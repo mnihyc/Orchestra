@@ -46,16 +46,9 @@ pub(super) async fn make_place(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
-    let mut operation_cut = batch.before(tx, object).await?;
-    let current_principal = operation_cut.as_ref().map(|cut| cut.principal.clone());
-    let current_batch = current_principal
-        .as_ref()
-        .map(|principal| batch.with_principal(principal));
-    let batch = current_batch.as_ref().unwrap_or(batch);
     let importer = batch.principal.user();
     if object.action == ImportAction::Replace {
         // What lies in it goes in it; its name and what it says of itself are its own.
-        batch.cut(&mut operation_cut)?;
         note_origin(
             tx,
             batch,
@@ -108,7 +101,6 @@ pub(super) async fn make_place(
         .object
         .created_at
         .map_or(batch.now, |created| created.get());
-    batch.cut(&mut operation_cut)?;
     hierarchy::create(
         tx,
         &hierarchy::NewNode {
@@ -118,6 +110,7 @@ pub(super) async fn make_place(
             name: &name,
             name_by_person: true,
             description: &description,
+            description_by_person: !description.is_empty(),
             owner,
             org: None,
             at,
@@ -165,12 +158,6 @@ pub(super) async fn make_folder(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
-    let mut operation_cut = batch.before(tx, object).await?;
-    let current_principal = operation_cut.as_ref().map(|cut| cut.principal.clone());
-    let current_batch = current_principal
-        .as_ref()
-        .map(|principal| batch.with_principal(principal));
-    let batch = current_batch.as_ref().unwrap_or(batch);
     if object.action == ImportAction::Replace {
         // What lies in the folder goes in it: the person has to be let add to it now, and a folder they cannot see is not one they find.
         let allowed = matches!(
@@ -187,7 +174,6 @@ pub(super) async fn make_folder(
         if !allowed {
             return refuse("you may not add to the folder that is there");
         }
-        batch.cut(&mut operation_cut)?;
         note_origin(
             tx,
             batch,
@@ -238,7 +224,7 @@ pub(super) async fn make_folder(
         Some(container) => Directory::Container(container),
         None => Directory::NodeDocs(object.lies_in),
     };
-    let made_now = crate::document_tree::create_folder_in_before(
+    let made_now = crate::document_tree::create_folder_in(
         tx,
         TreeActor::Person(batch.principal),
         parent,
@@ -246,9 +232,8 @@ pub(super) async fn make_folder(
         &name,
         Time::new(at),
         Time::new(batch.now),
-        || batch.cut(&mut operation_cut),
     )
-    .await??;
+    .await?;
     if !made_now {
         // A retry of what was made: it stands.
         note_origin(tx, batch, object, object.target, Some(object.lies_in), true).await?;

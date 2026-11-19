@@ -25,11 +25,8 @@ use orch_access_contract::pages::{
     self, Entry, EntrySource, Holder, Origin, Owners, OwnersFault, PageChange, PageKind, PageOf,
     PageState, StoredKind,
 };
-use orch_access_contract::permissions::{
-    EntryMember, ObjectKind, Options, Permission, Profile, ProviderUse, ResourceKind,
-};
+use orch_access_contract::permissions::{ObjectKind, Options, Permission, Profile, ResourceKind};
 use orch_access_contract::roles::{NodeKind, PlaceKind, PlaceRef, Role};
-use orch_access_contract::whereabouts::{WhereKind, WhereName};
 use orch_db::Conn;
 use orch_db::audit::{self, Actor};
 use orch_db::queries::access::{self, NewEntry, PageKey, RowWrite};
@@ -1387,205 +1384,6 @@ fn entry_details(
     })
 }
 
-/// The places that an entry newly names (`where` of the use of a provider) and that the person who
-/// names them cannot see, each with the member it is about. Naming a place is naming something of
-/// theirs to see: one they cannot see, or one that is not there, is refused alike, so that no one finds
-/// out what exists. A name that the entry already has stays as it is, even when its place is gone.
-async fn places_not_seen(
-    conn: &mut Conn,
-    principal: &Principal,
-    checked: &pages::CheckedChange,
-    stored: &[StoredEntry],
-) -> Result<Vec<FieldError>, Error> {
-    let mut asked: Vec<(String, WhereName)> = Vec::new();
-    for (index, row) in checked.rows.iter().enumerate() {
-        let names = |options: &Options| match options {
-            Options::ProviderUse(options) => options.r#where.clone().unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        for (entry, added) in row.add.iter().enumerate() {
-            for (place, name) in names(&added.options).into_iter().enumerate() {
-                asked.push((
-                    format!("rows[{index}].add[{entry}].options.where[{place}]"),
-                    name,
-                ));
-            }
-        }
-        for (entry, update) in row.update.iter().enumerate() {
-            let Some(options) = &update.options else {
-                continue;
-            };
-            let kept = stored
-                .iter()
-                .find(|stored| stored.entry.id == update.entry)
-                .map(|stored| {
-                    crate::options::read(stored.permission, &stored.entry)
-                        .map(|options| names(&options))
-                })
-                .transpose()?
-                .unwrap_or_default();
-            for (place, name) in names(options).into_iter().enumerate() {
-                if !kept.contains(&name) {
-                    asked.push((
-                        format!("rows[{index}].update[{entry}].options.where[{place}]"),
-                        name,
-                    ));
-                }
-            }
-        }
-    }
-    let mut seen: Vec<(WhereKind, Id)> = Vec::new();
-    for (kind, permission) in [
-        (WhereKind::Environment, Permission::EnvironmentView),
-        (WhereKind::Host, Permission::HostView),
-        (WhereKind::Machine, Permission::MachineView),
-    ] {
-        let ids: Vec<Id> = asked
-            .iter()
-            .filter(|(_, name)| name.kind == kind)
-            .map(|(_, name)| name.id)
-            .collect();
-        if !ids.is_empty() {
-            seen.extend(
-                resources::holding(conn, principal, &ids, permission, Policy::default())
-                    .await?
-                    .into_iter()
-                    .filter(|resource| !resource.deleted)
-                    .map(|resource| (kind, resource.id)),
-            );
-        }
-    }
-    Ok(asked
-        .into_iter()
-        .filter(|(_, name)| !seen.contains(&(name.kind, name.id)))
-        .map(|(path, _)| FieldError {
-            path,
-            message: "is a place you cannot see".to_owned(),
-        })
-        .collect())
-}
-
-/// How an entry in the Use row of a provider, new or changed by this change, stands to what its
-/// giver holds.
-enum Beyond {
-    /// It is within a single entry of the giver's, or the giver's use is unlimited, or the change
-    /// only narrows.
-    Within,
-    /// The giver has no use of the provider to give from.
-    NoUse,
-    /// It allows more than the nearest entry of the giver's does, in these members, each with the
-    /// path of the entry in the change (`rows[i].add[j]`, as for the places that cannot be seen).
-    Members(Vec<(String, EntryMember)>),
-}
-
-/// Whether an entry in the Use row of a provider, new or changed by this change, allows more than
-/// its giver holds: it has to be within a single entry of the giver's, unless the giver owns the
-/// provider, administers it or manages it (their use is unlimited), or the change only narrows the
-/// entry it changes. When it does not, the members in which it goes beyond the giver's nearest
-/// entry (the one it goes beyond in the fewest) are named, each at the path of its entry.
-fn exceeds_what_the_giver_holds(
-    setup: &Setup<'_>,
-    checked: &pages::CheckedChange,
-    stored: &[StoredEntry],
-) -> Result<Beyond, Error> {
-    let (Some(resource), Some(site)) = (&setup.resource, &setup.site) else {
-        return Ok(Beyond::Within);
-    };
-    if resource.kind != ResourceKind::Provider || setup.owns_or_administers() {
-        return Ok(Beyond::Within);
-    }
-    let mut written: Vec<(String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
-    for (index, row) in checked.rows.iter().enumerate() {
-        if row.permission != Permission::ProviderUse {
-            continue;
-        }
-        for (entry, added) in row.add.iter().enumerate() {
-            if let Options::ProviderUse(options) = &added.options {
-                written.push((format!("rows[{index}].add[{entry}]"), options, None));
-            }
-        }
-        for (entry, update) in row.update.iter().enumerate() {
-            let (Some(Options::ProviderUse(options)), Some(before)) = (
-                &update.options,
-                stored.iter().find(|stored| stored.entry.id == update.entry),
-            ) else {
-                continue;
-            };
-            let Options::ProviderUse(before) =
-                crate::options::read(before.permission, &before.entry)?
-            else {
-                continue;
-            };
-            written.push((
-                format!("rows[{index}].update[{entry}]"),
-                options,
-                Some(before),
-            ));
-        }
-    }
-    let wider: Vec<(&String, &ProviderUse)> = written
-        .iter()
-        .filter(|(_, options, before)| {
-            !before.as_ref().is_some_and(|before| options.within(before))
-        })
-        .map(|(path, options, _)| (path, *options))
-        .collect();
-    if wider.is_empty() {
-        return Ok(Beyond::Within);
-    }
-    let Ok(Ok(held)) = crate::usable::access(&setup.frame, resource, site, None, false) else {
-        return Ok(Beyond::NoUse);
-    };
-    let mut named: Vec<(String, EntryMember)> = Vec::new();
-    for (path, options) in wider {
-        let nearest = held
-            .each
-            .iter()
-            .map(|allowance| options.members_beyond(&allowance.provider))
-            .min_by_key(Vec::len);
-        match nearest {
-            None => return Ok(Beyond::NoUse),
-            Some(members) => {
-                for member in members {
-                    named.push((path.clone(), member));
-                }
-            }
-        }
-    }
-    Ok(if named.is_empty() {
-        Beyond::Within
-    } else {
-        Beyond::Members(named)
-    })
-}
-
-/// What is said of one member of an entry that allows more than its giver's own do. The words are
-/// a sentence a client reads as it is; the screen has the same words in each language.
-fn beyond_sentence(member: EntryMember) -> (&'static str, &'static str) {
-    match member {
-        EntryMember::Models => (
-            "models",
-            "allows more models than any one entry of yours does",
-        ),
-        EntryMember::Services => (
-            "services",
-            "allows more services than any one entry of yours does",
-        ),
-        EntryMember::Efforts => (
-            "efforts",
-            "allows more efforts than any one entry of yours does",
-        ),
-        EntryMember::Arrangements => (
-            "arrangements",
-            "allows more arrangement types than any one entry of yours does",
-        ),
-        EntryMember::Where => (
-            "where",
-            "allows more places than any one entry of yours does",
-        ),
-    }
-}
-
 async fn refuse(
     conn: &mut Conn,
     setup: &Setup<'_>,
@@ -1740,37 +1538,6 @@ pub async fn change_by_share(
         share_inside,
         Acting::Share,
         origin,
-    )
-    .await
-}
-
-/// The same share page producer and opaque native first-effect boundary.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the native share page inputs and its first-effect boundary"
-)]
-pub async fn change_by_share_fenced<E: Send, F: FnOnce() -> Result<(), E> + Send>(
-    conn: &mut Conn,
-    principal: &Principal,
-    target: Target,
-    change: &PageChange,
-    policy: Policy,
-    share_inside: Option<bool>,
-    origin: &audit::Origin,
-    before_effect: F,
-) -> Result<Outcome, ChangeFailure<E>> {
-    change_with_fence(
-        conn,
-        principal,
-        target,
-        change,
-        policy,
-        None,
-        EntrySource::Page,
-        share_inside,
-        Acting::Share,
-        origin,
-        before_effect,
     )
     .await
 }
@@ -2148,11 +1915,6 @@ where
         }
     }
 
-    let unseen = places_not_seen(conn, principal, &checked, &entries_now).await?;
-    if !unseen.is_empty() {
-        return Err(ChangeError::Invalid(unseen));
-    }
-
     if principal.caller().as_admin()
         && checked.rows.iter().any(|row| {
             row.add
@@ -2356,41 +2118,6 @@ where
                     Some(site) => refuse(conn, &setup, site, required, &lacking).await?,
                     None => ChangeError::SystemAdminOnly,
                 });
-            }
-        }
-    }
-
-    // What an entry in the Use row of a provider names is held to what its giver holds, whether the
-    // entry is new or changed: one rule for adding and for editing. An entry may always be narrowed.
-    if let Some(site) = &setup.site {
-        match exceeds_what_the_giver_holds(&setup, &checked, &entries_now)? {
-            Beyond::Within => {}
-            // The giver has no use of the provider at all: that is what they lack.
-            Beyond::NoUse => {
-                return Err(refuse(
-                    conn,
-                    &setup,
-                    site,
-                    Permission::ProviderUse,
-                    &[Permission::ProviderUse],
-                )
-                .await?);
-            }
-            // The giver has a use, and the entry would allow more than it does: nobody has to be
-            // asked for anything, the entry has to be made narrower.
-            Beyond::Members(members) => {
-                return Err(ChangeError::Invalid(
-                    members
-                        .into_iter()
-                        .map(|(entry, member)| {
-                            let (name, message) = beyond_sentence(member);
-                            FieldError {
-                                path: format!("{entry}.options.{name}"),
-                                message: message.to_owned(),
-                            }
-                        })
-                        .collect(),
-                ));
             }
         }
     }

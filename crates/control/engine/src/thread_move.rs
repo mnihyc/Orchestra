@@ -10,37 +10,16 @@ use serde_json::json;
 
 /// The main thread and all retained side lanes, locked in stable identifier order.
 pub async fn lock_lanes(conn: &mut Conn, main: Id) -> Result<Vec<threads::ThreadRow>, EngineError> {
-    lane_rows(conn, main, true).await
-}
-
-/// The same retained membership for effect-free operation preparation, without a writer lock.
-pub async fn lanes(conn: &mut Conn, main: Id) -> Result<Vec<threads::ThreadRow>, EngineError> {
-    lane_rows(conn, main, false).await
-}
-
-async fn lane_rows(
-    conn: &mut Conn,
-    main: Id,
-    locked: bool,
-) -> Result<Vec<threads::ThreadRow>, EngineError> {
-    let sql = if locked {
-        "SELECT node_id FROM threads WHERE node_id=$1 OR side_of=$1 ORDER BY node_id FOR UPDATE"
-    } else {
-        "SELECT node_id FROM threads WHERE node_id=$1 OR side_of=$1 ORDER BY node_id"
-    };
-    let ids: Vec<Id> = sqlx::query_scalar(sql)
-        .bind(main)
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+    let ids: Vec<Id> = sqlx::query_scalar(
+        "SELECT node_id FROM threads WHERE node_id=$1 OR side_of=$1 ORDER BY node_id FOR UPDATE",
+    )
+    .bind(main)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
     let mut lanes = Vec::new();
     for id in ids {
-        let row = if locked {
-            threads::lock(conn, id).await?
-        } else {
-            threads::thread(conn, id).await?
-        };
-        if let Some(row) = row {
+        if let Some(row) = threads::lock(conn, id).await? {
             lanes.push(row);
         }
     }
@@ -110,22 +89,6 @@ pub async fn reparent(
     target: Id,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), EngineError> {
-    reparent_before(conn, lanes, main, target, now, || Ok(())).await
-}
-
-/// The native trial/act's first mutation, after its owner acquired the complete tree/lane footprint.
-pub async fn reparent_before<F>(
-    conn: &mut Conn,
-    lanes: &[threads::ThreadRow],
-    main: Id,
-    target: Id,
-    now: chrono::DateTime<chrono::Utc>,
-    before: F,
-) -> Result<(), EngineError>
-where
-    F: FnOnce() -> Result<(), EngineError> + Send,
-{
-    before()?;
     hierarchy::move_under(conn, main, target, now).await?;
     for row in lanes.iter().filter(|row| row.node_id != main) {
         // The logical side parent stays the main thread. Some older rows place its node directly
@@ -157,29 +120,8 @@ pub async fn write(
     marker: Json,
     key: &str,
 ) -> Result<(), EngineError> {
-    write_before(conn, principal, lanes, main, target, marker, key, || Ok(())).await
-}
-
-/// The same native write and bookkeeping, with the owner's check at the first real mutation.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "preserve the native move operands and its first-mutation callback"
-)]
-pub async fn write_before<F>(
-    conn: &mut Conn,
-    principal: &Principal,
-    lanes: &[threads::ThreadRow],
-    main: Id,
-    target: Id,
-    marker: Json,
-    key: &str,
-    before: F,
-) -> Result<(), EngineError>
-where
-    F: FnOnce() -> Result<(), EngineError> + Send,
-{
     let now = principal.now().get();
-    reparent_before(conn, lanes, main, target, now, before).await?;
+    reparent(conn, lanes, main, target, now).await?;
     let mut unit = Unit::new(conn, now);
     for row in lanes {
         let seq = unit.stamp(row.node_id).await?;

@@ -716,7 +716,6 @@ impl State {
             return "Choose a server.".to_owned();
         };
         let said = match self.ask(&Request::McpImport {
-            as_name: None,
             name: server.name,
             from: Some(server.harness),
             place: Some(server.place),

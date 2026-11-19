@@ -205,9 +205,9 @@ pub async fn insert_command_with_authority(
     authority: Option<&Json>,
 ) -> Result<bool, DbError> {
     let inserted = sqlx::query(
-        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority, authority_required)
+        "INSERT INTO commands (id, machine_id, kind, body, serial_key, deadline_at, created_at, updated_at, login_authority)
          VALUES ($1, $2, $3, CASE WHEN jsonb_typeof($4::jsonb) = 'object'
-                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8, $9)
+                    THEN $4::jsonb - '$key' ELSE $4::jsonb END, $5, $6, $7, $7, $8)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(command.id)
@@ -218,7 +218,6 @@ pub async fn insert_command_with_authority(
     .bind(command.deadline_at)
     .bind(at)
     .bind(authority)
-    .bind(authority.is_some())
     .execute(&mut *conn)
     .await?
     .rows_affected();
@@ -243,47 +242,6 @@ pub async fn command_authority(conn: &mut Conn, id: Id) -> Result<Option<Json>, 
             .await?
             .flatten(),
     )
-}
-
-/// Conjoin private origin restrictions on the same locked canonical command.
-/// The typed owner verifies immutable identity/source first; no wire body or result is rewritten.
-pub async fn narrow_command_authority(
-    conn: &mut Conn,
-    id: Id,
-    expected: &Json,
-    narrowed: &Json,
-    at: DateTime<Utc>,
-) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE commands SET login_authority=$3,updated_at=$4 WHERE id=$1 AND authority_required AND login_authority=$2")
-        .bind(id).bind(expected).bind(narrowed).bind(at).execute(conn).await?.rows_affected()==1)
-}
-
-/// Independent private marker: losing required evidence cannot turn a new command into old work.
-pub async fn command_authority_required(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
-    Ok(
-        sqlx::query_scalar("SELECT authority_required FROM commands WHERE id=$1")
-            .bind(id)
-            .fetch_optional(conn)
-            .await?
-            .unwrap_or(false),
-    )
-}
-
-/// Private controller completion of a real MCP copy, excluded from wire/public command rows.
-pub async fn mcp_import_completion(conn: &mut Conn, id: Id) -> Result<Option<Json>, DbError> {
-    Ok(sqlx::query_scalar::<_, Option<Json>>(
-        "SELECT mcp_import_completion FROM commands WHERE id=$1",
-    )
-    .bind(id)
-    .fetch_optional(conn)
-    .await?
-    .flatten())
-}
-
-/// First completion stands in the same transaction as native outcome/resource/audit reconciliation.
-pub async fn finish_mcp_import(conn: &mut Conn, id: Id, outcome: &Json) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE commands SET mcp_import_completion=$2 WHERE id=$1 AND kind='mcp.import' AND state='succeeded' AND mcp_import_completion IS NULL")
-        .bind(id).bind(outcome).execute(conn).await?.rows_affected()==1)
 }
 
 /// Server-private row/envelope read; unlike CommandRow it cannot be serialized to a DTO.
@@ -312,23 +270,6 @@ pub async fn command_with_authority(
         ",login_authority AS authority FROM commands WHERE id=$1"
     ))
     .bind(id)
-    .fetch_optional(conn)
-    .await?)
-}
-
-/// A kind-specific native completion need not materialize unrelated command bodies or results.
-pub async fn command_with_authority_kind(
-    conn: &mut Conn,
-    id: Id,
-    kind: &str,
-) -> Result<Option<CommandWithAuthority>, DbError> {
-    Ok(sqlx::query_as(concat!(
-        "SELECT ",
-        command_columns!(),
-        ",login_authority AS authority FROM commands WHERE id=$1 AND kind=$2"
-    ))
-    .bind(id)
-    .bind(kind)
     .fetch_optional(conn)
     .await?)
 }

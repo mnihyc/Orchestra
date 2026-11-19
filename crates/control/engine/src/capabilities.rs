@@ -101,28 +101,6 @@ pub struct EnvironmentView {
     pub isolation: Option<orch_driver_contract::isolation::RuntimeIsolation>,
 }
 
-/// Native revocation operands selected while their Environment is serialized.
-/// Follow-up unit work remains the existing reconciliation of this accepted revocation.
-pub struct PreparedCapabilityRevocation {
-    facts: EnvironmentFacts,
-    key: String,
-    label: String,
-    caller: orch_authz::CapturedCaller,
-    operation: Option<String>,
-}
-
-impl PreparedCapabilityRevocation {
-    /// The actual stored Environment being changed.
-    pub fn environment(&self) -> Id {
-        self.facts.id
-    }
-
-    /// The key selected by the native capability writer.
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-}
-
 fn strings(value: Option<&Json>) -> Vec<String> {
     value
         .and_then(Json::as_array)
@@ -148,22 +126,13 @@ pub(crate) enum PreparedCapabilityGrant {
     None,
     Live {
         environment: Id,
-        plan: Box<crate::jobs::capability_change::Plan>,
+        plan: crate::jobs::capability_change::Plan,
     },
-    Stored(Box<StoredCapabilityGrant>),
-}
-
-/// The materialized stored grant travels together until its existing native writer.
-pub(crate) struct StoredCapabilityGrant {
-    facts: EnvironmentFacts,
-    definition: DefinitionRow,
-    marker: Option<PreparedCapabilityMarker>,
-}
-
-struct SettledCapability<'a> {
-    approved: bool,
-    by: Option<Id>,
-    note: Option<&'a str>,
+    Stored {
+        facts: EnvironmentFacts,
+        definition: DefinitionRow,
+        marker: Option<PreparedCapabilityMarker>,
+    },
 }
 
 /// Only the ordinary marker's materialized thread/segment facts; never an authority grant.
@@ -216,8 +185,8 @@ impl PreparedCapabilityGrant {
         conn: &mut orch_db::Conn,
         thread: Option<Id>,
     ) -> Result<(), EngineError> {
-        if let Self::Stored(stored) = self {
-            stored.marker = Some(PreparedCapabilityMarker::prepare(conn, thread).await?);
+        if let Self::Stored { marker, .. } = self {
+            *marker = Some(PreparedCapabilityMarker::prepare(conn, thread).await?);
         }
         Ok(())
     }
@@ -226,9 +195,8 @@ impl PreparedCapabilityGrant {
         conn: &mut orch_db::Conn,
         thread: Option<Id>,
     ) -> Result<(), EngineError> {
-        if let Self::Stored(stored) = self {
-            stored
-                .marker
+        if let Self::Stored { marker, .. } = self {
+            marker
                 .as_ref()
                 .ok_or_else(|| {
                     EngineError::unreadable(
@@ -263,11 +231,13 @@ pub(crate) async fn capability_host(
     let Some(machine) = facts.machine_id else {
         return Ok(None);
     };
-    sqlx::query_as("SELECT id,drivers FROM hosts WHERE machine_id=$1")
-        .bind(machine)
-        .fetch_optional(conn)
-        .await
-        .map_err(orch_db::DbError::from)
+    Ok(
+        sqlx::query_as("SELECT id,drivers FROM hosts WHERE machine_id=$1")
+            .bind(machine)
+            .fetch_optional(conn)
+            .await
+            .map_err(orch_db::DbError::from)?,
+    )
 }
 
 pub(crate) async fn capability_policy(
@@ -759,10 +729,7 @@ impl Engine {
             {
                 return Ok(PreparedCapabilityGrant::None);
             }
-            return Ok(PreparedCapabilityGrant::Live {
-                environment,
-                plan: Box::new(plan),
-            });
+            return Ok(PreparedCapabilityGrant::Live { environment, plan });
         }
         // This is the exact Env row the ordinary stored-grant UPDATE already takes.
         if orch_db::queries::environments::hosting::lock_environment(conn, environment)
@@ -785,18 +752,13 @@ impl Engine {
             .live_capability_plan(conn, &facts, key, true, None, None)
             .await?
         {
-            return Ok(PreparedCapabilityGrant::Live {
-                environment,
-                plan: Box::new(plan),
-            });
+            return Ok(PreparedCapabilityGrant::Live { environment, plan });
         }
-        Ok(PreparedCapabilityGrant::Stored(Box::new(
-            StoredCapabilityGrant {
-                facts,
-                definition,
-                marker: None,
-            },
-        )))
+        Ok(PreparedCapabilityGrant::Stored {
+            facts,
+            definition,
+            marker: None,
+        })
     }
     pub(crate) async fn apply_capability_grant(
         &self,
@@ -849,12 +811,11 @@ impl Engine {
                     live_job: Some(row.id),
                 })
             }
-            PreparedCapabilityGrant::Stored(stored) => {
-                let StoredCapabilityGrant {
-                    facts,
-                    definition,
-                    marker,
-                } = *stored;
+            PreparedCapabilityGrant::Stored {
+                facts,
+                definition,
+                marker,
+            } => {
                 let granted = self
                     .record_capability_grant_with_marker(
                         unit,
@@ -949,41 +910,23 @@ impl Engine {
             approval_origin: None,
             approval_origin_required: false,
             approval_binding: None,
-            revocation_origin: None,
-            revocation_origin_required: false,
         }))
     }
-    async fn queue_live_revocation(
+    pub(crate) async fn queue_live_capability(
         &self,
         unit: &mut Unit<'_>,
         facts: &EnvironmentFacts,
         key: &str,
-        caller: &Caller,
+        grant: bool,
+        requester: Option<Id>,
+        decided_by: Option<Id>,
     ) -> Result<Option<RecreateJob>, EngineError> {
-        let Some(mut plan) = self
-            .live_capability_plan(unit.conn, facts, key, false, None, Some(caller.user()))
+        let Some(plan) = self
+            .live_capability_plan(unit.conn, facts, key, grant, requester, decided_by)
             .await?
         else {
             return Ok(None);
         };
-        if let Some(operation) = caller.admitted_operation() {
-            if operation != "EnvironmentCapabilityRevoke" {
-                return Err(EngineError::unreadable(
-                    "the live removal has another originating operation",
-                ));
-            }
-            plan.revocation_origin = Some(
-                orch_authz::CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
-            );
-            plan.revocation_origin_required = true;
-        } else if caller
-            .grant()
-            .is_some_and(|grant| grant.operation_scope().is_some())
-        {
-            return Err(EngineError::unreadable(
-                "the scoped live removal has no admitted originating operation",
-            ));
-        }
         let now = unit.now();
         let row = crate::jobs::capability_change::queue(unit.conn, facts.id, &plan, now)
             .await
@@ -1153,15 +1096,9 @@ impl Engine {
             .await?;
         draft.recipe.capability_grace_secs = Some(grace);
         draft.recipe.options.wait_minutes = (grace + 59) / 60;
-        let mut row = crate::jobs::recreate::queue(&mut *unit.conn, draft, None, now)
+        let row = crate::jobs::recreate::queue(&mut *unit.conn, draft, None, now)
             .await
             .map_err(|error| EngineError::unreadable(error.to_string()))?;
-        if let Some(caller) = invoking {
-            crate::jobs::recreate::capability_revocation::record(
-                unit.conn, &mut row, caller, capability, now,
-            )
-            .await?;
-        }
         Ok(Some(RecreateJob {
             id: row.id,
             environment_id: environment,
@@ -1380,11 +1317,9 @@ impl Engine {
             self.settle_capability(
                 &mut unit,
                 &approval,
-                SettledCapability {
-                    approved: *approve,
-                    by: Some(caller.user()),
-                    note: note.as_deref(),
-                },
+                *approve,
+                Some(caller.user()),
+                note.as_deref(),
                 prepared,
                 caller,
             )
@@ -1404,11 +1339,12 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         approval: &ApprovalRow,
-        decision: SettledCapability<'_>,
+        approved: bool,
+        by: Option<Id>,
+        note: Option<&str>,
         prepared: PreparedCapabilityGrant,
         caller: &Caller,
     ) -> Result<(), EngineError> {
-        let SettledCapability { approved, by, note } = decision;
         let now = unit.now();
         let key = approval
             .request
@@ -1580,141 +1516,71 @@ impl Engine {
     ) -> Result<Option<RecreateJob>, RevokeError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        let principal = Principal::load(&mut tx, caller.clone(), Time::new(now)).await?;
-        let prepared = self
-            .prepare_capability_revocation(&mut tx, &principal, environment, key)
-            .await?;
-        self.apply_capability_revocation(tx, &principal, &prepared, || Ok(()))
-            .await
-    }
-
-    /// The original Environment or Host management alternatives, including gateway Ports authority.
-    pub async fn may_revoke_capability(
-        &self,
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        environment: Id,
-        key: &str,
-    ) -> Result<(), RevokeError> {
-        let object = AccessObject {
-            kind: ObjectKind::Environment,
-            id: environment,
-        };
-        let gateway = orch_driver_contract::capabilities::gateway_given(key);
-        let permission = if gateway {
-            Permission::PortsManage
-        } else {
-            Permission::EnvironmentManage
-        };
-        let manages = matches!(
-            resources::check(
-                conn,
-                principal,
-                object,
-                permission,
-                orch_authz::Policy::default()
-            )
-            .await?,
-            Decision::Allowed { .. }
-        );
-        let hosts = if gateway {
-            false
-        } else {
-            match env_rows::host_of(conn, environment).await? {
-                Some((host, _)) => matches!(
-                    resources::check(
-                        conn,
-                        principal,
-                        AccessObject {
-                            kind: ObjectKind::Host,
-                            id: host
-                        },
-                        Permission::HostManage,
-                        orch_authz::Policy::default()
-                    )
-                    .await?,
-                    Decision::Allowed { .. }
-                ),
-                None => false,
-            }
-        };
-        if !manages && !hosts {
-            return Err(RevokeError::Denied(Box::new(Refusal::of(
-                permission,
-                object,
-                Vec::new(),
-            ))));
-        }
-        Ok(())
-    }
-
-    /// Select only the existing native revocation facts, holding the writer's Environment row.
-    /// This method has no mutation, command, notice or job and may be prepared again.
-    pub async fn prepare_capability_revocation(
-        &self,
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        environment: Id,
-        key: &str,
-    ) -> Result<PreparedCapabilityRevocation, RevokeError> {
-        env_rows::environment_facts(conn, environment)
-            .await?
-            .filter(|facts| facts.deleted_at.is_none())
-            .ok_or(RevokeError::NotFound)?;
-        self.may_revoke_capability(conn, principal, environment, key)
-            .await?;
-        orch_db::queries::environments::hosting::lock_environment(conn, environment)
-            .await?
-            .ok_or(RevokeError::NotFound)?;
-        let facts = env_rows::environment_facts(conn, environment)
-            .await?
-            .filter(|facts| facts.deleted_at.is_none())
-            .ok_or(RevokeError::NotFound)?;
-        self.may_revoke_capability(conn, principal, environment, key)
-            .await?;
-        if !facts.granted_capabilities.iter().any(|held| held == key) {
-            return Err(RevokeError::NotGranted);
-        }
-        let label = env_rows::definition(conn, key)
-            .await?
-            .map_or_else(|| key.to_owned(), |def| def.label);
-        Ok(PreparedCapabilityRevocation {
-            facts,
-            key: key.to_owned(),
-            label,
-            caller: orch_authz::CapturedCaller::capture(principal.caller()),
-            operation: principal.caller().admitted_operation().map(str::to_owned),
-        })
-    }
-
-    /// Apply the exact native revocation, checking the transport only at its first update.
-    /// Its existing audit/notices and unit cleanup complete after acceptance without another check.
-    pub async fn apply_capability_revocation(
-        &self,
-        mut tx: orch_db::Tx,
-        principal: &Principal,
-        prepared: &PreparedCapabilityRevocation,
-        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
-    ) -> Result<Option<RecreateJob>, RevokeError> {
-        let now = principal.now().get();
-        let caller = principal.caller();
-        if prepared.caller != orch_authz::CapturedCaller::capture(caller)
-            || prepared.operation.as_deref() != caller.admitted_operation()
-        {
-            return Err(EngineError::unreadable(
-                "the native revocation changed its caller or operation",
-            )
-            .into());
-        }
-        let environment = prepared.environment();
-        let key = prepared.key();
-        let facts = &prepared.facts;
         let (finished, job) = {
-            let mut unit = Unit::with_first_effect(&mut tx, now, before_effect);
-            unit.before_effect()?;
+            let mut unit = Unit::new(&mut tx, now);
+            let facts = env_rows::environment_facts(&mut *unit.conn, environment)
+                .await?
+                .filter(|facts| facts.deleted_at.is_none())
+                .ok_or(RevokeError::NotFound)?;
+            let principal =
+                Principal::load(&mut *unit.conn, caller.clone(), Time::new(now)).await?;
+            let object = AccessObject {
+                kind: ObjectKind::Environment,
+                id: environment,
+            };
+            let manages = matches!(
+                resources::check(
+                    &mut *unit.conn,
+                    &principal,
+                    object,
+                    if orch_driver_contract::capabilities::gateway_given(key) {
+                        Permission::PortsManage
+                    } else {
+                        Permission::EnvironmentManage
+                    },
+                    orch_authz::Policy::default(),
+                )
+                .await?,
+                Decision::Allowed { .. }
+            );
+            let hosts = if orch_driver_contract::capabilities::gateway_given(key) {
+                false
+            } else {
+                match env_rows::host_of(&mut *unit.conn, environment).await? {
+                    Some((host, _)) => matches!(
+                        resources::check(
+                            &mut *unit.conn,
+                            &principal,
+                            AccessObject {
+                                kind: ObjectKind::Host,
+                                id: host,
+                            },
+                            Permission::HostManage,
+                            orch_authz::Policy::default(),
+                        )
+                        .await?,
+                        Decision::Allowed { .. }
+                    ),
+                    None => false,
+                }
+            };
+            if !manages && !hosts {
+                return Err(RevokeError::Denied(Box::new(Refusal::of(
+                    if orch_driver_contract::capabilities::gateway_given(key) {
+                        Permission::PortsManage
+                    } else {
+                        Permission::EnvironmentManage
+                    },
+                    object,
+                    Vec::new(),
+                ))));
+            }
             if !env_rows::revoke(&mut *unit.conn, environment, key, now).await? {
                 return Err(RevokeError::NotGranted);
             }
+            let label = env_rows::definition(&mut *unit.conn, key)
+                .await?
+                .map_or_else(|| key.to_owned(), |def| def.label);
             let mut entry = Entry::new(
                 Actor::User(caller.user()),
                 orch_db::audit::action!(AuditAction::CapabilityRevoked).as_str(),
@@ -1743,11 +1609,11 @@ impl Engine {
                 )
                 .await?;
             }
-            let reason = format!("\"{}\" was removed", prepared.label);
+            let reason = format!("\"{label}\" was removed");
             let job = if orch_driver_contract::capabilities::gateway_given(key) {
                 None
             } else if let Some(job) = self
-                .queue_live_revocation(&mut unit, facts, key, caller)
+                .queue_live_capability(&mut unit, &facts, key, false, None, Some(caller.user()))
                 .await?
             {
                 Some(job)

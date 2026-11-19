@@ -1,4 +1,3 @@
-import { unjudgedProvenance } from './resource-grouping.ts';
 /** What the fake API says of the system's own screens: its people and root orgs, its settings, what it stores about itself, its hosts and runtimes, its capabilities, harness builds and agent profiles, its storage and authority, its audit trail, its plugins and its identity providers.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: everything
@@ -266,7 +265,7 @@ export class AdminWorld implements Part {
       readme: null,
       color: null,
       title_source: 'user',
-
+      description_source: 'user',
       tags: [],
       tags_source: 'user',
       auto_updated_at: null,
@@ -294,7 +293,7 @@ export class AdminWorld implements Part {
 
   private agent(name: string, kind: string, profile: Agent['profile']): Agent {
     const created = new Date().toISOString();
-    return { ...unjudgedProvenance(),
+    return {
       id: fixtureId(27, this.world.resources.agents.length + 1),
       name,
       address: name.toLowerCase().replaceAll(' ', '-'),
@@ -926,7 +925,7 @@ export class AdminWorld implements Part {
     const systemWhenFull = this.settingValue('hosts.when_full') === 'block' ? 'block' : 'warn';
     const ada = this.world.people.get('ada');
     const vera = this.world.people.get('vera');
-    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ ...unjudgedProvenance(),
+    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({
       access: { admin_only: [], participating: false, administers: true, permissions: [], through: [] },
       address: name,
       capacity: { cpu_millis: 16_000, disk_gb: 500, memory_mb: memory },

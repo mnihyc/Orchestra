@@ -997,7 +997,6 @@ async fn slow_native_transfer(up: u64, down: u64) {
         }
         assert_eq!(position, TOTAL);
     };
-    let native_control = std::sync::atomic::AtomicBool::new(false);
     let control = async {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let mut dropped = 0;
@@ -1008,9 +1007,6 @@ async fn slow_native_transfer(up: u64, down: u64) {
         }
         assert!(dropped > 0, "UDP saturation takes no credit wait");
         assert!(udp.datagram_budget().unwrap().dropped().full > 0);
-        // The durable native acknowledgement includes real journal I/O. Its clock
-        // must not run a hundred times faster while that unscaled I/O is pending.
-        native_control.store(true, std::sync::atomic::Ordering::Relaxed);
         let id = new_id();
         rig.controller.issue_with_id(
             id,
@@ -1019,7 +1015,6 @@ async fn slow_native_transfer(up: u64, down: u64) {
             &orch_link_contract::commands::MachineProbe {},
         );
         let sent = tokio::time::Instant::now();
-        let wall_sent = std::time::Instant::now();
         tokio::time::timeout(Duration::from_secs(2), async {
             while rig.controller.progress(id).is_none_or(|p| {
                 matches!(
@@ -1032,16 +1027,10 @@ async fn slow_native_transfer(up: u64, down: u64) {
         })
         .await
         .unwrap();
-        native_control.store(false, std::sync::atomic::Ordering::Relaxed);
         assert!(
             sent.elapsed() <= Duration::from_millis(1500),
             "control beside saturated UDP and TCP: {:?}",
             sent.elapsed()
-        );
-        assert!(
-            wall_sent.elapsed() <= Duration::from_millis(1500),
-            "native control must also meet its real-time bound: {:?}",
-            wall_sent.elapsed()
         );
     };
     let mut moved = Box::pin(async {
@@ -1052,17 +1041,7 @@ async fn slow_native_transfer(up: u64, down: u64) {
     loop {
         tokio::select! {
             ()=&mut moved=>break,
-            ()=async {
-                tokio::task::yield_now().await;
-                let tick = Duration::from_millis(10);
-                let wall = if native_control.load(std::sync::atomic::Ordering::Relaxed) {
-                    tick
-                } else {
-                    Duration::from_micros(100)
-                };
-                std::thread::sleep(wall);
-                tokio::time::advance(tick).await;
-            }=>{}
+            ()=async {tokio::task::yield_now().await;std::thread::sleep(Duration::from_micros(100));tokio::time::advance(Duration::from_millis(10)).await;}=>{}
         }
         assert!(
             begun.elapsed() < maximum,

@@ -1,8 +1,8 @@
 //! Stream messages to neutral events: each tool use as a step of its kind, with the call as Claude Code made it kept whole beside it; sub-agent streams, usage, and unknown frames kept raw.
 //!
 //! [`EventMapper`] reads the harness's messages one at a time and says what happened, in the neutral
-//! vocabulary of Orch. An explicitly supplied output directory keeps native image bytes as blobs;
-//! ordinary frame mapping needs no filesystem. What it keeps between messages is what the stream forces: which blocks of which
+//! vocabulary of Orch. It does no input or output of its own, so every rule here is tested with literal
+//! messages. What it keeps between messages is only what the stream itself forces: which blocks of which
 //! message are open, which tool uses wait for their result, the list of things to do, and the tokens used.
 //!
 //! The harness writes each content block of a message twice, as growing pieces and then whole, and the
@@ -10,9 +10,8 @@
 //! alike: a block that was never started is started when it arrives complete. What a person said is never
 //! reported: the harness echoes it, and the echo only tells the adapter that the message was taken in.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use orch_agent_contract::events::UsageRequest;
 use orch_agent_contract::events::{
@@ -85,7 +84,6 @@ struct Message {
 
 #[derive(Debug, Clone)]
 struct ToolState {
-    native_web: bool,
     name: String,
     family: Family,
     input: Json,
@@ -124,24 +122,6 @@ impl NativeTaskKey {
     }
 }
 
-/// A message of a sub-agent that was printed, and what it is known to have used before the model closed it.
-#[derive(Debug, Clone)]
-struct Awaited {
-    /// The tool use that started the sub-agent, and the model's message.
-    key: (String, String),
-    /// The sub-agent that made the message.
-    agent: Option<String>,
-    /// The model the message named.
-    model: Option<String>,
-    /// What the printed message says it used: the input and its cache parts are final when the message starts.
-    used: TokenUsage,
-    /// A window closed with this message waiting and its growth could not be told by the exact sums (the sums did not
-    /// add up, or the main conversation did not fit under the growth): it may lie in that window.
-    doubt: bool,
-    /// A window of unknown base closed with this message waiting, and the windows of known base since did not name it.
-    through_unknown: bool,
-}
-
 #[derive(Debug, Clone)]
 struct NativeTask {
     key: NativeTaskKey,
@@ -159,10 +139,6 @@ struct Task {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredTool {
-    #[serde(default)]
-    native_web: bool,
-    #[serde(default)]
-    native_web_terminal: Option<ItemStatus>,
     name: String,
     input: Json,
     partial_input: String,
@@ -171,19 +147,11 @@ struct StoredTool {
     parent: Option<String>,
     item_started: bool,
     async_launched: bool,
-    #[serde(default)]
-    origin_turn: Option<TurnId>,
 }
 
 impl From<ToolState> for StoredTool {
     fn from(tool: ToolState) -> Self {
         Self {
-            native_web: tool.native_web,
-            native_web_terminal: if tool.native_web {
-                tool.native_terminal
-            } else {
-                None
-            },
             name: tool.name,
             input: tool.input,
             partial_input: tool.partial_input,
@@ -192,14 +160,12 @@ impl From<ToolState> for StoredTool {
             parent: tool.parent,
             item_started: tool.item_started,
             async_launched: tool.async_launched,
-            origin_turn: tool.origin_turn,
         }
     }
 }
 impl From<StoredTool> for ToolState {
     fn from(tool: StoredTool) -> Self {
         Self {
-            native_web: tool.native_web,
             family: family_of(&tool.name),
             name: tool.name,
             input: tool.input,
@@ -211,8 +177,8 @@ impl From<StoredTool> for ToolState {
             async_launched: tool.async_launched,
             generation: 0,
             progress_title: None,
-            native_terminal: tool.native_web_terminal,
-            origin_turn: tool.origin_turn,
+            native_terminal: None,
+            origin_turn: None,
         }
     }
 }
@@ -229,10 +195,6 @@ pub(crate) struct HistoryMapper {
 }
 
 impl HistoryMapper {
-    pub(crate) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
-        self.mapper.set_image_outputs(directory);
-    }
-
     pub(crate) fn new(
         settings: MapperSettings,
         clock: Arc<dyn Clock>,
@@ -276,10 +238,8 @@ impl HistoryMapper {
         }
         for block in frame.blocks() {
             let id = match block.get("type").and_then(Json::as_str) {
-                Some("tool_use" | "server_tool_use") => block.get("id"),
-                Some("tool_result" | "web_search_tool_result" | "web_fetch_tool_result") => {
-                    block.get("tool_use_id")
-                }
+                Some("tool_use") => block.get("id"),
+                Some("tool_result") => block.get("tool_use_id"),
                 _ => None,
             }
             .and_then(Json::as_str);
@@ -345,8 +305,6 @@ impl HistoryMapper {
         self.mapper.blocks.clear();
         self.mapper.pending_reasoning.clear();
         self.mapper.background_changes.clear();
-        // Nobody settles the sub-agents of a past: what the replay heard of them is not kept.
-        self.mapper.child_heard.clear();
         Ok(out)
     }
 
@@ -534,9 +492,6 @@ impl HistoryMapper {
                 continue;
             }
             self.tools.remove(&id)?;
-            if tool.native_web && tool.native_web_terminal.is_some() {
-                continue;
-            }
             self.mapper.tools.insert(id, tool.into());
             self.mapper.close_open_items(
                 if self.mapper.interrupted {
@@ -578,12 +533,8 @@ impl HistoryMapper {
 /// Reads the harness's messages and says what happened.
 #[derive(Debug)]
 pub struct EventMapper {
-    native_counts: orch_provider_contract::capabilities::counters::NativeCounters,
-    native_counter_declarations: BTreeMap<String, orch_provider_contract::capabilities::Counter>,
-    image_outputs: Option<std::path::PathBuf>,
     requests: crate::performance::Requests,
     request_reports: Vec<(TurnId, UsageRequest)>,
-    child_heard: Vec<crate::child_usage::Heard>,
     request_owners: HashMap<String, TurnId>,
     active_messages: HashMap<String, String>,
     settings: MapperSettings,
@@ -600,7 +551,6 @@ pub struct EventMapper {
     tools: HashMap<String, ToolState>,
     native_session: Option<String>,
     native_generation: u64,
-    resuming_process: bool,
     native_tasks: HashMap<String, NativeTask>,
     background_records: BTreeMap<String, orch_agent_contract::background::BackgroundTask>,
     background_changes: Vec<orch_agent_contract::background::BackgroundTask>,
@@ -614,26 +564,6 @@ pub struct EventMapper {
     /// Each model's running total at the last result of the process. `None` while it is not known: a process
     /// that resumed a session starts from the totals the harness restored.
     model_base: Option<BTreeMap<String, TokenUsage>>,
-    /// The numbers of the windows of totals, one counter for the whole conversation: a mapper that is made anew
-    /// (the session is reconfigured while no process runs) goes on from it, so that no number is used twice and
-    /// nothing kept for an earlier window is taken for a later one. What a result reports as a turn's use is the
-    /// growth of the totals since the result before; that stretch is a window, and the result closes it.
-    windows: Arc<AtomicU64>,
-    /// The window the next result closes.
-    open_window: u64,
-    /// The window the last result closed, whether or not the totals it grew from were known.
-    last_window: u64,
-    /// The messages of sub-agents that were printed and whose cost has not been found in the totals yet: a message is
-    /// printed block by block as each block is complete, and the program adds its cost to the totals when the message
-    /// ends, so a result can fall between the two (see [`EventMapper::place_awaited`]).
-    awaited: Vec<Awaited>,
-    /// The sub-agents (by the tool use that started them) that have ended: all their messages have.
-    ended_parents: HashSet<String>,
-    /// The window the result that ended the turn closed, until the conversation takes it.
-    usage_window: Option<u64>,
-    /// The main conversation's own use as the result that ended the turn reported it (its `usage`, which the program
-    /// tallies for the main conversation alone), until the conversation takes it.
-    main_use: Option<TokenUsage>,
     /// The window of the model in force, as the last result said.
     window: Option<i64>,
     /// Where the harness shortens the conversation, as its last breakdown of the context said.
@@ -647,19 +577,9 @@ pub struct EventMapper {
     compacting: bool,
     announced_compaction: bool,
     echoed: Vec<String>,
-    native_changes: native_changes::NativeChanges,
     retry_noticed: bool,
-    retry_notice_attempt: u64,
-    retrying: bool,
-    retry_attempt: Option<i64>,
     /// The model, by the name the harness's last start states (`system/init`), suffix of a larger window and all.
     running_model: Option<String>,
-    /// The original routing name and the exact context-qualified argument sent to the process.
-    requested_model: Option<(String, String)>,
-    requested_permission_mode: Option<String>,
-    reported_permission_mode: Option<(Frame, String)>,
-    /// Replayed init frames do not repeat the same current-turn notice.
-    reroute_noticed: Option<String>,
     /// What the stream has said of a failure during this turn, for the `result` that ends it.
     failure: Notes,
     /// The row of the table of failures that found the last failed turn, for a log and for the tests.
@@ -685,10 +605,8 @@ impl EventMapper {
     #[must_use]
     pub fn new(settings: MapperSettings, clock: Arc<dyn Clock>) -> Self {
         Self {
-            image_outputs: None,
             requests: crate::performance::Requests::default(),
             request_reports: Vec::new(),
-            child_heard: Vec::new(),
             request_owners: HashMap::new(),
             active_messages: HashMap::new(),
             settings,
@@ -703,7 +621,6 @@ impl EventMapper {
             tools: HashMap::new(),
             native_session: None,
             native_generation: 0,
-            resuming_process: false,
             native_tasks: HashMap::new(),
             background_records: BTreeMap::new(),
             background_changes: Vec::new(),
@@ -714,15 +631,6 @@ impl EventMapper {
             context_used: None,
             sub_tally: BTreeMap::new(),
             model_base: None,
-            windows: Arc::new(AtomicU64::new(1)),
-            open_window: 0,
-            last_window: 0,
-            awaited: Vec::new(),
-            ended_parents: HashSet::new(),
-            usage_window: None,
-            main_use: None,
-            native_counts: Default::default(),
-            native_counter_declarations: BTreeMap::new(),
             window: None,
             compact_at: None,
             pending_shortening: None,
@@ -731,16 +639,8 @@ impl EventMapper {
             compacting: false,
             announced_compaction: false,
             echoed: Vec::new(),
-            native_changes: native_changes::NativeChanges::default(),
             retry_noticed: false,
-            retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
-            retrying: false,
-            retry_attempt: None,
             running_model: None,
-            requested_model: None,
-            requested_permission_mode: None,
-            reported_permission_mode: None,
-            reroute_noticed: None,
             failure: Notes::default(),
             last_failure_row: None,
         }
@@ -767,134 +667,15 @@ impl EventMapper {
         self.turn_tally = TokenUsage::default();
         self.sub_tally.clear();
         self.retry_noticed = false;
-        self.retrying = false;
-        self.retry_attempt = None;
-        self.requested_model = None;
-        self.reroute_noticed = None;
         self.announced_compaction = false;
         self.failure = Notes::default();
     }
 
-    /// Set the profile's notice threshold; the live phase is reported from the first retry.
-    pub fn set_retry_notice_attempt(&mut self, attempt: u64) {
-        self.retry_notice_attempt = attempt;
-    }
-
-    /// Bind the turn's actual request after process init, or retain it for an init that arrives later.
-    pub fn begin_turn_with_model(
-        &mut self,
-        turn: TurnId,
-        model: &str,
-        context: Option<i64>,
-    ) -> Vec<SessionEvent> {
-        self.begin_turn(turn);
-        self.requested_model = Some((
-            model.to_owned(),
-            crate::parameters::model_argument(model, context),
-        ));
-        let mut out = Vec::new();
-        self.report_model_reroute(&mut out);
-        self.report_permission_mode(&mut out);
-        out
-    }
-    /// Reconfiguring the mapper keeps the report of a still-running native process.
-    pub(crate) fn inherit_process_report(&mut self, previous: &Self) {
-        self.running_model = previous.running_model.clone();
-        self.reported_permission_mode = previous.reported_permission_mode.clone();
-        self.requested_permission_mode = previous.requested_permission_mode.clone();
-        self.native_generation = previous.native_generation;
-        self.resuming_process = previous.resuming_process;
-        self.native_changes = previous.native_changes.clone();
-        self.native_counts = previous.native_counts.clone();
-        self.model_base = previous.model_base.clone();
-        self.windows = Arc::clone(&previous.windows);
-        self.open_window = previous.open_window;
-        self.awaited.clone_from(&previous.awaited);
-        self.ended_parents.clone_from(&previous.ended_parents);
-    }
-
-    /// Takes the numbers of windows from the counter of the conversation, so that they never repeat when the mapper is
-    /// made again.
-    pub(crate) fn share_windows(&mut self, counter: Arc<AtomicU64>) {
-        self.windows = counter;
-        self.open_window = self.windows.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// The actual launch's credential path selects only this program's declared report fields.
-    pub(crate) fn configure_native_counters(
-        &mut self,
-        provider: &orch_agent_contract::session::ProviderAccess,
-    ) {
-        use orch_agent_contract::session::ProviderAccess;
-        let path = match provider {
-            ProviderAccess::Native { .. } => "native",
-            ProviderAccess::Forwarded { .. } => "forwarded",
-            ProviderAccess::Shared { .. } => "shared",
-            ProviderAccess::Handover { .. } => "handover",
-        };
-        let program: orch_provider_contract::capabilities::Program =
-            serde_json::from_str(include_str!("capability-program.json")).unwrap_or_default();
-        self.native_counter_declarations = program
-            .access
-            .get(path)
-            .map(|access| access.counters.clone())
-            .unwrap_or_default();
-    }
-    fn report_model_reroute(&mut self, out: &mut Vec<SessionEvent>) {
-        let (Some(turn), Some((requested, argument)), Some(actual)) = (
-            self.turn,
-            self.requested_model.as_ref(),
-            self.running_model.as_ref(),
-        ) else {
-            return;
-        };
-        if actual == requested
-            || actual == argument
-            || self.reroute_noticed.as_ref() == Some(actual)
-        {
-            return;
-        }
-        let requested = requested.clone();
-        let actual = actual.clone();
-        self.reroute_noticed = Some(actual.clone());
-        let native_ref = format!("model-rerouted:{turn}:{}:{actual}", self.native_generation);
-        let payload = ErrorPayload {
-            details: None,
-            window: None,
-            resets_at: None,
-            code: orch_agent_contract::events::turn_error::MODEL_REROUTED.to_owned(),
-            message: format!(
-                "The harness ran this turn on {actual} instead of {requested}: its init frame reported the model."
-            ),
-            retryable: false,
-        };
-        out.extend(self.started(
-            &native_ref,
-            MAIN_STREAM,
-            None,
-            ItemContent::Error(payload.clone()),
-        ));
-        if let Ok(mut payload) = serde_json::to_value(payload) {
-            payload["details"] = json!({"turn_id":turn,"from_model":requested,"to_model":actual,"change":"model","next_turn":false});
-            out.push(SessionEvent::ItemCompleted(ItemCompleted {
-                native_ref,
-                status: ItemStatus::Completed,
-                payload,
-                output_blob: None,
-            }));
-        }
-    }
-
     /// Rejected native work is metered under its origin without reusing its request ids.
     pub(crate) fn begin_rejected_wake(&mut self, turn: TurnId) {
-        self.retrying = false;
-        self.retry_attempt = None;
-        self.retry_noticed = false;
         self.turn = Some(turn);
         self.last_turn = Some(turn);
         self.interrupted = true;
-        self.requested_model = None;
-        self.reroute_noticed = None;
         self.turn_tally = TokenUsage::default();
         self.sub_tally.clear();
         self.failure = Notes::default();
@@ -905,21 +686,8 @@ impl EventMapper {
     /// A process of the session was started: one that began the conversation counts its use from nothing;
     /// one that resumed or forked it starts from totals the harness restored, which are not known here.
     pub fn process_started(&mut self, fresh: bool) {
-        // What waited for a window of the process that is over is never decided: it is not a row.
-        let gone: Vec<(String, String)> = self.awaited.drain(..).map(|known| known.key).collect();
-        if !gone.is_empty() {
-            self.child_heard
-                .push(crate::child_usage::Heard::Dropped(gone));
-        }
-        self.ended_parents.clear();
-        self.native_changes = native_changes::NativeChanges::default();
         self.model_base = fresh.then(BTreeMap::new);
-        self.native_counts.start(fresh);
-        self.running_model = None;
-        self.reported_permission_mode = None;
-        self.reroute_noticed = None;
         self.native_generation = self.native_generation.saturating_add(1);
-        self.resuming_process = false;
         self.native_tasks.clear();
         self.background_records.clear();
         self.background_changes.clear();
@@ -962,242 +730,6 @@ impl EventMapper {
         std::mem::take(&mut self.request_reports)
     }
 
-    /// The messages a sub-agent printed wait for their window to be decided, for the turn that started it. One whose
-    /// turn cannot be named is dropped here, as it always was, and not held.
-    fn hear_printed(&mut self) {
-        for printed in self.requests.take_printed() {
-            match self.parent_turn(&printed.parent) {
-                Some(turn) => {
-                    let key = (printed.parent.clone(), printed.message_id.clone());
-                    // The blocks of a message are printed one after another: it waits once.
-                    if !self
-                        .awaited
-                        .iter()
-                        .rev()
-                        .take(64)
-                        .any(|known| known.key == key)
-                    {
-                        self.awaited.push(Awaited {
-                            key,
-                            agent: printed.agent_id.clone(),
-                            model: printed.request.model.clone(),
-                            used: printed.request.tokens.usage(),
-                            doubt: false,
-                            through_unknown: false,
-                        });
-                        if self.awaited.len() > AWAITED_MAX {
-                            let excess = self.awaited.len() - AWAITED_MAX;
-                            let gone: Vec<(String, String)> = self
-                                .awaited
-                                .drain(..excess)
-                                .map(|known| known.key)
-                                .collect();
-                            self.child_heard
-                                .push(crate::child_usage::Heard::Dropped(gone));
-                        }
-                    }
-                    self.child_heard.push(crate::child_usage::Heard::Printed {
-                        turn,
-                        printed: Box::new(printed),
-                    });
-                }
-                None => tracing::debug!(
-                    request = %printed.request.id,
-                    "a sub-agent's request names no turn of this session and is not reported"
-                ),
-            }
-        }
-    }
-
-    /// What was heard of sub-agents since the last call, in order, for [`crate::child_usage`].
-    pub fn take_child_heard(&mut self) -> Vec<crate::child_usage::Heard> {
-        std::mem::take(&mut self.child_heard)
-    }
-
-    /// The window of totals that the result which ended the turn closed: the turn states what its own requests carry
-    /// of its use, and leaves out of it what the requests of other turns' sub-agents named for that window add to it
-    /// (see [`crate::child_usage`]).
-    pub fn take_usage_window(&mut self) -> Option<u64> {
-        self.usage_window.take()
-    }
-
-    /// The main conversation's own use as the result that ended the turn reported it. Whatever the rows of the main
-    /// conversation's requests say between them, the use holds no more of them than this.
-    pub fn take_main_use(&mut self) -> Option<TokenUsage> {
-        self.main_use.take()
-    }
-
-    fn add_native_counts(&mut self, frame: &Frame, models: &mut Vec<ModelTokens>) {
-        let mut native_counts: BTreeMap<(String, String), Option<i64>> = BTreeMap::new();
-        for (reported_model, counts) in self.native_counts.observe(
-            frame.get("modelUsage"),
-            &self.native_counter_declarations,
-            frame.text("uuid"),
-        ) {
-            // Only our own exact launch argument proves its original wire name. Never parse another model's id.
-            let model = self
-                .requested_model
-                .as_ref()
-                .filter(|(_, argument)| argument == &reported_model)
-                .map(|(original, _)| original.clone())
-                .unwrap_or(reported_model);
-            for (capability, count) in counts {
-                let slot = native_counts
-                    .entry((model.clone(), capability))
-                    .or_insert(Some(0));
-                *slot = slot.and_then(|previous| previous.checked_add(count));
-            }
-        }
-        for ((model, capability), count) in native_counts {
-            let Some(count) = count else {
-                continue;
-            };
-            if let Some(known) = models.iter_mut().find(|known| known.model == model) {
-                known.counts.insert(capability, count);
-            } else {
-                models.push(ModelTokens {
-                    model,
-                    tokens: TokenUsage::default(),
-                    tokens_reported: false,
-                    counts: BTreeMap::from([(capability, count)]),
-                });
-            }
-        }
-    }
-
-    /// Meter an owned native notice without creating a turn or publishing its model output.
-    pub(crate) fn observe_unadmitted_native(
-        &mut self,
-        frame: &Frame,
-        origin: TurnId,
-        notice: orch_types::Id,
-    ) -> Vec<SessionEvent> {
-        let arrived = self.clock.time();
-        self.observe_unadmitted_native_at(frame, origin, notice, arrived)
-    }
-
-    /// Use the original arrival time when a later result proved the reply's source.
-    pub(crate) fn observe_unadmitted_native_at(
-        &mut self,
-        frame: &Frame,
-        origin: TurnId,
-        notice: orch_types::Id,
-        arrived: orch_types::Time,
-    ) -> Vec<SessionEvent> {
-        let mut out = Vec::new();
-        let error = if frame.kind() == FrameKind::Result {
-            outcome_of(
-                frame,
-                false,
-                &Notes::default(),
-                arrived.get(),
-                &chrono::Local,
-            )
-            .1
-        } else {
-            None
-        };
-        let outcome = error.as_ref().map_or(("done", None), |error| {
-            (error.code.as_str(), Some(error.message.as_str()))
-        });
-        for request in self.requests.observe(frame, arrived, Some(outcome)) {
-            self.native_request_observation(request, origin, notice);
-        }
-        // The messages this frame printed wait for the window its result closes, not the one after it.
-        self.hear_printed();
-        let changes = if frame.kind() == FrameKind::Result {
-            let changes = self.model_changes(frame);
-            let main = frame
-                .get("usage")
-                .map(|usage| TokenUsage::from_parts(parts_of(usage)))
-                .unwrap_or_default();
-            let closing = self.last_window;
-            self.place_awaited(closing, changes.as_deref(), main);
-            changes
-        } else {
-            None
-        };
-        if let Some(models) = changes {
-            // Advance the process baseline so the next real input cannot count these calls again.
-            let delta = models
-                .iter()
-                .fold(TokenUsage::default(), |sum, model| sum.plus(model.tokens));
-            self.thread_tally = self.thread_tally.plus(delta);
-            if let Some(last) = self.last_usage.as_mut() {
-                last.thread = self.thread_tally;
-                let mut usage = last.clone();
-                // Per-request ledger rows retain their actual origin. This is only the thread total;
-                // a native notice cannot rewrite another turn's model breakdown or counters.
-                usage.report = None;
-                out.push(SessionEvent::UsageUpdated(usage));
-            }
-        }
-        if frame.kind() == FrameKind::Result {
-            let mut models = Vec::new();
-            self.add_native_counts(frame, &mut models);
-            if !models.is_empty() {
-                out.push(SessionEvent::UsageUpdated(UsageUpdated {
-                    turn_id: origin,
-                    turn: TokenUsage::default(),
-                    thread: TokenUsage::default(),
-                    context_window: None,
-                    context_used: None,
-                    report: Some(TurnUsageReport {
-                        counters_only: true,
-                        models,
-                        ..TurnUsageReport::default()
-                    }),
-                }));
-            }
-        }
-        if self.settings.raw_events {
-            out.push(raw_event(FROM_HARNESS, frame.raw()));
-        }
-        out
-    }
-
-    /// Whether a request is one of a vendor-produced notice, which is reported under the turn that started the work and
-    /// whose cost is in no turn's use.
-    pub(crate) fn is_notice_request(id: &str) -> bool {
-        id.starts_with(NOTICE_REQUEST_PREFIX)
-    }
-
-    fn native_request_observation(
-        &mut self,
-        mut request: UsageRequest,
-        origin: TurnId,
-        notice: orch_types::Id,
-    ) {
-        // A later accepted turn may reset its local serial. Never reuse the older
-        // origin's main request ids for this separate, vendor-produced notice.
-        let scoped = |id: &str| format!("{NOTICE_REQUEST_PREFIX}{notice}:{id}");
-        request.id = format!("{NOTICE_REQUEST_PREFIX}{notice}:{}", request.id);
-        request.previous_ref = request.previous_ref.as_deref().map(scoped);
-        request.retry_of = request.retry_of.as_deref().map(scoped);
-        request.asked = None;
-        self.request_reports.push((origin, request));
-    }
-
-    pub(crate) fn abort_unadmitted_native(
-        &mut self,
-        origin: TurnId,
-        notice: orch_types::Id,
-        why: &str,
-    ) {
-        for request in self.requests.abort(
-            orch_agent_contract::events::turn_error::SESSION_LOST,
-            Some(why),
-            None,
-        ) {
-            self.native_request_observation(request, origin, notice);
-        }
-    }
-
-    /// The same hash-named output directory the host uses for retained native outputs.
-    pub fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
-        self.image_outputs = Some(directory);
-    }
-
     /// Closes pending request reports when the process exits without a result frame.
     pub fn abort_requests(&mut self, code: &str, message: &str) {
         let Some(turn) = self.turn.or(self.last_turn) else {
@@ -1213,68 +745,20 @@ impl EventMapper {
 
     /// Reads one message of the harness and says what happened.
     pub fn on_frame(&mut self, frame: &Frame) -> Vec<SessionEvent> {
-        if let Some(name) = Self::unknown_stream_event_name(frame) {
-            let mut out = Vec::new();
-            self.native_marker(
-                frame,
-                "unrecognized_event",
-                Some(name),
-                json!({"count":1}),
-                false,
-                &mut out,
-            );
-            if self.settings.raw_events {
-                out.push(raw_event(FROM_HARNESS, frame.raw()));
-            }
-            return out;
-        }
         let arrived = self.clock.time();
         let mut out = Vec::new();
-        // Only real main-stream output ends a retry wait; heartbeats and child output do not.
-        let main = frame.get("parent_tool_use_id").is_none_or(Json::is_null);
-        let output = match frame.kind() {
-            FrameKind::StreamEvent => matches!(
-                frame
-                    .get("event")
-                    .and_then(|event| event.get("type"))
-                    .and_then(Json::as_str),
-                Some("message_start" | "content_block_start" | "content_block_delta")
-            ),
-            FrameKind::Assistant => {
-                frame.get("error").is_none_or(Json::is_null)
-                    && frame.get("api_error").is_none_or(Json::is_null)
-                    && frame.get("message").is_some()
-            }
-            _ => false,
-        };
-        if self.retrying && main && output {
-            self.retrying = false;
-            self.retry_attempt = None;
-            self.retry_noticed = false;
-            self.phase(TurnPhaseKind::Working, &mut out);
-        }
         match frame.kind() {
             FrameKind::StreamEvent => self.stream_event(frame, &mut out),
             FrameKind::Assistant => self.assistant(frame, &mut out),
             FrameKind::User => self.user(frame, &mut out),
             FrameKind::System => self.system(frame, &mut out),
             FrameKind::Result => self.result(frame, &mut out),
-            FrameKind::Other(name) if name == "rate_limit_event" => {
-                self.rate_limit_event(frame, &mut out)
-            }
-            FrameKind::Other(name) if name == "auth_status" => {} // The provider status observer consumes it.
-            FrameKind::Other(name) => self.native_marker(
-                frame,
-                "unrecognized_event",
-                Some(name),
-                json!({"count":1}),
-                false,
-                &mut out,
-            ),
+            FrameKind::Other(name) if name == "rate_limit_event" => self.rate_limit_event(frame),
             FrameKind::ControlRequest
             | FrameKind::ControlResponse
             | FrameKind::ControlCancelRequest
-            | FrameKind::KeepAlive => {}
+            | FrameKind::KeepAlive
+            | FrameKind::Other(_) => {}
         }
         let completed = out.iter().find_map(|event| match event {
             SessionEvent::TurnCompleted(end) => Some(end),
@@ -1297,10 +781,6 @@ impl EventMapper {
             .map(|error| error.message.as_str());
         let requests = self.requests.observe(frame, arrived, Some((code, message)));
         for mut request in requests {
-            if let Some(error) = completed.and_then(|end| end.error.as_ref()) {
-                request.error_reason = request.error_reason.or_else(|| error.reason.clone());
-                request.upstream_status = request.upstream_status.or(error.status);
-            }
             if let Some(orch_agent_contract::requests::RequestOutcome::Error { said, .. }) =
                 &mut request.outcome
                 && let Some(words) = completed
@@ -1310,16 +790,25 @@ impl EventMapper {
                 *said = Some(words);
             }
             if request.subagent && !self.request_owners.contains_key(&request.id) {
-                let owner = frame
-                    .parent_tool_use_id()
-                    .and_then(|parent| self.parent_turn(parent));
+                let parent = frame.parent_tool_use_id();
+                let owner = parent
+                    .and_then(|parent| self.tools.get(parent))
+                    .and_then(|tool| tool.origin_turn)
+                    .or_else(|| {
+                        parent
+                            .and_then(|parent| {
+                                self.background_records
+                                    .values()
+                                    .find(|task| task.native_item_ref == parent)
+                            })
+                            .map(|task| task.origin_turn)
+                    });
                 if let Some(owner) = owner {
                     self.request_owners.insert(request.id.clone(), owner);
                 }
             }
             self.request_observation(request);
         }
-        self.hear_printed();
         if !self.background_changes.is_empty() {
             out.push(SessionEvent::BackgroundTasks(
                 orch_agent_contract::background::BackgroundTasks {
@@ -1405,27 +894,6 @@ impl EventMapper {
                     Some("text") => self.open_text(key, &stream, parent_ref.as_deref(), false, out),
                     Some("thinking") => {
                         self.open_text(key, &stream, parent_ref.as_deref(), true, out);
-                    }
-                    Some("server_tool_use") => {
-                        if self.native_web_start(block, &stream, parent_ref.as_deref(), out) {
-                            self.blocks.insert(
-                                key,
-                                Block {
-                                    native_ref: block
-                                        .get("id")
-                                        .and_then(Json::as_str)
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    kind: BlockKind::ToolUse,
-                                    text: String::new(),
-                                    chars: 0,
-                                    completed: false,
-                                },
-                            );
-                        }
-                    }
-                    Some("web_search_tool_result" | "web_fetch_tool_result") => {
-                        self.native_web_result(block, &stream, out);
                     }
                     Some("tool_use") => {
                         let id = block.get("id").and_then(Json::as_str).unwrap_or_default();
@@ -1854,10 +1322,8 @@ impl EventMapper {
         models: Vec<ModelTokens>,
     ) -> TurnUsageReport {
         TurnUsageReport {
-            counters_only: false,
             api_time_ms: None,
             subagents: Some(subagents),
-            carried_by_rows: None,
             by_subagent: self
                 .sub_tally
                 .iter()
@@ -1995,12 +1461,6 @@ impl EventMapper {
                         }
                     }
                 }
-                Some("server_tool_use") => {
-                    self.native_web_start(&block, &stream, parent_ref.as_deref(), out);
-                }
-                Some("web_search_tool_result" | "web_fetch_tool_result") => {
-                    self.native_web_result(&block, &stream, out);
-                }
                 Some("tool_use") => {
                     let id = block.get("id").and_then(Json::as_str).unwrap_or_default();
                     let name = block.get("name").and_then(Json::as_str).unwrap_or_default();
@@ -2033,19 +1493,6 @@ impl EventMapper {
         parent: Option<&str>,
         out: &mut Vec<SessionEvent>,
     ) {
-        self.open_tool_kind(id, (name, false), input, stream, parent, out);
-    }
-
-    fn open_tool_kind(
-        &mut self,
-        id: &str,
-        source: (&str, bool),
-        input: &Json,
-        stream: &str,
-        parent: Option<&str>,
-        out: &mut Vec<SessionEvent>,
-    ) {
-        let (name, native_web) = source;
         if self.tools.contains_key(id) {
             return;
         }
@@ -2055,7 +1502,6 @@ impl EventMapper {
         let family = family_of(name);
         let hidden = matches!(family, Family::Plan(_));
         let state = ToolState {
-            native_web,
             name: name.to_owned(),
             family: family.clone(),
             input: input.clone(),
@@ -2070,23 +1516,6 @@ impl EventMapper {
             native_terminal: None,
             origin_turn: self.turn_id(),
         };
-        if matches!(family, Family::Subagent) && !id.is_empty() {
-            let origin = match parent {
-                Some(parent) => self.parent_turn(parent),
-                None => self.turn,
-            };
-            if let Some(origin) = origin {
-                self.native_changes
-                    .parent_turns
-                    .entry(id.to_owned())
-                    .and_modify(|previous| {
-                        if *previous != Some(origin) {
-                            *previous = None;
-                        }
-                    })
-                    .or_insert(Some(origin));
-            }
-        }
         if !hidden {
             let payload = self.call_payload(&state, id, None);
             out.extend(self.started(id, stream, parent, ItemContent::ToolCall(payload)));
@@ -2101,11 +1530,7 @@ impl EventMapper {
         outcome: Option<&ToolOutcome>,
     ) -> ToolCallPayload {
         let ctx = self.tool_context();
-        let mut tool = if state.native_web {
-            native_web::payload(&state.name, &state.input, outcome)
-        } else {
-            tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx)
-        };
+        let mut tool = tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx);
         if outcome.is_none()
             && let ToolPayload::Subagent {
                 state: native_state,
@@ -2127,13 +1552,7 @@ impl EventMapper {
                 .is_none()
                 .then(|| state.progress_title.clone())
                 .flatten()
-                .unwrap_or_else(|| {
-                    if state.native_web {
-                        native_web::title(&state.name, &state.input)
-                    } else {
-                        call_title(&state.family, &state.name, &state.input, &ctx)
-                    }
-                }),
+                .unwrap_or_else(|| call_title(&state.family, &state.name, &state.input, &ctx)),
             started_at: state.started_at,
             duration_ms,
             raw: raw_call(&state.name, &state.input, outcome),
@@ -2159,9 +1578,6 @@ impl EventMapper {
         let Some(state) = self.tools.get_mut(id) else {
             return;
         };
-        if state.native_web && state.native_terminal.is_some() {
-            return;
-        }
         state.input = input;
         state.partial_input.clear();
         let state = state.clone();
@@ -2201,10 +1617,6 @@ impl EventMapper {
         let structured = frame.get("tool_use_result");
         for block in frame.blocks() {
             match block.get("type").and_then(Json::as_str) {
-                Some("web_search_tool_result" | "web_fetch_tool_result") => {
-                    let (stream, _) = stream_of(frame.parent_tool_use_id());
-                    self.native_web_result(&block, &stream, out);
-                }
                 Some("tool_result") => {
                     let Some(id) = block.get("tool_use_id").and_then(Json::as_str) else {
                         continue;
@@ -2248,8 +1660,6 @@ impl EventMapper {
                 self.tools.insert(id.to_owned(), state);
                 return;
             }
-            // The sub-agent's answer is the end of what it made.
-            self.sub_agent_ended(id);
         }
         let native_background = outcome
             .structured
@@ -2310,11 +1720,6 @@ impl EventMapper {
                 payload,
                 output_blob: None,
             }));
-        }
-        self.tool_image_results(id, &state, &outcome, status, out);
-        if state.native_web {
-            state.native_terminal = Some(status);
-            self.tools.insert(id.to_owned(), state);
         }
     }
 
@@ -2472,22 +1877,9 @@ impl EventMapper {
         {
             return;
         }
-        self.observe_process_resume(frame, out);
-        self.observe_permission_mode(frame, out);
-        self.observe_system(frame, out);
         match frame.subtype() {
             Some("init") => {
-                if frame
-                    .raw()
-                    .get("parent_tool_use_id")
-                    .is_none_or(Json::is_null)
-                {
-                    self.running_model = frame
-                        .text("model")
-                        .filter(|model| !model.is_empty())
-                        .map(str::to_owned);
-                    self.report_model_reroute(out);
-                }
+                self.running_model = frame.text("model").map(str::to_owned);
                 for server in frame
                     .get("mcp_servers")
                     .and_then(Json::as_array)
@@ -2516,8 +1908,6 @@ impl EventMapper {
             Some("status") => {
                 let compacting = frame.text("status") == Some("compacting");
                 if compacting && !self.compacting {
-                    self.retrying = false;
-                    self.retry_attempt = None;
                     self.compacting = true;
                     self.announced_compaction = true;
                     self.phase(TurnPhaseKind::Compacting, out);
@@ -2570,34 +1960,20 @@ impl EventMapper {
                 }
             }
             Some("api_retry") => {
-                if !frame.get("parent_tool_use_id").is_none_or(Json::is_null) {
-                    return;
-                }
                 self.failure.retries.note(frame);
-                let attempt = frame
-                    .get("attempt")
-                    .and_then(Json::as_i64)
-                    .filter(|n| *n > 0);
-                self.retry_phase(attempt, out);
-                if let Some(attempt) = attempt
-                    && self.turn.is_some()
-                    && u64::try_from(attempt).is_ok_and(|n| n >= self.retry_notice_attempt)
-                    && !self.retry_noticed
-                {
+                let attempt = frame.get("attempt").and_then(Json::as_u64).unwrap_or(0);
+                if attempt >= RETRY_NOTICE_ATTEMPT && !self.retry_noticed {
                     self.retry_noticed = true;
                     let status = frame
                         .get("error_status")
                         .and_then(Json::as_i64)
                         .map_or_else(|| "no answer".to_owned(), |status| status.to_string());
                     let kind = frame.text("error").unwrap_or("an error");
-                    let count = frame.get("max_retries").and_then(Json::as_u64).map_or_else(
-                        || format!("attempt {attempt}"),
-                        |max| format!("attempt {attempt} of {max}"),
-                    );
+                    let max = frame.get("max_retries").and_then(Json::as_u64).unwrap_or(0);
                     self.error_item(
                         "upstream_retrying",
                         &format!(
-                            "The model service answers {status} ({kind}); the harness tries again ({count})."
+                            "The model service answers {status} ({kind}); the harness tries again (attempt {attempt} of {max})."
                         ),
                         true,
                         frame.uuid().unwrap_or("retry"),
@@ -2679,10 +2055,10 @@ impl EventMapper {
         let state = if prior.is_some_and(|task| task.state == BackgroundTaskState::Stopped) {
             BackgroundTaskState::Stopped
         } else {
-            match native_task_terminal(status) {
-                Some(ItemStatus::Completed) => BackgroundTaskState::Completed,
-                Some(ItemStatus::Failed) => BackgroundTaskState::Failed,
-                Some(ItemStatus::Cancelled) => BackgroundTaskState::Stopped,
+            match status {
+                Some("completed") => BackgroundTaskState::Completed,
+                Some("failed" | "killed") => BackgroundTaskState::Failed,
+                Some("stopped") => BackgroundTaskState::Stopped,
                 _ => prior.map_or(BackgroundTaskState::Running, |task| task.state),
             }
         };
@@ -2976,7 +2352,11 @@ impl EventMapper {
         if status == Some("running") {
             changed |= state.native_terminal.take().is_some();
         }
-        let terminal = native_task_terminal(status);
+        let terminal = match status {
+            Some("completed") => Some(ItemStatus::Completed),
+            Some("failed" | "killed") => Some(ItemStatus::Failed),
+            _ => None,
+        };
         if let Some(terminal) = terminal {
             changed |= state.native_terminal.as_ref() != Some(&terminal);
             state.native_terminal = Some(terminal);
@@ -3015,6 +2395,13 @@ impl EventMapper {
         }
     }
 
+    /// A `rate_limit_event`: where the plan's windows stand. Only what a rejection says is kept for a failure.
+    fn rate_limit_event(&mut self, frame: &Frame) {
+        if let Some(info) = frame.get("rate_limit_info") {
+            self.failure.limit = Some(LimitInfo::read(info));
+        }
+    }
+
     /// The assistant message that wraps an API error: its class, its typed kind, its status, its words and,
     /// where it carries them, the parameters of the limit that was reached.
     fn api_error_message(&mut self, frame: &Frame) {
@@ -3038,27 +2425,10 @@ impl EventMapper {
         });
     }
 
-    fn retry_phase(&mut self, attempt: Option<i64>, out: &mut Vec<SessionEvent>) {
-        if self.turn.is_none() || (self.retrying && self.retry_attempt == attempt) {
-            return;
-        }
-        self.retrying = true;
-        self.retry_attempt = attempt;
-        if let Some(turn_id) = self.turn {
-            out.push(SessionEvent::TurnPhase(TurnPhase {
-                turn_id,
-                kind: TurnPhaseKind::Retrying,
-                retry_attempt: attempt,
-                at: self.clock.time(),
-            }));
-        }
-    }
-
     fn phase(&self, kind: TurnPhaseKind, out: &mut Vec<SessionEvent>) {
         if let Some(turn_id) = self.turn {
             out.push(SessionEvent::TurnPhase(TurnPhase {
                 turn_id,
-                retry_attempt: None,
                 kind,
                 at: self.clock.time(),
             }));
@@ -3075,9 +2445,6 @@ impl EventMapper {
     ) {
         let native_ref = format!("error:{native_ref}");
         let payload = ErrorPayload {
-            details: None,
-            window: None,
-            resets_at: None,
             code: code.to_owned(),
             message: message.to_owned(),
             retryable,
@@ -3109,17 +2476,18 @@ impl EventMapper {
         if !state.async_launched {
             return;
         }
-        let Some(terminal) = native_task_terminal(frame.text("status")) else {
+        if !matches!(
+            frame.text("status"),
+            Some("completed" | "failed" | "killed" | "stopped")
+        ) {
             return;
-        };
+        }
         let state = state.clone();
-        self.sub_agent_ended(&id);
         self.observe_background(frame, &id, frame.text("status"));
         let summary = frame.text("summary").unwrap_or_default().to_owned();
-        let failed = terminal == ItemStatus::Failed;
-        let stopped = terminal == ItemStatus::Cancelled;
+        let failed = matches!(frame.text("status"), Some("failed" | "killed"));
+        let stopped = frame.text("status") == Some("stopped");
         let outcome = ToolOutcome {
-            images: Vec::new(),
             text: summary,
             is_error: failed || stopped,
             structured: None,
@@ -3136,7 +2504,13 @@ impl EventMapper {
         if let Ok(payload) = serde_json::to_value(&payload) {
             out.push(SessionEvent::ItemCompleted(ItemCompleted {
                 native_ref: id.to_owned(),
-                status: terminal,
+                status: if stopped {
+                    ItemStatus::Cancelled
+                } else if failed {
+                    ItemStatus::Failed
+                } else {
+                    ItemStatus::Completed
+                },
                 payload,
                 output_blob: None,
             }));
@@ -3211,7 +2585,7 @@ impl EventMapper {
         // process used, its sub-agents and its shortenings of the conversation included. The turn's whole use is
         // what that total grew by since the result before, where the total it grew from is known.
         let main = self.turn_tally;
-        let (whole, mut models) = match self.model_changes(frame) {
+        let (whole, models) = match self.model_changes(frame) {
             Some(models) => (
                 Some(
                     models
@@ -3222,13 +2596,6 @@ impl EventMapper {
             ),
             None => (None, Vec::new()),
         };
-        let closing = self.last_window;
-        self.usage_window = Some(closing);
-        self.main_use = Some(main);
-        // The growth names the requests it holds only where it holds the main conversation's own use too.
-        let usable = whole.filter(|whole| whole.total_tokens >= main.total_tokens);
-        let extra = self.place_awaited(closing, usable.map(|_| models.as_slice()), main);
-        self.add_native_counts(frame, &mut models);
         let counted = self.subagent_total();
         // Sub-agents whose messages said no numbers are what the whole holds beyond the main conversation.
         let subagents = match whole {
@@ -3237,11 +2604,9 @@ impl EventMapper {
             }
             _ => counted,
         };
-        // Where the growth of the totals is not known, the use is the main conversation's, with the messages of
-        // sub-agents that have certainly ended in the window as they were printed.
-        let turn = match usable {
-            Some(whole) => whole,
-            None => main.plus(extra),
+        let turn = match whole {
+            Some(whole) if whole.total_tokens >= main.total_tokens => whole,
+            _ => main.plus(counted),
         };
         let thread = self.thread_tally.plus(turn);
         let shortened = self.pending_shortening.take();
@@ -3289,11 +2654,10 @@ impl EventMapper {
             .filter_map(|id| self.tools.remove(&id).map(|state| (id, state)))
             .collect();
         for (id, state) in open {
-            if !state.item_started || state.native_web && state.native_terminal.is_some() {
+            if !state.item_started {
                 continue;
             }
             let outcome = ToolOutcome {
-                images: Vec::new(),
                 text: "The call did not finish.".to_owned(),
                 is_error: true,
                 structured: None,
@@ -3400,11 +2764,9 @@ impl EventMapper {
     /// Whether the harness waits for something other than the model: a tool that runs.
     #[must_use]
     pub fn waiting_on_a_tool(&self) -> bool {
-        self.tools.values().any(|tool| {
-            tool.item_started
-                && !tool.async_launched
-                && !(tool.native_web && tool.native_terminal.is_some())
-        })
+        self.tools
+            .values()
+            .any(|tool| tool.item_started && !tool.async_launched)
     }
 
     /// The turn ended because the process did: no result will come, and what was open is closed.
@@ -3428,17 +2790,6 @@ fn json_id(value: &Json) -> String {
     match value {
         Json::String(text) => text.clone(),
         other => other.to_string(),
-    }
-}
-
-// The task roster uses killed for a native stop before task_notification says stopped.
-// Both are control outcomes; neither may briefly appear as a failure that wakes the owner.
-fn native_task_terminal(status: Option<&str>) -> Option<ItemStatus> {
-    match status {
-        Some("completed") => Some(ItemStatus::Completed),
-        Some("failed") => Some(ItemStatus::Failed),
-        Some("killed" | "stopped") => Some(ItemStatus::Cancelled),
-        _ => None,
     }
 }
 
@@ -3511,12 +2862,6 @@ fn parts_of(usage: &Json) -> TokensReportedApart {
     message_usage(&message)
 }
 
-/// How many printed messages of sub-agents are remembered while their cost is not found in the totals.
-const AWAITED_MAX: usize = 4096;
-
-/// What the id of a request of a vendor-produced notice begins with (then the notice and the request's own id).
-const NOTICE_REQUEST_PREFIX: &str = "native:";
-
 /// How far below its window the harness shortens a conversation, until a breakdown of its context says where:
 /// the room it keeps for an answer (20 000) and its own reserve (13 000). It shortens a context of 1 000 000
 /// at about 967 000.
@@ -3537,22 +2882,8 @@ fn model_tokens(usage: &Json) -> TokenUsage {
     })
 }
 
-/// What `a` and `b` both hold, part by part, its parts kept inside its whole.
-pub(crate) fn within(a: TokenUsage, b: TokenUsage) -> TokenUsage {
-    let input = a.input_tokens.min(b.input_tokens);
-    let output = a.output_tokens.min(b.output_tokens);
-    TokenUsage {
-        input_tokens: input,
-        cached_input_tokens: a.cached_input_tokens.min(b.cached_input_tokens).min(input),
-        cache_write_tokens: a.cache_write_tokens.min(b.cache_write_tokens).min(input),
-        output_tokens: output,
-        reasoning_tokens: a.reasoning_tokens.min(b.reasoning_tokens).min(output),
-        total_tokens: input + output,
-    }
-}
-
 /// What `a` holds beyond `b`, part by part and never below nothing, its parts kept inside its whole.
-pub(crate) fn less(a: TokenUsage, b: TokenUsage) -> TokenUsage {
+fn less(a: TokenUsage, b: TokenUsage) -> TokenUsage {
     let part = |x: i64, y: i64| (x - y).max(0);
     let input = part(a.input_tokens, b.input_tokens);
     let cached = part(a.cached_input_tokens, b.cached_input_tokens).min(input);
@@ -3569,282 +2900,10 @@ pub(crate) fn less(a: TokenUsage, b: TokenUsage) -> TokenUsage {
     }
 }
 
-/// The input of a request and the parts of it read from and written to the cache: what is final when a message starts.
-type Side = (i64, i64, i64);
-
-fn side(used: &TokenUsage) -> Side {
-    (
-        used.input_tokens.max(0),
-        used.cached_input_tokens.max(0),
-        used.cache_write_tokens.max(0),
-    )
-}
-
-/// Whether two names are of one model: the same, or one is the other with a suffix (the larger window).
-fn same_model(a: &str, b: &str) -> bool {
-    a == b || a.starts_with(b) || b.starts_with(a)
-}
-
-/// What each model's growth holds beyond the main conversation's own use, which is of the model the process runs.
-struct Rooms {
-    /// For each model of the growth: what it holds, or `None` where the main conversation does not fit under it.
-    rooms: Vec<Option<TokenUsage>>,
-    /// The model the main conversation's use is of.
-    main: Option<usize>,
-}
-
-fn rooms_of(changes: &[ModelTokens], main: TokenUsage, running: Option<&str>) -> Rooms {
-    let at = running
-        .and_then(|name| {
-            changes
-                .iter()
-                .position(|each| same_model(&each.model, name))
-        })
-        .or_else(|| {
-            changes
-                .iter()
-                .enumerate()
-                .max_by_key(|(_, each)| each.tokens.total_tokens)
-                .map(|(at, _)| at)
-        });
-    let fits = |part: TokenUsage, whole: TokenUsage| {
-        part.input_tokens <= whole.input_tokens
-            && part.cached_input_tokens <= whole.cached_input_tokens
-            && part.cache_write_tokens <= whole.cache_write_tokens
-            && part.output_tokens <= whole.output_tokens
-    };
-    Rooms {
-        rooms: changes
-            .iter()
-            .enumerate()
-            .map(|(entry, each)| {
-                if Some(entry) == at {
-                    fits(main, each.tokens).then(|| less(each.tokens, main))
-                } else {
-                    Some(each.tokens)
-                }
-            })
-            .collect(),
-        main: at,
-    }
-}
-
-/// How many steps the search for the one set of messages that fills a window exactly may take.
-const SEARCH_STEPS_MAX: usize = 200_000;
-
-/// The one set of `candidates` (in the order they were printed) whose sides add up to `target`; `None` where there is
-/// none, where there are several (which of them is not told by the sums), or where the search runs out of steps.
-fn exact_set(candidates: &[(usize, Side)], target: Side) -> Option<Vec<usize>> {
-    // What the messages from each one on can add at most, to stop a branch that cannot reach the target.
-    let mut from = vec![(0_i64, 0_i64, 0_i64); candidates.len() + 1];
-    for (at, (_, each)) in candidates.iter().enumerate().rev() {
-        from[at] = (
-            from[at + 1].0 + each.0,
-            from[at + 1].1 + each.1,
-            from[at + 1].2 + each.2,
-        );
-    }
-    struct Search<'a> {
-        candidates: &'a [(usize, Side)],
-        from: &'a [Side],
-        found: Vec<Vec<usize>>,
-        steps: usize,
-    }
-    fn go(search: &mut Search<'_>, at: usize, left: Side, chosen: &mut Vec<usize>) {
-        if search.found.len() > 1 || search.steps > SEARCH_STEPS_MAX {
-            return;
-        }
-        search.steps += 1;
-        if left == (0, 0, 0) {
-            // Nothing more can be added (every candidate has a side above nothing).
-            search.found.push(chosen.clone());
-            return;
-        }
-        let reach = search.from[at];
-        if at == search.candidates.len() || left.0 > reach.0 || left.1 > reach.1 || left.2 > reach.2
-        {
-            return;
-        }
-        let (message, each) = search.candidates[at];
-        if each.0 <= left.0 && each.1 <= left.1 && each.2 <= left.2 {
-            chosen.push(message);
-            go(
-                search,
-                at + 1,
-                (left.0 - each.0, left.1 - each.1, left.2 - each.2),
-                chosen,
-            );
-            chosen.pop();
-        }
-        go(search, at + 1, left, chosen);
-    }
-    let mut search = Search {
-        candidates,
-        from: &from,
-        found: Vec::new(),
-        steps: 0,
-    };
-    go(&mut search, 0, target, &mut Vec::new());
-    if search.steps > SEARCH_STEPS_MAX || search.found.len() != 1 {
-        return None;
-    }
-    search.found.pop()
-}
-
 impl EventMapper {
-    /// A sub-agent has ended: every message it printed has.
-    fn sub_agent_ended(&mut self, parent: &str) {
-        if self.awaited.iter().any(|known| known.key.0 == parent) {
-            self.ended_parents.insert(parent.to_owned());
-        }
-    }
-
-    /// A result closes `window` of totals: which of the printed messages of sub-agents that wait does its growth hold?
-    ///
-    /// The program prints a message of a sub-agent block by block, each as the block is complete, and adds the cost of
-    /// the message to its totals when the message ends: a result that comes between the first block and the end of the
-    /// message closes a window the message is printed in and its cost is not in (the cost is in the next window; a
-    /// message of a text and a call, the usual start of a sub-agent, is in that state for as long as the call takes to
-    /// be written). What the growth of a model holds beyond the main conversation's own use (`main`, the result's
-    /// `usage`, which is of the model the process runs) is what the sub-agents used of it, and the input of a printed
-    /// message and the parts of it read from or written to the cache are final when it is printed. So the messages of
-    /// a model that the growth holds are named by the exact sums: the one set of the waiting messages whose input,
-    /// cache read and cache write add up to what the growth holds beyond `main`, in input, cache read and cache write
-    /// at once. A message is never named for room it does not exactly fill.
-    ///
-    /// Where the sums name one set, it is that window's (a message of it is `named`), and the rest wait for a later
-    /// result, or are done with: a message that has certainly ended (its sub-agent printed a later message, or has
-    /// ended) and was not named by a window that could be told is decided only if every window since it was printed
-    /// could be told but those of unknown base, which then hold it (`unknown`); in any other case it is `dropped`, no
-    /// row: the growth that holds it counted it once, in the remainder of its turn. Where the sums do not add up (a side
-    /// call, a shortening of the conversation, a main conversation that does not fit, an ambiguous match) nothing of
-    /// that model is named, and its messages wait in doubt.
-    ///
-    /// Where the base of the totals is not known (`changes` is `None`) the growth cannot be asked; the messages that
-    /// have certainly ended and are not in doubt are named for the window and are held by its use as they were printed,
-    /// which is returned; the others wait.
-    fn place_awaited(
-        &mut self,
-        window: u64,
-        changes: Option<&[ModelTokens]>,
-        main: TokenUsage,
-    ) -> TokenUsage {
-        // Which messages have certainly ended: those of a sub-agent that has ended, and those it printed another
-        // message after.
-        let ended: Vec<bool> = {
-            let mut latest: HashMap<&str, usize> = HashMap::new();
-            for (at, known) in self.awaited.iter().enumerate() {
-                if let Some(agent) = known.agent.as_deref() {
-                    latest.insert(agent, at);
-                }
-            }
-            self.awaited
-                .iter()
-                .enumerate()
-                .map(|(at, known)| {
-                    self.ended_parents.contains(&known.key.0)
-                        || known
-                            .agent
-                            .as_deref()
-                            .is_some_and(|agent| latest.get(agent).is_some_and(|last| *last > at))
-                })
-                .collect()
-        };
-        let mut named: Vec<usize> = Vec::new();
-        let mut unsure: Vec<bool> = vec![false; self.awaited.len()];
-        let mut extra = TokenUsage::default();
-        let base_known = changes.is_some();
-        if let Some(changes) = changes {
-            let rooms = rooms_of(changes, main, self.running_model.as_deref());
-            let mut groups: Vec<Vec<usize>> = vec![Vec::new(); changes.len()];
-            for (at, known) in self.awaited.iter().enumerate() {
-                let entry = match known.model.as_deref() {
-                    Some(model) => changes
-                        .iter()
-                        .position(|each| same_model(&each.model, model)),
-                    None => rooms.main,
-                };
-                if let Some(entry) = entry {
-                    groups[entry].push(at);
-                }
-                // A message of a model the growth has nothing of is not in this window, and no doubt about it.
-            }
-            for (group, room) in groups.iter().zip(&rooms.rooms) {
-                let candidates: Vec<(usize, Side)> = group
-                    .iter()
-                    .map(|at| (*at, side(&self.awaited[*at].used)))
-                    .filter(|(_, side)| *side != (0, 0, 0))
-                    .collect();
-                if candidates.is_empty() {
-                    continue;
-                }
-                match room.and_then(|room| exact_set(&candidates, side(&room))) {
-                    Some(set) => named.extend(set),
-                    None => {
-                        for (at, _) in &candidates {
-                            unsure[*at] = true;
-                        }
-                    }
-                }
-            }
-        } else {
-            for (at, known) in self.awaited.iter().enumerate() {
-                if ended[at] && !known.doubt {
-                    named.push(at);
-                    extra = extra.plus(known.used);
-                }
-            }
-        }
-        let mut placement = crate::child_usage::Placement {
-            window,
-            base_known,
-            ..crate::child_usage::Placement::default()
-        };
-        let mut keep: Vec<Awaited> = Vec::new();
-        for (at, mut known) in std::mem::take(&mut self.awaited).into_iter().enumerate() {
-            if named.contains(&at) {
-                placement.named.push(known.key);
-                continue;
-            }
-            known.doubt |= unsure[at];
-            if !base_known {
-                known.through_unknown = true;
-            }
-            if ended[at] {
-                // Done with: the windows that could hold it are behind.
-                if !known.doubt && known.through_unknown && base_known {
-                    placement.unknown.push(known.key);
-                } else {
-                    placement.dropped.push(known.key);
-                }
-            } else {
-                keep.push(known);
-            }
-        }
-        self.awaited = keep;
-        let parents: HashSet<&str> = self
-            .awaited
-            .iter()
-            .map(|known| known.key.0.as_str())
-            .collect();
-        self.ended_parents
-            .retain(|parent| parents.contains(parent.as_str()));
-        if !(placement.named.is_empty()
-            && placement.unknown.is_empty()
-            && placement.dropped.is_empty())
-        {
-            self.child_heard
-                .push(crate::child_usage::Heard::Placed(placement));
-        }
-        extra
-    }
-
     /// What each model used since the result before, from the running totals of `modelUsage`; `None` where the
     /// totals they grew from are not known, or the harness gave none (a process that crashed gives zeros).
     fn model_changes(&mut self, frame: &Frame) -> Option<Vec<ModelTokens>> {
-        let closing = self.open_window;
-        self.open_window = self.windows.fetch_add(1, Ordering::SeqCst);
-        self.last_window = closing;
         let now: BTreeMap<String, TokenUsage> = frame
             .get("modelUsage")
             .and_then(Json::as_object)
@@ -3872,8 +2931,6 @@ impl EventMapper {
                         less(*total, before)
                     };
                     (grew.total_tokens > 0).then(|| ModelTokens {
-                        tokens_reported: true,
-                        counts: Default::default(),
                         model: model.clone(),
                         tokens: grew,
                     })
@@ -4396,190 +3453,6 @@ mod tests {
         base
     }
 
-    fn native_counts(events: &[SessionEvent]) -> BTreeMap<(String, String), i64> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
-                _ => None,
-            })
-            .flat_map(|report| &report.models)
-            .flat_map(|model| {
-                model
-                    .counts
-                    .iter()
-                    .map(|(capability, count)| ((model.model.clone(), capability.clone()), *count))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn subscription_model_search_totals_share_the_counter_hook_without_changing_tokens_or_requests()
-    {
-        use orch_agent_contract::session::ProviderAccess;
-        for provider in [
-            ProviderAccess::Native {
-                provider_id: new_id(),
-            },
-            ProviderAccess::Shared {
-                provider_id: new_id(),
-                form: "oauth_token".into(),
-            },
-            ProviderAccess::Handover {
-                provider_id: new_id(),
-                form: "login".into(),
-            },
-        ] {
-            let (mut native, _) = mapper(false);
-            native.configure_native_counters(&provider);
-            native.process_started(true);
-            let first = result_frame(
-                json!({"uuid":"first-result","modelUsage":{"main":{"inputTokens":100,"outputTokens":2,"webSearchRequests":2},"helper":{"webSearchRequests":3}}}),
-            );
-            let events = feed(&mut native, vec![first.clone()]);
-            let counts = native_counts(&events);
-            assert_eq!(counts[&("main".into(), "web_search".into())], 2);
-            assert_eq!(
-                counts[&("helper".into(), "web_search".into())],
-                3,
-                "a search-only model report does not depend on token totals"
-            );
-            let helper = events
-                .iter()
-                .find_map(|event| match event {
-                    SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
-                    _ => None,
-                })
-                .unwrap()
-                .models
-                .iter()
-                .find(|model| model.model == "helper")
-                .unwrap();
-            assert!(
-                !helper.tokens_reported,
-                "known searches do not claim a known zero token share"
-            );
-            let (mut control, _) = mapper(false);
-            control.process_started(true);
-            let plain = feed(&mut control, vec![first.clone()]);
-            let usage = |events: Vec<SessionEvent>| {
-                events
-                    .into_iter()
-                    .find_map(|event| match event {
-                        SessionEvent::UsageUpdated(usage) => Some((usage.turn, usage.thread)),
-                        _ => None,
-                    })
-                    .unwrap()
-            };
-            assert_eq!(usage(events), usage(plain));
-            assert_eq!(
-                native.take_requests().len(),
-                control.take_requests().len(),
-                "no inner native request is invented"
-            );
-            assert!(native_counts(&feed(&mut native, vec![first])).is_empty());
-            native.begin_turn(new_id());
-            let next = feed(
-                &mut native,
-                vec![result_frame(
-                    json!({"uuid":"next-result","modelUsage":{"main":{"webSearchRequests":3},"helper":{"webSearchRequests":3}}}),
-                )],
-            );
-            assert_eq!(
-                native_counts(&next)[&("main".into(), "web_search".into())],
-                1
-            );
-            assert_eq!(
-                native_counts(&next)[&("helper".into(), "web_search".into())],
-                0
-            );
-            let (mut reconfigured, _) = mapper(false);
-            reconfigured.inherit_process_report(&native);
-            reconfigured.configure_native_counters(&provider);
-            let after = feed(
-                &mut reconfigured,
-                vec![result_frame(
-                    json!({"uuid":"same-process","modelUsage":{"main":{"webSearchRequests":5},"helper":{"webSearchRequests":3}}}),
-                )],
-            );
-            assert_eq!(
-                native_counts(&after)[&("main".into(), "web_search".into())],
-                2
-            );
-            reconfigured.process_started(false);
-            reconfigured.begin_turn(new_id());
-            assert!(
-                native_counts(&feed(
-                    &mut reconfigured,
-                    vec![result_frame(
-                        json!({"uuid":"resumed","modelUsage":{"main":{"webSearchRequests":90}}})
-                    )]
-                ))
-                .is_empty()
-            );
-            reconfigured.begin_turn(new_id());
-            assert_eq!(
-                native_counts(&feed(
-                    &mut reconfigured,
-                    vec![result_frame(
-                        json!({"uuid":"resumed-next","modelUsage":{"main":{"webSearchRequests":92}}})
-                    )]
-                ))[&("main".into(), "web_search".into())],
-                2
-            );
-            reconfigured.begin_turn(new_id());
-            assert_eq!(
-                native_counts(&feed(
-                    &mut reconfigured,
-                    vec![result_frame(
-                        json!({"uuid":"cleared","modelUsage":{"main":{"webSearchRequests":1}}})
-                    )]
-                ))[&("main".into(), "web_search".into())],
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn forwarded_search_totals_stay_with_the_forwarder_and_own_context_arguments_keep_the_wire_model()
-     {
-        use orch_agent_contract::session::ProviderAccess;
-        let (mut forwarded, _) = mapper(false);
-        forwarded.configure_native_counters(&ProviderAccess::Forwarded {
-            provider_id: new_id(),
-            protocol: "anthropic-messages".into(),
-        });
-        forwarded.process_started(true);
-        assert!(
-            native_counts(&feed(
-                &mut forwarded,
-                vec![result_frame(
-                    json!({"uuid":"forwarded","modelUsage":{"main":{"webSearchRequests":8}}})
-                )]
-            ))
-            .is_empty()
-        );
-        let (mut native, _) = mapper(false);
-        native.configure_native_counters(&ProviderAccess::Native {
-            provider_id: new_id(),
-        });
-        native.process_started(true);
-        native.begin_turn_with_model(new_id(), "opaque-model", Some(1_000_000));
-        let counts = native_counts(&feed(
-            &mut native,
-            vec![result_frame(
-                json!({"uuid":"context","modelUsage":{"opaque-model":{"webSearchRequests":1},"opaque-model[1m]":{"webSearchRequests":2},"other[1m]":{"webSearchRequests":4}}}),
-            )],
-        ));
-        assert_eq!(counts[&("opaque-model".into(), "web_search".into())], 3);
-        assert_eq!(
-            counts[&("other[1m]".into(), "web_search".into())],
-            4,
-            "another model's routing name remains opaque"
-        );
-        assert!(!counts.contains_key(&("opaque-model[1m]".into(), "web_search".into())));
-    }
-
     #[test]
     fn a_turn_ends_with_its_use_counted_as_the_contract_counts_it() {
         let (mut mapper, turn) = mapper(false);
@@ -4816,11 +3689,11 @@ mod tests {
         );
         assert_eq!(
             code(failure(Some(429), "api_error", "Request rejected (429)")),
-            ("rate_limited".into(), true)
+            ("provider_busy".into(), true)
         );
         assert_eq!(
             code(failure(Some(500), "api_error", "Internal server error")),
-            ("overloaded".into(), true)
+            ("provider_busy".into(), true)
         );
         assert_eq!(
             code(failure(None, "api_error", "Connection lost (ECONNRESET)")),
@@ -5036,7 +3909,7 @@ mod tests {
         let SessionEvent::ItemCompleted(command) = &ended[0] else {
             panic!("the native task result ends the command")
         };
-        assert_eq!(command.status, ItemStatus::Cancelled);
+        assert_eq!(command.status, ItemStatus::Failed);
         assert!(
             command.payload["tool"]["exit_code"].is_null(),
             "a missing native exit code stays unknown"
@@ -5104,216 +3977,6 @@ mod tests {
                 assert_eq!(item.payload["tool"]["child_stream"], "sub:bg");
             }
             assert!(feed(&mut mapper, vec![stopped]).is_empty());
-        }
-    }
-
-    #[test]
-    fn unadmitted_native_usage_keeps_its_origin_and_advances_the_process_baseline_once() {
-        let (mut mapper, origin) = mapper(false);
-        mapper.process_started(true);
-        feed(
-            &mut mapper,
-            vec![result_frame(json!({
-                "usage":{"input_tokens":10,"output_tokens":2},
-                "modelUsage":{"mock-large":{"inputTokens":10,"outputTokens":2}}
-            }))],
-        );
-        let recent = new_id();
-        mapper.begin_turn(recent);
-        feed(
-            &mut mapper,
-            vec![result_frame(json!({
-                "usage":{"input_tokens":5,"output_tokens":1},
-                "modelUsage":{"mock-large":{"inputTokens":15,"outputTokens":3}}
-            }))],
-        );
-        mapper.take_requests();
-        assert!(!mapper.turn_active());
-        let frames = [
-            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"native-stop-call","model":"mock-large","usage":{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}),
-            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
-            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Native response must stay unpublished"}}}),
-            json!({"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}}),
-            json!({"type":"stream_event","event":{"type":"message_stop"}}),
-            result_frame(
-                json!({"uuid":"native-result","usage":{"input_tokens":3,"output_tokens":4},"modelUsage":{"mock-large":{"inputTokens":18,"outputTokens":7}}}),
-            ),
-        ];
-        let observed: Vec<_> = frames
-            .iter()
-            .flat_map(|value| {
-                mapper.observe_unadmitted_native(
-                    &frame(value.clone()),
-                    origin,
-                    orch_types::Id::from_u128(10),
-                )
-            })
-            .collect();
-        assert!(!mapper.turn_active());
-        assert!(
-            observed
-                .iter()
-                .all(|event| matches!(event, SessionEvent::UsageUpdated(_)))
-        );
-        let current = observed
-            .iter()
-            .find_map(|event| match event {
-                SessionEvent::UsageUpdated(usage) => Some(usage),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(current.turn_id, recent);
-        assert_eq!(
-            current.turn.total_tokens, 6,
-            "the older task's notice cannot rewrite the newer accepted turn"
-        );
-        assert_eq!(current.thread.total_tokens, 25);
-        let reports = mapper.take_requests();
-        let completed: Vec<_> = reports
-            .iter()
-            .filter(|(_, request)| request.outcome.is_some())
-            .collect();
-        assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0].0, origin);
-        assert!(
-            completed[0]
-                .1
-                .id
-                .starts_with("native:00000000-0000-0000-0000-00000000000a:")
-        );
-        assert_eq!(
-            completed[0].1.provider_request_id.as_deref(),
-            Some("native-stop-call")
-        );
-        assert_eq!(completed[0].1.tokens.input_tokens, Some(3));
-        assert_eq!(completed[0].1.tokens.output_tokens, Some(4));
-        assert!(completed[0].1.asked.is_none());
-        assert!(completed[0].1.check().is_ok());
-        assert_eq!(mapper.thread_tally.total_tokens, 25);
-        mapper.observe_unadmitted_native(
-            &frame(frames.last().unwrap().clone()),
-            origin,
-            orch_types::Id::from_u128(10),
-        );
-        assert!(
-            mapper.take_requests().is_empty(),
-            "the same native result cannot count the call again"
-        );
-        assert_eq!(mapper.thread_tally.total_tokens, 25);
-        mapper.begin_turn(new_id());
-        let next = feed(
-            &mut mapper,
-            vec![result_frame(json!({
-                "usage":{"input_tokens":5,"output_tokens":1},
-                "modelUsage":{"mock-large":{"inputTokens":23,"outputTokens":8}}
-            }))],
-        );
-        let usage = next
-            .iter()
-            .find_map(|event| match event {
-                SessionEvent::UsageUpdated(usage) => Some(usage),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(
-            usage.turn.total_tokens, 6,
-            "the new input does not inherit the stop-notice tokens"
-        );
-        assert_eq!(usage.thread.total_tokens, 31);
-    }
-
-    #[test]
-    fn unadmitted_native_process_loss_retains_the_origin_and_unknown_final_usage() {
-        let (mut mapper, origin) = mapper(false);
-        feed(&mut mapper, vec![result_frame(json!({}))]);
-        mapper.take_requests();
-        let notice = orch_types::Id::from_u128(10);
-        mapper.observe_unadmitted_native(&frame(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"native-lost-call","model":"mock-large","usage":{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}})), origin, notice);
-        mapper.take_requests();
-        mapper.abort_unadmitted_native(origin, notice, "the native process ended");
-        let observed = mapper.take_requests();
-        assert_eq!(observed.len(), 1);
-        assert_eq!(observed[0].0, origin);
-        assert_eq!(
-            observed[0].1.provider_request_id.as_deref(),
-            Some("native-lost-call")
-        );
-        assert!(
-            observed[0]
-                .1
-                .id
-                .starts_with("native:00000000-0000-0000-0000-00000000000a:")
-        );
-        assert!(observed[0].1.asked.is_none());
-        assert!(observed[0].1.tokens.output_tokens.is_none());
-        assert!(observed[0].1.outcome.is_some());
-        assert!(observed[0].1.check().is_ok());
-        assert!(!mapper.turn_active());
-    }
-
-    #[test]
-    fn native_stop_patches_never_publish_a_waking_failure_before_the_terminal_notice() {
-        use orch_agent_contract::background::BackgroundTaskState;
-        for native_status in ["killed", "stopped"] {
-            let (mut mapper, origin) = mapper(false);
-            feed(
-                &mut mapper,
-                vec![
-                    json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":"Agent","input":{"description":"Review","prompt":"Read the code","run_in_background":true,"subagent_type":"general-purpose"}}]}}),
-                    json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]},"tool_use_result":{"status":"async_launched","agentId":"task"}}),
-                    json!({"type":"system","subtype":"task_started","task_id":"task","run_id":"run-1","tool_use_id":"bg","task_type":"local_agent","is_backgrounded":true}),
-                    result_frame(json!({})),
-                ],
-            );
-            let stopped = feed(
-                &mut mapper,
-                vec![
-                    json!({"type":"system","subtype":"task_updated","task_id":"task","run_id":"run-1","patch":{"status":native_status}}),
-                ],
-            );
-            assert!(stopped.iter().any(|event| {
-                matches!(event, SessionEvent::ItemUpdated(item)
-                    if item.native_ref == "bg" && item.payload["tool"]["state"] == "interrupted")
-            }));
-            let tasks = mapper.background_tasks();
-            assert_eq!(tasks.len(), 1);
-            assert_eq!(tasks[0].origin_turn, origin);
-            assert_eq!(tasks[0].run_id.as_deref(), Some("run-1"));
-            assert_eq!(tasks[0].state, BackgroundTaskState::Stopped);
-            assert!(!tasks[0].state.wakes());
-            assert!(stopped.iter().any(|event| {
-                matches!(event, SessionEvent::BackgroundTasks(report)
-                    if report.tasks.iter().any(|task| task.state == BackgroundTaskState::Stopped))
-            }));
-            assert!(
-                !stopped
-                    .iter()
-                    .any(|event| matches!(event, SessionEvent::ItemCompleted(_)))
-            );
-            assert!(feed(
-                &mut mapper,
-                vec![json!({"type":"system","subtype":"task_updated","task_id":"task","run_id":"run-1","patch":{"status":"failed"}})],
-            ).is_empty(), "a late patch cannot rewrite the native stop");
-            let notice = json!({"type":"system","subtype":"task_notification","task_id":"task","run_id":"run-1","tool_use_id":"bg","status":native_status,"summary":"Stopped by the user"});
-            let terminal = feed(&mut mapper, vec![notice.clone()]);
-            let items: Vec<_> = terminal
-                .iter()
-                .filter_map(|event| match event {
-                    SessionEvent::ItemCompleted(item) => Some(item),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(items.len(), 1);
-            assert_eq!(items[0].native_ref, "bg");
-            assert_eq!(items[0].status, ItemStatus::Cancelled);
-            assert_eq!(items[0].payload["tool"]["state"], "interrupted");
-            assert!(
-                mapper
-                    .background_tasks()
-                    .iter()
-                    .all(|task| task.state == BackgroundTaskState::Stopped)
-            );
-            assert!(feed(&mut mapper, vec![notice]).is_empty());
         }
     }
 
@@ -5702,45 +4365,6 @@ mod tests {
     }
 
     #[test]
-    fn a_message_printed_in_a_frame_of_a_notice_turn_is_named_by_the_window_that_frame_closes() {
-        // The unadmitted native path hears the sub-agent messages its frames print before it places the window its
-        // result closes, not after: a message that ended in that window is named by it.
-        let (mut mapper, origin) = mapper(false);
-        mapper.process_started(true);
-        feed(
-            &mut mapper,
-            vec![
-                json!({"type":"assistant","session_id":"session","message":{"id":"main-1","content":[
-                    {"type":"tool_use","id":"tool-a","name":"Agent","input":{"description":"a","prompt":"p","subagent_type":"general-purpose","run_in_background":true}}]}}),
-                json!({"type":"system","subtype":"task_started","session_id":"session","uuid":"start-a","task_id":"task-a",
-                    "run_id":"run-a","tool_use_id":"tool-a","task_type":"local_agent","description":"a","is_backgrounded":true}),
-            ],
-        );
-        let notice = new_id();
-        let printed = json!({"type":"assistant","parent_tool_use_id":"tool-a","agent_id":"agent-a","session_id":"session",
-            "message":{"id":"ma1","model":"m","content":[{"type":"text","text":"a"}],"stop_reason":null,
-                "usage":{"input_tokens":70,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}});
-        let result = json!({"type":"result","subtype":"success","session_id":"session","is_error":false,
-            "terminal_reason":"completed","usage":{"input_tokens":10,"output_tokens":2},
-            "modelUsage":{"m":{"inputTokens":80,"outputTokens":12}}});
-        mapper.observe_unadmitted_native(&frame(printed), origin, notice);
-        mapper.observe_unadmitted_native(&frame(result), origin, notice);
-        let named: Vec<_> = mapper
-            .take_child_heard()
-            .into_iter()
-            .filter_map(|heard| match heard {
-                crate::child_usage::Heard::Placed(placement) => Some(placement.named),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            named,
-            vec![vec![("tool-a".to_owned(), "ma1".to_owned())]],
-            "the message and the window that holds its cost are heard together"
-        );
-    }
-
-    #[test]
     fn a_foreign_task_frame_is_retained_only_as_a_raw_diagnostic() {
         let (mut mapper, _) = mapper(true);
         mapper.set_native_session("session");
@@ -5760,14 +4384,10 @@ mod tests {
             json!({ "type": "system", "subtype": "api_retry", "attempt": n, "max_retries": 10,
                 "error_status": 529, "error": "overloaded", "uuid": format!("r{n}") })
         };
-        let early = feed(&mut mapper, vec![attempt(1), attempt(4)]);
-        assert_eq!(kinds(&early), ["turn.phase", "turn.phase"]);
+        assert!(feed(&mut mapper, vec![attempt(1), attempt(4)]).is_empty());
         let fifth = feed(&mut mapper, vec![attempt(5), attempt(6)]);
-        assert_eq!(
-            kinds(&fifth),
-            ["turn.phase", "item.started", "item.completed", "turn.phase"]
-        );
-        let SessionEvent::ItemStarted(notice) = &fifth[1] else {
+        assert_eq!(kinds(&fifth), ["item.started", "item.completed"]);
+        let SessionEvent::ItemStarted(notice) = &fifth[0] else {
             panic!("a notice");
         };
         let ItemContent::Error(error) = &notice.content else {
@@ -5786,69 +4406,18 @@ mod tests {
                 json!({ "type": "mystery", "blob": "x".repeat(RAW_FRAME_MAX_BYTES + 1) }),
             ],
         );
-        assert_eq!(
-            kinds(&events),
-            [
-                "item.started",
-                "item.completed",
-                "raw.frame",
-                "item.started",
-                "item.completed",
-                "raw.frame"
-            ]
-        );
-        let SessionEvent::RawFrame(stub) = &events[5] else {
+        assert_eq!(kinds(&events), ["raw.frame", "raw.frame"]);
+        let SessionEvent::RawFrame(stub) = &events[1] else {
             panic!("a raw frame");
         };
         assert_eq!(stub.payload["truncated"], true);
         assert_eq!(stub.direction, FROM_HARNESS);
         let (mut quiet, _) = mapper_quiet();
-        let observed = feed(&mut quiet, vec![json!({ "type": "mystery" })]);
-        assert_eq!(kinds(&observed), ["item.started", "item.completed"]);
-        let SessionEvent::ItemCompleted(item) = &observed[1] else {
-            panic!("the passive unknown-event marker completes");
-        };
-        assert_eq!(item.payload["data"]["change"], "unrecognized_event");
-        assert_eq!(item.payload["data"]["subject"], "mystery");
+        assert!(feed(&mut quiet, vec![json!({ "type": "mystery" })]).is_empty());
     }
 
     fn mapper_quiet() -> (EventMapper, TurnId) {
         mapper(false)
-    }
-
-    /// A result whose use is `input` and `output` of the main conversation and whose totals are `totals`.
-    fn result_of(main: (i64, i64), totals: (i64, i64)) -> Json {
-        json!({"type":"result","subtype":"success","is_error":false,
-            "usage":{"input_tokens":main.0,"output_tokens":main.1},
-            "modelUsage":{"m":{"inputTokens":totals.0,"outputTokens":totals.1}}})
-    }
-
-    /// The window that the result just fed closed, for the turn it ended.
-    fn closed_window(mapper: &mut EventMapper, value: Json) -> Option<u64> {
-        mapper.on_frame(&frame(value));
-        mapper.take_usage_window()
-    }
-
-    #[test]
-    fn a_mapper_made_again_goes_on_from_the_numbers_of_windows_that_the_one_before_used() {
-        let windows = Arc::new(AtomicU64::new(0));
-        let make = || {
-            let (mut mapper, turn) = mapper(false);
-            mapper.share_windows(Arc::clone(&windows));
-            mapper.process_started(true);
-            (mapper, turn)
-        };
-        let (mut first, _) = make();
-        let one = closed_window(&mut first, result_of((1, 1), (1, 1))).unwrap();
-        first.begin_turn(new_id());
-        let two = closed_window(&mut first, result_of((1, 1), (2, 2))).unwrap();
-        // The session is opened again while no process runs: the mapper is a new one.
-        let (mut second, _) = make();
-        let three = closed_window(&mut second, result_of((1, 1), (1, 1))).unwrap();
-        assert!(
-            one < two && two < three,
-            "the windows of a conversation are numbered once: {one} {two} {three}"
-        );
     }
 
     #[test]
@@ -5903,23 +4472,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "events/model_transitions.rs"]
-mod model_transitions;
-
-#[cfg(test)]
-#[path = "events/retry_transitions.rs"]
-mod retry_transitions;
-
-#[path = "events/native_changes.rs"]
-mod native_changes;
-mod permission_modes;
-mod rate_limits;
-mod session_lifecycle;
-
-#[path = "events/settings_observation.rs"]
-mod settings_observation;
-mod tool_images;
-
-mod native_web;

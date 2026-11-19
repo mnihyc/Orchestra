@@ -163,10 +163,8 @@ export const groupMembersKey = (groupId: string) => ['group-members', groupId] a
 export const groupHoldersKey = (groupId: string) => ['group-holders', groupId] as const;
 export const groupHoldersQuery = (groupId: string) => queryOptions({ queryKey: groupHoldersKey(groupId),
   queryFn: ({ signal }): Promise<Holder[]> => ok(api.GET('/groups/{id}/holders', { params: { path: { id: groupId } }, signal })) });
-export function addGroupHolder(groupId: string, holder: HolderInput, expectedRevision?: number): Promise<void> {
-  return done(api.PUT('/groups/{id}/holders', { params: { path: { id: groupId } }, body: {
-    ...holder, ...(expectedRevision === undefined ? {} : { expected_revision: expectedRevision }),
-  } }));
+export function addGroupHolder(groupId: string, body: HolderInput): Promise<void> {
+  return done(api.PUT('/groups/{id}/holders', { params: { path: { id: groupId } }, body }));
 }
 export function removeGroupHolder(groupId: string, body: HolderInput): Promise<void> {
   return done(api.DELETE('/groups/{id}/holders', { params: { path: { id: groupId } }, body }));

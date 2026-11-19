@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, HashSet};
 pub struct Plan {
     caller: Id,
     token: Option<Id>,
-    thread: Option<Id>,
+    thread: Id,
     environment: Id,
     generation: i32,
     directory: Option<String>,
@@ -43,30 +43,19 @@ pub struct Plan {
     manifest: Option<Hash>,
     local: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_binding: Option<EnvironmentBinding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     creator_origin: Option<CapturedOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     creator_thread: Option<Id>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    creator_job: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_environment: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_generation: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EnvironmentBinding {
-    machine: Id,
-    root: String,
-    observed_root: String,
-}
-
 impl Plan {
     /// The actual source Thread resolved by the ordinary initial-file planner.
     #[must_use]
-    pub fn source_thread(&self) -> Option<Id> {
+    pub fn source_thread(&self) -> Id {
         self.thread
     }
 
@@ -74,29 +63,6 @@ impl Plan {
     #[must_use]
     pub fn source_environment(&self) -> Id {
         self.environment
-    }
-
-    /// An explicit native empty selection carries no file content across a namespace.
-    #[must_use]
-    pub fn copies_files(&self) -> bool {
-        !self.empty
-    }
-
-    pub(crate) fn source_stamp(&self) -> Result<Hash, EngineError> {
-        crate::jobs::command_identity::hash(&json!([
-            self.caller,
-            self.token,
-            self.thread,
-            self.environment,
-            self.generation,
-            self.directory,
-            self.selection,
-            self.empty,
-            self.snapshot,
-            self.manifest,
-            self.local,
-            self.source_binding,
-        ]))
     }
 
     /// Attach the creator's full admission at its last rollbackable checkpoint. The shared
@@ -136,38 +102,6 @@ impl Plan {
         self.creator_thread = Some(created_thread);
         self.target_environment = Some(target_environment);
         self.target_generation = Some(target_generation);
-        Ok(())
-    }
-    /// A standalone Environment has an actual provision job and no created Thread.
-    pub fn capture_environment_creator(
-        &mut self,
-        caller: &Caller,
-        job: Id,
-        target: Id,
-        generation: i32,
-    ) -> Result<(), EngineError> {
-        let origin = CapturedOperation::capture(caller).map_err(EngineError::unreadable)?;
-        if (origin.operation() != orch_api_contract::environment_sources::CREATE.operation
-            && !orch_api_contract::environment_sources::duplicating::is_copy(origin.operation()))
-            || origin.user() != self.caller
-            || generation < 0
-            || self.creator_thread.is_some()
-            || self
-                .creator_origin
-                .as_ref()
-                .is_some_and(|old| old != &origin)
-            || self.creator_job.is_some_and(|old| old != job)
-            || self.target_environment.is_some_and(|old| old != target)
-            || self.target_generation.is_some_and(|old| old != generation)
-        {
-            return Err(EngineError::unreadable(
-                "the initial copy has another native standalone creator",
-            ));
-        }
-        self.creator_origin = Some(origin);
-        self.creator_job = Some(job);
-        self.target_environment = Some(target);
-        self.target_generation = Some(generation);
         Ok(())
     }
 }
@@ -216,36 +150,19 @@ fn relative(path: &str) -> bool {
 async fn rights(
     conn: &mut Conn,
     principal: &Principal,
-    thread: Option<Id>,
+    thread: Id,
     environment: Id,
 ) -> Result<(), Error> {
-    let decision = match thread {
-        Some(thread) => {
-            orch_authz::nodes::check(
-                conn,
-                principal,
-                thread,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await?
-        }
-        None => {
-            orch_authz::resources::check(
-                conn,
-                principal,
-                ObjectRef {
-                    kind: ObjectKind::Environment,
-                    id: environment,
-                },
-                Permission::EnvironmentView,
-                Policy::default(),
-            )
-            .await?
-        }
-    };
-    if let Decision::Refused(why) = decision {
+    if let Decision::Refused(why) = orch_authz::nodes::check(
+        conn,
+        principal,
+        thread,
+        Permission::ThreadView,
+        Act::Use,
+        Policy::default(),
+    )
+    .await?
+    {
         return Err(Error::Denied(Box::new(why)));
     }
     if let Decision::Refused(why) = orch_authz::resources::check(
@@ -270,24 +187,13 @@ async fn rights(
 pub async fn source_identity(
     conn: &mut Conn,
     requested: &NewEnvironmentFiles,
-) -> Result<(Option<Id>, Id), Error> {
+) -> Result<(Id, Id), Error> {
     match requested {
-        NewEnvironmentFiles::FromEnvironment {
-            from_environment, ..
-        } => {
-            let environment = environments::environment(conn, *from_environment)
-                .await?
-                .ok_or(Error::NotFound)?;
-            Ok((None, environment.id))
-        }
         NewEnvironmentFiles::FromThread { from_thread, .. } => {
             let thread = threads::thread(conn, *from_thread)
                 .await?
                 .ok_or(Error::NotFound)?;
-            Ok((
-                Some(*from_thread),
-                thread.environment_id.ok_or(Error::NotFound)?,
-            ))
+            Ok((*from_thread, thread.environment_id.ok_or(Error::NotFound)?))
         }
         NewEnvironmentFiles::Snapshot { snapshot_id } => {
             let row = storage::snapshot(conn, *snapshot_id)
@@ -296,35 +202,9 @@ pub async fn source_identity(
             let thread = row.thread_id.ok_or_else(|| Error::Invalid(
                 "a workspace export is for download; choose a thread snapshot to copy initial files".into(),
             ))?;
-            Ok((Some(thread), row.environment_id))
+            Ok((thread, row.environment_id))
         }
     }
-}
-
-fn selected_files(selection: &Option<FileSelection>) -> Result<(bool, Option<Selection>), Error> {
-    let empty = matches!(selection, Some(FileSelection::Nothing));
-    let selected = match selection {
-        Some(FileSelection::Selection { include, exclude }) => {
-            if include.is_empty() {
-                return Err(Error::Invalid(
-                    "an explicit file selection must name a path".into(),
-                ));
-            }
-            Some(Selection {
-                include: include.clone(),
-                exclude: exclude.clone().unwrap_or_default(),
-            })
-        }
-        _ => None,
-    };
-    if let Some(selected) = &selected {
-        for path in selected.include.iter().chain(&selected.exclude) {
-            validate_selection_pattern(path).map_err(|error| Error::Invalid(error.to_string()))?;
-        }
-        crate::selection::Matcher::new(selected)
-            .map_err(|error| Error::Invalid(error.to_string()))?;
-    }
-    Ok((empty, selected))
 }
 
 /// Authorizes the declared source, normalizes only its selection, and freezes no arbitrary blob claim.
@@ -337,52 +217,6 @@ pub async fn plan(
     let token = principal.caller().grant().and_then(|grant| grant.token());
     let (source_thread, source_environment) = source_identity(conn, requested).await?;
     match requested {
-        NewEnvironmentFiles::FromEnvironment {
-            from_environment,
-            selection,
-        } => {
-            rights(conn, principal, None, *from_environment).await?;
-            let env = environments::environment(conn, *from_environment)
-                .await?
-                .ok_or(Error::NotFound)?;
-            let machine = env
-                .machine_id
-                .filter(|_| env.status == "running")
-                .ok_or_else(|| {
-                    Error::Unavailable(
-                        "the source environment must be running to copy its workspace".into(),
-                    )
-                })?;
-            let (empty, selection) = selected_files(selection)?;
-            Ok(Plan {
-                caller,
-                token,
-                thread: None,
-                environment: env.id,
-                generation: env.generation,
-                directory: None,
-                selection,
-                empty,
-                snapshot: None,
-                manifest: None,
-                local: false,
-                source_binding: Some(EnvironmentBinding {
-                    machine,
-                    observed_root: crate::sessions::workspace_root(
-                        &env.workspace_root,
-                        &env.facts,
-                        env.generation,
-                    )
-                    .to_owned(),
-                    root: env.workspace_root,
-                }),
-                creator_origin: None,
-                creator_thread: None,
-                creator_job: None,
-                target_environment: None,
-                target_generation: None,
-            })
-        }
         NewEnvironmentFiles::FromThread {
             from_thread,
             selection,
@@ -394,7 +228,7 @@ pub async fn plan(
                 .environment_id
                 .filter(|id| *id == source_environment)
                 .ok_or(Error::NotFound)?;
-            rights(conn, principal, Some(*from_thread), environment).await?;
+            rights(conn, principal, *from_thread, environment).await?;
             let env = environments::environment(conn, environment)
                 .await?
                 .ok_or(Error::NotFound)?;
@@ -408,7 +242,29 @@ pub async fn plan(
                     "the source directory leaves its workspace".into(),
                 ));
             }
-            let (empty, selected) = selected_files(selection)?;
+            let empty = matches!(selection, Some(FileSelection::Nothing));
+            let selected = match selection {
+                Some(FileSelection::Selection { include, exclude }) => {
+                    if include.is_empty() {
+                        return Err(Error::Invalid(
+                            "an explicit file selection must name a path".into(),
+                        ));
+                    }
+                    Some(Selection {
+                        include: include.clone(),
+                        exclude: exclude.clone().unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(selected) = &selected {
+                for path in selected.include.iter().chain(&selected.exclude) {
+                    validate_selection_pattern(path)
+                        .map_err(|error| Error::Invalid(error.to_string()))?;
+                }
+                crate::selection::Matcher::new(selected)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+            }
             let observed = workspace::environment(conn, environment)
                 .await?
                 .ok_or(Error::NotFound)?;
@@ -423,7 +279,7 @@ pub async fn plan(
             Ok(Plan {
                 caller,
                 token,
-                thread: Some(*from_thread),
+                thread: *from_thread,
                 environment,
                 generation: env.generation,
                 directory: Some(thread.workspace_dir),
@@ -432,10 +288,8 @@ pub async fn plan(
                 snapshot: None,
                 manifest: None,
                 local: false,
-                source_binding: None,
                 creator_origin: None,
                 creator_thread: None,
-                creator_job: None,
                 target_environment: None,
                 target_generation: None,
             })
@@ -446,10 +300,10 @@ pub async fn plan(
                 .ok_or(Error::NotFound)?;
             let thread = row
                 .thread_id
-                .filter(|id| Some(*id) == source_thread)
+                .filter(|id| *id == source_thread)
                 .filter(|_| row.environment_id == source_environment)
                 .ok_or(Error::NotFound)?;
-            rights(conn, principal, Some(thread), row.environment_id).await?;
+            rights(conn, principal, thread, row.environment_id).await?;
             if row.state != "complete"
                 || row.missing_count != 0
                 || row.manifest_blob.is_none()
@@ -471,7 +325,7 @@ pub async fn plan(
             Ok(Plan {
                 caller,
                 token,
-                thread: Some(thread),
+                thread,
                 environment: row.environment_id,
                 generation: row.env_generation,
                 directory: row.directory,
@@ -480,10 +334,8 @@ pub async fn plan(
                 snapshot: Some(row.id),
                 manifest: row.manifest_blob,
                 local: row.storage == "environment",
-                source_binding: None,
                 creator_origin: None,
                 creator_thread: None,
-                creator_job: None,
                 target_environment: None,
                 target_generation: None,
             })
@@ -501,55 +353,32 @@ async fn current_at(
     now: Time,
 ) -> Result<environments::EnvironmentRow, Stop> {
     let principal = if let Some(origin) = &plan.creator_origin {
-        if origin.operation() == orch_api_contract::environment_sources::CREATE.operation
-            || orch_api_contract::environment_sources::duplicating::is_copy(origin.operation())
-        {
-            let job = plan
-                .creator_job
-                .ok_or_else(|| failure("the standalone initial copy has no provision"))?;
-            let owner = jobs::job(conn, job)
-                .await?
-                .ok_or_else(|| failure("the standalone provision disappeared"))?;
-            if plan.creator_thread.is_some()
-                || plan.target_environment != owner.environment_id
-                || plan.target_generation != Some(0)
-                || origin.user() != plan.caller
-                || owner.plan.pointer("/creator_provision/origin") != Some(&json!(origin))
-            {
-                return Err(failure(
-                    "the standalone initial copy lost its native provision association",
-                ));
-            }
-            crate::environment_creation::principal_at(conn, &owner, now).await?
-        } else {
-            let (Some(thread), Some(target), Some(_)) = (
-                plan.creator_thread,
-                plan.target_environment,
-                plan.target_generation,
-            ) else {
-                return Err(failure("the initial file creator evidence is incomplete"));
-            };
-            if origin.user() != plan.caller {
-                return Err(failure("the initial file creator identity changed"));
-            }
-            let caller = crate::operation_scope::creators::restore_initial_files(
-                conn,
-                origin,
-                thread,
-                target,
-                plan.thread,
-                plan.environment,
-                now,
-            )
-            .await?
-            .ok_or_else(|| failure("the accepted creator no longer permits this initial copy"))?;
-            Principal::load(conn, caller, now)
-                .await
-                .map_err(EngineError::from)?
+        let (Some(thread), Some(target), Some(_)) = (
+            plan.creator_thread,
+            plan.target_environment,
+            plan.target_generation,
+        ) else {
+            return Err(failure("the initial file creator evidence is incomplete"));
+        };
+        if origin.user() != plan.caller {
+            return Err(failure("the initial file creator identity changed"));
         }
+        let caller = crate::operation_scope::creators::restore_initial_files(
+            conn,
+            origin,
+            thread,
+            target,
+            plan.thread,
+            plan.environment,
+            now,
+        )
+        .await?
+        .ok_or_else(|| failure("the accepted creator no longer permits this initial copy"))?;
+        Principal::load(conn, caller, now)
+            .await
+            .map_err(EngineError::from)?
     } else {
-        if plan.creator_job.is_some()
-            || plan.creator_thread.is_some()
+        if plan.creator_thread.is_some()
             || plan.target_environment.is_some()
             || plan.target_generation.is_some()
         {
@@ -571,57 +400,9 @@ async fn current_at(
         }
         principal
     };
-    source_at(conn, &principal, plan, now).await
-}
-
-/// The same native source gate, used before any pending duplicate creation command.
-pub async fn require_source(
-    conn: &mut Conn,
-    principal: &Principal,
-    plan: &Plan,
-) -> Result<(), EngineError> {
-    source_at(conn, principal, plan, principal.now())
-        .await
-        .map(|_| ())
-        .map_err(|error| match error {
-            Stop::Failed(failure) => EngineError::unreadable(failure.message),
-            Stop::Cancelled => EngineError::unreadable("the source copy was cancelled"),
-            Stop::Lost => EngineError::unreadable("the source copy lost its native owner"),
-        })
-}
-
-async fn source_at(
-    conn: &mut Conn,
-    principal: &Principal,
-    plan: &Plan,
-    now: Time,
-) -> Result<environments::EnvironmentRow, Stop> {
-    rights(conn, principal, plan.thread, plan.environment)
+    rights(conn, &principal, plan.thread, plan.environment)
         .await
         .map_err(|error| failure(error.to_string()))?;
-    if plan.copies_files()
-        && let Some(target) = plan.target_environment
-    {
-        let destination = environments::environment(conn, target)
-            .await?
-            .ok_or_else(|| failure("the initial file destination disappeared"))?;
-        crate::copy_out::authorize(
-            conn,
-            principal,
-            crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
-                kind: orch_access_contract::permissions::ObjectKind::Environment,
-                id: plan.environment,
-            }),
-            Some(destination.home_node_id),
-        )
-        .await
-        .map_err(|error| match error {
-            crate::copy_out::Error::Native(error) => Stop::from(error),
-            _ => failure(
-                "the source policy no longer permits files to be copied into this organization",
-            ),
-        })?;
-    }
     let source = environments::environment(conn, plan.environment)
         .await?
         .ok_or_else(|| failure("the initial file source disappeared"))?;
@@ -629,7 +410,7 @@ async fn source_at(
         let row = storage::snapshot(conn, snapshot)
             .await?
             .filter(|row| {
-                row.thread_id == plan.thread
+                row.thread_id == Some(plan.thread)
                     && row.environment_id == plan.environment
                     && row.env_generation == plan.generation
                     && row.directory == plan.directory
@@ -644,8 +425,8 @@ async fn source_at(
         if (row.storage == "environment") != plan.local {
             return Err(failure("the initial file snapshot changed its storage"));
         }
-    } else if let Some(thread) = plan.thread {
-        let thread = threads::thread(conn, thread)
+    } else {
+        let thread = threads::thread(conn, plan.thread)
             .await?
             .filter(|thread| {
                 thread.environment_id == Some(plan.environment)
@@ -655,17 +436,6 @@ async fn source_at(
                 failure("the initial file source thread changed its directory or binding")
             })?;
         let _ = thread;
-    } else if !plan.source_binding.as_ref().is_some_and(|binding| {
-        plan.directory.is_none()
-            && source.machine_id == Some(binding.machine)
-            && source.workspace_root == binding.root
-            && crate::sessions::workspace_root(
-                &source.workspace_root,
-                &source.facts,
-                source.generation,
-            ) == binding.observed_root
-    }) {
-        return Err(failure("the initial workspace changed its physical source"));
     }
     if (plan.snapshot.is_none() || plan.local)
         && (source.generation != plan.generation
@@ -698,42 +468,24 @@ async fn target_at(
     conn: &mut Conn,
     owner: &jobs::JobRow,
     plan: &Plan,
-) -> Result<Option<(environments::EnvironmentRow, Option<Id>, Id)>, Stop> {
+) -> Result<Option<(environments::EnvironmentRow, Id, Id)>, Stop> {
     let Some(target) = plan.target_environment else {
         return Ok(None);
     };
     let generation = plan
         .target_generation
         .ok_or_else(|| failure("the initial file target generation is absent"))?;
-    if plan.creator_job.is_some_and(|id| id != owner.id)
-        || !owner.is_open()
+    if !owner.is_open()
         || owner.cancel_requested()
         || owner.kind != jobs::kind::ENVIRONMENT_PROVISION
         || owner.environment_id != Some(target)
-        || !matches!(
-            owner.plan.get("mode").and_then(Json::as_str),
-            Some("make" | "copy")
-        )
+        || owner.plan.get("mode").and_then(Json::as_str) != Some("make")
         || owner.plan.get("generation").and_then(Json::as_i64) != Some(i64::from(generation))
         || owner.plan.get("initial_files") != Some(&json!(plan))
     {
         return Err(failure(
             "the initial file target no longer belongs to this provisioning",
         ));
-    }
-    if owner.plan["mode"] == "copy" {
-        let (target, machine) = crate::environment_creation::connected_target(conn, owner)
-            .await?
-            .ok_or_else(|| failure("the initial file target has no native connected creator"))?;
-        if target.id
-            != plan
-                .target_environment
-                .ok_or_else(|| failure("the target disappeared"))?
-            || target.generation != generation
-        {
-            return Err(failure("the connected file target changed"));
-        }
-        return Ok(Some((target, None, machine)));
     }
     let runtime = owner
         .plan
@@ -764,7 +516,7 @@ async fn target_at(
     {
         return Err(failure("the initial file target runtime changed"));
     }
-    Ok(Some((current, Some(runtime), machine)))
+    Ok(Some((current, runtime, machine)))
 }
 
 fn safe_link(path: &str, target: &str) -> bool {
@@ -1335,21 +1087,11 @@ pub async fn command_current_callers(
         return Ok(None);
     };
     let plan: Plan = serde_json::from_value(owner.plan["initial_files"].clone())?;
-    let (caller, raw_until) = if let Some(origin) = &plan.creator_origin {
-        if origin.operation() == orch_api_contract::environment_sources::CREATE.operation
-            || orch_api_contract::environment_sources::duplicating::is_copy(origin.operation())
-        {
-            match crate::environment_creation::checkpoint_current(conn, &owner, clock, None).await {
-                Ok((principal, until)) => (principal.caller().clone(), until),
-                Err(EngineError::Unreadable(_)) => return Ok(None),
-                Err(error) => return Err(error),
-            }
-        } else {
-            let Some(caller) = origin.restore_current(conn, clock).await? else {
-                return Ok(None);
-            };
-            (caller, None)
-        }
+    let caller = if let Some(origin) = &plan.creator_origin {
+        let Some(caller) = origin.restore_current(conn, clock).await? else {
+            return Ok(None);
+        };
+        caller
     } else {
         let principal = match crate::jobs::source::load_principal_at(
             conn,
@@ -1373,7 +1115,7 @@ pub async fn command_current_callers(
         else {
             return Ok(None);
         };
-        (caller, None)
+        caller
     };
     let deadline = if let Some(snapshot) = plan.snapshot {
         let Some(row) = storage::snapshot(conn, snapshot).await? else {
@@ -1386,8 +1128,5 @@ pub async fn command_current_callers(
     } else {
         None
     };
-    Ok(Some(vec![(
-        Some(caller),
-        deadline.into_iter().chain(raw_until).min(),
-    )]))
+    Ok(Some(vec![(Some(caller), deadline)]))
 }

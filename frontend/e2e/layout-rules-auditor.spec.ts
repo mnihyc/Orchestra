@@ -105,10 +105,10 @@ test('a tab owns its named panel region while duplicate controls inside that pan
   expect((await duplicateAccessibleNames(page)).map((fault) => fault.text)).toEqual(['Inspect']);
 });
 
-for (const attribute of ['data-item', 'data-footer', 'data-timeline-row']) test(`timeline authors may recur across actual messages while duplicates in one message still fail: ${attribute}`, async ({ page }) => {
-  await page.setContent(`<main><div role="log"><div ${attribute}="first"><button>Ada Lovelace</button><p>First message</p></div><div ${attribute}="second"><button>Ada Lovelace</button><p>Second message</p></div></div></main>`);
+test('timeline authors may recur across actual messages while duplicates in one message still fail', async ({ page }) => {
+  await page.setContent('<main><div role="log"><div data-timeline-row="first"><button>Ada Lovelace</button><p>First message</p></div><div data-timeline-row="second"><button>Ada Lovelace</button><p>Second message</p></div></div></main>');
   expect(await duplicateAccessibleNames(page)).toEqual([]);
-  await page.locator(`[${attribute}="second"]`).evaluate((row) => { row.insertAdjacentHTML('beforeend', '<button>Ada Lovelace</button>'); });
+  await page.locator('[data-timeline-row="second"]').evaluate((row) => { row.insertAdjacentHTML('beforeend', '<button>Ada Lovelace</button>'); });
   expect((await duplicateAccessibleNames(page)).map((fault) => fault.text)).toEqual(['Ada Lovelace']);
 });
 
@@ -185,17 +185,6 @@ test('an earlier name inspection closes before the icon walk without hiding a di
   expect((await auditHoverIcons(page, result.icons)).filter((fault) => fault.rule === 'icon-centre').map((fault) => fault.text)).toEqual(['Displaced action']);
   await expect(page.locator('[data-inspection-card]')).toHaveCount(0);
   await expect(page.locator('body')).toHaveAttribute('data-escapes', '1');
-});
-
-for (const native of [false, true]) test(`modal input walks retain owned portals and the covered page's static rules: ${native ? 'native dialog' : 'shared prompt'}`, async ({ page }) => {
-  await page.setContent(`<style>body{margin:0;background:white;color:black}button{width:28px;height:28px}svg{width:16px;height:16px}.overlay{position:fixed;inset:0;z-index:1;background:white}.prompt{position:fixed;left:100px;top:100px;z-index:2}.portal{position:fixed;left:200px;top:100px;z-index:3}</style><main><span>Repeated caption</span><strong>Repeated caption</strong><button aria-label="Covered action"><svg></svg></button><button aria-label="Covered menu" aria-haspopup="menu"><svg></svg></button></main><div class="overlay"></div><div role="dialog" aria-modal="true" ${native ? '' : 'data-prompt-current="true" data-prompt-id="edit"'} class="prompt"><button aria-label="Current action"><svg></svg></button><button aria-label="Current menu" aria-haspopup="menu"><svg></svg></button></div>${native ? '' : '<div data-prompt-owner="edit" class="portal"><button aria-label="Owned portalled action"><svg></svg></button></div>'}`);
-  const result = await page.evaluate(inspectLayout, input);
-  const names = (selectors: string[]) => page.evaluate((selectors) => selectors.map((selector) => document.querySelector(selector)?.getAttribute('aria-label')), selectors);
-  expect(await names(result.icons)).toEqual(native ? ['Current action', 'Current menu'] : ['Current action', 'Current menu', 'Owned portalled action']);
-  expect(await names(result.menus)).toEqual(['Current menu']);
-  expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Repeated caption']);
-  // Every admitted icon must still receive a real trusted pointer event through the backdrop.
-  expect(await auditHoverIcons(page, result.icons)).toEqual([]);
 });
 
 test('tree items are repeated rows while repeated headings outside them remain a finding', async ({ page }) => {
@@ -315,15 +304,6 @@ test('visible duplicates cross landmarks, while list, table and timeline rows ar
   await page.setContent('<header><span data-user-content>Model</span></header><main><strong>Model</strong><ul><li>Repeated row</li><li>Repeated row</li></ul><table><tr><td>Table value</td></tr><tr><td>Table value</td></tr></table><div data-item="one">Timeline value</div><div data-item="two">Timeline value</div></main>');
   const result = await page.evaluate(inspectLayout, input);
   expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Model']);
-});
-
-test('definition values keep their terms while duplicate values in one pair and repeated controls still fail', async ({ page }) => {
-  await page.setContent('<main><span>Default</span><dl><div><dt>Model</dt><dd><span>Default</span></dd></div><div id="effort"><dt>Effort</dt><dd><span>Default</span></dd></div></dl></main>');
-  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-text')).toEqual([]);
-  await page.locator('#effort dd').evaluate((value) => { value.insertAdjacentHTML('beforeend', '<strong>Default</strong>'); });
-  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Default']);
-  await page.locator('dd').evaluateAll((values) => { for (const value of values) value.insertAdjacentHTML('beforeend', '<button>Change value</button>'); });
-  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-action').map((fault) => fault.text)).toEqual(['Change value']);
 });
 
 test('an exact reasoned exception permits just its named occurrences, never a third or a blank reason', async ({ page }) => {
@@ -628,8 +608,7 @@ test('an editor control surface keeps local labels without borrowing another sur
   expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'icon-centre').map((fault) => fault.text)).toEqual(['Local surface action']);
 });
 
-// The owner stands at the page's corner, where the auditor's pointer used to rest: the rest is outside the owner, so the hover is an entrance into it.
-for (const mode of ['complete', 'unowned hint', 'stolen focus', 'no hover hint'] as const) test(`full-value disclosure checks native focus and its own hint: ${mode}`, async ({ page }) => {
+for (const mode of ['complete', 'unowned hint', 'stolen focus'] as const) test(`full-value disclosure checks native focus and its own hint: ${mode}`, async ({ page }) => {
   const value = 'A complete value that is wider than this small control';
   await page.setContent('<style>body{margin:0;background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><main><span id="owner" class="cut" tabindex="0"></span><span id="other" tabindex="-1"></span></main>');
   await page.locator('#owner').evaluate((owner, setup) => {
@@ -640,7 +619,7 @@ for (const mode of ['complete', 'unowned hint', 'stolen focus', 'no hover hint']
       hint.textContent = setup.value;
       if (setup.mode !== 'unowned hint') owner.setAttribute('aria-describedby', hint.id);
     };
-    if (setup.mode !== 'no hover hint') owner.addEventListener('pointerover', show);
+    owner.addEventListener('pointerover', show);
     owner.addEventListener('focus', () => { show(); if (setup.mode === 'stolen focus') document.getElementById('other')?.focus(); });
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { document.getElementById('whole-value')?.remove(); owner.removeAttribute('aria-describedby'); } });
   }, { value, mode });
@@ -650,23 +629,6 @@ for (const mode of ['complete', 'unowned hint', 'stolen focus', 'no hover hint']
 });
 
 
-test('each clipped value gets a fresh keyboard entry when two values share their actual owner', async ({ page }) => {
-  await page.setContent('<style>.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><button id="owner"><span class="cut">The complete provider name</span><span class="cut">The complete weekly quota status</span></button>');
-  await page.locator('#owner').evaluate((owner) => {
-    const show = (keyboard: boolean) => {
-      let hint = document.getElementById('whole');
-      if (hint === null) { hint = document.createElement('div'); hint.id = 'whole'; hint.setAttribute('role', 'tooltip'); document.body.append(hint); }
-      hint.textContent = owner.textContent;
-      if (keyboard) { owner.setAttribute('aria-describedby', hint.id); owner.dataset.entries = String(Number(owner.dataset.entries ?? '0') + 1); }
-    };
-    owner.addEventListener('pointerover', () => show(false));
-    owner.addEventListener('focus', () => show(true));
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.getElementById('whole')?.remove(); });
-  });
-  expect((await auditPage(page)).faults.filter((fault) => fault.rule === 'cut-text')).toEqual([]);
-  await expect(page.locator('#owner')).toHaveAttribute('data-entries', '2');
-});
-
 for (const broken of [false, true]) test(`menu passes reveal their own values while retaining page rules: ${broken ? 'missing menu hint' : 'complete hints'}`, async ({ page }) => {
   await page.setContent('<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><main><span>Repeated page caption</span><strong>Repeated page caption</strong><span id="page-value" class="cut" tabindex="0">A complete underlying page value</span></main><div role="menu"><span id="menu-value" class="cut" tabindex="0">A complete value inside the open menu</span></div><div data-inspection-card><span id="card-value" class="cut" tabindex="0">A complete fact inside a portalled inspection</span></div>');
   await page.locator('main').evaluate((main) => {
@@ -675,7 +637,7 @@ for (const broken of [false, true]) test(`menu passes reveal their own values wh
   expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text))
     .toContain('An inactive page value without a keyboard stop');
   await page.evaluate((broken) => {
-    for (const owner of Array.from(document.querySelectorAll<HTMLElement>('.cut'))) {
+    for (const owner of document.querySelectorAll<HTMLElement>('.cut')) {
       owner.dataset.visits = '0';
       const show = () => {
         owner.dataset.visits = String(Number(owner.dataset.visits) + 1);
@@ -694,7 +656,7 @@ for (const broken of [false, true]) test(`menu passes reveal their own values wh
       owner.addEventListener('focus', show);
     }
     document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') for (const hint of Array.from(document.querySelectorAll('[role="tooltip"]'))) hint.remove();
+      if (event.key === 'Escape') for (const hint of document.querySelectorAll('[role="tooltip"]')) hint.remove();
     });
   }, broken);
   const result = await auditPage(page, '[role="menu"],[data-inspection-card]');
@@ -704,45 +666,6 @@ for (const broken of [false, true]) test(`menu passes reveal their own values wh
   expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Repeated page caption']);
   expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toEqual(broken ? ['A complete value inside the open menu'] : []);
 });
-
-for (const locale of ['en', 'zh-CN'] as const) {
-  test(`card values are revealed before a menu entrance closes their card in ${locale}`, async ({ page }) => {
-    const menu = locale === 'en' ? 'A complete value in the underlying menu' : '底层菜单中的完整内容';
-    const fact = locale === 'en' ? 'Weekly window 81% · resets tomorrow' : '本周用量 81% · 明天重置';
-    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><div role="menu"><button class="cut" id="menu-value">${menu}</button></div><div data-inspection-card id="card"><button class="cut" id="card-value">${fact}</button></div>`);
-    await page.evaluate(() => {
-      document.body.dataset.cardVisits = '0';
-      for (const owner of Array.from(document.querySelectorAll<HTMLElement>('.cut'))) {
-        const show = () => {
-          if (owner.id === 'menu-value') document.getElementById('card')?.remove();
-          else document.body.dataset.cardVisits = String(Number(document.body.dataset.cardVisits) + 1);
-          let hint = document.getElementById('whole');
-          if (hint === null) { hint = document.createElement('div'); hint.id = 'whole'; hint.setAttribute('role', 'tooltip'); document.body.append(hint); }
-          hint.textContent = owner.textContent; owner.setAttribute('aria-describedby', hint.id);
-        };
-        owner.addEventListener('pointerover', show); owner.addEventListener('focus', show);
-      }
-      document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.getElementById('whole')?.remove(); });
-    });
-    expect((await auditPage(page, '[role="menu"],[data-inspection-card]')).faults.filter((fault) => fault.rule === 'cut-text')).toEqual([]);
-    expect(Number(await page.locator('body').getAttribute('data-card-visits'))).toBeGreaterThanOrEqual(2);
-    await expect(page.locator('#card')).toHaveCount(0);
-  });
-
-  test(`a disappearing clipped value reports a finding within its reveal budget in ${locale}`, async ({ page }) => {
-    const text = locale === 'en' ? 'The complete value that disappeared' : '已经消失的完整内容';
-    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><button id="owner" class="cut">${text}</button>`);
-    await page.mouse.move(200, 200);
-    await page.evaluate(() => document.addEventListener('pointermove', (event) => {
-      if (event.clientX === 0 && event.clientY === 0) document.getElementById('owner')?.remove();
-    }));
-    const started = Date.now();
-    const result = await auditPage(page);
-    expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toContain(text);
-    // Five reveal intervals leave driver/scheduling margin while rejecting a whole-test wait.
-    expect(Date.now() - started).toBeLessThan(10_000);
-  });
-}
 
 test('context-menu audits open a tab menu by keyboard without selecting the tab', async ({ page }) => {
   await page.setContent('<style>body{background:white;color:black}</style><div role="tablist"><button id="tab" role="tab" aria-selected="true" aria-controls="panel" aria-haspopup="menu">Review</button></div><main id="panel" role="tabpanel" aria-labelledby="tab">Current work</main>');

@@ -2,7 +2,6 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, client, ok, repeatable } from '@/api/client';
-import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { fileNameOf, type Progress } from '@/api/exports';
 import type {
   Import, ImportLine, ImportPlan, ImportPreview, ImportPreviewRequest, ImportReportFormat, ImportReportListQuery,
@@ -93,17 +92,15 @@ export const importFileNamesQuery = (id: string, pageSize: number) => infiniteQu
 });
 
 /** One retained import. */
-export const importQuery = (id: string, administrative = false) => queryOptions({
-  ...(administrative ? ADMIN_QUERY : {}),
-  queryKey: [...importKeys.one(id), ...(administrative ? ['admin-inspect'] : [])],
+export const importQuery = (id: string) => queryOptions({
+  queryKey: importKeys.one(id),
   gcTime: 0,
   queryFn: ({ signal }): Promise<Import> => ok(api.GET('/imports/{id}', { params: { path: { id } }, signal })),
 });
 
 /** A report, with the server's filter and cursor. */
-export const importReportQuery = (id: string, filter: ImportReportListQuery, administrative = false) => infiniteQueryOptions({
-  ...(administrative ? ADMIN_QUERY : {}),
-  queryKey: [...importKeys.report(id, filter), ...(administrative ? ['admin-inspect'] : [])],
+export const importReportQuery = (id: string, filter: ImportReportListQuery) => infiniteQueryOptions({
+  queryKey: importKeys.report(id, filter),
   gcTime: 0,
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<{ items: ImportReportRow[]; next_cursor: string | null }> => ok(api.GET('/imports/{id}/report', {

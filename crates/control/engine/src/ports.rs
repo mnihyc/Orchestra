@@ -66,9 +66,6 @@ pub const LABEL_CHARACTERS: usize = 80;
 /// A refusal of current authority, policy, shape or revision.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The current native writer's once-only check failed before its first mutation.
-    #[error("the port writer's current boundary has ended: {0}")]
-    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// The database refused the transaction.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -737,76 +734,6 @@ async fn produce_admitted(
     origin: &Origin,
     admission: Option<Json>,
 ) -> Result<Produced, Error> {
-    produce_admitted_before(
-        conn,
-        principal,
-        environment,
-        requester,
-        client,
-        full_body,
-        resolved,
-        expected_program,
-        preparation,
-        origin,
-        admission,
-        &mut || Ok(()),
-    )
-    .await
-}
-
-/// The native reviewed producer with its check at its real first SQL effect after preparation.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "native admission inputs and its first-effect seam remain independent"
-)]
-pub async fn produce_prepared_before(
-    conn: &mut Conn,
-    principal: &Principal,
-    environment: &EnvironmentFull,
-    requester: Requester,
-    client: Id,
-    full_body: &Json,
-    resolved: &PortOpeningRequest,
-    expected_program: i64,
-    preparation: &Preparation,
-    origin: &Origin,
-    before: &mut (dyn FnMut() -> Result<(), Error> + Send),
-) -> Result<Produced, Error> {
-    produce_admitted_before(
-        conn,
-        principal,
-        environment,
-        requester,
-        client,
-        full_body,
-        resolved,
-        expected_program,
-        preparation,
-        origin,
-        None,
-        before,
-    )
-    .await
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one native producer owns every admission fence and its first-effect seam"
-)]
-async fn produce_admitted_before(
-    conn: &mut Conn,
-    principal: &Principal,
-    environment: &EnvironmentFull,
-    requester: Requester,
-    client: Id,
-    full_body: &Json,
-    resolved: &PortOpeningRequest,
-    expected_program: i64,
-    preparation: &Preparation,
-    origin: &Origin,
-    admission: Option<Json>,
-    before: &mut (dyn FnMut() -> Result<(), Error> + Send),
-) -> Result<Produced, Error> {
     let (user, thread) = requester.references();
     let body_hash = digest(full_body)?;
     // The authority guard must precede these locks; all concurrent port producers use this order.
@@ -854,7 +781,6 @@ async fn produce_admitted_before(
     )
     .await?;
     if let Some(prior) = prior {
-        before()?;
         rows::save_request(
             conn,
             &Request {
@@ -919,6 +845,18 @@ async fn produce_admitted_before(
         })
     {
         return Err(Error::ProgramConflict);
+    }
+    if (program != *desired || (revision == 0 && full_body.get("program").is_some()))
+        && !rows::set_program(
+            conn,
+            environment.id,
+            resolved.port,
+            desired,
+            expected_program,
+        )
+        .await?
+    {
+        return Err(Error::Conflict);
     }
     let preparation_holds = matches!(
         (resolved.kind, preparation),
@@ -1052,20 +990,6 @@ async fn produce_admitted_before(
             opening.state = "opening".into();
         }
     }
-    if (program != *desired || (revision == 0 && full_body.get("program").is_some())) && {
-        before()?;
-        !rows::set_program(
-            conn,
-            environment.id,
-            resolved.port,
-            desired,
-            expected_program,
-        )
-        .await?
-    } {
-        return Err(Error::Conflict);
-    }
-    before()?;
     rows::insert(conn, &opening).await?;
     rows::save_request(
         conn,
@@ -1470,16 +1394,6 @@ async fn authority_under(
 /// Closes ended authority and returns changed opening ids for immediate channel retirement.
 /// A non-HTTP caller takes lock_authority before invoking this function.
 pub async fn reconcile(conn: &mut Conn, environment: Id, now: Time) -> Result<Vec<Id>, Error> {
-    reconcile_before(conn, environment, now, &mut || Ok(())).await
-}
-
-/// The same native reconciliation, with its owning action's first-effect check at SQL writes.
-pub async fn reconcile_before(
-    conn: &mut Conn,
-    environment: Id,
-    now: Time,
-    before: &mut (dyn FnMut() -> Result<(), Error> + Send),
-) -> Result<Vec<Id>, Error> {
     rows::lock_environment(conn, environment).await?;
     let env = environments::environments(conn, &[environment])
         .await?
@@ -1575,7 +1489,6 @@ pub async fn reconcile_before(
                 } else {
                     "expired"
                 };
-                before()?;
                 if rows::settle_approval(conn, approval, state, None, &json!(null), now.get())
                     .await?
                 {
@@ -1587,7 +1500,6 @@ pub async fn reconcile_before(
                     .await?;
                 }
             }
-            before()?;
             if rows::close(conn, opening.id, reason, now.get()).await? {
                 if let Some(env) = &env {
                     record(
@@ -1608,7 +1520,6 @@ pub async fn reconcile_before(
             if let Some(env) = &env
                 && env.status != "running"
             {
-                before()?;
                 rows::availability(
                     conn,
                     opening.id,

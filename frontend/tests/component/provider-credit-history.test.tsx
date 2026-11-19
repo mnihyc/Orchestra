@@ -62,13 +62,13 @@ it('hides unsupported fields while preserving supported missing values and the c
   expect(screen.getByRole('group',{name:'Balance'})).toHaveTextContent('Used: Not reported');
 });
 
-it('keeps unsupported credit reasons visible without offering or fetching credit history',async()=>{
+it('keeps the entire unsupported credit view hidden without a history request',async()=>{
   const provider=planProvider();
   provider.facts_state.balances='unsupported';provider.facts_state.spend='unsupported';provider.facts_state.extra_usage='unsupported';
   const view=show(<Plan provider={provider} span={span} mode="current" bucket="day" onMode={vi.fn()} onBucket={vi.fn()} />);
   await waitFor(()=>expect(transport.get).toHaveBeenCalledTimes(1));
   expect(screen.queryByRole('radio',{name:i18n.t('providerCredits.credits')})).not.toBeInTheDocument();
-  expect(view.container.querySelector('[data-current-member="balances"]')).toHaveTextContent(i18n.t('providerDetails.notSupplied'));
+  expect(view.container.querySelector('[data-current-member="balances"]')).not.toBeInTheDocument();
   expect(transport.get.mock.calls.every(([,options])=>options.params.query.metric!=='credits')).toBe(true);
 });
 

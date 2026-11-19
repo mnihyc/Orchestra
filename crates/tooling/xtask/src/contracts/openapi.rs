@@ -33,26 +33,7 @@ mod tests {
         let replies = &document["paths"]["/auth/register"]["post"]["responses"];
         let created = &replies["201"]["content"]["application/json"]["schema"]["$ref"];
         let pending = &replies["202"]["content"]["application/json"]["schema"]["$ref"];
-        assert_eq!(created, "#/components/schemas/AuthRegisterCreatedReply");
-        let schemas = &document["components"]["schemas"];
-        for (name, full) in [
-            ("AuthRegisterCreatedReply", "AuthRegisterResult"),
-            ("AuthRegisterPendingReply", "VerificationRequired"),
-        ] {
-            let alternatives = schemas[name]["anyOf"].as_array().unwrap();
-            let references: Vec<_> = alternatives
-                .iter()
-                .map(|schema| schema["$ref"].as_str().unwrap())
-                .collect();
-            assert_eq!(
-                references,
-                [
-                    format!("#/components/schemas/{full}"),
-                    "#/components/schemas/AccountCreatedReceipt".to_owned(),
-                ],
-                "each status advertises only its original body and a session-free receipt"
-            );
-        }
+        assert_eq!(created, "#/components/schemas/AuthRegisterResult");
         let registered = &document["components"]["schemas"]["AuthRegisterResult"]["properties"];
         assert!(registered.get("access_token").is_some());
         assert!(registered.get("user").is_some());
@@ -60,23 +41,12 @@ mod tests {
             registered["accepted_invitation"]["anyOf"][0]["$ref"],
             "#/components/schemas/InvitationAcceptReply"
         );
-        assert_eq!(pending, "#/components/schemas/AuthRegisterPendingReply");
+        assert_eq!(pending, "#/components/schemas/VerificationRequired");
         let required = &document["components"]["schemas"]["VerificationRequired"];
         assert_eq!(
             required["properties"]["verification_required"]["const"],
             true
         );
         assert!(required["properties"].get("access_token").is_none());
-        let receipt = &schemas["AccountCreatedReceipt"]["properties"];
-        assert_eq!(receipt["sign_in_required"]["const"], true);
-        assert!(receipt.get("user_id").is_some());
-        for secret in [
-            "access_token",
-            "refresh_token",
-            "user",
-            "accepted_invitation",
-        ] {
-            assert!(receipt.get(secret).is_none());
-        }
     }
 }

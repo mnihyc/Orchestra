@@ -1,5 +1,5 @@
 /** The complete tree grid as a reader uses it: remembered columns, server sorting, keyboard branches and minimal paths. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -66,20 +66,6 @@ afterEach(async () => {
 });
 
 describe('the complete hierarchy', () => {
-  it.each(modes)('shows an org name once without its redundant address in the name cell in %s/%s', async (locale, theme) => {
-    await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
-    levels.set(null, [inventoryRow({ ...root, place_label: 'acme', path: [{ id: root.id, kind: 'org', name: 'Acme', redacted: false }] })]);
-    show(<EverythingScreen />);
-    const grid = await screen.findByRole('treegrid', { name: i18n.t('everything.tree') });
-    const row = grid.querySelector<HTMLElement>('[data-everything-row="org:acme"]');
-    if (row === null) throw new Error('The org row is missing');
-    const target = within(row).getByRole('link', { name: i18n.t('everything.placedName', { name: 'Acme', place: 'acme' }) });
-    expect(target).toHaveTextContent(/^Acme$/);
-    expect(within(row).getAllByText('Acme', { exact: true })).toHaveLength(1);
-    expect(within(row).queryByText('acme', { exact: true })).not.toBeInTheDocument();
-    expect(target).toHaveAttribute('href', '/org/acme');
-  });
-
   it.each(modes)('leads with the list and mounts its filters only on request in %s/%s', async (locale, theme) => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -125,23 +111,10 @@ describe('the complete hierarchy', () => {
     const kinds = new Set<string>(CATALOGUE.permissions.flatMap((permission) => permission.on));
     for (const kind of ['org', 'project', 'topic', 'thread', 'document', 'provider', 'agent', 'environment', 'host', 'machine', 'template', 'mcp_server', 'mount', 'chat', 'group', 'a_future_kind']) kinds.add(kind);
     for (const kind of kinds) {
-      const icon = show(<KindIcon row={{ id: kind, kind, path: [] }} activity={false} />);
+      const icon = render(<KindIcon row={{ id: kind, kind, path: [] }} />);
       expect(icon.container.querySelector('svg'), kind).toBeInTheDocument();
       icon.unmount();
     }
-  });
-
-  it('uses supplied thread activity and keeps an absent report distinct from a kind glyph', () => {
-    const row = { id: 'reported-thread', kind: 'thread', path: [] };
-    const view = show(<KindIcon row={{ ...row, thread_display: display('running') }} />);
-    expect(view.container.querySelector('svg')).toBeInTheDocument();
-    expect(view.container.querySelector('[data-work-state="running"]')).toBeInTheDocument();
-    view.rerender(<KindIcon row={row} />);
-    expect(view.container.querySelector('svg')).not.toBeInTheDocument();
-    expect(view.container.querySelector('[data-work-state]')).not.toBeInTheDocument();
-    expect(within(view.container).getByRole('img', { name: i18n.t('threadStates.notReported') })).toBeVisible();
-    view.rerender(<KindIcon row={row} activity={false} />);
-    expect(view.container.querySelector('[data-node-icon="thread"] svg')).toBeInTheDocument();
   });
 
   it.each(['waiting_approval', 'blocked', 'failed', 'running', 'queued', 'held', 'finished', 'idle', 'archived'] as const)('keeps kind, name and the supplied %s activity in a Recent card’s first line', async (state) => {

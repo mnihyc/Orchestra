@@ -87,7 +87,6 @@ export interface CodeViewProps {
   lit?: { version: string; lines: readonly number[] } | null;
   /** A line to go to when it changes. */
   line?: number | null;
-  endLine?: number | undefined;
   /** An explicit repeat request can revisit the same line without replacing the editor or its draft. */
   lineRequest?: number | undefined;
   /** Called when the text begins to differ from what was given, and when it stops. */
@@ -237,7 +236,6 @@ export function CodeView({
   overlay = null,
   lit = null,
   line = null,
-  endLine,
   lineRequest,
   onDirtyChange,
   onSettled,
@@ -444,14 +442,14 @@ export function CodeView({
     if (now.lit?.version === version) editor.dispatch({ effects: markLines.of(now.lit.lines) });
   }, [version]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const goTo = (target: number, through?: number) => {
+  const goTo = (target: number) => {
     const editor = view.current;
     if (editor === null) return;
     const lines = editor.state.doc.lines;
     const number = Math.max(1, Math.min(target, lines));
     const at = editor.state.doc.line(number);
     editor.dispatch({
-      selection: { anchor: at.from, head: through === undefined ? at.from : editor.state.doc.line(Math.max(number, Math.min(through, lines))).to },
+      selection: { anchor: at.from },
       effects: [EditorView.scrollIntoView(at.from, { y: 'center' }), flashLine.of(number)],
     });
     clearTimeout(flash.current);
@@ -459,8 +457,8 @@ export function CodeView({
   };
 
   useEffect(() => {
-    if (line !== null && line >= 1) goTo(line, endLine);
-  }, [line, endLine, version, lineRequest]);
+    if (line !== null && line >= 1) goTo(line);
+  }, [line, version, lineRequest]);
 
   useImperativeHandle(
     ref,

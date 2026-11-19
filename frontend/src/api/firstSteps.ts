@@ -1,5 +1,4 @@
 /** One read of observed setup facts for the currently chosen org. */
-import { suppliedRead } from '@/api/readScheduler';
 import { queryOptions } from '@tanstack/react-query';
 
 import { ApiError, api, ok } from '@/api/client';
@@ -12,7 +11,6 @@ export function firstStepsAccessRefused(error:unknown):boolean {return error ins
 /** Each opening rechecks authority; a cached refusal can never expose old facts. */
 export const firstStepsQuery = (orgId: string | null) => queryOptions({
   queryKey: firstStepsKey(orgId),
-  ...suppliedRead(firstStepsKey(orgId)),
   queryFn: ({ signal }): Promise<FirstSteps> => ok(api.GET('/me/first-steps', {
     params: { query: orgId === null ? {} : { org_id: orgId } },
     signal,

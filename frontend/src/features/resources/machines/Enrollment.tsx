@@ -163,9 +163,9 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
     title={title}
     footer={<><TaskGuideLink guide="connect-a-machine" heading={t('machineInstallation.connectHeading')} /><Button variant="secondary" onClick={onClose}>
       {t('common.close')}
-    </Button>{arrived===undefined && (made===undefined || expired) && <Button action="show" variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
+    </Button>{arrived===undefined && (made===undefined || expired) && <Button variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
     <div className="flex flex-col gap-4 py-2" data-tutorial-target="machine-enrollment">
-      {info.isPending && <SkeletonRows read={info} rows={1}/>}
+      {info.isPending && <SkeletonRows rows={1}/>}
       {info.isError && <ErrorState compact error={info.error} retrying={info.isRefetching} onRetry={()=>void info.refetch()}/>}
       {progress.isError && <ErrorState compact error={progress.error} retrying={progress.isRefetching} onRetry={()=>void progress.refetch()}/>}
       {info.data?.secure===false && <InlineAlert tone="warning" action={<Button size="sm" onClick={()=>void info.refetch()}>{t('machineInstallation.retry')}</Button>}>{t('machineInstallation.configureAddress',{setting:info.data.configure ?? 'public_url'})}</InlineAlert>}

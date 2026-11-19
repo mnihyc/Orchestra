@@ -68,10 +68,10 @@ describe('the groups of one model', () => {
     expect(within(chips).queryByText('frontier')).not.toBeInTheDocument();
   });
 
-  it('uses the shipped eight-group default', () => {
+  it('stop at eight', () => {
     show(<Groups start={['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']} offered={['i']} />);
     expect(screen.getByLabelText('Put it in a group')).toBeDisabled();
-    expect(screen.getByText('8 groups reached')).toBeInTheDocument();
+    expect(screen.getByText('A model is in at most 8 groups.')).toBeInTheDocument();
   });
 
   it('are only read for somebody who may not change them', () => {
@@ -117,11 +117,9 @@ describe('the speed of a thread', () => {
     show(<SpeedChoice state={speed(SOL)} writable chooser={null} rate={SOL.rate ?? null} onChoose={choose} />);
     expect(screen.getByRole('radio', { name: 'Standard' })).toBeChecked();
     expect(screen.getByText(/as this model starts/)).toBeInTheDocument();
-    // Not shown beside the options: the words are their hidden accessible description, which hover or focus shows.
-    screen.queryAllByText('Fast: quicker answers, counted at twice the rate here').forEach((node) => expect(node).not.toBeVisible());
+    expect(screen.queryByText('Fast: quicker answers, counted at twice the rate here')).not.toBeInTheDocument();
     expect(screen.getByText('Takes effect from the next turn.')).toBeInTheDocument();
     const fast = screen.getByRole('radio', { name: 'Fast' });
-    expect(fast).toHaveAccessibleDescription('Fast: quicker answers, counted at twice the rate here');
     await user.hover(fast);
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Fast: quicker answers, counted at twice the rate here');
     await user.click(fast);
@@ -180,8 +178,7 @@ describe('the context of a thread', () => {
     show(<ContextChoice state={context(SOL)} writable chooser={null} onChoose={() => undefined} />);
     const selected = screen.getByRole('radio', { name: '1M · higher rate' });
     expect(selected).toBeChecked();
-    // Not shown beside the options: the words are their hidden accessible description, which hover or focus shows.
-    screen.queryAllByText('Prompts above 272K are counted at a higher rate.').forEach((node) => expect(node).not.toBeVisible());
+    expect(screen.queryByText('Prompts above 272K are counted at a higher rate.')).not.toBeInTheDocument();
     await userEvent.hover(selected);
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Prompts above 272K are counted at a higher rate.');
     expect(selected).toHaveAccessibleDescription('Prompts above 272K are counted at a higher rate.');

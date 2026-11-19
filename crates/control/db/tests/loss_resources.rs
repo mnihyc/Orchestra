@@ -94,7 +94,7 @@ async fn machine(conn: &mut orch_db::Conn, owner: Id, name: &str) -> Id {
 }
 
 #[tokio::test]
-async fn imported_servers_keep_their_source_identity_and_new_discoveries_require_an_explicit_import()
+async fn imported_servers_and_mounts_keep_their_identity_without_a_machine_and_a_matching_new_machine_offers_the_server_again()
  {
     let db = TestDb::fresh().await;
     let mut conn = db.pool.acquire().await.unwrap();
@@ -145,7 +145,7 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
         .pop()
         .unwrap();
     assert!(retained.imported && retained.enabled);
-    assert_eq!(retained.machine_id, Some(old));
+    assert_eq!(retained.machine_id, None);
     assert_eq!(retained.spec, spec);
     assert_eq!(retained.description, "kept description");
     assert!(
@@ -182,10 +182,10 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
         assert!(
             offers
                 .iter()
-                .any(|offering| offering.machine_id == replacement && offering.state == "found")
+                .any(|offering| offering.machine_id == replacement && offering.state == "pending")
         );
         let queued:i64=sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind='mcp_offering' AND plan->>'server'=$1 AND plan->>'machine'=$2").bind(server.to_string()).bind(replacement.to_string()).fetch_one(&mut *conn).await.unwrap();
-        assert_eq!(queued, 0);
+        assert_eq!(queued, 1);
         sqlx::query("UPDATE environments SET facts=facts WHERE id=$1")
             .bind(environment)
             .execute(&mut *conn)
@@ -198,8 +198,8 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-        assert_eq!(queued, 0, "discovery never queues an import");
-        let job: Option<Id> = sqlx::query_scalar(
+        assert_eq!(queued, 1, "repeated reports do not queue repeated imports");
+        let job: Id = sqlx::query_scalar(
             "SELECT job_id FROM mcp_server_offerings WHERE server_id=$1 AND machine_id=$2",
         )
         .bind(server)
@@ -207,7 +207,6 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-        assert_eq!(job, None);
         mcp::offer_failed(
             &mut conn,
             server,
@@ -223,8 +222,8 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
                 .await
                 .unwrap()
                 .iter()
-                .any(|row| row.machine_id == replacement && row.state == "found"),
-            "an old failure cannot replace the current import candidate"
+                .any(|row| row.machine_id == replacement && row.state == "pending"),
+            "an old failure cannot replace the current pending copy"
         );
         mcp::offer(
             &mut conn,
@@ -240,7 +239,7 @@ async fn imported_servers_keep_their_source_identity_and_new_discoveries_require
             &mut conn,
             server,
             replacement,
-            new_id(),
+            job,
             "the old job finished late",
             at,
         )

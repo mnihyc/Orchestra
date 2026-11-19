@@ -7,7 +7,7 @@
  * - the access token, which is kept in memory only and never written anywhere: it is sent as a
  *   bearer, renewed shortly before it ends, and renewed once when the API says it is no longer good,
  *   after which the request that was refused is sent once more;
- * - the header that cookie-only session requests must carry;
+ * - the header that the two requests authenticated by the session cookie alone must carry;
  * - an error of the API as an `ApiError` that carries its code, the members that code adds, and the
  *   request id to show beside it;
  * - a request given up after silence, never for its length (`lib/requests.ts`).
@@ -19,7 +19,6 @@ import type { AuthResult, ErrorCode, MissingAccess, NodeRef, paths, Problem, Sig
 import { NetworkError, sendUntilSilent } from '@/lib/requests';
 import { openingId } from '@/lib/opening';
 import { apiErrorSentence, fieldErrorSentence } from '@/i18n/errors';
-import { createServerClock, serverClock, type ServerClock } from '@/lib/serverClock';
 
 /** Where every request of the API lives. */
 export const BASE_PATH = '/api/v1';
@@ -28,8 +27,8 @@ const CSRF_HEADER = 'X-Orch-Csrf';
 const REQUEST_ID_HEADER = 'X-Request-Id';
 const IDEMPOTENCY_HEADER = 'Idempotency-Key';
 
-/** Cookie-only discovery, renewal and sign-out keep the same CSRF transport. */
-const COOKIE_REQUESTS = [`${BASE_PATH}/auth/session`, `${BASE_PATH}/auth/refresh`, `${BASE_PATH}/auth/logout`];
+/** The two requests that the session cookie alone authenticates. */
+const COOKIE_REQUESTS = [`${BASE_PATH}/auth/refresh`, `${BASE_PATH}/auth/logout`];
 
 /**
  * How long before its end an access token is renewed: twice the silence a request is allowed, so that
@@ -171,9 +170,6 @@ interface Answer {
 /** A successful mutation acknowledged without its existing-content projection. */
 export type MutationReceipt = Readonly<Record<string, unknown>> & { readonly projection: 'receipt' };
 
-const isMutationReceipt = (value: unknown): value is MutationReceipt =>
-  isRecord(value) && value.projection === 'receipt';
-
 // A credential-creation receipt can contain its one-time secret. Do not put that payload on an Error's
 // enumerable properties, stack or message, where generic error reporting could copy it to a log.
 const receiptValues = new WeakMap<ReceiptAcknowledged, MutationReceipt>();
@@ -217,8 +213,8 @@ export async function ok<A extends Answer>(answer: Promise<A>): Promise<FullAnsw
   const reply = await answer;
   const { response } = reply;
   const data = acceptedBody(reply);
-  if (isMutationReceipt(data)) {
-    throw new ReceiptAcknowledged(data, response.status, response.headers.get(REQUEST_ID_HEADER) ?? '');
+  if (isRecord(data) && data.projection === 'receipt') {
+    throw new ReceiptAcknowledged(data as MutationReceipt, response.status, response.headers.get(REQUEST_ID_HEADER) ?? '');
   }
   return data as FullAnswer<A>;
 }
@@ -250,8 +246,6 @@ export interface SessionState {
   userId: string | null;
   /** When the access token ends, on this device's clock. */
   accessEndsAt: number | null;
-  /** A refused renewal ended a session this device had previously held. No credential is stored. */
-  sessionEnded?: boolean;
 }
 
 export type SessionEvent =
@@ -296,8 +290,6 @@ export interface ApiClientOptions {
   fetch?: (request: Request) => Promise<Response>;
   /** How long nothing may move before a request is given up. */
   silenceLimitMs?: number;
-  /** The application's HTTP and realtime transports share this measured clock. */
-  clock?: ServerClock;
 }
 
 export interface ApiClient {
@@ -337,32 +329,24 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const send = options.fetch ?? ((request: Request) => fetch(request));
 
   let token: string | null = null;
-  const clock = options.clock ?? createServerClock();
+  /** How far the server's clock is ahead of this device's, from the date of its last answer. */
+  let serverAhead = 0;
   let renewTimer: ReturnType<typeof setTimeout> | undefined;
   let renewing: Promise<boolean> | null = null;
   let restoring: Promise<boolean> | null = null;
   const listeners = new Set<(event: SessionEvent) => void>();
   const actListeners = new Set<(act: Act) => void | Promise<void>>();
-  const sessionMarker = `orch.session.${basePath}.present`;
-  let hadSession = false;
-  try { hadSession = localStorage.getItem(sessionMarker) === '1'; } catch { /* Device storage is optional. */ }
-  function rememberSession(present: boolean): void {
-    hadSession = present;
-    try { localStorage.setItem(sessionMarker, present ? '1' : '0'); } catch { /* Keep the fact in this page only. */ }
-  }
-  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false }));
+  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0 }));
 
   const emit = (event: SessionEvent) => {
     for (const listener of listeners) listener(event);
   };
 
-  function forget(reason: 'ended' | 'refused' | 'deliberate'): void {
+  function forget(): void {
     clearTimeout(renewTimer);
     const wasSignedIn = session.getState().status === 'signed_in';
-    const sessionEnded = reason === 'ended' && (wasSignedIn || hadSession);
-    if (reason === 'deliberate') rememberSession(false);
     token = null;
-    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded });
+    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1 });
     if (wasSignedIn) emit({ type: 'signed_out' });
   }
 
@@ -370,12 +354,11 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const before = session.getState();
     // The life of the token is counted on the server's clock, so that a device whose own clock is
     // wrong still renews in time.
-    const life = Date.parse(result.access_expires_at) - (Date.now() + (clock.offset() ?? 0));
+    const life = Date.parse(result.access_expires_at) - (Date.now() + serverAhead);
     const accessEndsAt = Date.now() + life;
     token = result.access_token;
-    rememberSession(true);
     const sameReader = before.status === 'signed_in' && before.userId === result.user.id;
-    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false });
+    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1) });
 
     clearTimeout(renewTimer);
     renewTimer = setTimeout(
@@ -402,9 +385,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   }
 
   async function dispatch(request: Request): Promise<Response> {
-    const sentAt = Date.now();
     const response = await sendUntilSilent(request, send, options.silenceLimitMs);
-    clock.observe(response.headers.get('Date') ?? '', sentAt, Date.now());
+    const date = Date.parse(response.headers.get('Date') ?? '');
+    if (!Number.isNaN(date)) serverAhead = date - Date.now();
     return response;
   }
 
@@ -475,7 +458,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const code = await codeOf(response);
     if (code === 'auth.suspended') {
       // The person was suspended: nothing of theirs answers any more, and the page says so by signing out.
-      forget('refused');
+      forget();
       return response;
     }
     if (code !== 'auth.invalid_token') return response;
@@ -489,14 +472,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   const api = createClient<paths>({ baseUrl, fetch: transport, credentials: 'same-origin' });
 
-  async function renewOnce(discover = false): Promise<boolean> {
-    const reader = session.getState().readerVersion;
-    const answer = discover ? await api.POST('/auth/session') : await api.POST('/auth/refresh');
-    if (reader !== session.getState().readerVersion) return session.getState().status === 'signed_in';
-    if (answer.data === null) {
-      forget('ended');
-      return false;
-    }
+  async function renewOnce(): Promise<boolean> {
+    const answer = await api.POST('/auth/refresh');
     if (answer.data !== undefined) {
       adopt(answer.data);
       return true;
@@ -504,14 +481,14 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const error = toError(answer.error, answer.response);
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
       // No session, an ended one, or a suspended person: nobody is signed in on this page.
-      forget(error.status === 401 ? 'ended' : 'refused');
+      forget();
       return false;
     }
     throw error;
   }
 
-  function renew(discover = false): Promise<boolean> {
-    renewing ??= renewOnce(discover).finally(() => {
+  function renew(): Promise<boolean> {
+    renewing ??= renewOnce().finally(() => {
       renewing = null;
     });
     return renewing;
@@ -519,7 +496,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   function restore(): Promise<boolean> {
     if (session.getState().status !== 'unknown') return Promise.resolve(session.getState().status === 'signed_in');
-    restoring ??= renew(true).finally(() => {
+    restoring ??= renew().finally(() => {
       restoring = null;
     });
     return restoring;
@@ -533,7 +510,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       // session as it is: saying "signed out" while the cookie still works would be untrue.
       if (!(error instanceof ApiError) || error.status !== 401) throw error;
     }
-    forget('deliberate');
+    forget();
   }
 
   return {
@@ -556,7 +533,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 }
 
 /** The client of the application. */
-export const client = createApiClient({ clock: serverClock });
+export const client = createApiClient();
 
 /** The typed requests of the API, on the application's client. */
 export const api = client.api;

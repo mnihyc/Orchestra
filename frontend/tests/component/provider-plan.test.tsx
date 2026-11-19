@@ -1,5 +1,5 @@
 /** Matched provider cards preserve zero, family, missing data, overage and privacy. */
-import { act, screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useQuery } from '@tanstack/react-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -23,18 +23,6 @@ function RefreshPanel({ provider }: { provider: ReturnType<typeof planProvider> 
 }
 
 describe('one provider usage card', () => {
-  it('keeps named fact groups with complete term and definition relationships', () => {
-    show(<ProviderUsageCard provider={planProvider()} />);
-    for (const name of ['Plan', 'Usage windows']) {
-      const group = screen.getByRole('group', { name });
-      const term = within(group).getByRole('term');
-      const definition = within(group).getByRole('definition');
-      const list = term.closest('dl');
-      expect(list).not.toBeNull();
-      expect(group).toContainElement(list);
-      expect(list).toContainElement(definition);
-    }
-  });
   it('keeps a real zero and native family labels without a warning mark', () => {
     show(<ProviderUsageCard provider={planProvider()} />);
     expect(screen.getByRole('meter', { name: '5-hour window' })).toHaveAttribute('aria-valuenow', '0');

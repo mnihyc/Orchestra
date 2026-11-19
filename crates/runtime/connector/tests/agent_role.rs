@@ -29,57 +29,6 @@ async fn rig_with_session() -> (Rig, Id, Id) {
     (rig, thread, segment)
 }
 
-#[tokio::test]
-async fn retained_command_output_arrives_before_its_item_and_survives_a_cut_upload() {
-    let (rig, thread, segment) = rig_with_session().await;
-    assert_eq!(rig.roles, vec![Role::Agent]);
-    let output = format!("{}tail", "b".repeat(40_000));
-    let hash = orch_types::Hash::of(output.as_bytes());
-    rig.blobs.cut_put(0);
-    rig.start_turn(thread, &format!("#!fake\nrun cat => 0 {output}\nsay Done"))
-        .await;
-    rig.wait_for(thread, segment, "item.completed", 1).await;
-    let applied = rig.applied(thread, segment);
-    let completed = applied
-        .iter()
-        .find(|event| {
-            event.kind == "item.completed" && event.body["payload"]["tool"]["kind"] == "command"
-        })
-        .expect("the command completed");
-    assert_eq!(
-        completed.body["payload"]["tool"]["output"]["blob"],
-        hash.to_string()
-    );
-    assert_eq!(
-        rig.blobs.content(&hash).as_deref(),
-        Some(output.as_bytes()),
-        "a published output reference already resolves to all of its original bytes"
-    );
-    let cached = rig
-        .data
-        .path()
-        .join("harness")
-        .join(rig.provider.to_string())
-        .join(rig.agent.to_string())
-        .join("outputs")
-        .join(hash.to_string());
-    assert_eq!(
-        std::fs::read(cached).unwrap(),
-        output.as_bytes(),
-        "retained outputs are not removed like temporary exports"
-    );
-    rig.wait_for(thread, segment, "turn.completed", 1).await;
-    assert_eq!(
-        rig.applied(thread, segment)
-            .iter()
-            .filter(|event| event.kind == "item.completed"
-                && event.body["payload"]["tool"]["kind"] == "command")
-            .count(),
-        1
-    );
-    rig.connector.unwrap().stop().await;
-}
-
 fn request_ref(rig: &Rig, thread: Id, segment: Id) -> String {
     rig.applied(thread, segment)
         .into_iter()

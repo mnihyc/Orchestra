@@ -410,32 +410,6 @@ impl PreparedVisibility {
         self.visible.retain(|object| allowed.contains(object));
     }
 
-    fn names(&self, object: Option<ObjectRef>) -> bool {
-        object.map_or_else(
-            || self.system_admin,
-            |object| self.visible.contains(&(object.kind, object.id)),
-        )
-    }
-
-    /// Actual native edge memberships whose names this prepared projection emits.
-    /// A consumer can retain source associations without inspecting projected JSON.
-    pub fn named_edges<'a>(
-        &'a self,
-        facts: &'a [RawFacts],
-    ) -> impl Iterator<Item = (&'a FactSubject, &'a Dependent)> + 'a {
-        facts.iter().flat_map(move |raw| {
-            raw.dependents
-                .iter()
-                .filter(move |edge| self.names(edge.visibility))
-                .map(move |edge| (&raw.subject, edge))
-        })
-    }
-
-    /// A consuming operation can hide system-only names, never add administrative standing.
-    pub fn restrict_system_names(&mut self, allowed: bool) {
-        self.system_admin &= allowed;
-    }
-
     /// The original grouping/hidden-count projection, using only the prepared native visibility.
     #[must_use]
     pub fn project(&self, facts: &[RawFacts]) -> Vec<ResourceFacts> {
@@ -469,7 +443,10 @@ impl PreparedVisibility {
                             .map(|(left, right)| left.max(right))
                     };
                     group.count += 1;
-                    let allowed = self.names(edge.visibility);
+                    let allowed = edge.visibility.map_or_else(
+                        || self.system_admin,
+                        |object| self.visible.contains(&(object.kind, object.id)),
+                    );
                     if allowed {
                         group.visible.push(VisibleDependent {
                             object: edge.object,

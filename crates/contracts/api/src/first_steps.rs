@@ -1,6 +1,6 @@
 //! Observed first steps in a readable org and the caller's portable setup choices.
 
-use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
 use orch_access_contract::key_scope::KeyAction::{Read, Write};
 use orch_access_contract::key_scope::KeyIdentityKind as I;
 use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
@@ -172,15 +172,11 @@ pub struct FirstSteps {
 crate::endpoints! {
     /// Reads actual setup facts of a currently readable org.
     MeFirstStepsGet: GET "/me/first-steps", Rule("user; org View before setup facts"), query FirstStepsGetQuery, none, json FirstSteps, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Account)], Target::CurrentAccount),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("first_org")),
-            Facet::response_content(&[Object(K::Provider)], Target::ResolvedCollection("first_providers")),
-            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("first_answer")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("first_members")),
-            Facet::response_content(&[Object(K::Document)], Target::ResolvedCollection("first_document")),
-            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("first_document_names")),
-        ]);
+        operation Op::single(
+            Read,
+            &[Identity(I::Account), Object(K::Org)],
+            Target::Resolved("current_account_and_organization"),
+        );
     /// Saves this person's choice and dismissal, preserving unrelated interface state.
     MeFirstStepsSet: PUT "/me/first-steps", User, none, json FirstStepsChoice, json PersonalState, 200,
         operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);

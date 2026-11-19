@@ -255,7 +255,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
     { value: 'everything', ...choiceOption(t, 'tokenScope.everything') },
   ];
 
-  if ((!operationScoped && catalogue.isPending) || me.isPending) return <SkeletonRows reads={[catalogue, me]} rows={4} />;
+  if ((!operationScoped && catalogue.isPending) || me.isPending) return <SkeletonRows rows={4} />;
   if (!operationScoped && catalogue.isError) return <ErrorState compact error={catalogue.error} retrying={catalogue.isRefetching} onRetry={() => void catalogue.refetch()} />;
   return (
     <form

@@ -271,9 +271,6 @@ fn neutral_code(code: &str) -> &'static str {
         "model_refused" => turn_error::MODEL_REFUSED,
         "context_overflow" => turn_error::CONTEXT_OVERFLOW,
         "provider_busy" => turn_error::PROVIDER_BUSY,
-        "rate_limited" => turn_error::RATE_LIMITED,
-        "overloaded" => turn_error::OVERLOADED,
-        "stream_interrupted" => turn_error::STREAM_INTERRUPTED,
         "provider_unreachable" => turn_error::PROVIDER_UNREACHABLE,
         _ => turn_error::HARNESS_ERROR,
     }
@@ -309,12 +306,7 @@ pub fn facts_of(error: &Json) -> Facts<'_> {
             .get("additionalDetails")
             .and_then(Json::as_str)
             .filter(|details| !details.is_empty()),
-        body_code: body_code(message).or_else(|| {
-            error
-                .get("additionalDetails")
-                .and_then(Json::as_str)
-                .and_then(body_code)
-        }),
+        body_code: body_code(message),
     }
 }
 
@@ -604,31 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn a_credit_benefit_refusal_keeps_the_account_cause_and_the_owners_fix() {
-        let message = "This organization cannot be used for Codex usage because it is enrolled in the monthly API Credits benefit with ChatGPT subscriptions. To enable Codex usage, an Organization Owner must cancel the benefit on https://platform.openai.com/settings/organization/billing/overview.";
-        let body = json!({"error":{"code":"codex_byok_restricted_by_api_credit_promo","type":"invalid_request_error","message":message}}).to_string();
-        let info = json!({"httpConnectionFailed":{"httpStatusCode":400}});
-        for payload in [
-            error(info.clone(), &body),
-            json!({"message":"The request was refused","codexErrorInfo":info,"additionalDetails":body}),
-        ] {
-            let failure = classify(
-                &payload,
-                &Notes::default(),
-                None,
-                utc("2026-11-07T10:00:00Z"),
-                &Utc,
-            );
-            assert_eq!(failure.code, "model_unavailable");
-            assert_eq!(failure.reason.as_deref(), Some("credit_program"));
-            assert_eq!(row_name(&payload), "model_access");
-            assert!(!failure.retryable);
-            assert!(failure.resets_at.is_none() && failure.window.is_none());
-            assert!(failure.said.as_deref().unwrap().contains(message));
-        }
-    }
-
-    #[test]
     fn a_limit_is_read_from_the_window_that_is_full_and_not_from_the_sentence() {
         let windows = Windows::read(&json!({
             "limitId": "codex", "limitName": null,
@@ -728,29 +695,29 @@ mod tests {
         };
         assert_eq!(
             code(json!("serverOverloaded"), "Selected model is at capacity."),
-            "overloaded"
+            "provider_busy"
         );
         assert_eq!(
             code(json!("internalServerError"), "high demand"),
-            "overloaded"
+            "provider_busy"
         );
         assert_eq!(
             code(json!("rateLimitExceeded"), "rate limit exceeded"),
-            "rate_limited"
+            "provider_busy"
         );
         assert_eq!(
             code(
                 json!({ "responseTooManyFailedAttempts": { "httpStatusCode": 429 } }),
                 "exceeded retry limit, last status: 429 Too Many Requests"
             ),
-            "rate_limited"
+            "provider_busy"
         );
         assert_eq!(
             code(
                 json!({ "httpConnectionFailed": { "httpStatusCode": 502 } }),
                 "unexpected status 502 Bad Gateway"
             ),
-            "overloaded"
+            "provider_busy"
         );
         assert_eq!(
             code(
@@ -785,7 +752,7 @@ mod tests {
                 json!("other"),
                 "stream disconnected before completion: stream closed before response.completed"
             ),
-            "stream_interrupted"
+            "provider_unreachable"
         );
     }
 
@@ -860,7 +827,7 @@ mod tests {
         let got = classify(&failure, &notes, None, now, &Utc);
         assert_eq!(
             (got.code.as_str(), got.incomplete, got.retryable),
-            ("stream_interrupted", true, true)
+            ("provider_unreachable", true, true)
         );
         assert!(
             got.said
@@ -886,7 +853,7 @@ mod stopped_retries {
     #[test]
     fn the_native_retry_deadline_retains_the_cause_for_the_recovery_rule() {
         for (message, kind, reason) in [
-            ("Model at capacity, please retry", "overloaded", None),
+            ("Model at capacity, please retry", "provider_busy", None),
             (
                 "flagged for possible cybersecurity risk",
                 "model_refused",
@@ -897,7 +864,7 @@ mod stopped_retries {
                 "model_unavailable",
                 Some("access"),
             ),
-            ("no native cause given", "stream_interrupted", None),
+            ("no native cause given", "provider_unreachable", None),
         ] {
             let failure = gave_up_trying(
                 &Notes {

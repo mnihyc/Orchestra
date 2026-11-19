@@ -14,7 +14,6 @@ import { useTranslation } from 'react-i18next';
 
 import { giveOrgInvitation, takeBackOrgInvitation, type UserFilter, usersQuery } from '@/api/admin';
 import { useSystemSettings } from '@/features/admin/SettingRows';
-import { PersonCredentials } from '@/features/admin/Credentials';
 import { CreateUserDialog, ResetLinkDialog, type Standing, StandingDialog } from '@/features/admin/UserDialogs';
 import { useSearchBox } from '@/features/admin/useSearchBox';
 import type { SectionProps } from '@/features/admin/sections';
@@ -113,7 +112,6 @@ export function Users({ search, onSearch }: SectionProps) {
   const filter: UserFilter = { q: search.q ?? '', status: status === 'all' ? '' : status, admins: search.admins === true };
   const list = useInfiniteQuery(usersQuery(filter));
   const people = list.data?.pages.flatMap((page) => page.items) ?? [];
-  const [credentials, setCredentials] = useState<{ user: AdminUser; kind: 'sessions' | 'tokens' } | null>(null);
   const [making, setMaking] = useState(false);
   const [inviting, setInviting] = useState(false);
   const [linking, setLinking] = useState<AdminUser | null>(null);
@@ -185,8 +183,6 @@ export function Users({ search, onSearch }: SectionProps) {
           align="end"
           entries={[
             ...traced(user),
-            { id: 'sessions', label: t('adminCredentials.sessions'), onSelect: () => setCredentials({ user, kind: 'sessions' }) },
-            { id: 'tokens', label: t('admin.sections.tokens.title'), onSelect: () => setCredentials({ user, kind: 'tokens' }) },
             { id: 'link', label: t('admin.users.link.entry'), icon: <KeyRound aria-hidden />, onSelect: () => setLinking(user) },
             {
               id: 'admin',
@@ -235,7 +231,7 @@ export function Users({ search, onSearch }: SectionProps) {
       </FilterBar>
 
       {list.isPending ? (
-        <SkeletonRows read={list} rows={5} />
+        <SkeletonRows rows={5} />
       ) : list.isError && people.length === 0 ? (
         <ErrorState error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : people.length === 0 ? (
@@ -247,7 +243,6 @@ export function Users({ search, onSearch }: SectionProps) {
         </div>
       )}
 
-      {credentials !== null && <PersonCredentials key={`${credentials.user.id}:${credentials.kind}`} user={credentials.user} kind={credentials.kind} onClose={() => setCredentials(null)} />}
       {inviting && <InviteDialog target={{ kind: 'system' }} open onClose={() => setInviting(false)} />}
       {making && <CreateUserDialog open onClose={() => setMaking(false)} />}
       {linking !== null && <ResetLinkDialog user={linking} onClose={() => setLinking(null)} />}

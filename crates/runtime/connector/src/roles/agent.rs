@@ -600,7 +600,6 @@ impl AgentRole {
             process.keep_for_turn(body.turn_id, call.context.id);
         }
         let turn = AdapterTurn {
-            native_model: body.native_model,
             native_wake: body.native_wake,
             thread_id: body.thread_id,
             turn_id: body.turn_id,
@@ -652,7 +651,6 @@ impl AgentRole {
                 blob: image.blob,
                 media_type: image.media_type.clone(),
                 name: image.name.clone(),
-                workspace_path: image.workspace_path.clone(),
                 path: Some(path.display().to_string()),
             });
         }
@@ -813,31 +811,11 @@ impl RoleHandler for AgentRole {
                 let process = self.hosting.process(body.provider_id, body.agent_id)?;
                 let reference = body.native_session_ref.clone();
                 let write = body.write;
-                let (record, output_directory) = process
+                let record = process
                     .call(move |adapter| {
-                        Box::pin(async move {
-                            let record = adapter.read_session(&reference, write).await?;
-                            Ok((record, adapter.output_directory()))
-                        })
+                        Box::pin(async move { adapter.read_session(&reference, write).await })
                     })
                     .await?;
-                let _unpublished_record = record
-                    .file
-                    .as_ref()
-                    .map(|file| Removed(PathBuf::from(&file.path)));
-                if let Some(file) = &record.file {
-                    let keep = crate::harnesses::output_blobs::keep_record(
-                        &self.hosting.services().content,
-                        output_directory.as_deref(),
-                        std::path::Path::new(&file.path),
-                    );
-                    Box::pin(crate::content::stoppable(
-                        &call.context.cancel,
-                        u64::from(CommandKind::AgentReadSession.deadline_secs()),
-                        keep,
-                    ))
-                    .await?;
-                }
                 // The record goes up as content of this command, and its file does not stay behind.
                 let uploaded = match &record.file {
                     Some(file) => {

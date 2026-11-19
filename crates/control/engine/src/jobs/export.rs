@@ -111,7 +111,6 @@ enum Piece {
 
 /// A zip being written by a thread of its own, from pieces that wait in a channel of a few places.
 struct Archive {
-    guard: Option<ArchiveGuard>,
     sender: Option<mpsc::Sender<Piece>>,
     worker: Option<std::thread::JoinHandle<std::io::Result<u64>>>,
     /// How many entries have been given.
@@ -126,26 +125,6 @@ struct Archive {
     open: Option<(String, Sha256, i64)>,
     /// The people the records written name, where the zip is a package; none where it is not.
     people: Option<BTreeSet<Id>>,
-}
-
-#[derive(Clone)]
-struct ArchiveGuard {
-    engine: Engine,
-    request: crate::exports::operation::Request,
-    current: Vec<crate::exports::operation::Subject>,
-    seen: BTreeSet<crate::exports::operation::Subject>,
-}
-fn source_failed(error: crate::operation_scope::continuing::Error) -> Failure {
-    match error {
-        crate::operation_scope::continuing::Error::Refused
-        | crate::operation_scope::continuing::Error::Binding(
-            crate::operation_scope::BindingError::Refused,
-        ) => Failure::new(
-            "authz.denied",
-            "The original access no longer permits this export.",
-        ),
-        other => Failure::new(INTERNAL, other.to_string()),
-    }
 }
 
 fn broken(error: impl std::fmt::Display) -> std::io::Error {
@@ -181,7 +160,6 @@ impl Archive {
             Ok(size)
         });
         Ok(Self {
-            guard: None,
             sender: Some(sender),
             worker: Some(worker),
             entries: 0,
@@ -209,67 +187,14 @@ impl Archive {
     }
 
     async fn send(&mut self, piece: Piece) -> Result<(), Failure> {
-        let Some(sender) = self.sender.clone() else {
+        let Some(sender) = &self.sender else {
             return Err(scratch_failed(&"the archive is closed"));
         };
-        if let Some(guard) = &self.guard {
-            let engine = guard.engine.clone();
-            let request = guard.request.clone();
-            let subjects = guard.current.clone();
-            let permit = sender
-                .reserve_owned()
-                .await
-                .map_err(|error| scratch_failed(&error))?;
-            request
-                .effect(&engine, &subjects, move || drop(permit.send(piece)))
-                .await
-                .map_err(source_failed)?;
-        } else if sender.send(piece).await.is_err() {
+        if sender.send(piece).await.is_err() {
+            // The thread stopped: it says why when it is joined.
             return Err(self.stopped().await);
         }
         Ok(())
-    }
-    fn source(&mut self, subject: crate::exports::operation::Subject) {
-        if let Some(guard) = &mut self.guard {
-            guard.current = vec![subject];
-            guard.seen.insert(subject);
-        }
-    }
-    fn form_sources(&mut self, subjects: Vec<crate::exports::operation::Subject>) {
-        if let Some(guard) = &mut self.guard {
-            for subject in &subjects {
-                if !matches!(subject, crate::exports::operation::Subject::Form(..)) {
-                    guard.seen.insert(*subject);
-                }
-            }
-            guard.current = subjects;
-        }
-    }
-    fn observe(&mut self, subject: crate::exports::operation::Subject) {
-        if let Some(guard) = &mut self.guard {
-            guard.seen.insert(subject);
-        }
-    }
-    fn all_sources(&mut self) -> Vec<crate::exports::operation::Subject> {
-        match &mut self.guard {
-            Some(guard) => {
-                guard.current = guard.seen.iter().copied().collect();
-                guard.current.clone()
-            }
-            None => Vec::new(),
-        }
-    }
-    fn metadata_sources(&mut self, selected: &Selected) {
-        if let Some(guard) = &mut self.guard {
-            guard.seen.extend(
-                selected
-                    .scope
-                    .iter()
-                    .filter(|node| selected.viewable.contains_key(&node.id))
-                    .map(|node| crate::exports::operation::Subject::Node(node.id)),
-            );
-            guard.current = guard.seen.iter().copied().collect();
-        }
     }
 
     async fn stopped(&mut self) -> Failure {
@@ -285,14 +210,6 @@ impl Archive {
 
     /// Adds a file given whole.
     async fn add(&mut self, path: &str, bytes: Vec<u8>) -> Result<(), Failure> {
-        // A small file is one bounded native message under the same source check.
-        // Large files still recheck after each piece's actual capacity wait.
-        if self.guard.is_some() && bytes.len() > PIECE_BYTES {
-            self.start(path).await?;
-            self.chunk(bytes).await?;
-            return self.end().await;
-        }
-
         self.names.insert(path.to_owned());
         self.entries += 1;
         self.digests.insert(
@@ -343,15 +260,15 @@ impl Archive {
         self.send(Piece::End).await
     }
 
-    /// Encode one record into its current source page. Each full piece is
-    /// still admitted after its own channel capacity wait.
     async fn record<T: serde::Serialize>(
         &mut self,
         record: &T,
         comma: &mut bool,
-        page: &mut Vec<u8>,
     ) -> Result<(), Stop> {
-        let mut bytes = if self.people.is_some() {
+        if *comma {
+            self.chunk(Bytes::from_static(b",")).await?;
+        }
+        let bytes = if self.people.is_some() {
             let value = serde_json::to_value(record)
                 .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
             if let Some(people) = self.people.as_mut() {
@@ -361,17 +278,7 @@ impl Archive {
         } else {
             serde_json::to_vec(record).map_err(|error| Failure::new(INTERNAL, error.to_string()))?
         };
-        if *comma {
-            bytes.insert(0, b',');
-        }
-        if bytes.len() > PIECE_BYTES - page.len() {
-            self.chunk(std::mem::take(page)).await?;
-        }
-        if bytes.len() >= PIECE_BYTES {
-            self.chunk(bytes).await?;
-        } else {
-            page.extend(bytes);
-        }
+        self.chunk(bytes).await?;
         *comma = true;
         Ok(())
     }
@@ -411,7 +318,8 @@ fn scratch_failed(error: &dyn std::fmt::Display) -> Failure {
 }
 
 /// The hash of a file and its size, read a piece at a time.
-fn hash_opened(mut file: std::fs::File) -> std::io::Result<(Hash, i64)> {
+fn hash_file(path: &Path) -> std::io::Result<(Hash, i64)> {
+    let mut file = std::fs::File::open(path)?;
     let mut hasher = Hash::hasher();
     let mut buffer = vec![0_u8; PIECE_BYTES];
     let mut size: i64 = 0;
@@ -435,7 +343,6 @@ pub struct Exporting {
     user: Id,
     node: Id,
     credential: Option<(Vec<String>, Option<Id>)>,
-    request: Option<crate::exports::operation::Request>,
     /// Whether the people of a package are named with their address.
     emails: bool,
 }
@@ -470,7 +377,6 @@ impl Exporting {
             user: text_id(&row.plan, "user").ok_or_else(|| missing("person"))?,
             node: text_id(&row.plan, "node").ok_or_else(|| missing("place"))?,
             credential,
-            request: crate::exports::operation::Request::from_job(row)?,
             emails: row
                 .plan
                 .get("emails")
@@ -490,12 +396,6 @@ impl Exporting {
     }
 
     async fn principal(&self, conn: &mut orch_db::Conn) -> Result<Principal, Stop> {
-        if let Some(request) = &self.request {
-            return request
-                .principal(&self.engine)
-                .await
-                .map_err(|error| source_failed(error).into());
-        }
         Principal::load(
             conn,
             self.caller()?,
@@ -516,23 +416,6 @@ impl Exporting {
         let wanted =
             Wanted::read(&request).map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
         Ok((wanted, request))
-    }
-
-    async fn selected(
-        &self,
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        wanted: &Wanted,
-    ) -> Result<Selected, Stop> {
-        let selected = match &self.request {
-            Some(request) => request.selected(&self.engine, conn, principal).await,
-            None => {
-                self.engine
-                    .select_export(conn, principal, self.node, wanted)
-                    .await
-            }
-        };
-        selected.map_err(|error| Failure::new(INTERNAL, error.to_string()).into())
     }
 
     fn scratch_path(&self, job: &Job) -> PathBuf {
@@ -604,7 +487,11 @@ impl Exporting {
         let mut conn = self.engine.inner.db.acquire().await?;
         let (wanted, _) = self.asked(&mut conn).await?;
         let principal = self.principal(&mut conn).await?;
-        let selected = self.selected(&mut conn, &principal, &wanted).await?;
+        let selected = self
+            .engine
+            .select_export(&mut conn, &principal, self.node, &wanted)
+            .await
+            .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
         let limits = self
             .engine
             .export_limits(&mut conn, self.node)
@@ -638,13 +525,6 @@ async fn copy_blob(
         return Ok(false);
     };
     let most = engine.inner.config.export_file_max_bytes;
-    if let Some(guard) = &archive.guard {
-        guard
-            .request
-            .effect(&guard.engine, &guard.current, || ())
-            .await
-            .map_err(source_failed)?;
-    }
     let read = match store.get(blob, None).await {
         Ok(read) => read,
         Err(BlobError::NotFound(_)) => return Ok(false),
@@ -738,23 +618,6 @@ async fn stream_chat(
     range: (Option<i64>, Option<i64>),
     files: &str,
 ) -> Result<i64, Stop> {
-    stream_chat_with_names(conn, archive, path, chat, format, range, files, None).await
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the existing native chat archive operands and trusted name bound"
-)]
-async fn stream_chat_with_names(
-    conn: &mut orch_db::Conn,
-    archive: &mut Archive,
-    path: &str,
-    chat: Id,
-    format: ExportFormat,
-    range: (Option<i64>, Option<i64>),
-    files: &str,
-    allowed: Option<&std::collections::HashSet<Id>>,
-) -> Result<i64, Stop> {
     let last = share_rows::chat_total(conn, chat).await?;
     let span = written::export_range(range, last);
     archive.start(path).await?;
@@ -763,14 +626,13 @@ async fn stream_chat_with_names(
             let title = written::chat_title(conn, chat).await?;
             if let Some(span) = span {
                 for (at, window) in text_windows(span).enumerate() {
-                    let read = written::read_chat_window_with_names(
+                    let read = written::read_chat_window(
                         conn,
                         chat,
                         &title,
                         window,
                         files,
                         (at == 0).then_some(span),
-                        allowed,
                     )
                     .await?;
                     archive.chunk(read.text.into_bytes()).await?;
@@ -794,18 +656,11 @@ async fn stream_chat_with_names(
             let mut comma = false;
             if let Some(span) = span {
                 for (low, high) in text_windows(span) {
-                    let records = written::chat_records_with_names(
-                        conn,
-                        chat,
-                        (Some(low), Some(high)),
-                        allowed,
-                    )
-                    .await?;
-                    let mut page = Vec::new();
+                    let records =
+                        written::chat_records(conn, chat, (Some(low), Some(high))).await?;
                     for record in &records {
-                        archive.record(record, &mut comma, &mut page).await?;
+                        archive.record(record, &mut comma).await?;
                     }
-                    archive.chunk(page).await?;
                 }
             }
             archive.chunk(Bytes::from_static(b"]")).await?;
@@ -852,10 +707,19 @@ struct ConversationScope<'a> {
 impl Exporting {
     async fn write(&self, job: &Job) -> Result<Done, Stop> {
         let scratch = self.scratch_path(job);
+        if let Some(dir) = scratch.parent() {
+            std::fs::create_dir_all(dir).map_err(|error| scratch_failed(&error))?;
+        }
+        // A runner that took the job over starts the zip again.
+        let _ = std::fs::remove_file(&scratch);
         let mut conn = self.engine.inner.db.acquire().await?;
         let (wanted, request) = self.asked(&mut conn).await?;
         let principal = self.principal(&mut conn).await?;
-        let selected = self.selected(&mut conn, &principal, &wanted).await?;
+        let selected = self
+            .engine
+            .select_export(&mut conn, &principal, self.node, &wanted)
+            .await
+            .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
         let limits = self
             .engine
             .export_limits(&mut conn, self.node)
@@ -863,30 +727,7 @@ impl Exporting {
             .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
         drop(conn);
         let layout = selected.layout(&wanted);
-        let create = || -> Result<Archive, Failure> {
-            if let Some(dir) = scratch.parent() {
-                std::fs::create_dir_all(dir).map_err(|error| scratch_failed(&error))?;
-            }
-            // A runner that took the job over starts the zip again.
-            let _ = std::fs::remove_file(&scratch);
-            Archive::begin(&scratch)
-        };
-        let mut archive = match &self.request {
-            Some(request) => request
-                .setup(&self.engine, create)
-                .await
-                .map_err(source_failed)??,
-            None => create()?,
-        };
-        if let Some(request) = &self.request {
-            archive.guard = Some(ArchiveGuard {
-                engine: self.engine.clone(),
-                request: request.clone(),
-                current: Vec::new(),
-                seen: selected.count_sources.iter().copied().collect(),
-            });
-        }
-
+        let mut archive = Archive::begin(&scratch)?;
         if wanted.package {
             archive.note_people();
         }
@@ -954,12 +795,6 @@ impl Exporting {
                     ),
                 };
                 if reads && exports {
-                    archive.source(match kind {
-                        Kind::Conversation => crate::exports::operation::Subject::Thread(thing.id),
-                        Kind::Chat => crate::exports::operation::Subject::Chat(thing.id),
-                        Kind::Document => crate::exports::operation::Subject::Document(thing.id),
-                    });
-
                     self.write_thing(
                         &mut conn,
                         &principal,
@@ -972,15 +807,6 @@ impl Exporting {
                     )
                     .await?;
                 } else if reads {
-                    archive.observe(match kind {
-                        Kind::Conversation => {
-                            crate::exports::operation::Subject::ThreadCount(thing.id)
-                        }
-                        Kind::Chat => crate::exports::operation::Subject::ChatCount(thing.id),
-                        Kind::Document => {
-                            crate::exports::operation::Subject::DocumentCount(thing.id)
-                        }
-                    });
                     // The Export row was lost since the things were read: left out and counted, in the place
                     // it lay in. What cannot be read any more is not named anywhere.
                     *tally
@@ -1014,7 +840,6 @@ impl Exporting {
                 }
             }
         }
-        archive.metadata_sources(&selected);
         // The index and the file that says what it holds come last: they know what was written.
         self.finish_archive(job, &selected, &wanted, &request, &layout, archive, tally)
             .await?;
@@ -1172,7 +997,7 @@ impl Exporting {
         scope: ConversationScope<'_>,
         path: &str,
     ) -> Result<(), Stop> {
-        use crate::views::{People, bypass_people, record_item_view, segment_view, turn_view};
+        use crate::views::{People, bypass_people, item_view, segment_view, turn_view};
         use orch_db::queries::{resources::thread_engine as resources, threads};
         let thread = scope.thread;
         let range = scope.range;
@@ -1180,26 +1005,10 @@ impl Exporting {
         let Some(forms) = self.engine.forms() else {
             return Err(forms_missing().into());
         };
-        let view = if let Some(request) = &self.request {
-            let (form, subjects) = request
-                .form(
-                    &self.engine,
-                    crate::exports::Form::Thread { id: thread },
-                    None,
-                )
-                .await
-                .map_err(source_failed)?;
-            archive.form_sources(subjects);
-            let crate::exports::operation::Rendered::Thread(view) = form else {
-                return Err(Failure::new(INTERNAL, "the thread form changed kind").into());
-            };
-            *view
-        } else {
-            forms
-                .thread(conn, principal, thread, self.engine.inner.clock.now())
-                .await
-                .map_err(|fault| Failure::new(INTERNAL, fault.to_string()))?
-        };
+        let view = forms
+            .thread(conn, principal, thread, self.engine.inner.clock.now())
+            .await
+            .map_err(|fault| Failure::new(INTERNAL, fault.to_string()))?;
         archive.start(path).await?;
         archive
             .chunk(Bytes::from_static(b"{\"projection\":"))
@@ -1220,7 +1029,6 @@ impl Exporting {
         }
         archive.chunk(bytes).await?;
         drop(view);
-        archive.source(crate::exports::operation::Subject::Thread(thread));
         archive
             .chunk(Bytes::from_static(b",\"segments\":["))
             .await?;
@@ -1236,7 +1044,6 @@ impl Exporting {
                 segments.iter().filter_map(|segment| segment.started_by),
             )
             .await?;
-            let mut page = Vec::new();
             for segment in &segments {
                 let view = segment_view(
                     conn,
@@ -1245,9 +1052,8 @@ impl Exporting {
                     Time::new(self.engine.inner.clock.now()),
                 )
                 .await?;
-                archive.record(&view, &mut comma, &mut page).await?;
+                archive.record(&view, &mut comma).await?;
             }
-            archive.chunk(page).await?;
         }
         archive.chunk(Bytes::from_static(b"],\"turns\":[")).await?;
         comma = false;
@@ -1261,7 +1067,6 @@ impl Exporting {
                         .chain(bypass_people(turn.limit_bypass.as_ref()))
                 });
                 let people = People::load(conn, who).await?;
-                let mut page = Vec::new();
                 for turn in &turns {
                     let display = match threads::segment(conn, turn.segment_id).await? {
                         Some(segment) => resources::model(conn, segment.provider_id, &turn.model)
@@ -1271,10 +1076,9 @@ impl Exporting {
                         None => String::new(),
                     };
                     archive
-                        .record(&turn_view(turn, &display, &people)?, &mut comma, &mut page)
+                        .record(&turn_view(turn, &display, &people)?, &mut comma)
                         .await?;
                 }
-                archive.chunk(page).await?;
             }
         }
         archive.chunk(Bytes::from_static(b"],\"items\":[")).await?;
@@ -1312,13 +1116,11 @@ impl Exporting {
                 .iter()
                 .flat_map(|item| item.author_id.into_iter().chain(item.pinned_by));
             let people = People::load(conn, who).await?;
-            let mut page = Vec::new();
             for item in &items {
                 archive
-                    .record(&record_item_view(item, &people), &mut comma, &mut page)
+                    .record(&item_view(item, &people), &mut comma)
                     .await?;
             }
-            archive.chunk(page).await?;
         }
         archive.chunk(Bytes::from_static(b"]}")).await?;
         archive.end().await?;
@@ -1533,42 +1335,21 @@ impl Exporting {
             written_forms.push((path.clone(), DocumentExport::Html));
         }
         for (path, format) in written_forms {
-            let how = DocumentHow {
-                format,
-                files: wanted.files,
-                comments: wanted.comments,
-                beside: written::files_beside(&path),
-            };
-            let form = if let Some(request) = &self.request {
-                let (form, subjects) = request
-                    .form(
-                        &self.engine,
-                        crate::exports::Form::Document {
-                            id: thing.id,
-                            json: format == DocumentExport::Json,
-                            comments: wanted.comments,
-                        },
-                        Some(how),
-                    )
-                    .await
-                    .map_err(source_failed)?;
-                archive.form_sources(subjects);
-                let crate::exports::operation::Rendered::Document(form) = form else {
-                    return Err(Failure::new(INTERNAL, "the document form changed kind").into());
-                };
-                *form
-            } else {
-                forms
-                    .document(
-                        conn,
-                        principal,
-                        thing.id,
-                        how,
-                        self.engine.inner.clock.now(),
-                    )
-                    .await
-                    .map_err(|fault| Failure::new(INTERNAL, fault.to_string()))?
-            };
+            let form = forms
+                .document(
+                    conn,
+                    principal,
+                    thing.id,
+                    DocumentHow {
+                        format,
+                        files: wanted.files,
+                        comments: wanted.comments,
+                        beside: written::files_beside(&path),
+                    },
+                    self.engine.inner.clock.now(),
+                )
+                .await
+                .map_err(|fault| Failure::new(INTERNAL, fault.to_string()))?;
             let what = if form.losses.is_empty() {
                 format!("the document {}", thing.title)
             } else {
@@ -1586,7 +1367,6 @@ impl Exporting {
                 }
             }
             archive.add(&path, form.bytes).await?;
-            archive.source(crate::exports::operation::Subject::Document(thing.id));
             tally.listed.push((path, what));
         }
         tally.documents += 1;
@@ -1743,28 +1523,11 @@ impl Exporting {
         let left_out: Vec<ExportLeftOut> = selected.left_out_told(&tally.left_out);
         let by = {
             let mut conn = self.engine.inner.db.acquire().await?;
-            if let Some(request) = &self.request {
-                if request
-                    .permits_person(&mut conn, self.engine.inner.clock.as_ref(), self.user, true)
-                    .await
-                    .map_err(source_failed)?
-                {
-                    archive.observe(crate::exports::operation::Subject::Creator);
-                    identity::users_brief(&mut conn, &[self.user])
-                        .await?
-                        .into_iter()
-                        .next()
-                } else {
-                    None
-                }
-            } else {
-                identity::users_brief(&mut conn, &[self.user])
-                    .await?
-                    .into_iter()
-                    .next()
-            }
+            identity::users_brief(&mut conn, &[self.user])
+                .await?
+                .into_iter()
+                .next()
         };
-        archive.all_sources();
         let now = self.engine.inner.clock.now();
         let manifest = json!({
             "made_by": by.as_ref().map(|person| json!({
@@ -1779,14 +1542,7 @@ impl Exporting {
         if wanted.package {
             let manifest = self
                 .manifest(
-                    selected,
-                    request,
-                    layout,
-                    &mut archive,
-                    &tally,
-                    counts,
-                    &left_out,
-                    now,
+                    selected, request, layout, &archive, &tally, counts, &left_out, now,
                 )
                 .await?;
             archive
@@ -1813,7 +1569,6 @@ impl Exporting {
                     .map_err(|error| Failure::new(INTERNAL, error.to_string()))?,
             )
             .await?;
-        let sources = archive.all_sources();
         let entries = archive.entries;
         let size = archive.finish().await?;
         job.remember(&json!({
@@ -1822,8 +1577,6 @@ impl Exporting {
             "entries": entries,
             "counts": counts,
             "left_out": left_out,
-            "export_sources":sources,
-            "manifest":manifest,
         }))
         .await?;
         Ok(())
@@ -1985,86 +1738,21 @@ impl Exporting {
             .into());
         };
         job.check()?;
-        if scratch != self.scratch_path(job) {
-            return Err(Failure::new(
-                INTERNAL,
-                "the archive scratch file does not belong to this job",
-            )
-            .into());
-        }
-        let subjects: Vec<crate::exports::operation::Subject> = if self.request.is_some() {
-            serde_json::from_value(plan.get("export_sources").cloned().ok_or_else(|| {
-                Failure::new(INTERNAL, "the archive's actual sources are missing")
-            })?)
-            .map_err(|error| Failure::new(INTERNAL, error.to_string()))?
-        } else {
-            Vec::new()
-        };
-        let opened = match &self.request {
-            Some(request) => request
-                .effect(&self.engine, &subjects, || std::fs::File::open(&scratch))
-                .await
-                .map_err(source_failed)?,
-            None => std::fs::File::open(&scratch),
-        }
-        .map_err(|error| scratch_failed(&error))?;
-        let (hash, size) = tokio::task::spawn_blocking(move || hash_opened(opened))
+        let path = scratch.clone();
+        let (hash, size) = tokio::task::spawn_blocking(move || hash_file(&path))
             .await
             .map_err(|error| Failure::new(INTERNAL, error.to_string()))?
             .map_err(|error| scratch_failed(&error))?;
-        let opened = match &self.request {
-            Some(request) => request
-                .effect(&self.engine, &subjects, || std::fs::File::open(&scratch))
-                .await
-                .map_err(source_failed)?,
-            None => std::fs::File::open(&scratch),
-        }
-        .map_err(|error| scratch_failed(&error))?;
-        let file = tokio::fs::File::from_std(opened);
+        let file = tokio::fs::File::open(&scratch)
+            .await
+            .map_err(|error| scratch_failed(&error))?;
         let content: ByteStream = ReaderStream::with_capacity(file, PIECE_BYTES)
             .map(|piece| piece.map_err(|error| BlobError::Io(error.to_string())))
             .boxed();
-        let refused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let content = match &self.request {
-            Some(request) => {
-                let initial = (
-                    request.clone(),
-                    self.engine.clone(),
-                    subjects.clone(),
-                    content,
-                    refused.clone(),
-                    false,
-                );
-                futures::stream::unfold(initial,|(request,engine,subjects,mut content,refused,ended)|async move {
-                    if ended {return None;}
-                    let piece=content.next().await?;
-                    let (piece,ended)=match piece {
-                        Err(error)=>(Err(error),true),
-                        Ok(piece)=>match request.effect(&engine,&subjects,||piece).await {
-                            Ok(piece)=>(Ok(piece),false),
-                            Err(error)=>{
-                                if matches!(error,crate::operation_scope::continuing::Error::Refused|crate::operation_scope::continuing::Error::Binding(crate::operation_scope::BindingError::Refused)) {
-                                    refused.store(true,std::sync::atomic::Ordering::Release);
-                                }
-                                (Err(BlobError::Io("The original access no longer permits this export.".into())),true)
-                            }
-                        },
-                    };
-                    Some((piece,(request,engine,subjects,content,refused,ended)))
-                }).boxed()
-            }
-            None => content,
-        };
         let stored = store
             .put(&hash, Some(size), content)
             .await
-            .map_err(|error| {
-                if refused.load(std::sync::atomic::Ordering::Acquire) {
-                    source_failed(crate::operation_scope::continuing::Error::Refused)
-                } else {
-                    Failure::new(INTERNAL, error.to_string())
-                }
-            })?;
+            .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
         if stored.created {
             job.remember(&json!({ "made_blob": hash.to_string() }))
                 .await?;
@@ -2083,25 +1771,8 @@ impl Exporting {
         drop(conn);
         let expires_at = now + chrono::Duration::hours(keep_hours);
         let mut tx = self.engine.inner.db.begin().await?;
-        let mut cut = match &self.request {
-            Some(request) => Some(
-                request
-                    .cut(&self.engine, &mut tx, &subjects)
-                    .await
-                    .map_err(source_failed)?,
-            ),
-            None => None,
-        };
-        if let Some(cut) = &mut cut {
-            cut.before(self.engine.inner.clock.as_ref())
-                .map_err(source_failed)?;
-        }
         storage::register_blob(&mut tx, &hash, size, now).await?;
         storage::pin_blobs(&mut tx, &[hash]).await?;
-        if let Some(cut) = &mut cut {
-            cut.before(self.engine.inner.clock.as_ref())
-                .map_err(source_failed)?;
-        }
         let hash_text = hash.to_string();
         let made = rows::make_ready(
             &mut tx,
@@ -2125,9 +1796,6 @@ impl Exporting {
             let _ = std::fs::remove_file(&scratch);
             return Err(Stop::Cancelled);
         }
-        if let Some(manifest) = plan.get("manifest").filter(|manifest| manifest.is_object()) {
-            rows::record_manifest(&mut tx, self.export, manifest).await?;
-        }
         let mut audit = AuditEntry::new(
             Actor::User(self.user),
             AuditAction::ExportCreated.as_str(),
@@ -2141,10 +1809,6 @@ impl Exporting {
             "written": { "counts": counts, "bytes": size, "left_out": left_out },
         });
         append(&mut tx, &audit, &Origin::default(), now).await?;
-        if let Some(cut) = &cut {
-            cut.deadline(self.engine.inner.clock.as_ref())
-                .map_err(source_failed)?;
-        }
         tx.commit().await.map_err(orch_db::DbError::from)?;
         let _ = std::fs::remove_file(&scratch);
         Ok(Done::Finished)
@@ -2195,56 +1859,6 @@ impl Engine {
         }
     }
 
-    /// Actual numbered native rows and replies used by every standalone chat export form.
-    /// Existing archive windows bound row memory; IDs/revisions form only an immutable source
-    /// witness, never an authorization target or a replacement for the real Chat identity.
-    pub async fn chat_export_sources(
-        &self,
-        conn: &mut orch_db::Conn,
-        chat: Id,
-        range: (Option<i64>, Option<i64>),
-        format: ExportFormat,
-    ) -> Result<written::ChatExportSources, EngineError> {
-        use sha2::{Digest, Sha256};
-        let last = share_rows::chat_total(conn, chat).await?;
-        let span = written::export_range(range, last);
-        let mut digest = Sha256::new();
-        let mut names = std::collections::BTreeSet::new();
-        for window in span.into_iter().flat_map(text_windows) {
-            let numbered =
-                share_rows::chat_messages_numbered(conn, chat, window.0, window.1).await?;
-            let selected = numbered
-                .iter()
-                .map(|row| &row.row)
-                .filter(|row| format == ExportFormat::Markdown || !row.is_deleted())
-                .collect::<Vec<_>>();
-            let reply_ids = selected
-                .iter()
-                .filter_map(|row| row.reply_to_id)
-                .collect::<Vec<_>>();
-            let replies = orch_db::queries::chats::messages_by_ids(conn, chat, &reply_ids).await?;
-            let mut actual = selected
-                .into_iter()
-                .chain(replies.iter())
-                .collect::<Vec<_>>();
-            actual.sort_by_key(|row| row.id);
-            actual.dedup_by_key(|row| row.id);
-            for row in &actual {
-                digest.update(row.id.as_bytes());
-                digest.update(row.seq_updated.to_be_bytes());
-                digest.update([u8::from(row.is_deleted())]);
-            }
-            names.extend(orch_chat::views::threads_of(&actual));
-        }
-        Ok(written::ChatExportSources {
-            format,
-            chat,
-            span,
-            stamp: hex::encode(digest.finalize()),
-            names: names.into_iter().collect(),
-        })
-    }
-
     /// A chat and the files its messages carry as one zip in the scratch directory: what the export of a chat is
     /// when it is asked for with its files. The caller streams the file and removes it. Says where it is and how
     /// large it is.
@@ -2255,25 +1869,10 @@ impl Engine {
         format: ExportFormat,
         range: (Option<i64>, Option<i64>),
     ) -> Result<(PathBuf, u64), EngineError> {
-        self.chat_with_files_with_names(conn, chat, format, range, None)
-            .await
-    }
-
-    /// The same native scratch archive under a trusted current source-name bound.
-    pub async fn chat_with_files_with_names(
-        &self,
-        conn: &mut orch_db::Conn,
-        chat: Id,
-        format: ExportFormat,
-        range: (Option<i64>, Option<i64>),
-        allowed: Option<&std::collections::HashSet<Id>>,
-    ) -> Result<(PathBuf, u64), EngineError> {
         let path = self
             .scratch_dir()
             .join(format!("chat-{}.zip", orch_types::new_id().simple()));
-        let outcome = self
-            .chat_zip(conn, chat, format, range, &path, allowed)
-            .await;
+        let outcome = self.chat_zip(conn, chat, format, range, &path).await;
         if outcome.is_err() {
             let _ = std::fs::remove_file(&path);
         }
@@ -2287,7 +1886,6 @@ impl Engine {
         format: ExportFormat,
         range: (Option<i64>, Option<i64>),
         path: &Path,
-        allowed: Option<&std::collections::HashSet<Id>>,
     ) -> Result<u64, EngineError> {
         let failed = |stop: Stop| match stop {
             Stop::Failed(failure) => EngineError::unreadable(failure.message),
@@ -2299,18 +1897,9 @@ impl Engine {
             ExportFormat::Markdown => "chat.md",
             ExportFormat::Json => "chat.json",
         };
-        let last = stream_chat_with_names(
-            conn,
-            &mut archive,
-            name,
-            chat,
-            format,
-            range,
-            "chat.files",
-            allowed,
-        )
-        .await
-        .map_err(failed)?;
+        let last = stream_chat(conn, &mut archive, name, chat, format, range, "chat.files")
+            .await
+            .map_err(failed)?;
         if let Some(span) = written::export_range(range, last) {
             for (low, high) in text_windows(span) {
                 for (file, blob) in chat_file_entries(conn, chat, (Some(low), Some(high)))
@@ -2402,7 +1991,7 @@ mod tests {
         let path = dir.join("f");
         let bytes = vec![7_u8; PIECE_BYTES * 2 + 5];
         std::fs::write(&path, &bytes).unwrap();
-        let (hash, size) = hash_opened(std::fs::File::open(&path).unwrap()).unwrap();
+        let (hash, size) = hash_file(&path).unwrap();
         assert_eq!(hash, Hash::of(&bytes));
         assert_eq!(size, i64::try_from(bytes.len()).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();

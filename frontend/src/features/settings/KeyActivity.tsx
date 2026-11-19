@@ -2,7 +2,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { adminTokenActivityQuery } from '@/api/adminReach';
 import { orgTokenActivityQuery } from '@/api/directory';
 import { tokenActivityQuery } from '@/api/users';
 import { DETAIL_PAGE_ROWS } from '@/features/resources/detailPageSize';
@@ -14,9 +13,9 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Table, type Column } from '@/ui/Table';
 
-export function KeyActivity({ tokenId, orgId, adminUserId }: { tokenId: string; orgId?: string; adminUserId?: string }) {
+export function KeyActivity({ tokenId, orgId }: { tokenId: string; orgId?: string }) {
   // A different actual key/org owns a new cursor history, even when the surrounding dialog stays.
-  return <ActivityReader key={JSON.stringify([adminUserId ?? null, orgId ?? null, tokenId])} tokenId={tokenId} orgId={orgId} adminUserId={adminUserId} />;
+  return <ActivityReader key={JSON.stringify([orgId ?? null, tokenId])} tokenId={tokenId} orgId={orgId} />;
 }
 
 function ActivityOutcome({ row }: { row: ApiTokenActivity }) {
@@ -35,12 +34,12 @@ function ActivityDetails({ row }: { row: ApiTokenActivity }) {
   </details>;
 }
 
-function ActivityReader({ tokenId, orgId, adminUserId }: { tokenId: string; orgId: string | undefined; adminUserId: string | undefined }) {
+function ActivityReader({ tokenId, orgId }: { tokenId: string; orgId: string | undefined }) {
   const { t } = useTranslation();
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [page, setPage] = useState(0);
   const query = { limit: DETAIL_PAGE_ROWS, cursor: cursors[page] ?? null };
-  const list = useQuery(adminUserId !== undefined ? adminTokenActivityQuery(adminUserId, tokenId, query) : orgId === undefined ? tokenActivityQuery(tokenId, query) : orgTokenActivityQuery(orgId, tokenId, query));
+  const list = useQuery(orgId === undefined ? tokenActivityQuery(tokenId, query) : orgTokenActivityQuery(orgId, tokenId, query));
   const busy = list.isFetching;
   const next = list.isError ? null : list.data?.next_cursor ?? null;
   const refresh = () => {
@@ -65,7 +64,7 @@ function ActivityReader({ tokenId, orgId, adminUserId }: { tokenId: string; orgI
   ];
   return <section aria-label={t('operationKeys.activity.title')} className="flex min-w-0 flex-col gap-3">
     <div className="flex flex-wrap items-center justify-between gap-2"><p className="max-w-prose text-sm text-text-muted">{t('operationKeys.activity.retention')}</p><Button size="sm" disabled={busy} onClick={refresh}>{t('operationKeys.activity.refresh')}</Button></div>
-    {list.isPending || busy ? <SkeletonRows read={list} rows={3} /> : list.isError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
+    {list.isPending || busy ? <SkeletonRows rows={3} /> : list.isError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
       : list.data.items.length === 0 ? <EmptyState compact title={t('operationKeys.activity.none')} />
       : <Table label={t('operationKeys.activity.title')} columns={columns} rows={list.data.items} rowKey={(row) => row.id} />}
     <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm text-text-muted">{t('operationKeys.activity.page', { page: page + 1 })}</span><div className="flex gap-2">

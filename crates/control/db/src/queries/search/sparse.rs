@@ -213,7 +213,7 @@ impl Scope {
             }
         }
         scope.chats = sqlx::query_scalar("SELECT c.id FROM chats c
-          JOIN nodes n ON n.id=COALESCE(c.node_id,c.home_id,c.org_id)
+          JOIN nodes n ON n.id=COALESCE(c.node_id,c.org_id)
           WHERE n.path @> $6::uuid[] AND (c.id=ANY($1) OR n.owner_id=$2
             OR (c.node_id IS NOT NULL AND (c.node_id=ANY($3) OR n.path && $4::uuid[]))
             OR EXISTS(SELECT 1 FROM chat_members m WHERE m.chat_id=c.id AND m.user_id=$2 AND m.left_at IS NULL)

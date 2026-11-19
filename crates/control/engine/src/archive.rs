@@ -6,30 +6,6 @@
 /// Existing Snapshot custody, operation facts and the origin of a recorded-store read.
 pub mod snapshot_authority;
 
-/// Native deletion operands, selected and held before the first hierarchy/lifecycle effect.
-pub mod deletion;
-
-/// Private retained artifacts keep their maker's custody. Only the existing browser
-/// system-administration mode extends that read; keys and ordinary page grants do not.
-#[must_use]
-pub fn may_read_custody(principal: &orch_authz::Principal, maker: Option<orch_types::Id>) -> bool {
-    maker == Some(principal.user()) || principal.is_system_admin() && principal.caller().as_admin()
-}
-
-/// The existing inspection marker for a read that used administrative artifact custody.
-#[must_use]
-pub fn custody_inspection(
-    principal: &orch_authz::Principal,
-    maker: Option<orch_types::Id>,
-) -> Option<orch_api_contract::access::AdminAccess> {
-    (maker != Some(principal.user()) && may_read_custody(principal, maker)).then_some(
-        orch_api_contract::access::AdminAccess {
-            place: orch_api_contract::nodes::NodeOrSystem::SYSTEM,
-            private: true,
-        },
-    )
-}
-
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -56,28 +32,6 @@ pub enum RemovalScheduleError {
     /// A dependency failed while building the cleanup plan.
     #[error(transparent)]
     Internal(#[from] EngineError),
-}
-
-impl From<orch_db::DbError> for RemovalScheduleError {
-    fn from(error: orch_db::DbError) -> Self {
-        Self::Internal(error.into())
-    }
-}
-
-/// The original removal job prerequisite, also used by a read-only Delete preview.
-pub async fn check_environment_removal(
-    conn: &mut Conn,
-    environment: Id,
-) -> Result<(), RemovalScheduleError> {
-    if let Some(job) = orch_db::queries::jobs::retained::open_of_environment(conn, environment)
-        .await
-        .map_err(EngineError::from)?
-        .into_iter()
-        .find(|job| job.kind != orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
-    {
-        return Err(RemovalScheduleError::Busy(Box::new(job)));
-    }
-    Ok(())
 }
 
 /// Counts of work settled by one lifecycle action.
@@ -133,29 +87,19 @@ impl Engine {
         if row.side_of.is_some() {
             return Err(EngineError::unreadable("side lanes use their close operation").into());
         }
-        let prepared = self.prepare_home_deletion_in(conn, node, None).await?;
-        self.delete_prepared_thread_before(conn, &prepared, by, now, || Ok(()))
+        self.lock_home_in(conn, node).await?;
+        let deleted_nodes: Vec<Id> = std::iter::once(node)
+            .chain(
+                hierarchy::descendants(conn, node)
+                    .await
+                    .map_err(EngineError::from)?
+                    .into_iter()
+                    .map(|row| row.id),
+            )
+            .collect();
+        hierarchy::keep_archive_states(conn, node)
             .await
-    }
-
-    /// The original native thread cascade over the exact prepared operands and first SQL cut.
-    pub async fn delete_prepared_thread_before(
-        &self,
-        conn: &mut Conn,
-        prepared: &deletion::Prepared,
-        by: Option<Id>,
-        now: Time,
-        before: impl FnOnce() -> Result<(), EngineError> + Send,
-    ) -> Result<ThreadRemoval, RemovalScheduleError> {
-        if prepared.node().kind != "thread" || prepared.side_parent().is_some() {
-            return Err(
-                EngineError::unreadable("a thread deletion has different native operands").into(),
-            );
-        }
-        let node = prepared.node().id;
-        let deleted_nodes = prepared.node_ids();
-        self.begin_home_deletion_before(conn, prepared, before)
-            .await?;
+            .map_err(EngineError::from)?;
         let archived_first = hierarchy::archive_by(conn, node, by, now.get())
             .await
             .map_err(EngineError::from)?;
@@ -171,9 +115,7 @@ impl Engine {
         } else {
             Settled::default()
         };
-        let environments = self
-            .remove_prepared_home_as_in(conn, prepared, by, now, None)
-            .await?;
+        let environments = self.remove_home_as_in(conn, node, by, now, None).await?;
         let gone = hierarchy::delete_subtree_by(conn, node, by, now.get())
             .await
             .map_err(EngineError::from)?
@@ -247,50 +189,6 @@ impl Engine {
         let environments = lifecycle::environments_under(conn, node)
             .await
             .map_err(EngineError::from)?;
-        self.remove_home_environments_in(conn, node, environments, by, now, keep_at)
-            .await
-    }
-
-    pub async fn remove_prepared_home_in(
-        &self,
-        conn: &mut Conn,
-        prepared: &deletion::Prepared,
-        by: Id,
-        now: Time,
-        keep_at: Option<Id>,
-    ) -> Result<Vec<Id>, RemovalScheduleError> {
-        self.remove_prepared_home_as_in(conn, prepared, Some(by), now, keep_at)
-            .await
-    }
-
-    async fn remove_prepared_home_as_in(
-        &self,
-        conn: &mut Conn,
-        prepared: &deletion::Prepared,
-        by: Option<Id>,
-        now: Time,
-        keep_at: Option<Id>,
-    ) -> Result<Vec<Id>, RemovalScheduleError> {
-        self.remove_home_environments_in(
-            conn,
-            prepared.node().id,
-            prepared.environments().to_vec(),
-            by,
-            now,
-            keep_at,
-        )
-        .await
-    }
-
-    async fn remove_home_environments_in(
-        &self,
-        conn: &mut Conn,
-        node: Id,
-        environments: Vec<Id>,
-        by: Option<Id>,
-        now: Time,
-        keep_at: Option<Id>,
-    ) -> Result<Vec<Id>, RemovalScheduleError> {
         let rows = hierarchy::with_ancestors(conn, &[node])
             .await
             .map_err(EngineError::from)?;
@@ -434,7 +332,15 @@ impl Engine {
         conn: &mut Conn,
         environment: Id,
     ) -> Result<(), RemovalScheduleError> {
-        check_environment_removal(conn, environment).await
+        if let Some(job) = orch_db::queries::jobs::retained::open_of_environment(conn, environment)
+            .await
+            .map_err(EngineError::from)?
+            .into_iter()
+            .find(|job| job.kind != orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
+        {
+            return Err(RemovalScheduleError::Busy(Box::new(job)));
+        }
+        Ok(())
     }
 
     /// Settles every live thread below an archived node inside its caller's authority transaction.
@@ -566,22 +472,10 @@ impl Engine {
         by: Option<Id>,
         now: Time,
     ) -> Result<(), EngineError> {
-        self.settle_side_before(conn, side, by, now, || Ok(()))
-            .await
-    }
-
-    pub(crate) async fn settle_side_before<'a>(
-        &self,
-        conn: &'a mut Conn,
-        side: Id,
-        by: Option<Id>,
-        now: Time,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<(), EngineError> {
         let Some(thread) = threads::thread(conn, side).await? else {
             return Ok(());
         };
-        let mut unit = Unit::with_first_effect(conn, now.get(), before);
+        let mut unit = Unit::new(conn, now.get());
         self.settle_in(&mut unit, &[side], by, "closed", false)
             .await?;
         if let Some(segment) = thread.current_segment_id {
@@ -619,7 +513,6 @@ impl Engine {
                     "thread_fork" | "thread_continuation"
                 )
             {
-                unit.before_effect()?;
                 if hold.job.kind == "thread_continuation" {
                     crate::jobs::continuation::supersede_in(
                         &mut *unit.conn,
@@ -641,7 +534,6 @@ impl Engine {
                 }
             }
             let machine = self.harness_machine_of(&mut *unit.conn, *id).await?;
-            unit.before_effect()?;
             lifecycle::cancel_delivery(&mut *unit.conn, *id, now).await?;
             counts.approvals += approvals::pending_of_thread(&mut *unit.conn, *id)
                 .await?

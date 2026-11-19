@@ -31,7 +31,6 @@ impl Engine {
         thread: &ThreadRow,
         args: &Arguments,
         source: &str,
-        budgets: &super::SearchBudgets,
     ) -> Result<Answer, EngineError> {
         if !args.query.is_empty()
             || args.regex.is_some()
@@ -110,7 +109,7 @@ impl Engine {
         let limit = usize::try_from(
             args.max_results
                 .unwrap_or(i64::try_from(candidates.count).unwrap_or(i64::MAX))
-                .clamp(1, budgets.results),
+                .clamp(1, super::RESULTS_MAX),
         )
         .unwrap_or(1);
         let mut selected = CandidateSet {

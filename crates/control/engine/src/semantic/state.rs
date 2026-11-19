@@ -128,17 +128,9 @@ impl Engine {
     /// Where search by meaning stands for the root org `org`.
     pub async fn semantic_state(&self, org: Id) -> Result<OrgState, EngineError> {
         let mut conn = self.db().acquire().await?;
-        Self::semantic_state_in(&mut conn, org).await
-    }
-
-    /// The same native state reader on its caller's actual snapshot/guarded connection.
-    pub async fn semantic_state_in(
-        conn: &mut orch_db::Conn,
-        org: Id,
-    ) -> Result<OrgState, EngineError> {
-        let chosen = choice(conn, org).await?;
-        let ready = rows::vectors_ready(&mut *conn).await?;
-        let generations = rows::generations(&mut *conn, org).await?;
+        let chosen = choice(&mut conn, org).await?;
+        let ready = rows::vectors_ready(&mut conn).await?;
+        let generations = rows::generations(&mut conn, org).await?;
         let active = generations.iter().find(|row| row.state == "active");
         let building = generations.iter().find(|row| row.state == "building");
         let filling = building.or(active).map(|row| row.id);
@@ -146,11 +138,11 @@ impl Engine {
             .iter()
             .map(|row| (row.id, row.dimensions))
             .collect();
-        let sizes = rows::sizes(&mut *conn, org, &lengths, filling, ready.is_ok()).await?;
-        let index = rows::index(&mut *conn, org).await?;
+        let sizes = rows::sizes(&mut conn, org, &lengths, filling, ready.is_ok()).await?;
+        let index = rows::index(&mut conn, org).await?;
         let rate = index.as_ref().and_then(|row| row.rate);
         let provider_pause = if let Some(named) = &chosen.embeddings {
-            rows::provider_pause_reason(&mut *conn, named.provider_id).await?
+            rows::provider_pause_reason(&mut conn, named.provider_id).await?
         } else {
             None
         };
@@ -197,7 +189,7 @@ impl Engine {
         let (preview_chunks, preview_source_bytes, preview_sources) =
             if state == "waiting" && building.is_some() {
                 let old = rows::sizes(
-                    &mut *conn,
+                    &mut conn,
                     org,
                     &lengths,
                     active.map(|generation| generation.id),

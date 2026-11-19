@@ -3,7 +3,6 @@
 use super::Pending;
 use crate::EngineError;
 use crate::operation_scope::{BindingError, Prepared, targets};
-use futures::future::BoxFuture;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_authz::{Caller, CapturedOperation, Policy, Principal};
@@ -50,21 +49,19 @@ impl LoginAuthority {
     }
 
     /// Recheck this exact attempt and its original credential before new continuation work.
-    pub fn authorized<'a>(
-        &'a self,
-        conn: &'a mut Conn,
+    pub async fn authorized(
+        &self,
+        conn: &mut Conn,
         provider: Id,
         now: Time,
-    ) -> BoxFuture<'a, Result<bool, EngineError>> {
-        Box::pin(async move {
-            if !self.current(conn, provider).await? {
-                return Ok(false);
-            }
-            match &self.origin {
-                Some(origin) => provider_login_authorized(conn, provider, origin, now).await,
-                None => Ok(true),
-            }
-        })
+    ) -> Result<bool, EngineError> {
+        if !self.current(conn, provider).await? {
+            return Ok(false);
+        }
+        match &self.origin {
+            Some(origin) => provider_login_authorized(conn, provider, origin, now).await,
+            None => Ok(true),
+        }
     }
 }
 
@@ -91,95 +88,90 @@ pub async fn login_operation(
 
 /// Restores accepted/current restrictions, then checks the account's existing ProviderManage.
 /// This does not give a key browser inspection or As-admin authority.
-pub fn provider_login_authorized<'a>(
-    conn: &'a mut Conn,
+pub async fn provider_login_authorized(
+    conn: &mut Conn,
     provider: Id,
-    origin: &'a CapturedOperation,
+    origin: &CapturedOperation,
     now: Time,
-) -> BoxFuture<'a, Result<bool, EngineError>> {
-    Box::pin(async move {
-        if origin.operation() == "ProviderCreate" {
-            // Inline sign-in is part of the actual creator. It keeps that selection,
-            // and rechecks its current home plus ordinary ProviderManage before new work.
-            return Ok(crate::jobs::provider_provision::creator_principal(
-                conn, origin, provider, now,
-            )
-            .await?
-            .is_some());
-        }
-        if !matches!(
-            origin.operation(),
-            "ProviderLoginStart.interactive"
-                | "ProviderLoginStart.import"
-                | "ProviderLoginInput"
-                | "ProviderLoginCancel"
-        ) {
+) -> Result<bool, EngineError> {
+    if origin.operation() == "ProviderCreate" {
+        // Inline sign-in is part of the actual creator. It keeps that selection,
+        // and rechecks its current home plus ordinary ProviderManage before new work.
+        return Ok(
+            crate::jobs::provider_provision::creator_principal(conn, origin, provider, now)
+                .await?
+                .is_some(),
+        );
+    }
+    if !matches!(
+        origin.operation(),
+        "ProviderLoginStart.interactive"
+            | "ProviderLoginStart.import"
+            | "ProviderLoginInput"
+            | "ProviderLoginCancel"
+    ) {
+        return Ok(false);
+    }
+    let Some(caller) = origin.restore(conn, now).await? else {
+        return Ok(false);
+    };
+    let Some(provider_state) = rows::state(conn, provider)
+        .await?
+        .filter(|state| state.deleted_at.is_none())
+    else {
+        return Ok(false);
+    };
+    if crate::preflight::second_step_missing(conn, origin.user(), provider_state.home_id).await? {
+        return Ok(false);
+    }
+    let mut plan = Prepared::for_selection(origin.operation()).map_err(EngineError::unreadable)?;
+    let object = ObjectRef {
+        kind: ObjectKind::Provider,
+        id: provider,
+    };
+    let target = match targets::page_object(conn, object).await {
+        Ok(target) => target,
+        Err(targets::TargetError::Missing) => return Ok(false),
+        Err(targets::TargetError::Authz(
+            orch_authz::Error::NotFound(_)
+            | orch_authz::Error::NoSuchUser(_)
+            | orch_authz::Error::Suspended { .. }
+            | orch_authz::Error::Archived { .. },
+        )) => return Ok(false),
+        Err(error) => return Err(EngineError::unreadable(error)),
+    };
+    plan.bind(0, target.object.kind, &[target])
+        .map_err(EngineError::unreadable)?;
+    let caller = match plan.admit(&caller, false) {
+        Ok(caller) => caller,
+        Err(BindingError::Refused) => return Ok(false),
+        Err(error) => return Err(EngineError::unreadable(error)),
+    };
+    let principal = match Principal::load(conn, caller, now).await {
+        Ok(principal) => principal,
+        Err(orch_authz::Error::NoSuchUser(_) | orch_authz::Error::Suspended { .. }) => {
             return Ok(false);
         }
-        let Some(caller) = origin.restore(conn, now).await? else {
-            return Ok(false);
-        };
-        let Some(provider_state) = rows::state(conn, provider)
-            .await?
-            .filter(|state| state.deleted_at.is_none())
-        else {
-            return Ok(false);
-        };
-        if crate::preflight::second_step_missing(conn, origin.user(), provider_state.home_id)
-            .await?
-        {
-            return Ok(false);
-        }
-        let mut plan =
-            Prepared::for_selection(origin.operation()).map_err(EngineError::unreadable)?;
-        let object = ObjectRef {
-            kind: ObjectKind::Provider,
-            id: provider,
-        };
-        let target = match targets::page_object(conn, object).await {
-            Ok(target) => target,
-            Err(targets::TargetError::Missing) => return Ok(false),
-            Err(targets::TargetError::Authz(
-                orch_authz::Error::NotFound(_)
-                | orch_authz::Error::NoSuchUser(_)
-                | orch_authz::Error::Suspended { .. }
-                | orch_authz::Error::Archived { .. },
-            )) => return Ok(false),
-            Err(error) => return Err(EngineError::unreadable(error)),
-        };
-        plan.bind(0, target.object.kind, &[target])
-            .map_err(EngineError::unreadable)?;
-        let caller = match plan.admit(&caller, false) {
-            Ok(caller) => caller,
-            Err(BindingError::Refused) => return Ok(false),
-            Err(error) => return Err(EngineError::unreadable(error)),
-        };
-        let principal = match Principal::load(conn, caller, now).await {
-            Ok(principal) => principal,
-            Err(orch_authz::Error::NoSuchUser(_) | orch_authz::Error::Suspended { .. }) => {
-                return Ok(false);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        match orch_authz::resources::check(
-            conn,
-            &principal,
-            object,
-            Permission::ProviderManage,
-            Policy::default(),
-        )
-        .await
-        {
-            Ok(decision) => Ok(decision.is_allowed()),
-            Err(
-                orch_authz::Error::NotFound(_)
-                | orch_authz::Error::NoSuchUser(_)
-                | orch_authz::Error::Suspended { .. }
-                | orch_authz::Error::Archived { .. },
-            ) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
-    })
+        Err(error) => return Err(error.into()),
+    };
+    match orch_authz::resources::check(
+        conn,
+        &principal,
+        object,
+        Permission::ProviderManage,
+        Policy::default(),
+    )
+    .await
+    {
+        Ok(decision) => Ok(decision.is_allowed()),
+        Err(
+            orch_authz::Error::NotFound(_)
+            | orch_authz::Error::NoSuchUser(_)
+            | orch_authz::Error::Suspended { .. }
+            | orch_authz::Error::Archived { .. },
+        ) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) async fn pending_current(
@@ -449,16 +441,17 @@ impl LoginCommandAuthority {
                 if kind != "provider.login.input" || &current != active {
                     return Ok(false);
                 }
-                if let Some(active) = active
-                    && !active.authorized(conn, self.provider, now).await?
-                {
-                    return Ok(false);
+                if let Some(active) = active {
+                    if !active.authorized(conn, self.provider, now).await? {
+                        return Ok(false);
+                    }
                 }
-                if let Some(origin) = origin
-                    && (origin.operation() != "ProviderLoginInput"
-                        || !provider_login_authorized(conn, self.provider, origin, now).await?)
-                {
-                    return Ok(false);
+                if let Some(origin) = origin {
+                    if origin.operation() != "ProviderLoginInput"
+                        || !provider_login_authorized(conn, self.provider, origin, now).await?
+                    {
+                        return Ok(false);
+                    }
                 }
             }
             LoginCommandSource::Cancel { origin } => {
@@ -470,11 +463,12 @@ impl LoginCommandAuthority {
                 {
                     return Ok(false);
                 }
-                if let Some(origin) = origin
-                    && (origin.operation() != "ProviderLoginCancel"
-                        || !provider_login_authorized(conn, self.provider, origin, now).await?)
-                {
-                    return Ok(false);
+                if let Some(origin) = origin {
+                    if origin.operation() != "ProviderLoginCancel"
+                        || !provider_login_authorized(conn, self.provider, origin, now).await?
+                    {
+                        return Ok(false);
+                    }
                 }
                 return Ok(true);
             }

@@ -6,8 +6,6 @@
 )]
 
 mod common;
-#[path = "updates/environment_scopes.rs"]
-mod environment_scopes;
 mod hosting;
 
 use common::World;

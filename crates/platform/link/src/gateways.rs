@@ -87,8 +87,7 @@ fn origin(endpoint: &Endpoint) -> Option<String> {
 
 impl PrimaryGateway {
     /// Resolve a fixed gateway or rank successful Automatic measurements.
-    /// Without a sample, use the declared entrances and verify their identity at attachment.
-    /// Reconnect and healthy Automatic reconsideration use this same measurement contract.
+    /// Every reconnect invokes this method again; it never changes a healthy session.
     pub async fn candidates(
         &self,
         dialer: &dyn Dialer,
@@ -191,35 +190,7 @@ impl PrimaryGateway {
             )
         });
         if good.is_empty() {
-            let mut candidates = Vec::new();
-            for endpoint in orch_link_contract::enrollment::endpoint_order(endpoints, last_worked) {
-                let key = origin(endpoint);
-                let known = self.catalogue.iter().find(|gateway| {
-                    gateway
-                        .endpoints
-                        .iter()
-                        .any(|known| key.is_some() && origin(known) == key)
-                });
-                if let Some(gateway) = known {
-                    candidates.push(GatewayCandidate {
-                        endpoint: endpoint.clone(),
-                        gateway_id: Some(gateway.id.clone()),
-                    });
-                } else {
-                    // A local entrance alias has no measured id yet. Try the advertised
-                    // identities in order; hello must match before machine authentication.
-                    for gateway in &self.catalogue {
-                        candidates.push(GatewayCandidate {
-                            endpoint: endpoint.clone(),
-                            gateway_id: Some(gateway.id.clone()),
-                        });
-                    }
-                }
-            }
-            if candidates.is_empty() {
-                return Err("no advertised gateway has an eligible entrance".to_owned());
-            }
-            return Ok((candidates, Vec::new()));
+            return Err("no advertised gateway has a verified round-trip measurement".to_owned());
         }
         let measurements = good
             .into_iter()

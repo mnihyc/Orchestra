@@ -8,9 +8,7 @@ import { ParameterRow } from '@/features/inspector/Parameters';
 import type { ModelParameters, ParameterView } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { me, userRef } from '../doubles/fixtures';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Harness' }));
 afterEach(async () => { await setLocale('en'); });
@@ -28,12 +26,9 @@ for (const locale of ['en', 'zh-CN'] as const) it(`enables only a declared Messa
   const user = userEvent.setup();
   show(<Manager changed={changed} />);
   const group = screen.getByRole('group', { name: i18n.t('webSearch.title') });
-  const live = i18n.t('webSearch.modeSwitch', { mode: i18n.t('choiceCatalog.webSearch.live.name') });
+  const live = i18n.t('choiceCatalog.webSearch.live.name');
   expect(within(group).getByRole('switch', { name: live })).not.toBeChecked();
-  expect(group.querySelector('[data-choice-description]')).toBeNull();
-  await user.hover(within(group).getByRole('switch', { name: live }));
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('webSearch.offered', { source: i18n.t('models.editor.theEndpoint') }));
-  expect(within(group).queryByRole('switch', { name: i18n.t('webSearch.modeSwitch', { mode: i18n.t('choiceCatalog.webSearch.cached.name') }) })).not.toBeInTheDocument();
+  expect(within(group).queryByRole('switch', { name: i18n.t('choiceCatalog.webSearch.cached.name') })).not.toBeInTheDocument();
   await user.click(within(group).getByRole('switch', { name: live }));
   const selected = changed.mock.lastCall?.[0];
   if (selected === undefined) throw new Error('The manager selection was not retained');

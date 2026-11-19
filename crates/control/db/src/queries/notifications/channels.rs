@@ -214,22 +214,6 @@ pub async fn update_channel(
     change: &ChannelChange<'_>,
     at: DateTime<Utc>,
 ) -> Result<Option<ChannelRow>, DbError> {
-    update_channel_before(conn, id, change, at, || Ok(())).await
-}
-
-/// The same native update, checking after its actual channel-row serialization wait and
-/// immediately before mutation. Native callers retain their existing transaction/semantics.
-pub async fn update_channel_before<E: From<DbError>>(
-    conn: &mut Conn,
-    id: Id,
-    change: &ChannelChange<'_>,
-    at: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<Option<ChannelRow>, E> {
-    if lock_channel_for_write(conn, id).await?.is_none() {
-        return Ok(None);
-    }
-    before()?;
     Ok(sqlx::query_as(concat!(
         "UPDATE notification_channels SET name = COALESCE($2, name), config = COALESCE($3::jsonb, config), ",
         "templates = COALESCE($4::jsonb, templates), enabled = COALESCE($5, enabled), updated_at = $6 ",
@@ -243,7 +227,7 @@ pub async fn update_channel_before<E: From<DbError>>(
     .bind(change.enabled)
     .bind(at)
     .fetch_optional(conn)
-    .await.map_err(DbError::from)?)
+    .await?)
 }
 
 /// Deletes a channel and its sealed secrets. Its routes are kept, off, as records of what the
@@ -251,12 +235,6 @@ pub async fn update_channel_before<E: From<DbError>>(
 /// whoever had a route on, or work waiting, is told once in their Inbox. Says whether there was
 /// such a channel.
 pub async fn delete_channel(conn: &mut Conn, id: Id, at: DateTime<Utc>) -> Result<bool, DbError> {
-    delete_channel_before(conn, id, at, || Ok(())).await
-}
-
-/// The complete native parent/route lock order before removal first changes a route.
-/// Holding the channel prevents a new route/reservation from entering this footprint.
-pub async fn lock_channel_removal(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     // The removal takes the channel alone first: a delivery being reserved through it finishes
     // reserving, and none is reserved after. Its routes are kept as records, with their notices,
     // before the row goes, so that no route is lost with it.
@@ -268,38 +246,16 @@ pub async fn lock_channel_removal(conn: &mut Conn, id: Id) -> Result<bool, DbErr
     if locked.is_none() {
         return Ok(false);
     }
-    let _: Vec<Id> = sqlx::query_scalar(
-        "SELECT id FROM notification_routes WHERE channel_id=$1 ORDER BY user_id,id FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_all(conn)
-    .await?;
-    Ok(true)
-}
-
-/// The same native removal with its opaque check after its complete initial lock footprint.
-pub async fn delete_channel_before<E: From<DbError>>(
-    conn: &mut Conn,
-    id: Id,
-    at: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<bool, E> {
-    if !lock_channel_removal(conn, id).await? {
-        return Ok(false);
-    }
-    before()?;
     super::people::keep_routes_and_tell(conn, id, at).await?;
     sqlx::query("DELETE FROM secrets WHERE owner_kind = $1 AND owner_id = $2")
         .bind(owner::CHANNEL)
         .bind(id)
         .execute(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+        .await?;
     let done = sqlx::query("DELETE FROM notification_channels WHERE id = $1")
         .bind(id)
         .execute(conn)
-        .await
-        .map_err(DbError::from)?;
+        .await?;
     Ok(done.rows_affected() == 1)
 }
 

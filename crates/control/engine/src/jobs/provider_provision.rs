@@ -51,16 +51,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod creator_authority;
-pub use creator_authority::CreatorCommand;
-pub use creator_authority::copy_checkpoint as copied_creator_checkpoint;
 pub use creator_authority::creator_principal;
 pub use creator_authority::remember_command as remember_creator_command;
 pub use creator_authority::retain as retain_creator_origin;
-pub use creator_authority::retain_duplicate as retain_duplicate_creator_origin;
-pub use creator_authority::retain_move as retain_move_creator_origin;
-pub use creator_authority::{
-    CopyAck as CredentialCopyAck, recorded_copy as recorded_credential_copy,
-};
 pub use creator_authority::{
     command_authorized as creator_command_authorized,
     command_current_callers as creator_command_current_callers,
@@ -722,29 +715,14 @@ impl ProviderProvision {
         let owner = orch_db::queries::jobs::job(&mut tx, job.id())
             .await?
             .ok_or_else(|| failed("provider_gone", "the provider job disappeared"))?;
-        let listed = if crate::jobs::lifecycle_commands::environment::present(&owner) {
-            let checked = crate::jobs::lifecycle_commands::environment::current(
-                &mut tx,
-                &owner,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-                named,
-            )
-            .await?;
-            let listed =
-                candidates_for(&mut tx, &provider, &template, named, &checked.principal).await?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-            listed
-        } else {
-            match creator_authority::principal(&mut tx, &owner, self.engine.inner.clock.as_ref())
-                .await
-                .map_err(creator_authority::stop)?
-            {
-                Some(principal) => {
-                    candidates_for(&mut tx, &provider, &template, named, &principal).await?
-                }
-                None => candidates(&mut tx, &provider, &template, named, now).await?,
+        let listed = match creator_authority::principal(&mut tx, &owner, Time::new(now))
+            .await
+            .map_err(creator_authority::stop)?
+        {
+            Some(principal) => {
+                candidates_for(&mut tx, &provider, &template, named, &principal).await?
             }
+            None => candidates(&mut tx, &provider, &template, named, now).await?,
         };
         let (host, warnings): (HostState, Vec<&str>) = match &previous {
             Some(old) => {
@@ -1353,7 +1331,6 @@ impl ProviderProvision {
 
     async fn verify(&self, job: &Job) -> Result<Done, Stop> {
         super::after_up::run(job).await?;
-        creator_authority::copy_credential(job).await?;
         let placed = self.placed(job).await?;
         let mut conn = self
             .engine
@@ -1416,35 +1393,17 @@ impl ProviderProvision {
             .await
             .map_err(EngineError::from)?;
         if creator {
-            creator_authority::lock_commit(&mut tx, &owner).await?;
-        }
-        let mut accepted_creator = None;
-        if crate::jobs::lifecycle_commands::environment::present(&owner) {
-            crate::jobs::lifecycle_commands::environment::lock_source(&mut tx, &owner).await?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
             let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-            let checked = crate::jobs::lifecycle_commands::environment::current(
-                &mut tx,
-                &owner,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-                Some(placed.host.id),
-            )
-            .await?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
-        if creator {
-            let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-            let accepted =
-                creator_authority::principal(&mut tx, &owner, self.engine.inner.clock.as_ref())
-                    .await
-                    .map_err(creator_authority::stop)?
-                    .ok_or_else(|| {
-                        failed(
-                            "access.denied",
-                            "The retained provider creator disappeared.",
-                        )
-                    })?;
-            accepted_creator = Some(accepted);
+            creator_authority::principal(&mut tx, &owner, Time::new(now))
+                .await
+                .map_err(creator_authority::stop)?
+                .ok_or_else(|| {
+                    failed(
+                        "access.denied",
+                        "The retained provider creator disappeared.",
+                    )
+                })?;
             if !orch_db::queries::jobs::pass_commit(&mut tx, job.id(), now).await? {
                 return Err(Stop::Cancelled);
             }
@@ -1490,21 +1449,6 @@ impl ProviderProvision {
             )
             .await?;
         }
-        let mut finished = crate::unit::Finished::default();
-        if let Some(accepted) = &accepted_creator {
-            let current = orch_db::queries::jobs::job(&mut tx, job.id())
-                .await?
-                .ok_or(Stop::Lost)?;
-            finished = creator_authority::end_moved_source(
-                &self.engine,
-                &mut tx,
-                &current,
-                accepted,
-                self.engine.inner.clock.as_ref(),
-            )
-            .await
-            .map_err(creator_authority::stop)?;
-        }
         if creator {
             orch_db::queries::jobs::merge_plan(
                 &mut tx,
@@ -1514,22 +1458,7 @@ impl ProviderProvision {
             )
             .await?;
         }
-        if crate::jobs::lifecycle_commands::environment::present(&owner) {
-            let current = orch_db::queries::jobs::job(&mut tx, job.id())
-                .await?
-                .ok_or(Stop::Lost)?;
-            crate::jobs::lifecycle_commands::environment::check_deadline(
-                &mut tx,
-                &current,
-                self.engine.inner.clock.as_ref(),
-            )
-            .await?;
-        }
         tx.commit().await.map_err(DbError::from)?;
-        for thread in finished.wakes {
-            self.engine.wake(thread);
-        }
-        self.engine.kick();
         Ok(Done::Finished)
     }
 
@@ -1573,12 +1502,6 @@ impl ProviderProvision {
     }
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
-        if let Err(error) = creator_authority::undo_transfer(job).await {
-            return Undone::Deferred(format!(
-                "Returning the sign-in to its original provider: {error:?}"
-            ));
-        }
-
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());
         };
@@ -1781,29 +1704,29 @@ async fn rows_of_profiles(conn: &mut orch_db::Conn) -> Result<Vec<String>, Engin
 #[async_trait]
 impl Phased for ProviderProvision {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
-        Box::pin(creator_authority::phase(job, phase)).await?;
+        creator_authority::phase(job, phase).await?;
         let current = job.row().await?;
         if super::recreate::batch_authority::applies(&current) {
-            Box::pin(super::recreate::batch_authority::guard(job)).await?;
+            super::recreate::batch_authority::guard(job).await?;
         }
         if let Some(recipe) = current.plan.get("provider_recovery").cloned() {
             let recipe = serde_json::from_value::<crate::provider_recovery::Recipe>(recipe)
                 .map_err(EngineError::from)?;
-            Box::pin(crate::provider_recovery::guard(job, &recipe)).await?;
+            crate::provider_recovery::guard(job, &recipe).await?;
         }
 
         match phase {
-            "schedule" => Box::pin(self.schedule(job)).await,
-            "image" => Box::pin(self.image(job)).await,
-            "volumes" => Box::pin(self.volumes(job)).await,
-            "tools" => Box::pin(self.tools(job)).await,
-            "create" => Box::pin(self.create(job)).await,
-            "start" => Box::pin(self.start(job)).await,
-            "enroll" => Box::pin(self.enroll(job)).await,
-            "after_up" => Box::pin(super::after_up::run(job)).await,
-            "verify" => Box::pin(self.verify(job)).await,
-            "commit" => Box::pin(self.commit(job)).await,
-            "refresh" => Box::pin(self.refresh(job)).await,
+            "schedule" => self.schedule(job).await,
+            "image" => self.image(job).await,
+            "volumes" => self.volumes(job).await,
+            "tools" => self.tools(job).await,
+            "create" => self.create(job).await,
+            "start" => self.start(job).await,
+            "enroll" => self.enroll(job).await,
+            "after_up" => super::after_up::run(job).await,
+            "verify" => self.verify(job).await,
+            "commit" => self.commit(job).await,
+            "refresh" => self.refresh(job).await,
             other => Err(failed(
                 INTERNAL,
                 format!("a provider's provisioning has no phase {other}"),
@@ -1812,9 +1735,6 @@ impl Phased for ProviderProvision {
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
-        if let Err(error) = creator_authority::copy_audit(job).await {
-            tracing::warn!(job=%job.id(),?error,"a completed owner credential copy could not be audited before its compensation");
-        }
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted provider command outcome could not be recorded");
         }
@@ -1836,12 +1756,6 @@ impl Phased for ProviderProvision {
                     .to_owned(),
             ),
         }
-    }
-
-    /// Every command of the phases is made from the job and a word of the phase, so it is the same command
-    /// each time the phase runs.
-    fn answers_are_final(&self) -> bool {
-        true
     }
 
     async fn result(&self, job: &Job) -> Option<Json> {

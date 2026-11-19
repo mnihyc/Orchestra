@@ -18,7 +18,7 @@ import { type SceneName, sceneOf } from './thread-scenes.ts';
 import { type Answer, type Person, Refusal, type Subscriber, World } from './world.ts';
 import { bootstrap } from './bootstrap.ts';
 import { threadOpening } from './thread-opening.ts';
-import { chatOpening, nodeChatOpening, documentPages, nodeOverview, orgOverview, orgLandingPlaces } from './screen-openings.ts';
+import { chatOpening, nodeChatOpening, documentPages } from './screen-openings.ts';
 import { installScreenFixture } from './screen-gate.ts';
 
 const BASE = '/api/v1';
@@ -31,14 +31,6 @@ let activeTraces = 0;
 const world = new World(process.argv.includes('--fresh') ? { scenario: 'fresh' } : {});
 const requestIds = new WeakMap<IncomingMessage, string>();
 const receivedRequests: { id: string; method: string; path: string; body: Record<string, unknown>; reply?: { status: number; body: unknown } }[] = [];
-
-/**
- * The JSON the double answered last, by request id. A page can give a request up once its headers are in (its query moved on), and
- * the browser then keeps no body to read; the test asks here for what was sent. Only the latest are kept: a case reads the answer
- * to what it has just done, and ORCH_DOUBLE_KEPT_REPLIES (default 256) is far more than the answers that pass in between.
- */
-const KEPT_REPLIES = Number(process.env.ORCH_DOUBLE_KEPT_REPLIES ?? 256);
-const keptReplies = new Map<string, { status: number; json: string }>();
 
 function cookiesOf(request: IncomingMessage): Record<string, string> {
   const jar: Record<string, string> = {};
@@ -94,8 +86,6 @@ function send(response: ServerResponse, answer: Answer, requestId: string): void
   // Keep the exact JSON bytes' value with the same request receipt as its uploaded body.
   const received = receivedRequests.find((entry) => entry.id === requestId);
   if (received !== undefined) received.reply = { status: answer.status, body: JSON.parse(json) as unknown };
-  keptReplies.set(requestId, { status: answer.status, json });
-  for (const oldest of keptReplies.keys()) { if (keptReplies.size <= KEPT_REPLIES) break; keptReplies.delete(oldest); }
   response.writeHead(answer.status, headers).end(json);
 }
 
@@ -116,8 +106,6 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       return world.login(await bodyOf(request));
     case 'POST /auth/email-code':
       return world.emailCode(await bodyOf(request));
-    case 'POST /auth/session':
-      return world.restoreSession(cookiesOf(request), csrfHeader);
     case 'POST /auth/refresh':
       return world.refresh(cookiesOf(request), csrfHeader);
     case 'POST /auth/logout':
@@ -160,14 +148,6 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
     default:
   }
 
-  const overview = /^GET \/orgs\/([^/]+)\/overview$/.exec(route);
-  if (overview?.[1] !== undefined) {
-    receivedRequests.push({ id: requestId, method, path, body: {} });
-    const person = world.browserPerson(bearer);
-    return { status: 200, body: query.has('resolve_ids')
-      ? { mode: 'places', nodes: await orgLandingPlaces(world, person, overview[1], query) }
-      : { mode: 'overview', data: await orgOverview(world, person, overview[1], query) } };
-  }
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
@@ -177,9 +157,6 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
   const scopes = /^GET \/nodes\/([^/]+)\/chat-opening$/.exec(route);
   if (scopes?.[1] !== undefined) return { status: 200, body: await nodeChatOpening(world, world.browserPerson(bearer), scopes[1], query) };
-  const nodeHome = /^GET \/nodes\/([^/]+)\/overview$/.exec(route);
-  if (nodeHome?.[1] !== undefined) return { status: 200, body: await nodeOverview(world, world.browserPerson(bearer), nodeHome[1], query) };
-
   const documents = /^GET \/nodes\/([^/]+)\/document-pages$/.exec(route);
   if (documents?.[1] !== undefined) return { status: 200, body: await documentPages(world, world.browserPerson(bearer), documents[1], query) };
 
@@ -237,15 +214,10 @@ async function control(request: IncomingMessage, path: string): Promise<Answer> 
       // Nobody is who they were: every live connection ends, and each client finds out when it comes back.
       for (const socket of sockets) socket.close(1012);
       receivedRequests.length = 0;
-      keptReplies.clear();
       world.reset(body);
       return { status: 204 };
     case '/requests':
       return { status: 200, body: receivedRequests };
-    case '/reply': {
-      const kept = keptReplies.get(typeof body.id === 'string' ? body.id : '');
-      return { status: 200, body: kept === undefined ? null : { status: kept.status, body: JSON.parse(kept.json) as unknown } };
-    }
     case '/outbox':
       return { status: 200, body: world.outbox };
     case '/invitation/chat':

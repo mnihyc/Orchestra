@@ -422,9 +422,7 @@ async fn delete_by_id(
         }
         Err(error) => {
             batch.rollback().await?;
-            if let DbError::Reference { constraint } = &error {
-                tracing::debug!(table, %constraint, "a reference deferred soft-deleted collection");
-            } else {
+            if !matches!(error, DbError::Reference { .. }) {
                 return Err(error);
             }
             let mut gone = Vec::new();
@@ -464,9 +462,7 @@ async fn delete_by_id(
                     }
                     Err(error) => {
                         one.rollback().await?;
-                        if let DbError::Reference { constraint } = &error {
-                            tracing::debug!(table, %constraint, "a reference deferred one soft-deleted row");
-                        } else {
+                        if !matches!(error, DbError::Reference { .. }) {
                             return Err(error);
                         }
                     }

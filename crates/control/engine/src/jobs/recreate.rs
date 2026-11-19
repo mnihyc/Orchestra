@@ -61,32 +61,18 @@ const LOOK_EVERY: Duration = Duration::from_millis(250);
 const NAME_DIGITS: usize = 12;
 
 pub mod batch_authority;
-/// Exact native custody of an accepted capability removal.
-pub mod capability_revocation;
-/// Independent original global review and confirmation in the same native replacement mechanism.
-pub mod environment_authority;
 
 fn fail(code: &str, message: impl Into<String>) -> Stop {
     Stop::Failed(Failure::new(code, message))
 }
 
-/// Fully locked native queue operands. Construction performs no business mutation or IO.
-#[derive(Clone, Debug)]
-pub struct PreparedQueue {
-    draft: Draft,
-}
-impl PreparedQueue {
-    /// The actual fresh recipe that the writer will insert.
-    pub fn recipe(&self) -> &Recipe {
-        &self.draft.recipe
-    }
-}
-
-/// Prepare the existing complete lifecycle/thread hold footprint before operation admission.
-pub async fn prepare_queue(
+/// Holds the threads and inserts their replacement in the caller's transaction.
+pub async fn queue(
     conn: &mut Conn,
     mut draft: Draft,
-) -> Result<PreparedQueue, UpdateError> {
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<jobs::JobRow, UpdateError> {
     if !draft.blockers.is_empty() {
         return Err(UpdateError::Blocked(draft.blockers));
     }
@@ -135,49 +121,6 @@ pub async fn prepare_queue(
             return Err(UpdateError::Held(job.id));
         }
     }
-    Ok(PreparedQueue { draft })
-}
-
-/// Holds the threads and inserts their replacement in the caller's transaction.
-pub async fn queue(
-    conn: &mut Conn,
-    draft: Draft,
-    batch: Option<Id>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<jobs::JobRow, UpdateError> {
-    let prepared = prepare_queue(conn, draft).await?;
-    queue_prepared(conn, prepared, batch, now, || Ok(())).await
-}
-
-/// The same prepared native writer with the caller's current first-effect cut.
-pub async fn queue_before<F>(
-    conn: &mut Conn,
-    draft: Draft,
-    batch: Option<Id>,
-    now: chrono::DateTime<chrono::Utc>,
-    before: F,
-) -> Result<jobs::JobRow, UpdateError>
-where
-    F: FnOnce() -> Result<(), EngineError> + Send,
-{
-    let prepared = prepare_queue(conn, draft).await?;
-    queue_prepared(conn, prepared, batch, now, || {
-        before().map_err(UpdateError::from)
-    })
-    .await
-}
-
-/// Consume the native operands and its once-only check immediately before the first SQL effect.
-pub async fn queue_prepared(
-    conn: &mut Conn,
-    prepared: PreparedQueue,
-    batch: Option<Id>,
-    now: chrono::DateTime<chrono::Utc>,
-    before: impl FnOnce() -> Result<(), UpdateError>,
-) -> Result<jobs::JobRow, UpdateError> {
-    let draft = prepared.draft;
-    let target = draft.recipe.target;
-    before()?;
     if draft.recipe.network_policy.restricted() {
         orch_db::queries::network::require(conn, draft.recipe.old, Some("restricted")).await?;
     }
@@ -265,9 +208,7 @@ impl Recreating {
     async fn notice(&self, job: &Job, message: &str) -> Result<(), Stop> {
         let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-        super::provision::creator_guard_in(&mut tx, job).await?;
         batch_authority::guard_in(&mut tx, job).await?;
-        capability_revocation::guard_in(&mut tx, job, false).await?;
         let owner = jobs::job(&mut tx, job.id()).await?.ok_or(Stop::Lost)?;
         let mut unit = Unit::new(&mut tx, job.now());
         let mut steers = Vec::new();
@@ -275,9 +216,7 @@ impl Recreating {
             let Some(row) = threads::lock(&mut *unit.conn, *thread).await? else {
                 continue;
             };
-            if batch_authority::is_restricted(&owner)
-                && !batch_authority::thread_matches(&owner, &row)
-            {
+            if batch_authority::is_restricted(&owner) && row.provider_id != owner.provider_id {
                 return Err(fail(
                     "access.denied",
                     "The affected thread no longer belongs to this provider update.",
@@ -324,12 +263,11 @@ impl Recreating {
                 &mut *unit.conn,
                 &owner,
                 &command,
-                job.engine().inner.clock.as_ref(),
+                orch_types::Time::new(job.now()),
             )
             .await?;
         }
         let finished = unit.finish().await?;
-        batch_authority::deadline_in(&mut tx, job).await?;
         job.engine().commit(tx, finished).await?;
         for (thread, turn, machine) in steers {
             let command = Outgoing::new(
@@ -391,7 +329,6 @@ impl Recreating {
         loop {
             job.check()?;
             batch_authority::guard(job).await?;
-            capability_revocation::guard(job, false).await?;
             let mut active = Vec::new();
             {
                 let mut conn = job
@@ -451,9 +388,7 @@ impl Recreating {
         if plan.get("runtime").is_none() {
             let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
             orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-            super::provision::creator_guard_in(&mut tx, job).await?;
             batch_authority::guard_in(&mut tx, job).await?;
-            capability_revocation::guard_in(&mut tx, job, false).await?;
             let next = new_id();
             let digits = next.simple().to_string();
             let name = format!(
@@ -529,7 +464,6 @@ impl Recreating {
                 job.now(),
             )
             .await?;
-            batch_authority::deadline_in(&mut tx, job).await?;
             tx.commit().await.map_err(DbError::from)?;
         }
         let mut conn = job
@@ -593,9 +527,7 @@ impl Recreating {
         if batch_authority::applies(&job.row().await?) {
             let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
             orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-            super::provision::creator_guard_in(&mut tx, job).await?;
             batch_authority::guard_in(&mut tx, job).await?;
-            capability_revocation::guard_in(&mut tx, job, false).await?;
             jobs::merge_plan(
                 &mut tx,
                 job.id(),
@@ -612,7 +544,6 @@ impl Recreating {
                 job.now(),
             )
             .await?;
-            batch_authority::deadline_in(&mut tx, job).await?;
             tx.commit().await.map_err(DbError::from)?;
         } else {
             job.remember(&json!({"old_stop_requested":true})).await?;
@@ -728,7 +659,6 @@ impl Recreating {
         let carry = job.plan().await?.get("carry").and_then(Json::as_bool) == Some(true);
         for phase in ["image", "tools", "create", "enroll"] {
             batch_authority::guard(job).await?;
-            capability_revocation::guard(job, false).await?;
             if phase == "create"
                 && let Target::Provider(provider) = self.recipe.target
                 && self.recipe.volume_carry.is_some()
@@ -952,11 +882,10 @@ impl Recreating {
                     let agent = orch_db::queries::resources::thread_engine::agent(&mut conn, agent)
                         .await?
                         .ok_or_else(|| fail("unhealthy", "the provider profile is gone"))?;
-                    let (provider_kind, provider_config) =
-                        crate::harnesses::provider_start_options(&mut conn, provider).await?;
+                    let provider_config =
+                        crate::harnesses::provider_config_of(&mut conn, provider).await?;
                     let mut runtime =
-                        crate::provider_runtime::harness_values(&mut conn, provider, machine)
-                            .await?;
+                        crate::provider_runtime::harness_values(&mut conn, provider).await?;
                     runtime.home=Some(match candidate.volumes.pointer("/home/directory/path").and_then(Json::as_str) {
                         Some(path)=>orch_driver_contract::runtime::EnvironmentDataSource::ExistingDirectory {path:path.into()},
                         None=>orch_driver_contract::runtime::EnvironmentDataSource::MadeByOrch,
@@ -973,7 +902,6 @@ impl Recreating {
                             },
                             &AgentStart {
                                 provider_id: provider,
-                                provider_kind,
                                 agent_id: agent.id,
                                 harness_kind: agent.harness_kind,
                                 profile: serde_json::from_value(agent.profile)
@@ -1046,9 +974,6 @@ impl Recreating {
         let next: Id =
             serde_json::from_value(plan["runtime"].clone()).map_err(EngineError::from)?;
         let mut tx = job.engine().db().begin().await.map_err(EngineError::from)?;
-        if plan.get("committed").and_then(Json::as_bool) != Some(true) {
-            super::provision::creator_guard_in(&mut tx, job).await?;
-        }
         let locked = jobs::lock(&mut tx, job.id())
             .await?
             .ok_or_else(|| fail("job_gone", "the job is gone"))?;
@@ -1056,9 +981,7 @@ impl Recreating {
             return Ok(Done::Finished);
         }
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-        super::provision::creator_guard_in(&mut tx, job).await?;
         batch_authority::guard_in(&mut tx, job).await?;
-        capability_revocation::guard_in(&mut tx, job, false).await?;
         if locked.cancel_requested() {
             return Err(Stop::Cancelled);
         }
@@ -1101,9 +1024,7 @@ impl Recreating {
             let Some(row) = threads::lock(&mut *unit.conn, *thread).await? else {
                 continue;
             };
-            if batch_authority::is_restricted(&locked)
-                && !batch_authority::thread_matches(&locked, &row)
-            {
+            if batch_authority::is_restricted(&locked) && row.provider_id != locked.provider_id {
                 return Err(fail(
                     "access.denied",
                     "The affected thread no longer belongs to this provider update.",
@@ -1175,7 +1096,6 @@ impl Recreating {
         .await?;
         jobs::merge_plan(&mut tx, job.id(), &json!({"committed":true}), job.now()).await?;
         hosts::delete_runtime_secret(&mut tx, next, "enroll_token").await?;
-        batch_authority::deadline_in(&mut tx, job).await?;
         job.engine().commit(tx, finished).await?;
         Ok(Done::Finished)
     }
@@ -1186,7 +1106,6 @@ impl Recreating {
             return Ok(None);
         }
         batch_authority::cleanup_guard(job).await?;
-        capability_revocation::guard(job, true).await?;
         let mut cleanup_detail = None;
         let old = self.old(job).await?;
         let mut conn = job
@@ -1280,26 +1199,7 @@ impl Recreating {
                     .is_some_and(|provider| provider.status == "disabled"),
             };
         drop(guard_conn);
-        let removed_capability = capability_revocation::applies(&job.row().await?);
-        if removed_capability {
-            job.command_to_undo(
-                Outgoing::new(
-                    ids::derived("capability.recreate.stop", &[job.id().as_bytes()]),
-                    host.machine_id,
-                    SerialKey::Runtime(old.id),
-                    &NodeRuntimeStop {
-                        runtime_id: old.id,
-                        reason: Some(orch_driver_contract::runtime::UnitReason::Recreate),
-                    },
-                )
-                .map_err(EngineError::from)?,
-            )
-            .await?;
-        }
-        let resume = !removed_capability
-            && !guarded
-            && !disabled
-            && (self.recipe.auto_start || !self.recipe.was_stopped);
+        let resume = !guarded && !disabled && (self.recipe.auto_start || !self.recipe.was_stopped);
         if resume
             && (plan.get("old_stop_requested").and_then(Json::as_bool) == Some(true)
                 || self.recipe.auto_start
@@ -1595,9 +1495,7 @@ impl Phased for Recreating {
         if phase != "commit"
             || job.plan().await?.get("committed").and_then(Json::as_bool) != Some(true)
         {
-            super::provision::creator_phase(job, phase).await?;
             batch_authority::guard(job).await?;
-            capability_revocation::guard(job, false).await?;
         }
         match phase {
             "notify" => {

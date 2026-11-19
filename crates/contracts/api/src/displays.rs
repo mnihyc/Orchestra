@@ -148,48 +148,12 @@ crate::common::full_or_receipt! {
     }
 }
 
-/// The actual accepted display without private current session metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DisplayCreateReceipt {
-    /// This acknowledgement contains no full session projection.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual native reservation.
-    pub display_id: Id,
-    /// The actual native environment.
-    pub environment_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The native first/current session or its accepted identity receipt.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum DisplayCreateResponse {
-        /// Same native session metadata, under this operation's current Read.
-        Full(Display),
-        /// No session metadata is disclosed and no service is opened twice.
-        Receipt(DisplayCreateReceipt),
-    }
-}
-
-crate::common::full_or_receipt! {
-    /// A new once-only display ticket or its already accepted identity.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum DisplayTicketCreateResponse {
-        /// The unchanged first native credential.
-        Full(DisplayTicketCreateReply),
-        /// No secret is stored or returned again.
-        Receipt(crate::common::TicketCreateReceipt),
-    }
-}
-
 crate::endpoints! {
     /// Lists displays and optionally rediscovers installed programs.
     EnvironmentDisplayList: GET "/environments/{id}/displays", Permission("vnc.view"), query EnvironmentDisplayListQuery, none, json EnvironmentDisplays, 200;
     /// Opens a virtual screen for programs with windows.
-    EnvironmentDisplayCreate: POST "/environments/{id}/displays", Permission("vnc.manage"), query ThroughThreadQuery, json EnvironmentDisplayCreateBody, json DisplayCreateResponse, 201,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Object(K::Environment)],Target::PermissionObject),
-            Facet::response_content(&[Object(K::Environment)],Target::PermissionObject),
-            Facet::response_content(&[Object(K::Thread)],Target::ResolvedCollection("close_threads")),
-        ]));
+    EnvironmentDisplayCreate: POST "/environments/{id}/displays", Permission("vnc.manage"), query ThroughThreadQuery, json EnvironmentDisplayCreateBody, json Display, 201,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Stops an owned virtual screen or lets go of an announced server.
     DisplayClose: DELETE "/displays/{display_id}", Rule("vnc.manage on its environment"), none, none, json DisplayCloseResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -198,8 +162,8 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("close_threads")),
         ]));
     /// Gives a ticket to watch or, with Manage, work in a display.
-    DisplayTicketCreate: POST "/displays/{display_id}/ticket", Rule("vnc.view on its environment; control also needs vnc.manage"), none, json DisplayTicketCreateBody, json DisplayTicketCreateResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    DisplayTicketCreate: POST "/displays/{display_id}/ticket", Rule("vnc.view on its environment; control also needs vnc.manage"), none, json DisplayTicketCreateBody, json DisplayTicketCreateReply, 200,
+        operation Op::variants(&[
             Variant {
                 name: "view",
                 selector: "control is false",
@@ -225,7 +189,7 @@ crate::endpoints! {
                     ),
                 ],
             },
-        ]));
+        ]);
     /// Carries a display's RFB connection without a viewer password.
     DisplayAttach: GET "/ws/displays/{display_id}", Public, query DisplayAttachQuery, none, raw, 101,
         operation Op::protocol();

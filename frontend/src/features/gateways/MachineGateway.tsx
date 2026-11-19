@@ -20,7 +20,7 @@ export function MachineGatewayCard({ status, gateways, onRefresh, refreshing = f
       <div className="inline-flex min-w-0 items-center gap-1"><h3 className="text-sm font-medium">{t('regionalGateways.connector')}</h3>
         <HelpHint term={t('regionalGateways.primary')} what={t('regionalGateways.primaryHelp')}
           guide={{ article: 'connect-a-machine', heading: 'choose-a-gateway' }} /></div>
-      {onRefresh !== undefined && <IconButton action="refresh" size="sm" label={t('regionalGateways.refreshConnector')} pending={refreshing} onClick={onRefresh} />}
+      {onRefresh !== undefined && <IconButton action="refresh" size="sm" label={t('regionalGateways.refresh')} pending={refreshing} onClick={onRefresh} />}
     </div>
     <Facts compact label={t('regionalGateways.connector')} rows={[
       { name: t('regionalGateways.primary'), value: <GatewayName id={status.primary_gateway_id} gateways={gateways} /> },

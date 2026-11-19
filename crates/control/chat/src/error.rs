@@ -117,15 +117,6 @@ pub enum Error {
     /// Only the author may do it.
     #[error("only the author does that")]
     NotTheAuthor,
-    /// Group management belongs to its current managers and the home's management reach.
-    #[error("Only a current chat manager may do that")]
-    ManagerRequired,
-    /// A group keeps at least one current manager membership.
-    #[error("A chat must keep a manager")]
-    LastManager,
-    /// Membership and guests stay in their original root organization.
-    #[error("A chat stays in its organization. Make a new chat there and share a link.")]
-    MoveCrossesOrg,
     /// A secret of the node could not be read, so that nothing can be written
     /// that might hold one.
     #[error("the secrets that text must be masked of cannot be read: {0}")]

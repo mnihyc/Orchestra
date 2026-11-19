@@ -26,11 +26,6 @@ use orch_link_contract::commands::{
 use orch_model_contract::protocol::EMBEDDINGS as EMBEDDINGS_PROTOCOL;
 use orch_types::{Id, Time, new_id};
 
-enum Origin<'a> {
-    Query(Box<super::query_origin::QueryWork>),
-    Administration(&'a super::administration::Work),
-}
-
 #[derive(sqlx::FromRow)]
 struct Pending {
     id: Id,
@@ -144,39 +139,6 @@ impl Engine {
         named: &Embeddings,
         texts: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, EmbedError> {
-        self.embed_texts_for_query(org, named, texts, None).await
-    }
-
-    pub(super) async fn embed_texts_for_query(
-        &self,
-        org: Id,
-        named: &Embeddings,
-        texts: Vec<String>,
-        query: Option<super::query_origin::QueryWork>,
-    ) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let origin = query.map(|query| Origin::Query(Box::new(query)));
-        self.embed_texts_native(org, named, texts, origin).await
-    }
-
-    /// The same supplier with the actual administrative index request and original operation.
-    pub(crate) async fn embed_texts_for(
-        &self,
-        org: Id,
-        named: &Embeddings,
-        texts: Vec<String>,
-        work: Option<&super::administration::Work>,
-    ) -> Result<Vec<Vec<f32>>, EmbedError> {
-        self.embed_texts_native(org, named, texts, work.map(Origin::Administration))
-            .await
-    }
-
-    async fn embed_texts_native(
-        &self,
-        org: Id,
-        named: &Embeddings,
-        texts: Vec<String>,
-        origin: Option<Origin<'_>>,
-    ) -> Result<Vec<Vec<f32>>, EmbedError> {
         let writer = named.writer.ok_or_else(|| {
             unavailable(
                 "access",
@@ -184,17 +146,6 @@ impl Engine {
             )
         })?;
         let mut tx = self.db().begin().await?;
-        let source = if let Some(Origin::Query(query)) = &origin {
-            Some(
-                query
-                    .prepare(&mut tx, self.inner.clock.as_ref())
-                    .await?
-                    .into_parts()
-                    .opened,
-            )
-        } else {
-            None
-        };
         // Serialize short admission with a lifecycle edit, never with the remote request itself.
         let present = sqlx::query("SELECT id FROM providers WHERE id=$1 FOR SHARE")
             .bind(named.provider_id)
@@ -238,8 +189,6 @@ impl Engine {
                     provider: provider.id,
                     model: Some(&named.model_name),
                     effort: None,
-                    // Embeddings run in no environment.
-                    runs_in: None,
                 },
             )
             .await
@@ -297,13 +246,8 @@ impl Engine {
         let params =
             resources::provider_request_defaults(&mut tx, provider.id, EMBEDDINGS_PROTOCOL).await?;
         let parameters: orch_provider_contract::models::ModelParameters =
-            orch_provider_contract::models::composed_model_parameters(
-                &model.parameters,
-                &model.groups,
-                &model.option_layers,
-                Some(EMBEDDINGS_PROTOCOL),
-            )
-            .map_err(|_| unavailable("parameters", "the model parameters cannot be read"))?;
+            serde_json::from_value(model.parameters.clone())
+                .map_err(|_| unavailable("parameters", "the model parameters cannot be read"))?;
         let params = orch_model_contract::parameters::resolve(
             EMBEDDINGS_PROTOCOL,
             &parameters,
@@ -327,50 +271,9 @@ impl Engine {
         let deadline = chrono::Duration::seconds(i64::from(
             orch_link_contract::commands::CommandKind::ProviderEmbed.deadline_secs(),
         ));
-        let mut outgoing = Outgoing::new(call, machine, SerialKey::None, &request)
+        let outgoing = Outgoing::new(call, machine, SerialKey::None, &request)
             .map_err(|error| EngineError::unreadable(error.to_string()))?
             .by(Time::new(admitted + deadline));
-        let original = match origin {
-            Some(Origin::Query(query)) => {
-                let frame = source
-                    .as_ref()
-                    .ok_or_else(|| {
-                        EngineError::unreadable("the semantic query lost its native source")
-                    })?
-                    .refresh(&mut tx, self.inner.clock.as_ref())
-                    .await
-                    .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
-                let caller = frame.principal().caller().clone();
-                let authority = super::query_origin::QueryAuthority::capture(*query, &outgoing)?;
-                outgoing = outgoing.with_authority(
-                    crate::commands::CommandAuthority::SemanticQuery(Box::new(authority)),
-                );
-                frame
-                    .into_parts()
-                    .first_effect
-                    .check(self.inner.clock.as_ref())
-                    .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
-                Some(caller)
-            }
-            Some(Origin::Administration(work)) => {
-                let checked = work
-                    .checkpoint(&mut tx, self.inner.clock.as_ref())
-                    .await
-                    .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
-                let authority = super::administration::EmbeddingCommand::capture(
-                    work, &outgoing, named, writer,
-                )?;
-                outgoing = outgoing.with_authority(
-                    crate::commands::CommandAuthority::semantic_embedding(authority),
-                );
-                checked
-                    .before
-                    .check(self.inner.clock.as_ref())
-                    .map_err(|error| EngineError::BeforeEffect(Box::new(error)))?;
-                Some(checked.caller)
-            }
-            None => None,
-        };
         sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,provider_id,person_id,model_name,created_at,purpose)
             VALUES ($1,$2,$2,$3,$4,$5,$6,'embeddings') ON CONFLICT(id) DO NOTHING")
             .bind(call).bind(org).bind(provider.id).bind(writer).bind(&named.model_name).bind(admitted)
@@ -390,32 +293,11 @@ impl Engine {
             self.forget_embedding_call(call).await?;
             return Err(unavailable(reason, pause_detail(reason)));
         }
-        let issued = if let Some(caller) = original {
-            let clock = self.inner.clock.clone();
-            self.inner
-                .commands
-                .issue_before(
-                    outgoing,
-                    Box::new(move || {
-                        if caller.key_deadline_allows(clock.as_ref()) {
-                            Ok(())
-                        } else {
-                            Err(Box::new(continuing_refusal())
-                                as Box<dyn std::error::Error + Send + Sync>)
-                        }
-                    }),
-                )
-                .await
-        } else {
-            self.inner.commands.issue(outgoing).await
-        };
-        match issued {
-            Ok(()) => {}
-            Err(crate::commands::CommandsError::BeforeEffect(error)) => {
-                return Err(EngineError::BeforeEffect(error).into());
-            }
-            Err(error) => return Err(EngineError::from(error).into()),
-        }
+        self.inner
+            .commands
+            .issue(outgoing)
+            .await
+            .map_err(|error| EngineError::unreadable(error.to_string()))?;
         let stopped = {
             let mut conn = self.db().acquire().await?;
             rows::embedding_pause_reason(&mut conn, call, provider.id)
@@ -544,7 +426,7 @@ impl Engine {
         &self,
         org: Id,
         provider: Id,
-        _writer: Option<Id>,
+        writer: Option<Id>,
         model: &str,
         call: Id,
         at: chrono::DateTime<chrono::Utc>,
@@ -563,7 +445,7 @@ impl Engine {
                 thread: None,
                 provider,
                 entry: None,
-                person: None,
+                person: writer,
                 model,
                 protocol: Some(EMBEDDINGS_PROTOCOL),
                 tokens: orch_db::usage::ledger::Tokens {
@@ -695,8 +577,4 @@ impl Engine {
         }
         Ok(())
     }
-}
-
-fn continuing_refusal() -> crate::operation_scope::continuing::Error {
-    crate::operation_scope::continuing::Error::Refused
 }

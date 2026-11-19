@@ -7,6 +7,10 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+  # The deployment scenarios package two releases and run stacks on Docker: an hour and more,
+  # so they run each night, by hand and for release tags, not on every branch push.
+  schedule:
+    - cron: "23 2 * * *"
 
 permissions:
   contents: read
@@ -18,34 +22,19 @@ concurrency:
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
-    # The slowest platform leg, macOS on Intel, takes about 200 minutes with a cache and, compiling from nothing
-    # without the plain check, about 230 (lint 90, connector tests 36, documentation 34, the executable's own
-    # build about 60). Keep about 45 minutes of headroom over that without holding the release gate for six hours.
-    timeout-minutes: 270
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
-    env:
-      # These debug builds check and run executables, without needing debug info.
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Prepare memory for Linux compilation
-        if: runner.os == 'Linux'
-        run: |
-          bash .github/scripts/ci_memory.sh
-          printf '%s\n' 'CARGO_BUILD_JOBS=1' >> "$GITHUB_ENV"
       - name: Install the repository toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ci-rust
           cache-bin: 'false'
-          # A leg that fails or runs out of time has still compiled: keep that for the next run of the branch.
-          cache-on-failure: 'true'
       - name: Check formatting
         # Formatting does not depend on the platform, and on Windows cargo fmt passes a package's files to rustfmt in
         # one command line that is longer than Windows allows (os error 206).
@@ -53,11 +42,8 @@ jobs:
         run: cargo fmt --all --check
       # Every check runs even when one before it failed, and each keeps going past a crate that fails, so that one run
       # lists every finding of every crate instead of the first layer of them.
-      # The plain check lists the errors of crates that a denied lint in a crate below them would hide from the
-      # lint step. It runs on Linux only: the lint step compiles the same code on every platform, and on the
-      # slowest leg the two together (72 and 90 minutes from nothing on Intel macOS) ran the job out of its time.
       - name: Compile scaffold
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        if: ${{ !cancelled() }}
         run: cargo check --workspace --all-targets --locked --keep-going
       - name: Lint
         if: ${{ !cancelled() }}
@@ -103,27 +89,12 @@ jobs:
       CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Prepare memory for static compilation
-        run: bash .github/scripts/ci_memory.sh
       - name: Install the musl C compiler
-        # The distribution mirror's name at times does not resolve, for minutes or for hours: each attempt
-        # first puts the mirrors that answer at the head of the list, and a failed installation is tried
-        # again, up to four more times, after growing waits.
-        run: |
-          wait=30
-          for attempt in 1 2 3 4 5; do
-            bash .github/scripts/ci_apt_mirror.sh
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools && exit 0
-            echo "Installing the musl C compiler failed (attempt $attempt of 5)."
-            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
-          done
-          exit 1
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - name: Install the repository toolchain
         run: rustup show
       - name: Compile static machine placeholders and CLI
-        # Keep optimized static compilation on one Cargo job, with swap for the
-        # largest crate. Release settings are the same as native packaging.
-        run: cargo build --release --locked -j 1 -p orchctl -p orch-connector -p orch-node --target ${{ matrix.target }}
+        run: cargo build --release --locked -p orchctl -p orch-connector -p orch-node --target ${{ matrix.target }}
 
   dependencies:
     name: Dependencies
@@ -144,7 +115,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [api-0, api-1, api-2, api-3, api-4, api-5, api-6, api-7, engine-0, engine-1, engine-2, rest-0, rest-1, rest-2, rest-3]
+        shard: [api-0, api-1, api-2, api-3, api-4, api-5, engine-0, engine-1, engine-2, rest-0, rest-1, rest-2, rest-3]
     services:
       # The database the deployment runs, by the same digest.
       postgres:
@@ -165,8 +136,6 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
-      # Keep the large libraries and their test harnesses from compiling concurrently.
-      CARGO_BUILD_JOBS: '1'
       # Debug futures of the API and the engine outgrow the default 2 MiB thread stack, as the servers' own 8 MiB
       # workers acknowledge; the cases that must hold on default stacks run themselves again without this.
       RUST_MIN_STACK: "33554432"
@@ -177,20 +146,6 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install the deployment database search extensions
-        if: startsWith(matrix.shard, 'api-') || startsWith(matrix.shard, 'engine-')
-        env:
-          ORCH_CI_POSTGRES: ${{ job.services.postgres.id }}
-        # Service containers start before checkout. Build the same pinned extension
-        # files as deployment and add them before any fixture template is migrated.
-        run: |
-          set -euo pipefail
-          docker build --tag orch-ci-database ./deploy/postgres
-          docker run --rm --entrypoint tar orch-ci-database -C /usr/local -cf - lib/postgresql/vector.so lib/postgresql/pg_bigm.so share/postgresql/extension |
-            docker exec -i "$ORCH_CI_POSTGRES" tar -C /usr/local -xf -
-          docker exec "$ORCH_CI_POSTGRES" psql -U orch -d postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_bigm;'
-      - name: Prepare memory for test compilation
-        run: bash .github/scripts/ci_memory.sh
       - name: Install the repository toolchain
         run: rustup show
       # Every shard restores one dependency-only cache; the first API shard saves it once.
@@ -199,9 +154,6 @@ jobs:
           shared-key: ci-tests
           save-if: ${{ matrix.shard == 'api-0' }}
           cache-bin: 'false'
-          # The one shard that saves the shared cache saves it whether or not its cases pass: a failing case in it
-          # had left every shard of every later run to compile from nothing.
-          cache-on-failure: 'true'
       # The generated types come from the web app's own openapi-typescript, read from its lock file.
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         if: matrix.shard == 'rest-0'
@@ -220,26 +172,6 @@ jobs:
       - name: Build the connector the tests start
         if: ${{ !cancelled() }}
         run: cargo build --locked -p orch-connector
-      - name: Plan the assigned native fixtures
-        if: ${{ !cancelled() }}
-        id: native-fixtures
-        run: |
-          fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}' --plan)
-          printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
-      - name: Install the native fixtures' C compiler
-        if: ${{ !cancelled() && (fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector) }}
-        # The distribution mirror's name at times does not resolve, for minutes or for hours: each attempt
-        # first puts the mirrors that answer at the head of the list, and a failed installation is tried
-        # again, up to four more times, after growing waits.
-        run: |
-          wait=30
-          for attempt in 1 2 3 4 5; do
-            bash .github/scripts/ci_apt_mirror.sh
-            sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools && exit 0
-            echo "Installing the musl C compiler failed (attempt $attempt of 5)."
-            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
-          done
-          exit 1
       - name: Prepare the assigned tests' Docker fixtures
         if: ${{ !cancelled() }}
         run: python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}'
@@ -285,9 +217,7 @@ jobs:
   web-build:
     name: Web units and production build
     runs-on: ubuntu-24.04
-    # The unit suite takes about twenty minutes; the limit keeps one stalled file from ending the job
-    # before the browser plan is made.
-    timeout-minutes: 120
+    timeout-minutes: 60
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       artifact: ${{ steps.artifact.outputs.name }}
@@ -347,9 +277,7 @@ jobs:
     needs: web-build
     if: ${{ !cancelled() && needs.web-build.outputs.matrix != '' }}
     runs-on: ubuntu-24.04
-    # A group is planned for half an hour of passing cases. Failing cases run to their timeouts and are
-    # retried, so the limit leaves a failing group the time to finish and report every case.
-    timeout-minutes: 180
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.web-build.outputs.matrix || '{"include":[{"name":"unavailable"}]}') }}
@@ -364,18 +292,7 @@ jobs:
         with:
           name: ${{ needs.web-build.outputs.artifact }}
       - name: Install the repository browser
-        # Its system packages come from a distribution mirror whose name at times does not resolve, for
-        # minutes or for hours: each attempt first puts the mirrors that answer at the head of the list, and
-        # a failed installation is tried again, up to four more times, after growing waits.
-        run: |
-          wait=30
-          for attempt in 1 2 3 4 5; do
-            bash ../.github/scripts/ci_apt_mirror.sh
-            npx playwright install --with-deps chromium && exit 0
-            echo "The browser installation failed (attempt $attempt of 5)."
-            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
-          done
-          exit 1
+        run: npx playwright install --with-deps chromium
         working-directory: frontend
       - name: Verify selectors and run the complete assigned inventory
         run: python3 -I -B .github/scripts/ci_web.py run --group '${{ matrix.name }}'
@@ -430,3 +347,17 @@ jobs:
           path: .tmp/ci-web/coverage.json
           include-hidden-files: true
           if-no-files-found: error
+
+  deploy-smoke:
+    name: Deployment scenarios
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the repository toolchain
+        run: rustup show
+      - name: Package two releases and run every scenario on Docker
+        env:
+          ORCH_SMOKE_RUN: ci${{ github.run_id }}
+        run: bash scripts/smoke/run-all.sh

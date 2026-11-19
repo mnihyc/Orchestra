@@ -209,8 +209,7 @@ pub async fn current_callers(
     // The input association is frozen while delivering/steering; the canonical row's
     // immutable id/key/body was independently checked by the dispatcher. No input edit
     // can lend the retained native command a later author's or model approver's origin.
-    let known_author = super::saved_authority(input.submission_authority.as_ref())?
-        .is_some_and(|saved| saved.has_actor_origins());
+    let known_author = input.submission_authority.is_some();
     let known_actor = if input.run_as.is_some() {
         input.run_as_authority.is_some()
     } else {
@@ -240,19 +239,6 @@ pub async fn current_callers(
     .await
     .map_err(orch_db::DbError::from)?;
     if !associated {
-        return Ok(None);
-    }
-    if let Some(parent) = super::saved_authority(input.submission_authority.as_ref())?
-        .and_then(|authority| authority.capability_parent().cloned())
-        && !parent.current_use(conn, clock, access).await?
-    {
-        return Ok(None);
-    }
-    if input.id != turn.input_id
-        && let Some(original) = threads::input(conn, turn.input_id).await?
-        && super::saved_authority(original.submission_authority.as_ref())?
-            .is_some_and(|authority| authority.capability_parent().is_some())
-    {
         return Ok(None);
     }
     let mut unit = Unit::new(conn, clock.now());
@@ -314,14 +300,6 @@ pub async fn current_callers(
             Err(crate::native_actions::NativeError::Internal(error)) => return Err(error),
             Err(_) => return Ok(None),
         }
-    }
-    if let Some(parent) = super::saved_authority(input.submission_authority.as_ref())?
-        .and_then(|authority| authority.capability_parent().cloned())
-    {
-        let Some(parent_callers) = parent.current_callers(unit.conn, clock, access).await? else {
-            return Ok(None);
-        };
-        callers.extend(parent_callers);
     }
     if callers.iter().any(|(caller, _)| {
         caller

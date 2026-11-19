@@ -41,8 +41,6 @@ export interface ViewTabProps {
   menu: readonly MenuEntry[];
   onSelect: () => void;
   onClose: () => void;
-  /** A surviving tab when closing this tab removes its entire group. */
-  focusFallback?: () => HTMLElement | null;
   onDoubleClick?: (() => void) | undefined;
   /** What makes the tab a handle: the ref and the attributes of whatever moves it. */
   handleRef?: Ref<HTMLDivElement>;
@@ -67,7 +65,6 @@ export function ViewTab({
   menu,
   onSelect,
   onClose,
-  focusFallback,
   onDoubleClick,
   handleRef,
   handleProps,
@@ -78,9 +75,8 @@ export function ViewTab({
     if (open) menuStrip.current = document.getElementById(id)?.closest<HTMLElement>('[role="tablist"]') ?? null;
   };
   const restoreMenuFocus = (event: Event) => {
-    const original = document.getElementById(id)
+    const destination = document.getElementById(id)
       ?? menuStrip.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
-    const destination = original?.isConnected ? original : focusFallback?.();
     if (destination?.isConnected) { event.preventDefault(); destination.focus(); }
   };
   const said = about === undefined ? title : `${title} · ${about}`;
@@ -93,7 +89,7 @@ export function ViewTab({
       <div
         role="presentation"
         className={cx(
-          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
+          'group/tab relative flex h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
           active ? 'bg-bg text-text' : 'text-text-muted hover:bg-bg-muted hover:text-text',
           carried && 'opacity-50',
         )}

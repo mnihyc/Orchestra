@@ -129,7 +129,6 @@ impl Engine {
         thread: &ThreadRow,
         args: &Arguments,
         source: &str,
-        budgets: &super::SearchBudgets,
     ) -> Result<Answer, EngineError> {
         if !args.query.is_empty()
             || args.regex.is_some()
@@ -213,9 +212,7 @@ impl Engine {
         let limit = args
             .max_results
             .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(
-                RESULTS_DEFAULT.min(usize::try_from(budgets.results).unwrap_or(RESULTS_DEFAULT)),
-            );
+            .map_or(RESULTS_DEFAULT, |value| value.max(1));
         // The scopes the agent reaches, for the conservative narrowing; each source is then looked up in its tree.
         let mut scopes = vec![thread.node_id];
         let mut documents = vec![document];

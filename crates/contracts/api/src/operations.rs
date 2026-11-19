@@ -16,81 +16,6 @@ use serde::Serialize;
 
 use crate::routes::{Access, Route};
 
-/// The bounded organization opening shares the native node/source projection and
-/// the personal setup read. Outside openings retain their native administration act.
-#[must_use]
-pub const fn org_overview_facets() -> [FacetSpec; 6] {
-    use KeyAction::{Manage, Read};
-    use KeyTargetKind::{Identity, Object};
-    [
-        FacetSpec::required(
-            Read,
-            &[
-                Object(ObjectKind::Org),
-                Object(ObjectKind::Project),
-                Object(ObjectKind::Topic),
-                Object(ObjectKind::Thread),
-            ],
-            TargetResolver::ResolvedCollection("overview_nodes"),
-        ),
-        FacetSpec::required(
-            Read,
-            &[
-                Object(ObjectKind::Org),
-                Object(ObjectKind::Project),
-                Object(ObjectKind::Topic),
-                Object(ObjectKind::Thread),
-                Object(ObjectKind::Document),
-                Object(ObjectKind::Provider),
-                Object(ObjectKind::Environment),
-                Object(ObjectKind::Agent),
-                Object(ObjectKind::Machine),
-                Object(ObjectKind::Host),
-                Object(ObjectKind::Template),
-                Object(ObjectKind::McpServer),
-                Object(ObjectKind::Mount),
-                Object(ObjectKind::Skill),
-            ],
-            TargetResolver::ResolvedCollection("overview_sources"),
-        ),
-        FacetSpec::required(Read, &[Object(ObjectKind::Org)], TargetResolver::Path("id")),
-        FacetSpec::required(
-            Read,
-            &[Identity(KeyIdentityKind::Account)],
-            TargetResolver::ResolvedCollection("overview_account"),
-        ),
-        FacetSpec::required(
-            Manage,
-            &[Object(ObjectKind::Org)],
-            TargetResolver::ResolvedCollection("overview_outside_openings"),
-        ),
-        FacetSpec::required(
-            Read,
-            &[Identity(KeyIdentityKind::Notification)],
-            TargetResolver::ResolvedCollection("overview_delivery"),
-        ),
-    ]
-}
-
-/// Project/topic openings use the same factual source roles without an account/setup read.
-#[must_use]
-pub const fn node_overview_facets() -> [FacetSpec; 6] {
-    use KeyAction::{Manage, Read};
-    use KeyTargetKind::Object;
-    let mut facets = org_overview_facets();
-    facets[2] = FacetSpec::required(
-        Read,
-        &[Object(ObjectKind::Project), Object(ObjectKind::Topic)],
-        TargetResolver::Path("id"),
-    );
-    facets[4] = FacetSpec::required(
-        Manage,
-        &[Object(ObjectKind::Project), Object(ObjectKind::Topic)],
-        TargetResolver::ResolvedCollection("overview_outside_openings"),
-    );
-    facets
-}
-
 /// Whether a declaration is an operation a person can delegate to a credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -905,20 +830,14 @@ mod tests {
                 .iter()
                 .any(|facet| facet.action == KeyAction::Read
                     && facet.usage == FacetUsage::Required
-                    && facet.target
-                        == TargetResolver::ResolvedCollection(
-                            crate::document_sources::OPERATION_AFFECTED
-                        ))
+                    && facet.target == TargetResolver::Resolved("sources"))
         );
         assert!(
             copy.facets
                 .iter()
                 .any(|facet| facet.action == KeyAction::Write
                     && facet.usage == FacetUsage::Required
-                    && facet.target
-                        == TargetResolver::ResolvedCollection(
-                            crate::document_sources::OPERATION_DESTINATIONS
-                        ))
+                    && facet.target == TargetResolver::Resolved("destination"))
         );
     }
 

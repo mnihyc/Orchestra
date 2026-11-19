@@ -117,21 +117,6 @@ async fn malformed_request_options_are_refused_before_the_completion_port() {
 }
 
 #[tokio::test]
-async fn an_input_budget_that_cannot_hold_the_actual_instruction_never_calls_the_paid_port() {
-    let port = Arc::new(Port {
-        text: "unused".into(),
-        requests: Mutex::new(vec![]),
-    });
-    let mut input = request(SummaryField::Summary);
-    input.config["context_tokens"] = json!(10);
-    assert!(matches!(
-        Model::new(port.clone()).summarize(input).await,
-        Err(SummarizeError::Config(_))
-    ));
-    assert!(port.requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn a_fitting_title_is_returned_unchanged_and_hostile_activity_stays_in_user_material() {
     let port = Arc::new(Port {
         text: "Fix login".to_owned(),

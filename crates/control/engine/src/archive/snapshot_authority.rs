@@ -1,6 +1,6 @@
 //! The existing Snapshot read door and its actual current credential targets.
 //! Stored copied bytes follow the Thread's current Environment; native recordings keep theirs;
-//! a threadless whole-workspace export retains its maker's custody after removal.
+//! a threadless whole-workspace export remains private to its maker even after removal.
 
 use crate::EngineError;
 use crate::commands::Outgoing;
@@ -58,10 +58,10 @@ impl Source {
         } else {
             None
         };
-        Ok(Self::with_current(row, current))
+        Ok(Self::from_current(row, current))
     }
 
-    fn with_current(row: SnapshotRow, current: Option<Id>) -> Option<Self> {
+    fn from_current(row: SnapshotRow, current: Option<Id>) -> Option<Self> {
         let environment = if row.thread_id.is_some() && row.storage != "environment" {
             current?
         } else {
@@ -70,8 +70,9 @@ impl Source {
         Some(Self { row, environment })
     }
 
-    /// The existing custody rule for rows selected under one actual current Thread binding.
-    /// Every supplied row must actually belong to that Thread; no permission is supplied here.
+    /// The native list already read one actual Thread binding and its selected Snapshot rows.
+    /// Share the same custody rule without loading that Thread again for every row.
+    #[must_use]
     pub fn from_thread_rows(
         thread: Id,
         current: Option<Id>,
@@ -82,7 +83,7 @@ impl Source {
                 if row.thread_id != Some(thread) {
                     return None;
                 }
-                Self::with_current(row, current)
+                Self::from_current(row, current)
             })
             .collect()
     }
@@ -102,7 +103,7 @@ impl Source {
         permission: Permission,
     ) -> Result<Access, orch_authz::Error> {
         if self.row.thread_id.is_none() {
-            return Ok(if super::may_read_custody(principal, self.row.created_by) {
+            return Ok(if self.row.created_by == Some(principal.user()) {
                 Access::Allowed
             } else {
                 Access::MakerOnly

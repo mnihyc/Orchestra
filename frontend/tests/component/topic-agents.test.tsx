@@ -97,7 +97,7 @@ for (const [locale, theme] of modes) {
     expect(screen.getByText(i18n.t('topicAgents.defaultProvider'))).toBeVisible();
     expect(screen.getByText('M1')).toBeVisible();
     expect(screen.getByText(i18n.t('choiceCatalog.effort.low.name'))).toBeVisible();
-    expect(screen.getByRole('link', { name: i18n.t('topicAgents.defaults') })).toHaveAttribute('href', '/topic/login?tab=settings&section=defaults');
+    expect(screen.getByRole('link', { name: i18n.t('topicAgents.defaults') })).toHaveAttribute('href', '/topic/login?tab=settings&section=policies');
     expect(screen.queryByText(locale === 'zh-CN' ? '此主题旁的文档' : 'Documents beside this topic')).not.toBeInTheDocument();
     expect(calls.shares).not.toHaveBeenCalled();
     expect(calls.read).toHaveBeenCalledExactlyOnceWith(topic.id, null);

@@ -390,9 +390,6 @@ pub struct SnapshotSelection {
 /// A thread's directory kept as of a moment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Snapshot {
-    /// This maker-owned whole-workspace snapshot was opened administratively.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_access: Option<crate::access::AdminAccess>,
     /// The snapshot's identifier.
     pub id: Id,
     /// The thread it was taken for; absent for a whole-workspace export.
@@ -831,9 +828,6 @@ pub struct EnvironmentChangeListQuery {
     /// Only the changes of this turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<Id>,
-    /// Only the changes recorded by this exact file-change item.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item_id: Option<Id>,
     /// With a thread: the changes of every thread of the environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all: Option<bool>,
@@ -1051,156 +1045,33 @@ pub struct SnapshotUpdateBody {
     pub label: String,
 }
 
-/// A completed label change without existing Snapshot metadata.
+/// A successful Snapshot relabel without existing stored metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotUpdateReceipt {
     /// Identifies the restricted acknowledgement.
     pub projection: crate::common::ReceiptProjection,
-    /// The supplied Snapshot whose label was changed.
+    /// The supplied Snapshot identity whose label was updated.
     pub snapshot_id: Id,
 }
 
-/// The existing metadata under current source Read, or the completed label acknowledgement.
+/// The ordinary Snapshot body or a truthful relabel acknowledgement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum SnapshotUpdateResponse {
-    /// The original native complete Snapshot body.
+    /// Existing metadata admitted through this operation's Read facets.
     Full(Box<Snapshot>),
-    /// No existing metadata is disclosed.
+    /// No existing label, path, selection or origin metadata is returned.
     Receipt(SnapshotUpdateReceipt),
 }
+
 impl SnapshotUpdateResponse {
-    /// Extract ordinary content without treating a completed receipt as content.
+    /// Extract ordinary content while keeping a receipt a distinct outcome.
     pub fn into_full(self) -> Result<Snapshot, SnapshotUpdateReceipt> {
         match self {
             Self::Full(snapshot) => Ok(*snapshot),
             Self::Receipt(receipt) => Err(receipt),
         }
     }
-}
-
-/// The identities of a newly accepted snapshot and the job that will take it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SnapshotStartReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The new native job.
-    pub job_id: Id,
-    /// The new native snapshot.
-    pub snapshot_id: Id,
-}
-
-/// The immutable newly queued job, or its safe accepted identities.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum SnapshotStartResponse {
-    /// The native initial job body under current same-operation source Read.
-    Full(Box<Job>),
-    /// No existing source references or later job content.
-    Receipt(SnapshotStartReceipt),
-}
-impl SnapshotStartResponse {
-    /// Extract ordinary initial content while keeping a receipt distinct.
-    pub fn into_full(self) -> Result<Job, SnapshotStartReceipt> {
-        match self {
-            Self::Full(job) => Ok(*job),
-            Self::Receipt(receipt) => Err(receipt),
-        }
-    }
-}
-
-/// A completed native copy acknowledgement without existing file metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct FileCopyReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The supplied Environment identity.
-    pub environment_id: Id,
-    /// The supplied destination path after normal path validation.
-    pub path: String,
-}
-
-/// The native copied metadata, or the safe completed path acknowledgement.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum FileCopyResponse {
-    /// Metadata admitted through this copy operation's current Read.
-    Full(Box<FileStat>),
-    /// The copy completed without disclosing existing file metadata.
-    Receipt(FileCopyReceipt),
-}
-impl FileCopyResponse {
-    /// Extract ordinary content while keeping a receipt distinct.
-    pub fn into_full(self) -> Result<FileStat, FileCopyReceipt> {
-        match self {
-            Self::Full(stat) => Ok(*stat),
-            Self::Receipt(receipt) => Err(receipt),
-        }
-    }
-}
-
-/// The accepted directory path without existing filesystem metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct FileMkdirReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The supplied Environment identity.
-    pub environment_id: Id,
-    /// The supplied path after native validation.
-    pub path: String,
-}
-crate::common::full_or_receipt! {
-    /// Confirmed native directory metadata, or its truthful accepted path.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum FileMkdirResponse {
-        Full(FileStat),
-        Receipt(FileMkdirReceipt),
-    }
-}
-
-/// A completed cancellation request without existing job progress or result content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct JobCancelReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The supplied Job identity.
-    pub job_id: Id,
-    /// Whether this call recorded a cancellation request; false for an already ended job.
-    pub cancel_requested: bool,
-}
-
-/// The ordinary job body or a truthful cancellation acknowledgement.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum JobCancelResponse {
-    /// Existing content admitted through this operation's Read facet.
-    Full(Box<Job>),
-    /// No existing progress, plan or result is disclosed.
-    Receipt(JobCancelReceipt),
-}
-
-impl JobCancelResponse {
-    /// Extract ordinary content while keeping a receipt distinct.
-    pub fn into_full(self) -> Result<Job, JobCancelReceipt> {
-        match self {
-            Self::Full(job) => Ok(*job),
-            Self::Receipt(receipt) => Err(receipt),
-        }
-    }
-}
-
-/// Only the job newly accepted by a native creation, without existing job content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct JobCreationReceipt {
-    /// Restricted acknowledgement marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual newly queued job.
-    pub job_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// Current native job content or its accepted identity acknowledgement.
-    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
-    pub enum JobCreationResponse {Full(Job),Receipt(JobCreationReceipt),}
 }
 
 crate::endpoints! {
@@ -1218,26 +1089,22 @@ crate::endpoints! {
     EnvironmentFileContentPut: PUT "/environments/{id}/files/content", Permission("files.manage"), query EnvironmentFileContentPutQuery, bytes, json FileStat, 200,
         operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Writes completed uploaded content as a job, whose cancellation waits for the machine to stop.
-    EnvironmentUploadWrite: POST "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadWriteBody, json JobCreationResponse, 202,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Write, &[Object(K::Environment)], Target::PermissionObject),
-            Facet::response_content(&[Object(K::Environment)], Target::Resolved("upload_job_environment")),
-            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("job_machine_names")),
-        ]));
+    EnvironmentUploadWrite: POST "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadWriteBody, json Job, 202,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Reads the confirmed file receipt, or the actual refusal, after an upload job ends.
     EnvironmentUploadWriteResult: GET "/environments/{id}/files/uploads/{upload_id}/write", Permission("files.view"), query ThroughThreadQuery, none, json FileStat, 200;
     /// Groups the caller's upload writes and retained partial progress into one history entry.
     EnvironmentUploadFinish: POST "/environments/{id}/files/uploads/{upload_id}/finish", Permission("files.manage"), query ThroughThreadQuery, json EnvironmentUploadFinishBody, none, 204,
         operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Makes a directory in an environment's workspace.
-    EnvironmentFileMkdir: POST "/environments/{id}/files/mkdir", Permission("files.manage"), query ThroughThreadQuery, json FilePathBody, json FileMkdirResponse, 200,
-        operation Op::receipt(&Op::returning(Write, &[Object(K::Environment)], Target::PermissionObject));
+    EnvironmentFileMkdir: POST "/environments/{id}/files/mkdir", Permission("files.manage"), query ThroughThreadQuery, json FilePathBody, json FileStat, 200,
+        operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Renames a file or a directory, which is also how one is moved.
     EnvironmentFileRename: POST "/environments/{id}/files/rename", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200,
         operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
     /// Copies a file, or a directory with what is in it.
-    EnvironmentFileCopy: POST "/environments/{id}/files/copy", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileCopyResponse, 200,
-        operation Op::receipt(&Op::facets(&[
+    EnvironmentFileCopy: POST "/environments/{id}/files/copy", Permission("files.manage"), query ThroughThreadQuery, json FileFromToBody, json FileStat, 200,
+        operation Op::facets(&[
             Facet::required(
                 Read,
                 &[Object(K::Environment)],
@@ -1248,8 +1115,7 @@ crate::endpoints! {
                 &[Object(K::Environment)],
                 Target::Resolved("copy_destination"),
             ),
-            Facet::response_content(&[Object(K::Environment)], Target::Resolved("copy_reply_environment")),
-        ]));
+        ]);
     /// Deletes a file, or a directory with what is in it.
     EnvironmentFileDelete: DELETE "/environments/{id}/files", Permission("files.manage"), query EnvironmentFileDeleteQuery, none, none, 204,
         operation Op::single(Write, &[Object(K::Environment)], Target::PermissionObject);
@@ -1268,15 +1134,12 @@ crate::endpoints! {
     /// Lists the snapshots of a thread, newest first.
     ThreadSnapshotList: GET "/threads/{id}/snapshots", Rule("files.view on the thread's environment"), query PageQuery, none, json Page<Snapshot>, 200,
         operation Op::facets(&[
-            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_governors")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_environments")),
             Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("snapshot_origins")),
         ]);
-    /// Whole-workspace exports kept by this reader, or inspected in browser administration.
-    EnvironmentSnapshotList: GET "/environments/{id}/snapshots", Rule("files.view and snapshot custody"), query PageQuery, none, json Page<Snapshot>, 200,
-        operation Op::facets(&[Facet::required(Read, &[Object(K::Environment)], Target::Path("id"))]);
     /// Starts taking a snapshot of a thread's directory as a job whose result names the snapshot.
-    ThreadSnapshotCreate: POST "/threads/{id}/snapshots", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotCreateBody, json SnapshotStartResponse, 202,
-        operation Op::receipt(&Op::facets(&[
+    ThreadSnapshotCreate: POST "/threads/{id}/snapshots", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotCreateBody, json Job, 202,
+        operation Op::facets(&[
             Facet::required(
                 Read,
                 &[Object(K::Environment)],
@@ -1287,11 +1150,10 @@ crate::endpoints! {
                 &[Object(K::Environment)],
                 Target::Resolved("environment"),
             ),
-            Facet::response_content(&[Object(K::Environment)], Target::Resolved("snapshot_reply_environment")),
-        ]));
+        ]);
     /// Captures an owner's complete workspace through the same leased snapshot job, even without a thread.
-    EnvironmentFilesExport: POST "/environments/{id}/files/export", Rule("environment.manage"), none, none, json SnapshotStartResponse, 202,
-        operation Op::receipt(&Op::facets(&[
+    EnvironmentFilesExport: POST "/environments/{id}/files/export", Rule("environment.manage"), none, none, json Job, 202,
+        operation Op::facets(&[
             Facet::required(
                 Read,
                 &[Object(K::Environment)],
@@ -1302,8 +1164,7 @@ crate::endpoints! {
                 &[Object(K::Environment)],
                 Target::Resolved("environment"),
             ),
-            Facet::response_content(&[Object(K::Environment)], Target::Resolved("snapshot_reply_environment")),
-        ]));
+        ]);
     /// Measures selected files and refuses an oversized or slow selection before any snapshot job exists.
     ThreadSnapshotPreflight: POST "/threads/{id}/snapshots/preflight", Rule("files.manage on the thread's environment"), none, json ThreadSnapshotPreflightBody, json SnapshotPreflight, 200,
         operation Op::facets(&[
@@ -1370,9 +1231,6 @@ crate::endpoints! {
                     Facet::required(
                         Read,
                         &[
-                            Object(K::Org),
-                            Object(K::Project),
-                            Object(K::Topic),
                             Object(K::Thread),
                             Object(K::Document),
                             Object(K::Environment),
@@ -1383,9 +1241,8 @@ crate::endpoints! {
                             Identity(I::Export),
                             Identity(I::Import),
                         ],
-                        Target::ResolvedCollection("job_subjects"),
+                        Target::Resolved("job_subjects"),
                     ),
-                    Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("job_machine_names")),
                 ],
             },
             Variant {
@@ -1396,15 +1253,14 @@ crate::endpoints! {
                     Facet::required(
                         Manage,
                         &[Object(K::Provider)],
-                        Target::ResolvedCollection("job_subjects"),
+                        Target::Resolved("job_subjects"),
                     ),
-                    Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("job_machine_names")),
                 ],
             },
         ]);
     /// Cancels a job that has not passed its commit phase; one that has is undone like a failure.
-    JobCancel: POST "/jobs/{id}/cancel", Rule("whoever could have started it"), none, none, json JobCancelResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    JobCancel: POST "/jobs/{id}/cancel", Rule("whoever could have started it"), none, none, json Job, 200,
+        operation Op::variants(&[
             Variant {
                 name: "continuation",
                 selector: "stored kind is thread continuation",
@@ -1413,10 +1269,9 @@ crate::endpoints! {
                     Facet::required(
                         Write,
                         &[Object(K::Thread)],
-                        Target::ResolvedCollection("job_subjects"),
+                        Target::Resolved("job_subjects"),
                     ),
                     Facet::response_content(&[Identity(I::Job)], Target::Path("id")),
-                    Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("job_machine_names")),
                 ],
             },
             Variant {
@@ -1427,9 +1282,6 @@ crate::endpoints! {
                     Facet::required(
                         Manage,
                         &[
-                            Object(K::Org),
-                            Object(K::Project),
-                            Object(K::Topic),
                             Object(K::Thread),
                             Object(K::Document),
                             Object(K::Environment),
@@ -1440,13 +1292,12 @@ crate::endpoints! {
                             Identity(I::Export),
                             Identity(I::Import),
                         ],
-                        Target::ResolvedCollection("job_subjects"),
+                        Target::Resolved("job_subjects"),
                     ),
                     Facet::response_content(&[Identity(I::Job)], Target::Path("id")),
-                    Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("job_machine_names")),
                 ],
             },
-        ]));
+        ]);
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 //! Typed document-folder navigation and atomic document-tree organization.
 
-use crate::operations::{OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant};
-use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
 use orch_access_contract::key_scope::KeyTargetKind::Object;
 use orch_access_contract::permissions::ObjectKind as K;
 
@@ -236,58 +238,6 @@ pub struct DocumentTreePlan {
     pub losing: i64,
 }
 
-/// Complete descriptive membership or a protected equality witness of that same membership.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
-pub enum DocumentTreeDeletion {
-    /// The original ordinary complete preview shape.
-    Membership(DocumentTreeMembership),
-    /// Opaque confirmation that discloses no membership rows or audience information.
-    Sealed(DocumentTreeConfirmation),
-}
-
-/// Protected native confirmation, never authority to delete or to read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DocumentTreeConfirmation {
-    /// The server's authenticated encrypted complete-stamp equality witness.
-    pub confirmation: String,
-}
-
-impl From<DocumentTreeMembership> for DocumentTreeDeletion {
-    fn from(value: DocumentTreeMembership) -> Self {
-        Self::Membership(value)
-    }
-}
-impl DocumentTreeDeletion {
-    /// The original descriptive membership, only when this confirmation actually contains it.
-    #[must_use]
-    pub fn membership(&self) -> Option<&DocumentTreeMembership> {
-        match self {
-            Self::Membership(value) => Some(value),
-            Self::Sealed(_) => None,
-        }
-    }
-}
-
-/// A completed native preview without private entry, material or audience metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentTreeDeletePreviewReceipt {
-    /// The restricted projection.
-    pub projection: crate::common::ReceiptProjection,
-    /// Exact confirmation usable by the ordinary deletion operation under current authority.
-    pub deletion_plan: DocumentTreeDeletion,
-}
-
-crate::common::full_or_receipt! {
-    /// The native descriptive preview or its protected complete-stamp confirmation.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum DocumentTreeDeletePreviewResponse {
-        Full(DocumentTreePlan),
-        Receipt(DocumentTreeDeletePreviewReceipt),
-    }
-}
-
 /// A copied identity pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentTreeCopied {
@@ -328,8 +278,6 @@ pub enum DocumentTreeCommand {
     Copy,
     /// Move identities with their history and files.
     Move,
-    /// Copy into another root and retain-delete the original in one owner-only act.
-    MoveOut,
     /// Rename a text document.
     Rename,
     /// Soft-delete a complete tree.
@@ -357,8 +305,8 @@ pub struct DocumentTreeOperationBody {
     pub client_id: String,
     /// Earlier version only for RestoreVersion.
     pub version: Option<i32>,
-    /// Full or protected current deletion confirmation, for Delete or MoveOut.
-    pub deletion_plan: Option<DocumentTreeDeletion>,
+    /// Complete current preview only for Delete.
+    pub deletion_plan: Option<DocumentTreeMembership>,
 }
 
 /// Folder creation in a node's document area; omission keeps the ordinary root placement.
@@ -381,7 +329,7 @@ pub struct DocumentContainerCreateReceipt {
     /// The actual durable native operation.
     pub operation: Id,
     /// The actual folder produced by that operation, including a durable replay.
-    pub folder_id: Id,
+    pub container_id: Id,
 }
 
 /// Native tree receipt content or the safe completed folder identity.
@@ -440,25 +388,6 @@ pub struct DocumentTreeListQuery {
     pub limit: Option<u16>,
 }
 
-/// The real accepted operation and its native affected identities without existing metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct DocumentTreeOperationReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual atomic native operation, unchanged on durable replay.
-    pub operation: Id,
-    /// Typed identities actually returned by the accepted native writer.
-    pub entries: Vec<DocumentTreeItem>,
-}
-crate::common::full_or_receipt! {
-    /// Native tree metadata or a truthful accepted operation acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum DocumentTreeOperationResponse {
-        Full(DocumentTreeReceipt),
-        Receipt(DocumentTreeOperationReceipt),
-    }
-}
-
 crate::endpoints! {
     /// Lists the readable document and folder children beside a node or inside one folder.
     DocumentTreeList: GET "/nodes/{id}/document-tree", Rule("node.view on the root or doc.view on the specified folder; retained rows require current restore authority"), query DocumentTreeListQuery, none, json DocumentTreePage, 200,
@@ -466,12 +395,20 @@ crate::endpoints! {
             Variant {
                 name: "view",
                 selector: "ordinary live entries",
-                facets: &crate::document_sources::tree_facets(Read),
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Document), Object(K::DocumentContainer)],
+                    Target::Resolved("directory_and_results"),
+                )],
             },
             Variant {
                 name: "retained",
                 selector: "explicit retained/deleted inspection",
-                facets: &crate::document_sources::tree_facets(Manage),
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Document), Object(K::DocumentContainer)],
+                    Target::Resolved("directory_and_results"),
+                )],
             },
         ]);
     /// Reads a document folder's metadata and redacted ancestry without opening an editor.
@@ -506,55 +443,128 @@ crate::endpoints! {
     DocumentContainerCreate: POST "/nodes/{id}/document-containers", Rule("destination doc.create with docs.enabled"), none, json DocumentContainerCreateBody, json DocumentContainerCreateResponse, 201,
         operation Op::receipt(&Op::facets(&crate::document_sources::folder_create_facets()));
     /// Creates ordinary text directly inside an existing writable document folder.
-    DocumentContainerDocumentCreate: POST "/document-containers/{id}/documents", Rule("doc.create on this container with docs.enabled"), none, json crate::documents::NodeDocumentCreateBody, json crate::documents::DocumentCreationResponse, 201,
-        operation Op::receipt(&Op::facets(&crate::document_sources::text_create_facets()));
+    DocumentContainerDocumentCreate: POST "/document-containers/{id}/documents", Rule("doc.create on this container with docs.enabled"), none, json crate::documents::NodeDocumentCreateBody, json crate::documents::Document, 201,
+        operation Op::facets(&[
+            Facet::required(Write, &[Object(K::Document)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Document)], Target::Resolved("created_document")),
+        ]);
     /// Computes a complete authorized deletion preview without changing any document.
-    DocumentTreeDeletePreview: POST "/document-tree/delete/preview", Rule("doc.manage on every affected entry"), none, json DocumentTreeOperationBody, json DocumentTreeDeletePreviewResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::document_sources::TREE_DELETE_PREVIEW_FACETS));
+    DocumentTreeDeletePreview: POST "/document-tree/delete/preview", Rule("doc.manage on every affected entry"), none, json DocumentTreeOperationBody, json DocumentTreePlan, 200,
+        operation Op::single(
+            Manage,
+            &[Object(K::Document), Object(K::DocumentContainer)],
+            Target::Resolved("affected_entries"),
+        );
     /// Executes an atomic document operation, requiring a complete preview only for deletion.
-    DocumentTreeOperate: POST "/document-tree/operations", Rule("current complete source and destination document authority"), none, json DocumentTreeOperationBody, json DocumentTreeOperationResponse, 200,
-        operation Op::receipt(&Op::variants(&[
+    DocumentTreeOperate: POST "/document-tree/operations", Rule("current complete source and destination document authority"), none, json DocumentTreeOperationBody, json DocumentTreeReceipt, 200,
+        operation Op::variants(&[
             Variant {
                 name: "create_folder",
                 selector: "command=create_folder",
-                facets: &crate::document_sources::OPERATION_CREATE_FOLDER_FACETS,
+                facets: &[
+                    Facet::required(
+                        Write,
+                        &[Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::DocumentContainer)],
+                        Target::Resolved("created_entries"),
+                    ),
+                ],
             },
             Variant {
                 name: "copy",
                 selector: "command=copy",
-                facets: &crate::document_sources::OPERATION_COPY_FACETS,
-            },
-            Variant {
-                name: "move_out",
-                selector: "command=move_out; owner-only copy into another root and native source deletion",
-                facets: &crate::document_sources::OPERATION_MOVE_OUT_FACETS,
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("created_entries"),
+                    ),
+                ],
             },
             Variant {
                 name: "move",
                 selector: "command=move, including folder rename",
-                facets: &crate::document_sources::OPERATION_MOVE_FACETS,
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("sources"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("destination"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
             },
             Variant {
                 name: "rename",
                 selector: "command=rename; exactly one text document",
-                facets: &crate::document_sources::OPERATION_RENAME_FACETS,
+                facets: &[
+                    Facet::required(Write, &[Object(K::Document)], Target::Resolved("sources")),
+                    Facet::response_content(&[Object(K::Document)], Target::Resolved("sources")),
+                ],
             },
             Variant {
                 name: "delete",
                 selector: "command=delete",
-                facets: &crate::document_sources::OPERATION_DELETE_FACETS,
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
             },
             Variant {
                 name: "restore",
                 selector: "command=restore",
-                facets: &crate::document_sources::OPERATION_RESTORE_FACETS,
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                    Facet::required(
+                        Write,
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("restoration_destinations"),
+                    ),
+                    Facet::response_content(
+                        &[Object(K::Document), Object(K::DocumentContainer)],
+                        Target::Resolved("affected_entries"),
+                    ),
+                ],
             },
             Variant {
                 name: "restore_version",
                 selector: "command=restore_version",
-                facets: &crate::document_sources::OPERATION_RESTORE_VERSION_FACETS,
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Document)], Target::Resolved("sources")),
+                    Facet::response_content(&[Object(K::Document)], Target::Resolved("sources")),
+                ],
             },
-        ]));
+        ]);
 }
 
 #[cfg(test)]

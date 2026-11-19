@@ -15,32 +15,12 @@ struct Open {
     stopped: bool,
 }
 
-/// A message of a sub-agent as the program prints it: complete, before the model's closing usage, so that its output
-/// count is the count the message started with and not the figure of the request. The request it describes is
-/// final in every other respect. It is not reported from here: the sub-agent's own transcript settles it
-/// ([`crate::child_usage`]); this is what is handed over for that, once for each block the program prints.
-#[derive(Debug, Clone)]
-pub struct Printed {
-    /// The request as the printed message gives it, final, with the starting count of the output.
-    pub request: UsageRequest,
-    /// The tool use that started the sub-agent (the `parent_tool_use_id` of its messages).
-    pub parent: String,
-    /// The sub-agent, as the program names it on the message; its transcript is a file of that name.
-    pub agent_id: Option<String>,
-    /// The session whose transcripts hold the sub-agent's.
-    pub session_id: Option<String>,
-    /// The model's message that was the request.
-    pub message_id: String,
-}
-
 /// The documented stream-json events, sampled without calculating a duration or speed.
 #[derive(Debug, Default)]
 pub struct Requests {
     pending: Option<UsageRequest>,
     open: HashMap<String, Open>,
     finished: HashSet<String>,
-    echoed: HashSet<String>,
-    printed: Vec<Printed>,
     serial: u64,
 }
 
@@ -96,26 +76,7 @@ fn counts(usage: &Json) -> RequestTokens {
     counts
 }
 
-/// Settles a request a sub-agent's printed message described with the closing usage of the model's message, as the
-/// sub-agent's transcript holds it: the figures it states replace those of the printed message, and what it leaves
-/// out stays as the printed message gave it.
-pub fn settle_usage(request: &mut UsageRequest, usage: &Json) {
-    let closing = counts(usage);
-    let tokens = &mut request.tokens;
-    tokens.input_tokens = closing.input_tokens.or(tokens.input_tokens);
-    tokens.cached_input_tokens = closing.cached_input_tokens.or(tokens.cached_input_tokens);
-    tokens.cache_write_tokens = closing.cache_write_tokens.or(tokens.cache_write_tokens);
-    tokens.output_tokens = closing.output_tokens.or(tokens.output_tokens);
-    tokens.reasoning_tokens = closing.reasoning_tokens.or(tokens.reasoning_tokens);
-    request.web_searches = search_count(usage).or(request.web_searches);
-}
-
 impl Requests {
-    /// The messages of sub-agents printed since the last call, to be settled from their transcripts.
-    pub fn take_printed(&mut self) -> Vec<Printed> {
-        std::mem::take(&mut self.printed)
-    }
-
     /// The caller has given the input to the harness.
     pub fn asked(&mut self, at: Time) -> UsageRequest {
         if let Some(pending) = &self.pending {
@@ -125,8 +86,6 @@ impl Requests {
         let request = UsageRequest {
             id: format!("main:{}", self.serial),
             asked: Some(at),
-            attempt: Some(1),
-            tool_refs: Some(Vec::new()),
             ..UsageRequest::default()
         };
         self.pending = Some(request.clone());
@@ -160,24 +119,7 @@ impl Requests {
         let stream = parent.unwrap_or("main").to_owned();
         let event = frame.get("event").unwrap_or(&Json::Null);
         match frame.text("type") {
-            Some("system")
-                if frame.text("subtype") == Some("api_retry")
-                    && frame.get("parent_tool_use_id").is_none_or(Json::is_null) =>
-            {
-                let native_next = frame
-                    .get("attempt")
-                    .and_then(Json::as_i64)
-                    .filter(|n| *n > 0)
-                    .and_then(|n| n.checked_add(1));
-                if native_next.is_some()
-                    && !self.open.contains_key("main")
-                    && self
-                        .pending
-                        .as_ref()
-                        .is_some_and(|request| request.attempt == native_next)
-                {
-                    return Vec::new();
-                }
+            Some("system") if frame.text("subtype") == Some("api_retry") => {
                 let retry = Frame::from_value(
                     serde_json::json!({"type":"result","api_error_status":frame.get("error_status"),"api_error":frame.text("error"),"result":frame.text("message").unwrap_or("The provider request is being retried.")}),
                 );
@@ -188,27 +130,17 @@ impl Requests {
                     &chrono::Utc,
                 );
                 let mut reports = Vec::new();
-                let mut next_attempt = None;
-                let mut retry_of = None;
                 if let Some(mut failed) = self
                     .open
                     .remove("main")
                     .map(|open| open.request)
                     .or_else(|| self.pending.take())
                 {
-                    next_attempt = failed.attempt.and_then(|n| n.checked_add(1));
-                    retry_of = Some(failed.id.clone());
-                    failed.error_reason = error.reason.clone();
-                    failed.upstream_status = error.status;
                     failed.finish(&error.code, Some(&error.message), error.said.as_deref());
                     self.finished.insert(failed.id.clone());
                     reports.push(failed);
                 }
-                let mut next = self.asked(at);
-                next.attempt = native_next.or(next_attempt);
-                next.retry_of = retry_of;
-                self.pending = Some(next.clone());
-                reports.push(next);
+                reports.push(self.asked(at));
                 return reports;
             }
             Some("user")
@@ -254,8 +186,6 @@ impl Requests {
                             ..UsageRequest::default()
                         }
                     };
-                    raw.tool_refs = Some(Vec::new());
-                    raw.provider_request_id = (!id.is_empty()).then(|| id.to_owned());
                     raw.model = message
                         .get("model")
                         .and_then(Json::as_str)
@@ -281,18 +211,6 @@ impl Requests {
                     return reports;
                 }
                 "content_block_start" => {
-                    let block = event.get("content_block").unwrap_or(&Json::Null);
-                    if text(block, "type") == "tool_use"
-                        && let Some(open) = self.open.get_mut(&stream)
-                    {
-                        let id = text(block, "id");
-                        if !id.is_empty() {
-                            let refs = open.request.tool_refs.get_or_insert_with(Vec::new);
-                            if !refs.iter().any(|known| known == id) {
-                                refs.push(id.to_owned());
-                            }
-                        }
-                    }
                     if text(event.get("content_block").unwrap_or(&Json::Null), "type") == "thinking"
                         && let Some(open) = self.open.get_mut(&stream)
                     {
@@ -361,54 +279,9 @@ impl Requests {
             },
             Some("assistant") if parent.is_some() => {
                 let message = frame.get("message").unwrap_or(&Json::Null);
-                let message_id = text(message, "id");
-                if !message_id.is_empty()
-                    && let Some(open) = self.open.get_mut(&stream).filter(|open| {
-                        open.request.provider_request_id.as_deref() == Some(message_id)
-                    })
-                {
-                    // The CLI also emits the whole assistant block before the stream's
-                    // final usage delta. Its start-usage output count is not a completion.
-                    let usage = message.get("usage").unwrap_or(&Json::Null);
-                    let observed = counts(usage);
-                    if open.request.model.is_none() {
-                        open.request.model = message
-                            .get("model")
-                            .and_then(Json::as_str)
-                            .map(str::to_owned);
-                    }
-                    open.counts.input_tokens = open.counts.input_tokens.or(observed.input_tokens);
-                    open.counts.cached_input_tokens = open
-                        .counts
-                        .cached_input_tokens
-                        .or(observed.cached_input_tokens);
-                    open.counts.cache_write_tokens = open
-                        .counts
-                        .cache_write_tokens
-                        .or(observed.cache_write_tokens);
-                    open.request.web_searches = search_count(usage).or(open.request.web_searches);
-                    for block in message
-                        .get("content")
-                        .and_then(Json::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
-                        open.thinking |= text(block, "type") == "thinking";
-                        if text(block, "type") == "tool_use" {
-                            let id = text(block, "id");
-                            let refs = open.request.tool_refs.get_or_insert_with(Vec::new);
-                            if !id.is_empty() && !refs.iter().any(|known| known == id) {
-                                refs.push(id.to_owned());
-                            }
-                        }
-                    }
-                    return Vec::new();
-                }
-                let id = format!("{stream}:{message_id}");
-                if !self.finished.contains(&id) {
-                    if self.echoed.insert(id.clone()) {
-                        self.open.remove(&stream);
-                    }
+                let id = format!("{stream}:{}", text(message, "id"));
+                if self.finished.insert(id.clone()) {
+                    self.open.remove(&stream);
                     let mut raw = UsageRequest {
                         id,
                         subagent: true,
@@ -416,34 +289,13 @@ impl Requests {
                             .get("model")
                             .and_then(Json::as_str)
                             .map(str::to_owned),
-                        provider_request_id: (!text(message, "id").is_empty())
-                            .then(|| text(message, "id").to_owned()),
-                        tool_refs: Some(
-                            message
-                                .get("content")
-                                .and_then(Json::as_array)
-                                .into_iter()
-                                .flatten()
-                                .filter(|block| text(block, "type") == "tool_use")
-                                .filter_map(|block| block.get("id").and_then(Json::as_str))
-                                .filter(|id| !id.is_empty())
-                                .map(str::to_owned)
-                                .collect(),
-                        ),
                         web_searches: search_count(message.get("usage").unwrap_or(&Json::Null)),
                         tokens: counts(message.get("usage").unwrap_or(&Json::Null)),
                         output_streamed: Some(false),
                         ..UsageRequest::default()
                     };
                     raw.finish("done", None, None);
-                    self.printed.push(Printed {
-                        request: raw,
-                        parent: stream.clone(),
-                        agent_id: frame.text("agent_id").map(str::to_owned),
-                        session_id: frame.session_id().map(str::to_owned),
-                        message_id: message_id.to_owned(),
-                    });
-                    return Vec::new();
+                    return vec![raw];
                 }
             }
             Some("result") => {
@@ -494,70 +346,6 @@ impl Requests {
             _ => {}
         }
         Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod native_child_usage_tests {
-    #![allow(
-        clippy::unwrap_used,
-        reason = "a protocol assertion fails by panicking"
-    )]
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn whole_child_echoes_do_not_finish_the_stream_before_its_final_usage() {
-        let at: Time = "2026-11-08T03:00:00Z".parse().unwrap();
-        let mut requests = Requests::default();
-        let mut total = 0;
-        for (id, input) in [("child-first", 70), ("child-after-barrier", 90)] {
-            let frame = |event: Json| {
-                Frame::from_value(
-                    json!({"type":"stream_event","parent_tool_use_id":"owned-child","event":event}),
-                )
-            };
-            let _=requests.observe(&frame(json!({"type":"message_start","message":{"id":id,"model":"actual-child-model",
-                "usage":{"input_tokens":input,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}})),at,None);
-            let whole = Frame::from_value(
-                json!({"type":"assistant","parent_tool_use_id":"owned-child","message":{"id":id,
-                "model":"actual-child-model","content":[{"type":"tool_use","id":"child-command","name":"Bash","input":{}}],
-                "usage":{"input_tokens":input,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}),
-            );
-            assert!(
-                requests.observe(&whole, at, None).is_empty(),
-                "the whole block is not the final usage boundary"
-            );
-            // The foreground result does not end this separately observed child request.
-            let _ = requests.observe(
-                &Frame::from_value(json!({"type":"result","subtype":"success"})),
-                at,
-                Some(("done", None)),
-            );
-            let _=requests.observe(&frame(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}})),at,None);
-            let done = requests.observe(&frame(json!({"type":"message_stop"})), at, None);
-            assert_eq!(done.len(), 1);
-            let measured = &done[0];
-            assert!(measured.subagent);
-            assert_eq!(measured.tokens.input_tokens, Some(input));
-            assert_eq!(measured.tokens.output_tokens, Some(10));
-            assert_eq!(
-                measured.tool_refs.as_deref(),
-                Some(["child-command".to_owned()].as_slice())
-            );
-            assert!(
-                measured.asked.is_none()
-                    && measured.first_output.is_none()
-                    && measured.end.is_none(),
-                "untold child times stay unsupported"
-            );
-            total += measured.tokens.input_tokens.unwrap() + measured.tokens.output_tokens.unwrap();
-            assert!(
-                requests.observe(&whole, at, None).is_empty(),
-                "the same native request is not counted again"
-            );
-        }
-        assert_eq!(total, 180);
     }
 }
 

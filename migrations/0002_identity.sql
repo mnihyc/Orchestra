@@ -92,8 +92,6 @@ CREATE UNIQUE INDEX users_username_key ON users USING btree (username);
 
 CREATE TRIGGER access_changed_delete AFTER DELETE ON users FOR EACH ROW EXECUTE FUNCTION access_changed();
 
-CREATE TRIGGER access_changed_insert AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION access_changed();
-
 CREATE TRIGGER access_changed_update AFTER UPDATE OF status, is_system_admin ON users FOR EACH ROW WHEN (((old.status IS DISTINCT FROM new.status) OR (old.is_system_admin IS DISTINCT FROM new.is_system_admin))) EXECUTE FUNCTION access_changed();
 
 CREATE TRIGGER public_name_user AFTER INSERT OR UPDATE OF username ON users FOR EACH ROW EXECUTE FUNCTION orch_public_name_user();
@@ -148,10 +146,6 @@ CREATE TABLE enrollment_tokens (
     used_at timestamp with time zone,
     machine_id uuid,
     again_machine_id uuid,
-    issuer_origin jsonb,
-    issuer_required boolean DEFAULT false NOT NULL,
-    CONSTRAINT enrollment_tokens_required_issuer_check CHECK (NOT issuer_required OR issuer_origin IS NOT NULL),
-    CONSTRAINT enrollment_tokens_issuer_origin_check CHECK (issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object'),
     CONSTRAINT enrollment_tokens_access_check CHECK ((access = ANY (ARRAY['defaults'::text, 'only_me'::text, 'home'::text]))),
     CONSTRAINT enrollment_tokens_purpose_check CHECK ((purpose = ANY (ARRAY['machine'::text, 'connected'::text, 'host'::text, 'runtime'::text]))),
     CONSTRAINT enrollment_tokens_roles_check CHECK ((roles <@ ARRAY['provider'::text, 'agent'::text, 'environment'::text, 'node'::text])),

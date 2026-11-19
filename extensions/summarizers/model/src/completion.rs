@@ -42,25 +42,8 @@ impl Summarizer for Model {
         descriptor::descriptor()
     }
 
-    async fn summarize(
-        &self,
-        mut request: SummaryRequest,
-    ) -> Result<SummaryResult, SummarizeError> {
+    async fn summarize(&self, request: SummaryRequest) -> Result<SummaryResult, SummarizeError> {
         let config = descriptor::Config::read(&request.config)?;
-        // Handoffs use their existing transcript/share planner; their previous text is not activity.
-        if request.field != SummaryField::Handoff {
-            let budget = crate::context::request_budget(&request, config.context_tokens)?;
-            let total = u64::try_from(request.activity.len()).unwrap_or(u64::MAX);
-            let input = std::mem::take(&mut request.activity)
-                .into_iter()
-                .enumerate()
-                .map(|(index, item)| crate::context::InputItem {
-                    key: index.to_string(),
-                    item,
-                })
-                .collect();
-            request.activity = crate::context::fill(input, budget, None, total)?.activity;
-        }
         let (system, input) = prompts::render(&request, &config);
         let answer = self
             .complete

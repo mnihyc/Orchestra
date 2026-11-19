@@ -71,8 +71,6 @@ interface Common {
   /** A choice is stored that the model's entry no longer opens: it is not sent, and the thread runs with the start. */
   stale: boolean;
   providerFixed?: boolean;
-  /** Present only when the native restriction names the provider and this view may read it. */
-  constraintProvider?: ThreadParameters['provider'];
 }
 
 export interface SpeedOrAccess extends Common {
@@ -158,7 +156,6 @@ export function statesOf(parameters: ThreadParameters, own: Readonly<Record<stri
     const providerFixed = Object.hasOwn(constraint, 'const');
     const common = {
       providerFixed,
-      ...(projection.constraint_source === 'provider' && parameters.provider !== undefined && parameters.provider !== null ? { constraintProvider: parameters.provider } : {}),
       key: def.key,
       title: def.title,
       description: def.description,
@@ -207,16 +204,6 @@ export function statesOf(parameters: ThreadParameters, own: Readonly<Record<stri
     });
   }
   return states;
-}
-
-/** An absent numeric context never supplies a guessed window or a writable synthetic choice. */
-export function contextOmission(parameters: ThreadParameters, states: readonly State[]): 'limits' | 'adjustment' | null {
-  if (states.some((state) => state.kind === 'context')) return null;
-  const declared = parameters.parameters.some((parameter) => {
-    const def = readDef(parameter.def);
-    return def !== null && kindOf(def) === 'context';
-  });
-  return declared ? 'limits' : 'adjustment';
 }
 
 /** The label of what a choice among speeds or programs runs with: the name of the speed or program, or the word for none. */

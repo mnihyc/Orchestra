@@ -35,7 +35,6 @@ import { Route as DocumentFolderFolderIdIndexRouteImport } from './routes/docume
 import { Route as DocumentsNodeIdIndexRouteImport } from './routes/documents/$nodeId/index';
 import { Route as HelpArticleIndexRouteImport } from './routes/help/$article/index';
 import { Route as InviteTokenIndexRouteImport } from './routes/invite/$token/index';
-import { Route as MessagesIdIndexRouteImport } from './routes/messages/$id/index';
 import { Route as OrgSlugIndexRouteImport } from './routes/org/$slug/index';
 import { Route as PlaceChatNodeIdIndexRouteImport } from './routes/place-chat/$nodeId/index';
 import { Route as ProjectProjectIdIndexRouteImport } from './routes/project/$projectId/index';
@@ -205,11 +204,6 @@ const HelpArticleIndexRoute = HelpArticleIndexRouteImport.update({
 const InviteTokenIndexRoute = InviteTokenIndexRouteImport.update({
   id: '/invite/$token/',
   path: '/invite/$token/',
-  getParentRoute: () => rootRouteImport,
-} as any);
-const MessagesIdIndexRoute = MessagesIdIndexRouteImport.update({
-  id: '/messages/$id/',
-  path: '/messages/$id/',
   getParentRoute: () => rootRouteImport,
 } as any);
 const OrgSlugIndexRoute = OrgSlugIndexRouteImport.update({
@@ -443,7 +437,6 @@ export interface FileRoutesByFullPath {
   '/documents/$nodeId/': typeof DocumentsNodeIdIndexRoute;
   '/help/$article/': typeof HelpArticleIndexRoute;
   '/invite/$token/': typeof InviteTokenIndexRoute;
-  '/messages/$id/': typeof MessagesIdIndexRoute;
   '/org/$slug/': typeof OrgSlugIndexRoute;
   '/place-chat/$nodeId/': typeof PlaceChatNodeIdIndexRoute;
   '/project/$projectId/': typeof ProjectProjectIdIndexRoute;
@@ -511,7 +504,6 @@ export interface FileRoutesByTo {
   '/documents/$nodeId': typeof DocumentsNodeIdIndexRoute;
   '/help/$article': typeof HelpArticleIndexRoute;
   '/invite/$token': typeof InviteTokenIndexRoute;
-  '/messages/$id': typeof MessagesIdIndexRoute;
   '/org/$slug': typeof OrgSlugIndexRoute;
   '/place-chat/$nodeId': typeof PlaceChatNodeIdIndexRoute;
   '/project/$projectId': typeof ProjectProjectIdIndexRoute;
@@ -580,7 +572,6 @@ export interface FileRoutesById {
   '/documents/$nodeId/': typeof DocumentsNodeIdIndexRoute;
   '/help/$article/': typeof HelpArticleIndexRoute;
   '/invite/$token/': typeof InviteTokenIndexRoute;
-  '/messages/$id/': typeof MessagesIdIndexRoute;
   '/org/$slug/': typeof OrgSlugIndexRoute;
   '/place-chat/$nodeId/': typeof PlaceChatNodeIdIndexRoute;
   '/project/$projectId/': typeof ProjectProjectIdIndexRoute;
@@ -650,7 +641,6 @@ export interface FileRouteTypes {
     | '/documents/$nodeId/'
     | '/help/$article/'
     | '/invite/$token/'
-    | '/messages/$id/'
     | '/org/$slug/'
     | '/place-chat/$nodeId/'
     | '/project/$projectId/'
@@ -718,7 +708,6 @@ export interface FileRouteTypes {
     | '/documents/$nodeId'
     | '/help/$article'
     | '/invite/$token'
-    | '/messages/$id'
     | '/org/$slug'
     | '/place-chat/$nodeId'
     | '/project/$projectId'
@@ -786,7 +775,6 @@ export interface FileRouteTypes {
     | '/documents/$nodeId/'
     | '/help/$article/'
     | '/invite/$token/'
-    | '/messages/$id/'
     | '/org/$slug/'
     | '/place-chat/$nodeId/'
     | '/project/$projectId/'
@@ -855,7 +843,6 @@ export interface RootRouteChildren {
   DocumentsNodeIdIndexRoute: typeof DocumentsNodeIdIndexRoute;
   HelpArticleIndexRoute: typeof HelpArticleIndexRoute;
   InviteTokenIndexRoute: typeof InviteTokenIndexRoute;
-  MessagesIdIndexRoute: typeof MessagesIdIndexRoute;
   OrgSlugIndexRoute: typeof OrgSlugIndexRoute;
   PlaceChatNodeIdIndexRoute: typeof PlaceChatNodeIdIndexRoute;
   ProjectProjectIdIndexRoute: typeof ProjectProjectIdIndexRoute;
@@ -1079,13 +1066,6 @@ declare module '@tanstack/react-router' {
       path: '/invite/$token';
       fullPath: '/invite/$token/';
       preLoaderRoute: typeof InviteTokenIndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    '/messages/$id/': {
-      id: '/messages/$id/';
-      path: '/messages/$id';
-      fullPath: '/messages/$id/';
-      preLoaderRoute: typeof MessagesIdIndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     '/org/$slug/': {
@@ -1391,7 +1371,6 @@ const rootRouteChildren: RootRouteChildren = {
   DocumentsNodeIdIndexRoute: DocumentsNodeIdIndexRoute,
   HelpArticleIndexRoute: HelpArticleIndexRoute,
   InviteTokenIndexRoute: InviteTokenIndexRoute,
-  MessagesIdIndexRoute: MessagesIdIndexRoute,
   OrgSlugIndexRoute: OrgSlugIndexRoute,
   PlaceChatNodeIdIndexRoute: PlaceChatNodeIdIndexRoute,
   ProjectProjectIdIndexRoute: ProjectProjectIdIndexRoute,

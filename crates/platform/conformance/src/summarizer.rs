@@ -110,7 +110,6 @@ pub async fn run(summarizer: &dyn Summarizer, config: &Json, report: &mut Report
 
 const fn field_name(field: SummaryField) -> &'static str {
     match field {
-        SummaryField::Summary => "summary",
         SummaryField::Title => "title",
         SummaryField::Description => "description",
         SummaryField::Tags => "tags",
@@ -174,10 +173,7 @@ async fn field_case(summarizer: &dyn Summarizer, field: SummaryField, config: &J
         .await
         .map_err(|error| format!("it failed: {error}"))?;
     match field {
-        SummaryField::Summary
-        | SummaryField::Title
-        | SummaryField::Description
-        | SummaryField::Rollup => {
+        SummaryField::Title | SummaryField::Description | SummaryField::Rollup => {
             let text = answer
                 .text
                 .ok_or("it answered no text for a field of text")?;

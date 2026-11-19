@@ -19,7 +19,6 @@ import { UserChip } from '@/ui/UserChip';
 
 import { type Changes, type PageSource, sourceKey, sourcePreview, sourceQuery } from './changes';
 import { usePermissionName } from './names';
-import { OwnerReadNotice } from './OwnerReadConfirmation';
 
 /** An act the person has asked for and is to confirm. */
 export interface Asked {
@@ -67,7 +66,6 @@ export function Account({ preview }: { preview: PagePreview }) {
   const none = preview.gaining.length === 0 && preview.losing.length === 0 && preview.more === 0;
   return (
     <div className="flex flex-col gap-2" aria-live="polite">
-      <OwnerReadNotice disclosure={preview.owner_reads} />
       {preview.pages > 1 && (
         <p className="text-sm text-text-muted">
           {t('access.preview.pages', { count: preview.pages })}
@@ -111,7 +109,7 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
       error={changes.error}
       onConfirm={() => {
         if (asked === null) return;
-        void changes.run({ label: asked.label, make: asked.make, confirmation: preview.data?.owner_reads?.confirmation }).then((made) => {
+        void changes.run({ label: asked.label, make: asked.make }).then((made) => {
           if (!made) return;
           asked.after?.();
           onClose();
@@ -126,7 +124,7 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
           ) : preview.isPending ? (
             <div>
               <p className="sr-only">{t('access.preview.working')}</p>
-              <SkeletonRows read={preview} rows={2} />
+              <SkeletonRows rows={2} />
             </div>
           ) : preview.isError ? (
             <ErrorState compact error={preview.error} action={<Button size="sm" action="retry" pending={preview.isRefetching} onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} />

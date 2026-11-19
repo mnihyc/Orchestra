@@ -4,7 +4,6 @@ import type { AgentReachOverview, BackupRestoreList, InstallationRecords } from 
 import { ACME, RUNS_ON } from '../doubles/fixtures';
 import { begin, showView } from './inspector-support';
 import { signIn } from './support';
-import { signInForManagement } from './admin-mode-support';
 
 test.beforeEach(async () => { await begin(); });
 
@@ -20,7 +19,6 @@ test('the environment Overview and thread Environment panel show the same per-th
   await page.route(`**/api/v1/environments/${RUNS_ON.workspace}/agent-reach`, async (route) => { await route.fulfill({ json: reach() }); });
   await signIn(page);
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
-  await page.locator('[data-resource-details] summary').click();
   const overview = page.getByRole('region', { name: 'What agents here can reach', exact: true });
   await expect(overview).toContainText('DEPLOY_SECRET_NAME');
   await expect(overview).toContainText('/mnt/build-data');
@@ -32,10 +30,7 @@ test('the environment Overview and thread Environment panel show the same per-th
   const panel = page.getByTestId('environment-panel').getByRole('region', { name: 'What agents here can reach', exact: true });
   await expect(panel).toContainText('DEPLOY_SECRET_NAME');
   await expect(panel).toContainText('/mnt/build-data');
-  // The compact inspector keeps the same credential fact in its short label.
-  await expect(panel).toContainText('Credential copy');
-  await expect(panel).toContainText('Copy expires');
-  await expect(panel.locator(`a[href="/thread/${ACME.mainThread}"]`)).toHaveCount(1);
+  await expect(panel).toContainText('The environment holds a copy of the model credential.');
   await expect(panel).toContainText('team-sign-in');
 });
 
@@ -49,7 +44,6 @@ test('a cut response on a phone shows missing permissions and loses old facts wh
   });
   await signIn(page);
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
-  await page.locator('[data-resource-details] summary').click();
   const block = page.getByRole('region', { name: 'What agents here can reach', exact: true });
   await expect(block.getByText(/^You need .+ to see this\.$/)).toHaveCount(3);
   await expect(block).not.toContainText('DEPLOY_SECRET_NAME');
@@ -72,10 +66,10 @@ test('Management sends one explicit release check, refreshes its record through 
     records = { ...records, release };
     await route.fulfill({ json: release });
   });
-  await signInForManagement(page);
+  await signIn(page);
   await page.goto('/admin/overview');
   await expect(page.getByText('No release check recorded.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('region', { name: 'Look for a newer release', exact: true })).toContainText('Automatic checks are off');
+  await expect(page.getByText('Off by default', { exact: true })).toBeVisible();
   expect(writes).toEqual([]);
   await page.getByRole('button', { name: 'Check now', exact: true }).click();
   await expect(page.getByText('Release 0.2.0 is available', { exact: true })).toBeVisible();
@@ -96,7 +90,7 @@ test('the restore list uses the verified manifest, distinguishes unknown from ze
     if (answer === 'refused') await route.fulfill({ status: 503, json: { type: 'orch:error:source.offline', code: 'source.offline', status: 503, title: 'Manifest unavailable', detail: 'The protected manifest no longer verifies.', request_id: 'manifest-lost' } });
     else await route.fulfill({ json: answer === 'list' ? list : null });
   });
-  await signInForManagement(page);
+  await signIn(page);
   await page.goto('/admin/overview');
   await page.getByRole('button', { name: 'Restore list…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Restore list…', exact: true });

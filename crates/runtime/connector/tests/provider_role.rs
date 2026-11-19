@@ -6,12 +6,6 @@
 )]
 
 mod common;
-#[path = "provider_role/native_capability.rs"]
-mod native_capability;
-#[path = "provider_role/service.rs"]
-mod service;
-#[path = "provider_role/standalone_search.rs"]
-mod standalone_search;
 
 use std::sync::Arc;
 
@@ -34,72 +28,6 @@ fn failed_with(progress: &Progress, code: &str) -> bool {
 }
 
 #[tokio::test]
-async fn owned_generation_streams_and_returns_tools_without_exporting_the_provider_key() {
-    use common::model::CHAT;
-    use orch_link_contract::commands::ProviderGenerate;
-    use orch_model_contract::generation::{
-        GenerationInput, GenerationMessage, GenerationPart, GenerationRole, GenerationTool,
-    };
-    let p = ProviderRig::new().await;
-    let started = p
-        .start_provider(&[
-            (RESPONSES, p.mock.responses_base_url(), json!({})),
-            (CHAT, p.mock.responses_base_url(), json!({})),
-            (MESSAGES, p.mock.messages_base_url(), json!({})),
-        ])
-        .await;
-    assert!(matches!(started, Progress::Succeeded(_)));
-    for protocol in [RESPONSES, CHAT, MESSAGES] {
-        p.mock
-            .queue("say Reading the source.\ntool read {\"operation\":\"ThreadGet\"}\nusage 100 20")
-            .unwrap();
-        let request = ProviderGenerate {
-            native_capability: None,
-            capture_native_result: false,
-            provider_id: p.rig.provider,
-            protocol: protocol.into(),
-            model_name: MODEL.into(),
-            params: None,
-            model_parameters: common::model::enabled_parameters(),
-            input: GenerationInput {
-                system: "Use only the supplied read tools.".into(),
-                messages: vec![GenerationMessage {
-                    role: GenerationRole::User,
-                    content: vec![GenerationPart::Text {
-                        text: "Read this thread".into(),
-                    }],
-                    continuation: vec![],
-                }],
-                tools: vec![GenerationTool {
-                    name: "read".into(),
-                    description: "Read a permitted operation".into(),
-                    parameters: json!({"type":"object","properties":{"operation":{"type":"string"}},"required":["operation"]}),
-                }],
-                max_output_tokens: 128,
-            },
-        };
-        assert!(!serde_json::to_string(&request).unwrap().contains(&p.key));
-        let reply = p.rig.succeed(&SerialKey::None, &request).await;
-        assert_eq!(reply["output"]["stop"], "tools");
-        assert_eq!(reply["usage"]["input_tokens"], 100);
-        assert_eq!(reply["usage"]["output_tokens"], 20);
-        assert!(!reply.to_string().contains(&p.key));
-    }
-    let events = p.wait_provider_event("provider.generation.delta", 3).await;
-    assert!(
-        events
-            .iter()
-            .all(|event| !event.body.to_string().contains(&p.key))
-    );
-    assert!(
-        p.model_requests()
-            .iter()
-            .all(|request| request.credential.verdict == Verdict::Accepted)
-    );
-    assert!(files_holding(p.rig.data.path(), &p.key).is_empty());
-}
-
-#[tokio::test]
 async fn synthetic_capacity_access_and_successful_refusals_share_the_same_classifier() {
     let p = ProviderRig::new().await;
     p.start_both_providers().await;
@@ -107,14 +35,14 @@ async fn synthetic_capacity_access_and_successful_refusals_share_the_same_classi
         (
             RESPONSES,
             "error overloaded retry-after=7",
-            "overloaded",
+            "provider_busy",
             None,
             Some(7),
         ),
         (
             RESPONSES,
             r#"body 200 {"error":{"type":"overloaded_error","message":"Model at capacity"}}"#,
-            "overloaded",
+            "provider_busy",
             None,
             None,
         ),
@@ -234,14 +162,6 @@ async fn a_system_completion_uses_the_providers_key_without_a_turn_and_returns_t
         requests
             .iter()
             .all(|request| request.credential.verdict == Verdict::Accepted)
-    );
-    assert_eq!(
-        requests[0].body["store"], false,
-        "own Responses requests explicitly refuse retention"
-    );
-    assert!(
-        requests[1].body.get("store").is_none(),
-        "other interfaces retain their native shape"
     );
     assert!(files_holding(p.rig.data.path(), &p.key).is_empty());
 }
@@ -1135,18 +1055,6 @@ async fn messages_report_inference_speed_independently_from_capacity_class() {
     p.mock.queue("say Ordinary\nusage 100 5").unwrap();
     p.rig.succeed(&p.provider_key(), &request).await;
     request.params = Some(json!({"speed":"fast","service_tier":"auto"}));
-    let refused = p.rig.send(&p.provider_key(), &request).await;
-    assert!(
-        matches!(refused,Progress::Failed(ref error) if error.code=="conflict" && error.detail.contains("capacity tier")),
-        "{refused:?}"
-    );
-    assert_eq!(
-        p.model_requests().len(),
-        1,
-        "an unenabled capacity choice never reaches the endpoint"
-    );
-    request.model_parameters.as_mut().unwrap().capacity_tiers =
-        Some(serde_json::from_value(json!([{"id":"auto","label":"Automatic"}])).unwrap());
     let response = json!({"id":"message-speed-control","type":"message","role":"assistant","model":MODEL,
         "content":[{"type":"text","text":"A summary"}],"stop_reason":"end_turn",
         "usage":{"input_tokens":100,"output_tokens":5,"speed":"fast","service_tier":"standard"}});

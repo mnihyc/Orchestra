@@ -1,9 +1,7 @@
 //! Native ingress, real guarded selection and source/effect ordering, without vendor-history claims.
 
-mod image_services;
 #[path = "../../../tests/native_continuations/mod.rs"]
 mod native;
-mod web_services;
 
 use super::*;
 use crate::test_common as common;
@@ -34,99 +32,6 @@ use std::{
 use tokio::sync::{Semaphore, oneshot};
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-static PREPARED_SERVICE_INPUTS: OnceLock<Mutex<HashMap<Id, Json>>> = OnceLock::new();
-
-/// Exercise the public consumer port inside the actual native ingress task and its admitted Source.
-pub(crate) async fn prepared_service_result(
-    engine: &Engine,
-    call: &CallContext,
-    capability: &str,
-) -> Option<Result<Json, EngineError>> {
-    let input = PREPARED_SERVICE_INPUTS
-        .get()?
-        .lock()
-        .ok()?
-        .remove(&call.thread)?;
-    Some(
-        async {
-            let mut invalid = input.clone();
-            invalid["model"] = json!("an unoffered model");
-            if engine
-                .execute_prepared_capability_service(call, capability, invalid)
-                .await
-                .is_ok()
-            {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            let accepted = engine
-                .execute_prepared_capability_service(call, capability, input.clone())
-                .await?;
-            let expected = accepted.project(200)?;
-            let receipt = accepted.receipt().clone();
-            let pin: i32 = sqlx::query_scalar("SELECT b.pin_count FROM thread_tool_service_results r JOIN blobs b ON b.hash=r.result_blob WHERE r.answer_id=$1")
-                .bind(super::Source::captured()?.answer()).fetch_one(&mut *engine.db().acquire().await?).await.map_err(orch_db::DbError::from)?;
-            if pin <= 0 { return Err(EngineError::ToolCallIdentity); }
-            // The materializer lost its in-memory packet after a destination failure.
-            drop(accepted);
-            super::reap(engine, None).await?;
-            orch_db::queries::link::purge_finished(
-                &mut *engine.db().acquire().await?,
-                engine.inner.clock.now() + chrono::Duration::days(1),
-                engine.inner.config.sweep_batch,
-            )
-            .await?;
-            let restored = engine
-                .read_accepted_capability_result(call, &receipt)
-                .await?;
-            if restored.project(200)? != expected {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            let record = serde_json::to_value(&restored)?;
-            let repeated = engine
-                .execute_prepared_capability_service(call, capability, input.clone())
-                .await?;
-            if serde_json::to_value(repeated)? != record {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            let mut wrong = input.clone();
-            wrong["query"] = json!("a different generation intent");
-            if engine
-                .execute_prepared_capability_service(call, capability, wrong)
-                .await
-                .is_ok()
-            {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            let mut wrong_receipt = serde_json::to_value(&receipt)?;
-            wrong_receipt["owner"]["turn"] = json!(new_id());
-            let wrong_receipt = serde_json::from_value(wrong_receipt)?;
-            if engine
-                .read_accepted_capability_result(call, &wrong_receipt)
-                .await
-                .is_ok()
-            {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            engine
-                .release_accepted_capability_result(call, &receipt)
-                .await?;
-            if engine
-                .read_accepted_capability_result(call, &receipt)
-                .await
-                .is_ok()
-                || engine
-                    .execute_prepared_capability_service(call, capability, input)
-                    .await
-                    .is_ok()
-            {
-                return Err(EngineError::ToolCallIdentity);
-            }
-            Ok(expected)
-        }
-        .await,
-    )
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Point {
@@ -424,92 +329,6 @@ struct Scene {
     directory: tempfile::TempDir,
 }
 
-async fn source_input_key(
-    world: &common::World,
-    thread: Id,
-    route: orch_api_contract::routes::Route,
-    name: &str,
-) -> Proof<Caller> {
-    use crate::operation_scope::{Prepared, targets};
-    use orch_access_contract::key_scope::{
-        KeyAction, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
-    };
-    use orch_access_contract::permissions::ObjectKind;
-    use orch_api_contract::operations::{self, TargetResolver};
-    use orch_authz::TokenGrant;
-    let operation = operations::for_route(&route)?
-        .variants
-        .into_iter()
-        .find(|variant| {
-            variant.name.is_empty() || matches!(variant.name.as_str(), "submit" | "edit")
-        })
-        .ok_or("the real plain input variant is missing")?
-        .operation;
-    // Give the positive control all declared acts in one actual org, not an owner/session shortcut.
-    // The deciding cases then change only one retained stored key, after real helper startup.
-    let scope = KeyScope {
-        rules: vec![KeyRule {
-            target: KeyTarget {
-                kind: KeyTargetKind::Object(ObjectKind::Org),
-                id: Some(world.root),
-                reach: KeyReach::Subtree,
-            },
-            resources: None,
-            allow: operations::catalogue()?
-                .into_iter()
-                .flat_map(|operation| operation.variants)
-                .map(|variant| KeyOperation {
-                    operation: variant.operation,
-                    actions: KeyAction::ALL.to_vec(),
-                })
-                .collect(),
-        }],
-        ..KeyScope::default()
-    };
-    assert!(scope.validate().is_empty());
-    let id = new_id();
-    let digest = Hash::of(id.as_bytes());
-    let expires = world.clock.now() + chrono::Duration::hours(1);
-    let mut conn = world.pool.acquire().await?;
-    orch_db::queries::identity::create_api_token_scoped(
-        &mut conn,
-        &orch_db::queries::identity::NewApiToken {
-            id,
-            user_id: world.ada,
-            name,
-            token_hash: digest.as_bytes(),
-            scopes: &[],
-            node_id: None,
-            at: world.clock.now(),
-            expires_at: Some(expires),
-        },
-        Some(&serde_json::to_value(&scope)?),
-    )
-    .await?;
-    let caller = Caller::token(
-        world.ada,
-        TokenGrant::from_stored_scope(&[], None, Some(scope), Some(Time::new(expires)))?
-            .for_token(id),
-    );
-    let target = targets::node(&mut conn, thread).await?;
-    let mut prepared = Prepared::new(route, &operation)?;
-    let kind = KeyTargetKind::Object(ObjectKind::Thread);
-    for (index, facet) in prepared.variant().facets.clone().iter().enumerate() {
-        match facet.target {
-            TargetResolver::Path("id") | TargetResolver::PermissionObject => {
-                prepared.bind(index, kind, std::slice::from_ref(&target))?
-            }
-            TargetResolver::ResolvedCollection(_) => prepared.bind_empty(index)?,
-            _ => {
-                return Err(
-                    "the real plain input added a new source that this fixture must bind".into(),
-                );
-            }
-        }
-    }
-    Ok(prepared.admit(&caller, false)?)
-}
-
 impl Scene {
     async fn lend_document(
         &self,
@@ -545,54 +364,9 @@ impl Scene {
         Self::configured(false).await
     }
 
-    async fn with_input_keys() -> Proof<Self> {
-        Box::pin(Self::configured_with_input_keys(
-            false, false, false, None, true,
-        ))
-        .await
-    }
-
     async fn configured(display: bool) -> Proof<Self> {
-        Self::configured_with_web_services(display, false).await
-    }
-
-    async fn configured_with_web_services(display: bool, web: bool) -> Proof<Self> {
-        Self::configured_with_web_modes(display, web, false).await
-    }
-
-    async fn configured_with_web_modes(display: bool, web: bool, fetch: bool) -> Proof<Self> {
-        Self::configured_with_web_clock(display, web, fetch, None).await
-    }
-
-    async fn configured_with_web_clock(
-        display: bool,
-        web: bool,
-        fetch: bool,
-        clock: Option<Arc<dyn orch_types::Clock>>,
-    ) -> Proof<Self> {
-        Box::pin(Self::configured_with_input_keys(
-            display, web, fetch, clock, false,
-        ))
-        .await
-    }
-
-    async fn configured_with_input_keys(
-        display: bool,
-        web: bool,
-        fetch: bool,
-        clock: Option<Arc<dyn orch_types::Clock>>,
-        keyed: bool,
-    ) -> Proof<Self> {
-        let world = match clock {
-            Some(clock) => common::World::with_clock(clock).await,
-            None => common::World::new().await,
-        };
+        let world = common::World::new().await;
         let mut descriptor = common::descriptor();
-        if web {
-            descriptor["parameters"] = serde_json::to_value(vec![
-                orch_agent_contract::parameters::web_search_capability_parameter(None, true),
-            ])?;
-        }
         descriptor["capabilities"]["native_input_prefix"] = json!("turn_start");
         descriptor["capabilities"]["orch_tools"] = json!("mcp");
         descriptor["capabilities"]["mcp"] =
@@ -615,9 +389,6 @@ impl Scene {
             ))
         });
         let thread = world.thread("Native source tools").await;
-        if web {
-            web_services::install(&world, thread, fetch).await?;
-        }
         let directory = tempfile::tempdir()?;
         tokio::fs::create_dir_all(directory.path().join("out")).await?;
         let bytes = Bytes::from_static(b"original\0source\xffbytes");
@@ -758,11 +529,7 @@ impl Scene {
         if display {
             declare_display(&world, directory.path()).await?;
         }
-        let (start, submitted) = if keyed {
-            Box::pin(Self::key_authored_turn(&world, thread)).await?
-        } else {
-            Self::authored_turn(&world, thread).await?
-        };
+        let (start, submitted) = Self::authored_turn(&world, thread).await?;
         if display {
             let attached: bool = sqlx::query_scalar(
                 "SELECT COALESCE(e.status='running' AND m.online
@@ -837,43 +604,14 @@ impl Scene {
         world: &common::World,
         thread: Id,
     ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
-        Self::authored_turn_by(world, thread, &Caller::session(world.ada), None).await
-    }
-
-    async fn authored_turn_by(
-        world: &common::World,
-        thread: Id,
-        author: &Caller,
-        editor: Option<&Caller>,
-    ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
         let submitted = world
             .engine()
             .submit_input(
-                author,
+                &Caller::session(world.ada),
                 thread,
                 common::queued("Original actual authored input"),
             )
             .await?;
-        if let Some(editor) = editor {
-            world
-                .engine()
-                .edit_input(
-                    editor,
-                    thread,
-                    submitted.input.id,
-                    Some(
-                        common::queued("Final words accepted under an independent edit key")
-                            .content,
-                    ),
-                    None,
-                )
-                .await?;
-            sqlx::query("UPDATE environments SET status='running',status_detail=NULL WHERE id=$1")
-                .bind(world.environment)
-                .execute(world.pool.pool())
-                .await?;
-            world.engine().preflight(thread).await?;
-        }
         let start = match tokio::time::timeout(common::PATIENCE, async {
             loop {
                 if let Some(start) = world.turn_starts(thread).first().cloned() {
@@ -916,24 +654,6 @@ impl Scene {
         world.wait_turn(start.turn_id, "running").await;
         world.wait_state(thread, "running").await;
         Ok((start, submitted))
-    }
-
-    /// Both keys enter through the real operation producer, before an input is delivered.
-    async fn key_authored_turn(
-        world: &common::World,
-        thread: Id,
-    ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
-        use orch_api_contract::{
-            routes::Endpoint as _,
-            threads::{ThreadInputCreate, ThreadInputUpdate},
-        };
-        sqlx::query("UPDATE environments SET status='failed',status_detail='queued credential control' WHERE id=$1")
-            .bind(world.environment).execute(world.pool.pool()).await?;
-        let author =
-            source_input_key(world, thread, ThreadInputCreate::ROUTE, "source-author").await?;
-        let editor =
-            source_input_key(world, thread, ThreadInputUpdate::ROUTE, "source-editor").await?;
-        Self::authored_turn_by(world, thread, &author, Some(&editor)).await
     }
 
     /// Enumerated gates only: no free native error text, paths, SQL or input bodies.
@@ -1037,7 +757,6 @@ impl Scene {
                     segment_id: source.segment_id,
                 },
                 &Event::OrchToolCall(OrchToolCall {
-                    deadline: None,
                     turn_id: turn,
                     call_ref: call.into(),
                     attempt,
@@ -1320,90 +1039,6 @@ impl Scene {
         ]
         .map(|kind| self.world.began(kind))
     }
-}
-
-#[tokio::test]
-async fn a_paid_tool_restores_original_input_origins_and_never_invents_missing_provenance() -> Proof
-{
-    let scene = Scene::new().await?;
-    let engine = scene.world.engine();
-    let mut tx = scene.world.pool.begin().await?;
-    let machine: Id = sqlx::query_scalar("SELECT machine_id FROM segments WHERE id=$1")
-        .bind(scene.source.segment_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    let call = CallContext {
-        machine,
-        thread: scene.thread,
-        turn: scene.start.turn_id,
-        call_ref: "original-paid-origins".into(),
-        attempt: None,
-        tool: orch_agent_contract::events::OrchTool::ListShared,
-        arguments: json!({}),
-    };
-    let (source, _) = Source::load(&mut tx, &call).await?;
-    tx.commit().await?;
-    source
-        .scope(async {
-            super::admit(&engine, &call).await?;
-            let mut tx = scene.world.pool.begin().await?;
-            let origins = super::original_callers(
-                &mut tx,
-                &call,
-                engine.inner.clock.as_ref(),
-                engine.inner.access.as_ref(),
-            )
-            .await?;
-            assert_eq!(origins.actor(), scene.world.ada);
-            assert!(
-                origins.callers().len() >= 2,
-                "author and actor origins remain conjunctive"
-            );
-            assert!(
-                origins
-                    .callers()
-                    .iter()
-                    .all(|caller| caller.user() == scene.world.ada)
-            );
-            assert_eq!(origins.attribution().turn_id, scene.start.turn_id);
-            assert_eq!(origins.attribution().segment_id, scene.source.segment_id);
-            sqlx::query("UPDATE thread_inputs SET submission_authority=NULL WHERE id=$1")
-                .bind(scene.input)
-                .execute(&mut *tx)
-                .await?;
-            assert!(
-                matches!(
-                    super::original_callers(
-                        &mut tx,
-                        &call,
-                        engine.inner.clock.as_ref(),
-                        engine.inner.access.as_ref()
-                    )
-                    .await,
-                    Err(EngineError::StaleToolSource)
-                ),
-                "a missing original origin never falls back to an owner session"
-            );
-            // Roll back this deliberately removed provenance; the native scene remains its original one.
-            tx.rollback().await?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-        })
-        .await?;
-    let mut conn = scene.world.pool.acquire().await?;
-    assert!(
-        matches!(
-            super::original_callers(
-                &mut conn,
-                &call,
-                engine.inner.clock.as_ref(),
-                engine.inner.access.as_ref()
-            )
-            .await,
-            Err(EngineError::StaleToolSource)
-        ),
-        "receipt metadata alone is no admitted tool dispatch"
-    );
-    Ok(())
 }
 
 #[tokio::test]

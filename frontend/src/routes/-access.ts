@@ -8,8 +8,7 @@
 import { redirect } from '@tanstack/react-router';
 import { QueryObserver } from '@tanstack/react-query';
 
-import { signOut } from '@/api/auth';
-import { admissionMetaQuery } from '@/shell/admission';
+import { metaQuery, signOut } from '@/api/auth';
 import { client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { setSystemName } from '@/lib/title';
@@ -87,10 +86,10 @@ interface Visit {
 async function admissionFacts() {
   // Admission still owns Meta when restoration unmounts the last AuthFrame observer.
   // Disabled retains without fetching; Infinity does not block a caller-specific refetch.
-  const reader = new QueryObserver(queryClient, { ...admissionMetaQuery, enabled: false, staleTime: Infinity });
+  const reader = new QueryObserver(queryClient, { ...metaQuery, enabled: false, staleTime: Infinity });
   const release = reader.subscribe(() => undefined);
   try {
-    return await Promise.all([queryClient.query({ ...admissionMetaQuery, staleTime: 'static' }), client.restore()]);
+    return await Promise.all([queryClient.query({ ...metaQuery, staleTime: 'static' }), client.restore()]);
   } finally { release(); }
 }
 

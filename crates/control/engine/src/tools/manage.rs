@@ -265,7 +265,7 @@ pub(crate) enum Claim {
     /// A plan waits under it for other arguments. It stays, for the arguments it was made for.
     Other,
     /// The plan, which is spent.
-    Claimed(Box<Waiting>),
+    Claimed(Waiting),
 }
 
 /// The plans that agents were given a word for, and the answers to the calls that were made, for as long as a word is
@@ -336,7 +336,7 @@ impl Plans {
             Some(_) => self
                 .waiting
                 .remove(&key)
-                .map_or(Claim::Missing, |waiting| Claim::Claimed(Box::new(waiting))),
+                .map_or(Claim::Missing, Claim::Claimed),
         }
     }
 

@@ -75,7 +75,8 @@ export function IconButton({
     onClick?.(event);
   };
 
-  const face = (
+  return (
+    <Tooltip content={reason ?? label} shortcut={shortcut} side={side}>
       <IconButtonFace
         ownerDescription={reason === undefined ? rest['aria-describedby'] : undefined}
         ref={ref}
@@ -99,8 +100,6 @@ export function IconButton({
       >
         {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : act === undefined ? icon : <ActionIcon action={act} />}
       </IconButtonFace>
+    </Tooltip>
   );
-  return <Tooltip content={reason ?? label} shortcut={shortcut} side={side}>
-    {disabled ? <span className="inline-flex" tabIndex={0}>{face}</span> : face}
-  </Tooltip>;
 }

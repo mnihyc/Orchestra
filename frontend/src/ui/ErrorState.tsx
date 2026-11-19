@@ -9,7 +9,6 @@ import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
-import { WhereNames } from '@/features/access/WhereField';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
@@ -86,7 +85,7 @@ function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retr
     ? action ?? (onRetry !== undefined && text.retryable ? <Button size="sm" icon={<RefreshCw aria-hidden />} pending={retrying} onClick={onRetry}>{t('common.tryAgain')}</Button> : undefined)
     : <Button size="sm" onClick={() => setReviewing(true)}>{review.label}</Button>;
   return <>
-    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={text.diagnostic===undefined ? message ?? text.message : <div className="flex min-w-0 flex-col gap-1"><div>{message ?? text.message}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>} action={next} compact={compact} className={className} />
+    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={message ?? text.message} action={next} compact={compact} className={className} />
     {review !== undefined && reviewing && <Dialog open onOpenChange={setReviewing} title={review.label}>
       <div className="flex flex-col gap-3">{review.content}</div>
     </Dialog>}
@@ -117,7 +116,6 @@ export function MissingAccessList({ missing, className }: { missing: readonly Mi
             <span>
               <span className="font-medium">{what}</span>
             </span>
-            {entry.options?.where !== undefined && entry.options.where !== null && entry.options.where.length > 0 && <span><Trans i18nKey="access.missing.notWhere" components={{ names: <WhereNames names={entry.options.where} unreadable={t('access.missing.thatPlace')} /> }} /></span>}
             {entry.closed !== null || entry.ask.length === 0 ? <span className="text-text-muted">{answer}</span> : <span className="flex flex-wrap items-center gap-1 text-text-muted">
               <span className="sr-only">{answer}</span>
               <Trans i18nKey="access.missing.askPeople" components={{ people: entry.ask.length === 1 && entry.ask_more === 0 && entry.ask[0] !== undefined ? <UserChip user={entry.ask[0]} size={24} /> : <AvatarStack users={entry.ask} total={entry.ask.length + entry.ask_more} size={24} /> }} />

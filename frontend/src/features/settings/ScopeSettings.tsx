@@ -30,7 +30,6 @@ import { selectOrg } from '@/shell/org';
 import { Page, PlaceMark, Section } from '@/shell/Page';
 import { useScreenHeading } from '@/shell/screen';
 import { ErrorState } from '@/ui/ErrorState';
-import { StateLine } from '@/ui/StateLine';
 import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 
 /** The sections of a project's and a topic's settings, with the checks their routes read from the address, are `sections.ts`'s. */
@@ -45,7 +44,7 @@ function placeOf(node: Project | Topic): RowPlace {
 export function ScopeEditor({ node }: { node: Project | Topic }) {
   const { t } = useTranslation();
   return (
-    <Section id="defaults" title={t('day100.names.defaults')}>
+    <Section id="policies" title={t('day100.names.defaults')}>
       <SettingsEditor target={{ kind: 'node', id: node.id }} scope={node.kind} place={placeOf(node)} secrets />
     </Section>
   );
@@ -53,21 +52,20 @@ export function ScopeEditor({ node }: { node: Project | Topic }) {
 
 export interface TopicScopeSettingsProps {
   topic: Topic;
-  section: string;
+  section: TopicSection;
   onSection: (section: TopicSection) => void;
 }
 
 /** The settings in a topic's tab: its general settings, the editor at topic scope, and where what happens in the topic is sent; the control above them says which is in view. */
 export function TopicScopeSettings({ topic, section }: TopicScopeSettingsProps) {
   const { t } = useTranslation();
-  const navigation = placeSettingsSections({ kind: 'topic', id: topic.id, current: isTopicSection(section) ? section : '' }, t);
+  const navigation = placeSettingsSections({ kind: 'topic', id: topic.id, current: section }, t);
   return (
-    <SettingsFrame title={sectionLabel(isTopicSection(section) ? section : '',t)} mark={<PlaceMark><Diamond aria-hidden /></PlaceMark>}
+    <SettingsFrame title={sectionLabel(section,t)} mark={<PlaceMark><Diamond aria-hidden /></PlaceMark>}
       adminAccess={topic.access.admin_access} private={topic.page === 'restricted'} opening={{ kind: topic.kind, id: topic.id }}
       label={t('settings.org.sections', { name: topic.name })} current={section} items={navigation}>
-      {!isTopicSection(section) && <StateLine message={t('settings.chooseSection')} />}
       {section === 'general' && <General key={topic.id} node={topic} />}
-      {section === 'defaults' && <ScopeEditor node={topic} />}
+      {section === 'policies' && <ScopeEditor node={topic} />}
       {section === 'audit' && <Trail scope={scopeOf(topic)} />}
       {section === 'destinations' && <OutsideOrch node={topic} />}
     </SettingsFrame>
@@ -76,7 +74,7 @@ export function TopicScopeSettings({ topic, section }: TopicScopeSettingsProps) 
 
 export interface ProjectSettingsProps {
   projectId: string;
-  section: string;
+  section: ProjectSection;
 }
 
 export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
@@ -86,7 +84,7 @@ export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
   const query = useQuery({ ...projectQuery(projectId), enabled: !opening.waiting });
   const project = query.data;
   const readable = query.isError ? undefined : project;
-  const tabTitle = useSettingsTabTitle(sectionLabel(isProjectSection(section) ? section : '', t), readable);
+  const tabTitle = useSettingsTabTitle(sectionLabel(section, t), readable);
   useEffect(() => {
     if (project !== undefined) selectOrg(userId, project.org_id);
   }, [project, userId]);
@@ -95,7 +93,7 @@ export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
   if (query.isPending) {
     return (
       <Page>
-        <SkeletonGroup read={query} className="flex flex-col gap-4">
+        <SkeletonGroup className="flex flex-col gap-4">
           <Skeleton className="h-8 w-1/3" />
           <Skeleton className="h-[10rem] w-full" />
         </SkeletonGroup>
@@ -106,7 +104,7 @@ export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
     return <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   }
   const data = query.data;
-  const navigation = placeSettingsSections({ kind: 'project', id: projectId, current: isProjectSection(section) ? section : '' }, t);
+  const navigation = placeSettingsSections({ kind: 'project', id: projectId, current: section }, t);
   return (
     <SettingsFrame
         adminAccess={data.access.admin_access} private={data.page === 'restricted'} opening={{ kind: data.kind, id: data.id }}
@@ -115,12 +113,11 @@ export function ProjectSettings({ projectId, section }: ProjectSettingsProps) {
             <Folder aria-hidden />
           </PlaceMark>
         }
-        title={sectionLabel(isProjectSection(section) ? section : '',t)}
+        title={sectionLabel(section,t)}
         label={t('settings.org.sections', { name: data.name })} current={section}
         items={navigation}>
-            {!isProjectSection(section) && <StateLine message={t('settings.chooseSection')} />}
             {section === 'general' && <General key={data.id} node={data} />}
-            {section === 'defaults' && <ScopeEditor node={data} />}
+            {section === 'policies' && <ScopeEditor node={data} />}
             {section === 'tags' && <Tags node={data} />}
             {section === 'audit' && <Trail scope={scopeOf(data)} />}
             {section === 'destinations' && <OutsideOrch node={data} />}

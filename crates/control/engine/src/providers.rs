@@ -70,9 +70,6 @@ use orch_types::{Hash, Id, Json, Time};
 use serde_json::json;
 use std::collections::BTreeMap;
 
-pub mod deleting;
-mod native_counts;
-
 /// Vendor quota is an observation, not a local admission rule. An external reset
 /// or available credits can admit the next request; independent lifecycle failures
 /// still prevent dispatch. Configured Orch usage caps are checked separately.
@@ -449,29 +446,11 @@ impl Engine {
     /// Makes sure the provider runs on the machine that keeps its key: `provider.start` where the link's
     /// rows do not say that it was, for what it carries now. The command is the same for every thread and
     /// every turn that needs the provider, and the machine answers one it has run with itself.
-    pub(crate) fn ensure_provider_started(
+    pub(crate) async fn ensure_provider_started(
         &self,
         thread: Id,
         provider: Id,
-    ) -> futures::future::BoxFuture<'_, Result<Keeping, EngineError>> {
-        Box::pin(self.ensure_provider_started_with_preparation(thread, provider, None))
-    }
-
-    /// The same native starter, retaining the actual parent source through its first write and command.
-    pub(crate) async fn ensure_provider_started_with_preparation(
-        &self,
-        thread: Id,
-        provider: Id,
-        preparation: Option<&crate::harnesses::preparation::Preparation>,
     ) -> Result<Keeping, EngineError> {
-        if let Some(source) = preparation {
-            source
-                .check_selection(
-                    self,
-                    crate::harnesses::preparation::Target::ProviderSelection { provider },
-                )
-                .await?;
-        }
         let plan = match self.start_plan(provider).await? {
             Ok(plan) => plan,
             Err(error) => return Ok(Keeping::Cannot(error)),
@@ -489,27 +468,8 @@ impl Engine {
                     None => return Ok(keeping(self.inner.commands.wait(id).await?)),
                 },
                 None => {
-                    let target = crate::harnesses::preparation::Target::Provider {
-                        provider: plan.provider,
-                        machine: plan.machine,
-                    };
-                    let builtin = {
-                        let mut conn = self.db().acquire().await?;
-                        orch_db::queries::ask::get(&mut conn, thread, false)
-                            .await?
-                            .is_some()
-                    };
-                    if !builtin {
-                        self.set_step_with_preparation(
-                            thread,
-                            "provider",
-                            preparation.map(|source| (source, target)),
-                        )
-                        .await?;
-                    }
-                    return self
-                        .send_provider_start_with_preparation(&plan, id, preparation)
-                        .await;
+                    self.set_step(thread, "provider").await?;
+                    return self.send_provider_start(&plan, id).await;
                 }
             }
         }
@@ -517,15 +477,7 @@ impl Engine {
 
     /// Asks the machine to start the provider again, because it has lost it: for the lease that found it
     /// without, and once for that lease.
-    pub(crate) fn restart_provider(
-        &self,
-        provider: Id,
-        lease: Id,
-    ) -> futures::future::BoxFuture<'_, Result<Keeping, EngineError>> {
-        Box::pin(self.restart_provider_inner(provider, lease))
-    }
-
-    async fn restart_provider_inner(
+    pub(crate) async fn restart_provider(
         &self,
         provider: Id,
         lease: Id,
@@ -539,37 +491,12 @@ impl Engine {
     }
 
     async fn send_provider_start(&self, plan: &StartPlan, id: Id) -> Result<Keeping, EngineError> {
-        self.send_provider_start_with_preparation(plan, id, None)
-            .await
-    }
-
-    async fn send_provider_start_with_preparation(
-        &self,
-        plan: &StartPlan,
-        id: Id,
-        preparation: Option<&crate::harnesses::preparation::Preparation>,
-    ) -> Result<Keeping, EngineError> {
         let command = Outgoing::new(
             id,
             plan.machine,
             SerialKey::Provider(plan.provider),
             &plan.body,
         )?;
-        let command = match preparation {
-            Some(source) => {
-                source
-                    .command(
-                        self,
-                        crate::harnesses::preparation::Target::Provider {
-                            provider: plan.provider,
-                            machine: plan.machine,
-                        },
-                        command,
-                    )
-                    .await?
-            }
-            None => command,
-        };
         Ok(keeping(
             crate::commands::run(self.inner.commands.as_ref(), command).await?,
         ))
@@ -788,9 +715,6 @@ impl Engine {
                         at: delivered.at.get(),
                     };
                     self.on_lease_usage(unit, &provider, &ctx, &usage).await?;
-                }
-                Event::ProviderGenerationDelta(delta) => {
-                    self.on_ask_delta(unit, provider_id, &delta).await?
                 }
                 Event::LeaseDenied(denied) => {
                     self.on_lease_denied(unit, &provider, &denied).await?;
@@ -1047,13 +971,7 @@ impl Engine {
         };
         // What the forwarder counted in all when the lease closed is in the ledger already: a request
         // reported after that was counted there, and is not counted again.
-        let reconciled = ledger::event_exists(&mut *unit.conn, ids::usage_close(lease.id)).await?;
-        if reconciled
-            && !usage
-                .timing
-                .as_ref()
-                .is_some_and(|timing| timing.outcome.value().is_some())
-        {
+        if ledger::event_exists(&mut *unit.conn, ids::usage_close(lease.id)).await? {
             tracing::info!(lease = %lease.id, "usage reported after its lease was reconciled is not counted again");
             return Ok(());
         }
@@ -1074,7 +992,7 @@ impl Engine {
                 lease: Some(lease.id),
                 context: None,
                 harness: false,
-                counted: !reconciled,
+                counted: true,
                 id,
                 at: ctx.at,
                 model: &usage.model,
@@ -1106,22 +1024,6 @@ impl Engine {
             tokens,
             request_ref,
         } = forwarded;
-        // Native request facts can arrive after their own model's aggregate was already billed.
-        // Only pricing uses the uncovered quantities; the immutable request keeps its full observations.
-        let (billing, covered) = if harness
-            && lease.is_none()
-            && counted
-            && let Some(timing) = timing
-            && matches!(timing.outcome, UsageMeasurement::Told { .. })
-        {
-            let (billing, covered) = self
-                .native_request_billing(unit, attribution, model, id, timing)
-                .await?;
-            (Some(billing), covered)
-        } else {
-            (timing.cloned(), BTreeMap::new())
-        };
-        let pricing = billing.as_ref();
         let entry = resources::model(&mut *unit.conn, provider.id, model).await?;
         let own = entry
             .as_ref()
@@ -1150,14 +1052,10 @@ impl Engine {
         let book = RateBook::load(&mut *unit.conn, attribution.thread_id).await?;
         // An old adapter may provide performance without actual request/report facts.
         // Its timing alone must not change historical requested-tier accounting.
-        let (tier, mut priced) = if let Some(timing) = pricing.filter(|timing| {
+        let (tier, mut priced) = if let Some(timing) = timing.filter(|timing| {
             timing.wire_protocol.is_some()
                 || timing.requested_service_tier.is_some()
                 || timing.reported_service_tier != UsageMeasurement::Unsupported
-                || timing.requested_capacity_tier.is_some()
-                || timing.reported_capacity_tier != UsageMeasurement::Unsupported
-                || timing.cache_write_1h_tokens.is_some()
-                || timing.cache_write_12h_tokens.is_some()
         }) {
             book.price_observed(
                 &mut *unit.conn,
@@ -1165,10 +1063,8 @@ impl Engine {
                 model,
                 &tokens,
                 context.unwrap_or((tokens.input, tokens.input)),
-                crate::rates::Observation {
-                    timing,
-                    protocol: None,
-                },
+                timing,
+                None,
             )
             .await?
         } else {
@@ -1184,37 +1080,18 @@ impl Engine {
                 .await?;
             (tier, priced)
         };
-        if let Some(timing) = pricing.filter(|timing| {
-            timing.web_searches != UsageMeasurement::Unsupported
-                || timing.web_fetches != UsageMeasurement::Unsupported
-        }) && priced.credits.is_some()
+        if let Some(timing) =
+            timing.filter(|timing| timing.web_searches != UsageMeasurement::Unsupported)
+            && priced.credits.is_some()
             && let Some(found) = &priced.found
-            && found.source != crate::rates::Source::Reported
         {
-            priced.credits = crate::rates::credits_with_timing(
+            priced.credits = crate::rates::credits_with_searches(
                 &found.rate,
                 &tokens,
                 context_tokens,
                 tier.as_deref(),
-                timing,
+                &timing.web_searches,
             );
-        }
-        if timing.is_some_and(|timing| {
-            timing
-                .reported_tokens
-                .as_ref()
-                .is_none_or(|tokens| tokens.is_empty())
-                && timing
-                    .outcome
-                    .value()
-                    .is_some_and(|outcome| outcome != "done")
-        }) {
-            // A missing usage body is not evidence that the failed attempt was free.
-            priced.credits = None;
-        }
-        if let Some(timing) = timing {
-            book.apply_reported_total(&mut *unit.conn, timing, &mut priced)
-                .await?;
         }
         let rate_json = priced
             .found
@@ -1252,19 +1129,7 @@ impl Engine {
                 .await?
             }
             None => {
-                if covered.is_empty() {
-                    ledger::record_program(&mut *unit.conn, &event, timing, program.as_deref())
-                        .await?
-                } else {
-                    ledger::record_native_program(
-                        &mut *unit.conn,
-                        &event,
-                        timing,
-                        program.as_deref(),
-                        &covered,
-                    )
-                    .await?
-                }
+                ledger::record_program(&mut *unit.conn, &event, timing, program.as_deref()).await?
             }
         };
         if written {
@@ -1399,23 +1264,12 @@ impl Engine {
             context: (i64, i64),
             searches: Option<i64>,
             search_aware: bool,
-            fetches: Option<i64>,
-            fetch_aware: bool,
-            reported_cost: orch_link_contract::commands::LeaseReportedCost,
-            cost_aware: bool,
-            requests: i64,
-            hourly: Option<i64>,
-            hourly_aware: bool,
-            twelve_hour: Option<i64>,
-            twelve_hour_aware: bool,
         }
         let mut residuals: BTreeMap<String, Residual> = BTreeMap::new();
         let mut comparable_snapshot = true;
         for group in groups {
             let key = group.key();
             comparable_snapshot &= key.wire_protocol.is_some()
-                || key.requested_capacity_tier.is_some()
-                || key.reported_capacity_tier != UsageMeasurement::Unsupported
                 || key.requested_service_tier.is_some()
                 || key.reported_service_tier != UsageMeasurement::Unsupported;
             let canonical = serde_json::to_string(&key)?;
@@ -1426,76 +1280,10 @@ impl Engine {
                 context: (group.min_context_tokens, group.max_context_tokens),
                 searches: Some(0),
                 search_aware: false,
-                fetches: Some(0),
-                fetch_aware: false,
-                reported_cost: Default::default(),
-                cost_aware: false,
-                requests: 0,
-                hourly: Some(0),
-                hourly_aware: false,
-                twelve_hour: Some(0),
-                twelve_hour_aware: false,
             });
             add_tokens(&mut row.tokens, &tokens);
-            row.requests = row.requests.saturating_add(group.requests);
-            row.cost_aware |= group.reported_cost_usage.is_some();
-            if let Some(cost) = &group.reported_cost_usage {
-                row.reported_cost.merge(cost);
-            }
-            row.hourly_aware |= group.cache_write_usage.as_ref().is_some_and(|cache| {
-                cache.known_requests > 0
-                    || cache.one_hour_tokens != 0
-                    || cache.twelve_hour_known_requests == 0
-                        && cache.twelve_hour_tokens == 0
-                        && group.timing.cache_write_12h_tokens.is_none()
-            }) || group.timing.cache_write_1h_tokens.is_some();
-            row.hourly = row
-                .hourly
-                .zip(
-                    group
-                        .cache_write_usage
-                        .as_ref()
-                        .filter(|cache| {
-                            cache.known_requests == group.requests
-                                && cache.one_hour_tokens >= 0
-                                && cache.one_hour_tokens <= tokens.cache_write
-                        })
-                        .map(|cache| cache.one_hour_tokens),
-                )
-                .and_then(|(held, value)| held.checked_add(value));
-            row.twelve_hour_aware |= group.cache_write_usage.as_ref().is_some_and(|cache| {
-                cache.twelve_hour_known_requests > 0 || cache.twelve_hour_tokens != 0
-            }) || group.timing.cache_write_12h_tokens.is_some();
-            row.twelve_hour = row
-                .twelve_hour
-                .zip(
-                    group
-                        .cache_write_usage
-                        .as_ref()
-                        .filter(|cache| {
-                            cache.twelve_hour_known_requests == group.requests
-                                && cache.twelve_hour_tokens >= 0
-                                && cache.twelve_hour_tokens <= tokens.cache_write
-                        })
-                        .map(|cache| cache.twelve_hour_tokens),
-                )
-                .and_then(|(held, value)| held.checked_add(value));
             row.context.0 = row.context.0.min(group.min_context_tokens);
             row.context.1 = row.context.1.max(group.max_context_tokens);
-            row.fetch_aware |= group
-                .search_usage
-                .as_ref()
-                .is_some_and(|usage| usage.fetch_known_requests > 0);
-            row.fetches = row
-                .fetches
-                .zip(
-                    group
-                        .search_usage
-                        .as_ref()
-                        .filter(|usage| usage.fetch_known_requests == group.requests)
-                        .map(|usage| usage.fetches),
-                )
-                .map(|(held, fetches)| held.saturating_add(fetches));
             row.search_aware |= group.search_usage.is_some();
             row.searches = row
                 .searches
@@ -1509,75 +1297,6 @@ impl Engine {
                 .map(|(held, searches)| held.saturating_add(searches));
         }
         for residual in residuals.values_mut() {
-            let prior_requests = counted
-                .group_requests
-                .get(&residual.key)
-                .copied()
-                .unwrap_or(0);
-            residual.reported_cost = residual
-                .reported_cost
-                .complete(residual.requests)
-                .and_then(|total| {
-                    if prior_requests == 0 {
-                        return Some(orch_link_contract::commands::LeaseReportedCost {
-                            total: Some(total),
-                            known_requests: residual.requests,
-                        });
-                    }
-                    let prior = counted
-                        .group_reported_costs
-                        .get(&residual.key)
-                        .and_then(Option::as_ref)?;
-                    let mut received = orch_link_contract::commands::LeaseReportedCost {
-                        total: Some(total),
-                        known_requests: residual.requests,
-                    };
-                    received.subtract(&orch_link_contract::commands::LeaseReportedCost {
-                        total: Some(prior.clone()),
-                        known_requests: prior_requests,
-                    });
-                    Some(received)
-                })
-                .unwrap_or_default();
-            residual.requests = residual.requests.saturating_sub(prior_requests).max(0);
-            residual.fetches = residual
-                .fetches
-                .zip(
-                    counted
-                        .group_fetches
-                        .get(&residual.key)
-                        .copied()
-                        .unwrap_or(Some(0)),
-                )
-                .map(|(received, counted)| received.saturating_sub(counted).max(0));
-            residual.hourly = residual
-                .hourly
-                .zip(
-                    counted
-                        .group_cache_write_1h
-                        .get(&residual.key)
-                        .copied()
-                        .unwrap_or(Some(0)),
-                )
-                .and_then(|(received, counted)| {
-                    if counted >= 0 && counted <= received {
-                        Some(received - counted)
-                    } else {
-                        None
-                    }
-                });
-            residual.twelve_hour = residual
-                .twelve_hour
-                .zip(
-                    counted
-                        .group_cache_write_12h
-                        .get(&residual.key)
-                        .copied()
-                        .unwrap_or(Some(0)),
-                )
-                .and_then(|(received, counted)| {
-                    (counted >= 0 && counted <= received).then(|| received - counted)
-                });
             residual.searches = residual
                 .searches
                 .zip(
@@ -1599,16 +1318,6 @@ impl Engine {
         residuals.retain(|_, residual| {
             residual.tokens != Tokens::default()
                 || residual.searches.is_some_and(|searches| searches > 0)
-                || residual.fetches.is_some_and(|fetches| fetches > 0)
-                || residual
-                    .reported_cost
-                    .complete(residual.requests)
-                    .is_some_and(|cost| {
-                        cost.amount
-                            .bytes()
-                            .any(|digit| matches!(digit, b'1'..=b'9'))
-                    })
-                || residual.hourly.is_some_and(|hourly| hourly > 0)
         });
         let unmapped = counted.unassigned != Tokens::default()
             || counted.legacy != Tokens::default()
@@ -1655,20 +1364,9 @@ impl Engine {
                     context: (0, i64::MAX),
                     searches: None,
                     search_aware: false,
-                    fetches: None,
-                    fetch_aware: false,
-                    reported_cost: Default::default(),
-                    cost_aware: false,
-                    requests: 0,
-                    hourly: None,
-                    hourly_aware: false,
-                    twelve_hour: None,
-                    twelve_hour_aware: false,
                 });
                 add_tokens(&mut row.tokens, &unknown);
                 row.context = (0, i64::MAX);
-                row.reported_cost = Default::default();
-                row.requests = 0;
             }
         } else if unmapped {
             // Without a readable aggregate, legacy overlap cannot establish even a
@@ -1689,15 +1387,6 @@ impl Engine {
                     context: (0, i64::MAX),
                     searches: None,
                     search_aware: false,
-                    fetches: None,
-                    fetch_aware: false,
-                    reported_cost: Default::default(),
-                    cost_aware: false,
-                    requests: 0,
-                    hourly: None,
-                    hourly_aware: false,
-                    twelve_hour: None,
-                    twelve_hour_aware: false,
                 },
             );
         }
@@ -1709,43 +1398,8 @@ impl Engine {
                 context,
                 searches,
                 search_aware,
-                fetches,
-                fetch_aware,
-                reported_cost,
-                cost_aware,
-                requests,
-                hourly,
-                hourly_aware,
-                twelve_hour,
-                twelve_hour_aware,
             } = residual;
             let timing = RequestTiming {
-                reported_cost: if cost_aware {
-                    reported_cost
-                        .complete(requests)
-                        .map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
-                            value,
-                        })
-                } else {
-                    UsageMeasurement::Unsupported
-                },
-                cache_write_1h_tokens: hourly_aware.then(|| {
-                    hourly.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
-                        value,
-                    })
-                }),
-                cache_write_12h_tokens: twelve_hour_aware.then(|| {
-                    twelve_hour.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
-                        value,
-                    })
-                }),
-                web_fetches: if fetch_aware {
-                    fetches.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
-                        value,
-                    })
-                } else {
-                    UsageMeasurement::Unsupported
-                },
                 web_searches: if search_aware {
                     searches.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
                         value,
@@ -1753,12 +1407,9 @@ impl Engine {
                 } else {
                     UsageMeasurement::Unsupported
                 },
-                native_prices: key.native_prices,
                 wire_protocol: key.wire_protocol,
                 requested_service_tier: key.requested_service_tier,
                 reported_service_tier: key.reported_service_tier,
-                requested_capacity_tier: key.requested_capacity_tier,
-                reported_capacity_tier: key.reported_capacity_tier,
                 ..RequestTiming::default()
             };
             self.count_forwarded(
@@ -1906,23 +1557,7 @@ impl Engine {
                 .map(|at| at.get())
                 .unwrap_or_else(|| unit.now())
                 .clamp(lower, upper);
-            let mut timing = request.measured();
-            if let Some(predecessor) = request.retry_of.as_deref()
-                && let Some(attempt) =
-                    ledger::attempt_after(unit.conn, turn_id, attribution.provider_id, predecessor)
-                        .await?
-            {
-                timing.attempt = Some(attempt);
-            }
-            if let Some(previous) = request.previous_ref.as_deref() {
-                ledger::supersede_observation(
-                    unit.conn,
-                    turn_id,
-                    attribution.provider_id,
-                    previous,
-                )
-                .await?;
-            }
+            let timing = request.measured();
             self.count_forwarded(
                 unit,
                 &provider,
@@ -1930,37 +1565,17 @@ impl Engine {
                 Forwarded {
                     id: ids::usage_request(turn_id, &request.id),
                     at,
-                    model: request
-                        .model
-                        .as_deref()
-                        .or_else(|| {
-                            turn.usage_detail
-                                .as_ref()
-                                .and_then(|detail| detail.get("effective_model"))
-                                .and_then(Json::as_str)
-                        })
-                        .unwrap_or(&attribution.turn_model),
+                    model: request.model.as_deref().unwrap_or(&attribution.turn_model),
                     tokens: tokens_of(&serde_json::to_value(request.tokens.usage())?),
                     request_ref: Some(&request.id),
                     timing: Some(&timing),
-                    lease: turn.lease_id,
+                    lease: None,
                     context: None,
                     harness: true,
                     counted: turn.lease_id.is_none(),
                 },
             )
             .await?;
-            if let Some(refs) = request.tool_refs.as_deref() {
-                ledger::tools::record(
-                    unit.conn,
-                    turn_id,
-                    attribution.provider_id,
-                    &request.id,
-                    request.provider_request_id.as_deref(),
-                    refs,
-                )
-                .await?;
-            }
         }
         Ok(())
     }
@@ -2013,22 +1628,13 @@ impl Engine {
         if turn.lease_id.is_some() {
             return Ok(());
         }
-        self.count_native_capabilities(unit, turn).await?;
         // A missing report supplies no consumption to count. Measured request rows are
         // recorded separately; a terminal outcome alone must not invent a known zero.
         let Some(usage) = turn.usage.as_ref() else {
             return Ok(());
         };
         let mut tokens = tokens_of(usage);
-        let stated = crate::context_fill::uncarried_of(turn.usage_detail.as_ref());
-        if let Some(uncarried) = stated {
-            // The adapter stated how much of the use its request rows carry: the turn is closed as the use less that
-            // figure, and the rows are counted as they come, whichever of them are here now.
-            tokens = uncarried;
-            if tokens.total == 0 {
-                return Ok(());
-            }
-        } else if has_requests {
+        if has_requests {
             let counted = ledger::counted_request_totals(&mut *unit.conn, turn_id).await?;
             tokens = shortfall(&tokens, &counted);
             if tokens.total == 0 {
@@ -2097,17 +1703,6 @@ impl Engine {
                 "done"
             });
         let timing = orch_api_contract::usage::RequestTiming {
-            error_reason: turn
-                .error
-                .as_ref()
-                .and_then(|error| error.get("reason"))
-                .and_then(Json::as_str)
-                .map(str::to_owned),
-            upstream_status: turn
-                .error
-                .as_ref()
-                .and_then(|error| error.get("status"))
-                .and_then(Json::as_i64),
             request_ms: turn
                 .usage_detail
                 .as_ref()
@@ -2117,10 +1712,7 @@ impl Engine {
                     orch_api_contract::usage::UsageMeasurement::Unsupported,
                     |value| orch_api_contract::usage::UsageMeasurement::Told { value },
                 ),
-            // The row of a turn whose adapter stated what its rows carry holds only what they do not: it is no
-            // request, and says no outcome of one, whether its rows came before this follow-up or come after it (each
-            // request is counted, and its outcome told, by its own row).
-            outcome: if has_requests || stated.is_some() {
+            outcome: if has_requests {
                 orch_api_contract::usage::UsageMeasurement::Unsupported
             } else {
                 orch_api_contract::usage::UsageMeasurement::Told {

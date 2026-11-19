@@ -146,14 +146,12 @@ pub fn capabilities() -> Capabilities {
         steer: true,
         interrupt: true,
         background_commands: true,
-        prompt_cache_ttl: true,
         turn_changes_require_restart: true,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
             HarnessRequestKind::Permissions,
             HarnessRequestKind::UserInput,
-            HarnessRequestKind::McpElicitation,
         ],
         subagents: true,
         subagent_limits: vec![
@@ -170,7 +168,6 @@ pub fn capabilities() -> Capabilities {
         }),
         reasoning_summary: true,
         input_images: true,
-        image_generation: false,
         // Changed between turns without a restart; a harness that refuses is restarted.
         effort: EffortSupport::Turn,
         mcp_discovery: true,
@@ -232,7 +229,6 @@ pub fn capabilities() -> Capabilities {
         approval_reviewer: Some(ApprovalReviewerSupport {
             model: crate::review::CLAUDE_REVIEW_MODEL.to_owned(),
             settable: true,
-            session_model_paths: Vec::new(),
         }),
     }
 }
@@ -286,7 +282,7 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
         ("parameters.web_search.title", "网络搜索"),
         (
             "parameters.web_search.description",
-            "选择原生网络搜索，或在可用时选择已启用的托管提供方服务。搜索可能另行计费。",
+            "让模型在提供方启用的模式范围内搜索公开网络。搜索可能另行计费。",
         ),
         ("parameters.context.title", "上下文"),
         (
@@ -402,17 +398,14 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         side_thread_modes: Vec::new(),
         capabilities: {
             let mut declared = capabilities();
-            if !crate::config::input_prefix_supported(version) {
+            if version != "2.1.296" {
                 declared.native_input_prefix = None;
             }
             declared
         },
         parameters: definitions(),
         text: text(),
-        extensions: serde_json::from_value(serde_json::json!({
-            "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
-            (orch_agent_contract::turn_end_delays::EXTENSION): crate::config::turn_end_delays(),
-        })).unwrap_or_default(),
+        extensions: Default::default(),
     }
 }
 
@@ -427,51 +420,6 @@ fn entry(kind: ArrangementType) -> ArrangementEntry {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn the_options_that_hold_back_a_turns_end_are_declared_and_no_override_removes_them() {
-        use orch_agent_contract::turn_end_delays::{EXTENSION, TurnEndDelays};
-        let actual = super::descriptor("2.1.322", false);
-        let declared = actual
-            .extensions
-            .get(EXTENSION)
-            .expect("the descriptor declares what holds back a turn's end");
-        let delays: TurnEndDelays = serde_json::from_value(declared.clone()).unwrap();
-        assert_eq!(
-            delays
-                .delays
-                .iter()
-                .map(|each| each.pointer.as_str())
-                .collect::<Vec<_>>(),
-            ["/child_usage_wait_ms"]
-        );
-        let read: orch_agent_contract::descriptor::AgentDescriptor =
-            serde_json::from_value(serde_json::to_value(&actual).unwrap()).unwrap();
-        let overridden = read
-            .with_overrides(&serde_json::json!({ (EXTENSION): null }))
-            .unwrap();
-        assert_eq!(overridden.extensions.get(EXTENSION), Some(declared));
-    }
-
-    #[test]
-    fn input_prefix_support_follows_the_supported_line() {
-        for version in ["2.1.319", "2.1.322", "2.1.323", "2.2.0", "3.0.0"] {
-            assert!(
-                super::descriptor(version, false)
-                    .capabilities
-                    .native_input_prefix
-                    .is_some(),
-                "{version}"
-            );
-        }
-        for version in ["2.1.296", "2.1.318"] {
-            assert!(
-                super::descriptor(version, false)
-                    .capabilities
-                    .native_input_prefix
-                    .is_none()
-            );
-        }
-    }
     use super::*;
 
     #[test]
@@ -484,19 +432,11 @@ mod tests {
     fn the_harness_stands_against_the_range_as_the_contract_says() {
         assert_eq!(support_of("2.1.285"), HarnessSupport::Unsupported);
         assert_eq!(support_of("2.1.296"), HarnessSupport::Unsupported);
-        assert_eq!(support_of("2.1.318"), HarnessSupport::Unsupported);
-        assert_eq!(support_of("2.1.319"), HarnessSupport::Supported);
-        assert_eq!(support_of("2.1.322"), HarnessSupport::Supported);
-        assert_eq!(
-            support_of("2.1.323"),
-            HarnessSupport::Supported,
-            "a later build of the line counts as the supported build"
-        );
+        assert_eq!(support_of("2.1.312"), HarnessSupport::Supported);
         assert_eq!(support_of("2.2.0"), HarnessSupport::Untested);
-        assert_eq!(support_of("3.0.0"), HarnessSupport::Untested);
         assert_eq!(support_of("2.1.284"), HarnessSupport::Unsupported);
         assert_eq!(
-            descriptor("2.1.322", false).harness.status,
+            descriptor("2.1.312", false).harness.status,
             HarnessSupport::Supported
         );
     }

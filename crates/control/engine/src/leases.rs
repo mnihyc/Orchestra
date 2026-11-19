@@ -56,42 +56,6 @@ pub const ERROR: &str = "error";
 /// The `leases.close_reason` of a lease whose turn was ended because a usage cap was reached.
 pub const CAP_REACHED: &str = "cap_reached";
 
-/// Choices of the admitted turn, shared by the first lease issue and its provider-restart retry.
-pub(crate) struct LeaseChoices {
-    request_options: orch_model_contract::parameters::thread::Values,
-    access_program: Option<orch_link_contract::commands::LeaseAccessProgram>,
-    native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
-}
-
-impl LeaseChoices {
-    pub(crate) fn of_snapshot(
-        snapshot: &crate::sessions::StartSnapshot,
-    ) -> Result<Self, EngineError> {
-        use orch_agent_contract::parameters::{ModelList, ParameterOptions};
-        let parameters = &snapshot.descriptor.parameters;
-        let params = snapshot.adapter_params()?;
-        let managed = parameters.iter().any(|parameter| {
-            matches!(
-                parameter.options,
-                Some(ParameterOptions::FromModel {
-                    from_model: ModelList::AccessPrograms
-                })
-            )
-        });
-        Ok(Self {
-            native_model: snapshot.native_model.clone(),
-            // Wire option namespaces do not enter native turn.params. Keep the actual startup snapshot.
-            request_options: orch_model_contract::parameters::thread::read(
-                &snapshot.settings.params,
-            )
-            .map_err(EngineError::unreadable)?,
-            access_program: managed.then(|| orch_link_contract::commands::LeaseAccessProgram {
-                program: crate::providers::access_program(parameters, &params),
-            }),
-        })
-    }
-}
-
 /// The mode of the lease a credential path needs; none for the path on which
 /// the harness uses the provider's own login.
 #[must_use]
@@ -158,8 +122,7 @@ pub async fn open_for_turn(
         if crate::background_wake::running(unit.conn, Some(thread), None, None).await?
             || crate::background_wake::awaiting_native(unit.conn, thread).await?
         {
-            // The native session keeps one live lease while its work runs. Mixed-author
-            // billing is recorded on the affected turns without changing their authority.
+            // Admission holds other authors and changes of provider/model until this work ends.
             return Ok(Some(stale));
         }
         threads::close_lease(&mut *unit.conn, stale.id, TURN_ENDED, now).await?;
@@ -246,24 +209,19 @@ impl Engine {
         &self,
         provider: Id,
         allowed: &[String],
-        protocol: Option<&str>,
     ) -> Result<
         std::collections::BTreeMap<String, orch_provider_contract::models::ModelParameters>,
         EngineError,
     > {
-        let mut conn = self.inner.db.begin_snapshot().await?;
+        let mut conn = self.inner.db.acquire().await?;
         let mut parameters = std::collections::BTreeMap::new();
         for name in allowed {
             let row = orch_db::queries::resources::thread_engine::model(&mut conn, provider, name)
                 .await?
                 .filter(|row| row.enabled)
                 .ok_or_else(|| EngineError::unreadable("a lease model is no longer enabled"))?;
-            parameters.insert(
-                name.clone(),
-                crate::binding::model_parameters_for(&row, protocol)?,
-            );
+            parameters.insert(name.clone(), serde_json::from_value(row.parameters)?);
         }
-        conn.commit().await.map_err(orch_db::DbError::from)?;
         Ok(parameters)
     }
 
@@ -276,7 +234,6 @@ impl Engine {
         provider: &ProviderRow,
         protocol: Option<String>,
         attempt: u32,
-        choices: &LeaseChoices,
     ) -> Result<Outcome, EngineError> {
         let machine = machine_of(provider).ok_or_else(|| {
             EngineError::unreadable("the provider has no machine to keep a lease on")
@@ -288,15 +245,8 @@ impl Engine {
         };
         let body = LeaseOpen {
             model_parameters: self
-                .lease_model_parameters(
-                    lease.provider_id,
-                    &lease.allowed_models,
-                    protocol.as_deref(),
-                )
+                .lease_model_parameters(lease.provider_id, &lease.allowed_models)
                 .await?,
-            request_options: choices.request_options.clone(),
-            access_program: choices.access_program.clone(),
-            native_model: choices.native_model.clone(),
             lease_id: lease.id,
             provider_id: lease.provider_id,
             thread_id: lease.thread_id,

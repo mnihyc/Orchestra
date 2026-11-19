@@ -179,7 +179,7 @@ it('lets a decider replace the proposed end with a different date', async () => 
 });
 
 it('offers the same duration when requesting Use from the new-thread picker', async () => {
-  const blocked = { ...environment('blocked', { usable: false }), used: 'topic' as const, reason: 'environment_use_required' };
+  const blocked = { ...environment('blocked', { usable: false }), reason: 'environment_use_required' };
   const user = userEvent.setup();
   function Picker() {
     const [requesting, setRequesting] = useState<BindingEnvironment | null>(null);

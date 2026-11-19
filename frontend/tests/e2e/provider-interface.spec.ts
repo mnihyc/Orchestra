@@ -47,8 +47,7 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
   await expect(dialog.getByText(words.resources.endpoint.noAgent,{exact:true})).toHaveCount(0);
   await dialog.getByRole('combobox',{name:words.resources.endpoint.protocol}).click();
   await expect(page.getByRole('listbox')).toBeVisible();
-  // Embeddings is also a native endpoint format in the current catalogue.
-  await expect(page.getByRole('listbox').getByRole('option')).toHaveText(['OpenAI Embeddings', 'OpenAI Responses', 'OpenAI Chat Completions', 'Anthropic Messages']);
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(3);
   for(const option of await page.getByRole('listbox').getByRole('option').all())await expect(option).not.toHaveAttribute('aria-describedby',/.+/);
   await page.keyboard.press('Escape');
   await dialog.getByRole('combobox',{name:words.resources.home.label}).click();

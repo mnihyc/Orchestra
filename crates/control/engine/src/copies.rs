@@ -641,11 +641,10 @@ impl crate::engine::Engine {
                     .await?;
                 }
             }
-            if around.scoped
-                && out.files.len() > before
-                && let Some(binding) = around.names.get(&place.id)
-            {
-                record(sources, binding);
+            if around.scoped && out.files.len() > before {
+                if let Some(binding) = around.names.get(&place.id) {
+                    record(sources, binding);
+                }
             }
             Ok(())
         })

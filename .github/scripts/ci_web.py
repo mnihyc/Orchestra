@@ -160,17 +160,13 @@ def partition(rows):
             groups.append(group("layout", [unit(selected, "layout-rows", False, weight)]))
     if any(u["seconds"] > PAYLOAD for u in functional):
         raise ValueError("A whole functional file exceeds the forecast payload; review its lifecycle")
-    # Passing cases fill at most half of the hour, so that a group whose failing cases are retried still
-    # finishes and reports them within the deadline instead of being cancelled; a whole file larger than
-    # that half keeps a group of its own.
-    limit = max([PAYLOAD // 2] + [u["seconds"] for u in functional])
-    count = max(1, math.ceil(sum(u["seconds"] for u in functional) / limit))
+    count = max(1, math.ceil(sum(u["seconds"] for u in functional) / PAYLOAD))
     while True:
         bins = [[] for _ in range(count)]
         for item in sorted(functional, key=lambda u: (-u["seconds"], u["selectors"])):
             target = min(bins, key=lambda b: sum(u["seconds"] for u in b))
             target.append(item)
-        if all(sum(u["seconds"] for u in b) <= limit for b in bins):
+        if all(sum(u["seconds"] for u in b) <= PAYLOAD for b in bins):
             break
         count += 1  # At most one bin per whole file; no case is discarded.
     for selected in bins:

@@ -51,19 +51,14 @@ async fn a_turn_of_plain_text_streams_from_the_real_harness_into_neutral_events(
     rig.adapter.start_turn(turn).await.unwrap();
     let events = rig.until_turn_ends().await;
 
-    let began_at = events
-        .iter()
-        .position(|event| matches!(event, SessionEvent::TurnStarted(_)))
-        .expect("the native turn began");
-    assert!(
-        events[..began_at].iter().all(|event| matches!(event,
-        SessionEvent::ItemCompleted(item) if item.payload["marker"] == "harness_changed"
-            && item.payload["data"]["turn_id"].is_null())),
-        "only uncorrelated passive observations precede the native start: {:?}",
+    assert_eq!(
+        events.first().map(SessionEvent::kind),
+        Some("turn.started"),
+        "{:?}",
         kinds(&events)
     );
-    let SessionEvent::TurnStarted(began) = &events[began_at] else {
-        unreachable!();
+    let SessionEvent::TurnStarted(began) = &events[0] else {
+        panic!("the turn began");
     };
     assert_eq!(began.turn_id, turn_id);
     assert!(!began.native_turn_ref.is_empty());
@@ -72,9 +67,7 @@ async fn a_turn_of_plain_text_streams_from_the_real_harness_into_neutral_events(
     let started_items: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ItemStarted(item) if !matches!(item.content, ItemContent::Marker(_)) => {
-                Some(item)
-            }
+            SessionEvent::ItemStarted(item) => Some(item),
             _ => None,
         })
         .collect();
@@ -104,7 +97,7 @@ async fn a_turn_of_plain_text_streams_from_the_real_harness_into_neutral_events(
     let completed = events
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ItemCompleted(item) if item.native_ref == reference => Some(item),
+            SessionEvent::ItemCompleted(item) => Some(item),
             _ => None,
         })
         .expect("the message completes");
@@ -218,9 +211,7 @@ async fn the_reasoning_of_a_model_is_streamed_as_a_summary_before_what_it_says()
     let started: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ItemStarted(item) if !matches!(item.content, ItemContent::Marker(_)) => {
-                Some(item)
-            }
+            SessionEvent::ItemStarted(item) => Some(item),
             _ => None,
         })
         .collect();

@@ -83,12 +83,8 @@ pub struct Resolved {
     pub params: Json,
     /// The smallest inherited native limits over the harness's own sub-agents.
     pub subagent_limits: orch_agent_contract::session::SubagentLimits,
-    /// Prompt-cache lifetime where the selected program declares support; unset follows that program.
-    pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// Whether background task completion may start an admitted continuation.
     pub background_wake: bool,
-    /// Whether native image generation is explicitly enabled here.
-    pub image_generation: Option<bool>,
     /// The features that are on, by name.
     pub features: BTreeMap<String, bool>,
     /// The standing instructions scope by scope, outermost first, those that say nothing left out.
@@ -115,14 +111,10 @@ pub struct Resolved {
     pub binding_allowed: Option<Vec<ArrangementType>>,
     /// How many calls of Orch's tools the agent may make in a minute, as the guide to them says.
     pub tool_calls_per_minute: Option<i64>,
-    /// How many announcements an hour the agent may send, as the tool guide says.
-    pub announcements_per_hour: Option<i64>,
-    /// How many individual thread messages an hour the agent may send.
-    pub thread_messages_per_hour: Option<i64>,
+    /// How many times in an hour the agent may send to other threads, as the guide to the tools says.
+    pub sends_per_hour: Option<i64>,
     /// What announcement choices the current place permits advertising in its schema.
     pub broadcast_agent_options: Vec<String>,
-    /// Shared search work budgets advertised in this exact session catalogue.
-    pub search_budgets: crate::tools::search_budgets::SearchBudgets,
 }
 
 /// One scope's standing instructions, as the agent is told them under a heading of their place.
@@ -196,8 +188,6 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::AGENT_PARAMS,
         keys::AGENT_FEATURES,
         keys::THREADS_BACKGROUND_WAKE,
-        keys::AGENTS_IMAGE_GENERATION,
-        keys::AGENTS_PROMPT_CACHE_TTL,
         keys::AGENT_INSTRUCTIONS,
         keys::AGENT_MEMORY,
         keys::AGENTS_SUBAGENTS_AT_ONCE,
@@ -212,11 +202,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         keys::BINDING_PREFER,
         keys::BINDING_ALLOWED,
         keys::ORCH_TOOLS_CALLS_PER_MINUTE,
-        keys::ORCH_TOOLS_SEARCH_QUERY_CHARS,
-        keys::ORCH_TOOLS_SEARCH_RESULTS,
-        keys::ORCH_TOOLS_SEARCH_CONTEXT,
         keys::BROADCAST_RATE_PER_HOUR,
-        keys::BROADCAST_THREAD_MESSAGES_PER_HOUR,
         keys::BROADCAST_AGENT_OPTIONS,
     ]
     .into_iter()
@@ -233,11 +219,8 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
             at_once: value(&snapshot, keys::AGENTS_SUBAGENTS_AT_ONCE)?.unwrap_or(8),
             depth: value(&snapshot, keys::AGENTS_SUBAGENT_DEPTH)?.unwrap_or(1),
         },
-        prompt_cache_ttl: value(&snapshot, keys::AGENTS_PROMPT_CACHE_TTL)?,
         background_wake: value::<String>(&snapshot, keys::THREADS_BACKGROUND_WAKE)?.as_deref()
             != Some("off"),
-        image_generation: value::<String>(&snapshot, keys::AGENTS_IMAGE_GENERATION)?
-            .map(|value| value == "on"),
         features: value(&snapshot, keys::AGENT_FEATURES)?.unwrap_or_default(),
         standing: standing_from(&snapshot)?,
         memory: word(&snapshot, keys::AGENT_MEMORY)?.unwrap_or_default(),
@@ -265,9 +248,7 @@ pub async fn load(conn: &mut Conn, thread: Id) -> Result<Resolved, EngineError> 
         binding_prefer: types(&snapshot, keys::BINDING_PREFER)?.unwrap_or_default(),
         binding_allowed: types(&snapshot, keys::BINDING_ALLOWED)?,
         tool_calls_per_minute: value(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
-        announcements_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
-        thread_messages_per_hour: value(&snapshot, keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?,
-        search_budgets: crate::tools::search_budgets::SearchBudgets::resolve(&snapshot)?,
+        sends_per_hour: value(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?,
         broadcast_agent_options: value(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?
             .unwrap_or_default(),
     };

@@ -1,5 +1,4 @@
 /** A first online connection completes enrollment through the existing live cache, once. */
-import type * as GatewayApi from '@/api/gateways';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -31,7 +30,7 @@ vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => live.navigate,
   Link: ({ children }: { children: ReactNode }) => <a href="#enrolled">{children}</a>,
 }));
-vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
+vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof import('@/api/gateways')>(),
   gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [] }) },
 }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));

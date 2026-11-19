@@ -6,25 +6,15 @@ Each non-empty line that is not a comment is one check:
   contracts                     regenerate the generated contract files (`cargo xtask contracts`) and list what differed
   web <npm script>              e.g. `web lint`, `web typecheck`, `web test`, `web build`; `npm ci` runs once first
   web-e2e                       the end-to-end suites against the tests' fake API
-
-The workflow uses --group rust and --group web on independent runners. With no group, run all checks.
 """
 
-import argparse
-import importlib.util
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 
 ROOT = os.getcwd()
 FRONTEND = os.path.join(ROOT, "frontend")
-FIXTURE_MODULE = importlib.util.spec_from_file_location("orch_ci_fixtures", Path(__file__).with_name("ci_fixtures.py"))
-if FIXTURE_MODULE is None or FIXTURE_MODULE.loader is None:
-    raise RuntimeError("the native fixture preparer is unavailable")
-FIXTURES = importlib.util.module_from_spec(FIXTURE_MODULE)
-FIXTURE_MODULE.loader.exec_module(FIXTURES)
 
 
 def run(label, command, cwd=ROOT, env=None):
@@ -35,44 +25,16 @@ def run(label, command, cwd=ROOT, env=None):
     return code == 0
 
 
-def prepare_native_fixtures(path):
-    print("::group::prepare native Docker fixtures", flush=True)
-    try:
-        environment = FIXTURES.prepare_fixtures(FIXTURES.target_commands(path))
-    except Exception as error:
-        print(f"native fixture preparation failed: {error}", file=sys.stderr, flush=True)
-        environment, passed = {}, False
-    else:
-        passed = True
-    print("::endgroup::", flush=True)
-    print(f"{'PASSED' if passed else 'FAILED'}: prepare native Docker fixtures", flush=True)
-    return passed, environment
-
-
-def main(path, group="all"):
-    with open(path, encoding="utf-8") as targets:
-        lines = [line.strip() for line in targets]
+def main(path):
+    lines = [line.strip() for line in open(path, encoding="utf-8")]
     checks = [line for line in lines if line and not line.startswith("#")]
     if not checks:
         print(f"{path} names no check", file=sys.stderr)
         return 2
-    known = {"test", "clippy", "doc", "fmt", "contracts", "web", "web-e2e"}
-    unknown = [check for check in checks if check.partition(" ")[0] not in known]
-    if unknown:
-        for check in unknown:
-            print(f"unknown check: {check}", file=sys.stderr)
-        return 2
-    if group != "all":
-        checks = [check for check in checks
-                  if (check.partition(" ")[0] in {"web", "web-e2e"}) == (group == "web")]
-    if not checks:
-        print(f"{path} names no {group} check")
-        return 0
     results = []
-    fixture_environment = {}
     if any(check.startswith("test ") for check in checks):
-        passed, fixture_environment = prepare_native_fixtures(path)
-        results.append(("prepare native Docker fixtures", passed))
+        results.append(("prepare native Docker fixtures", run(
+            "prepare native Docker fixtures", [sys.executable, "-I", "-B", ".github/scripts/ci_fixtures.py", "--targets", path])))
     connector = False
     npm = False
     for check in checks:
@@ -84,8 +46,7 @@ def main(path, group="all"):
                     "build the connector the tests start",
                     run("build the connector", ["cargo", "build", "--locked", "-p", "orch-connector"]),
                 ))
-            results.append((check, run(check, ["cargo", "test", "--locked", "--no-fail-fast", *shlex.split(rest)],
-                                       env=fixture_environment)))
+            results.append((check, run(check, ["cargo", "test", "--locked", "--no-fail-fast", *shlex.split(rest)])))
         elif word == "clippy":
             results.append((check, run(check, ["cargo", "clippy", "--workspace", "--all-targets", "--locked",
                                                "--keep-going", "--", "-D", "warnings"])))
@@ -107,7 +68,6 @@ def main(path, group="all"):
             if word == "web":
                 results.append((check, run(check, ["npm", "run", *shlex.split(rest)], cwd=FRONTEND)))
             else:
-                run("choose package mirrors that answer", ["bash", ".github/scripts/ci_apt_mirror.sh"])
                 run("install the browser", ["npx", "playwright", "install", "--with-deps", "chromium"], cwd=FRONTEND)
                 results.append((check, run(check, ["npx", "playwright", "test", *shlex.split(rest)], cwd=FRONTEND)))
         else:
@@ -120,8 +80,4 @@ def main(path, group="all"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("path")
-    parser.add_argument("--group", choices=("all", "rust", "web"), default="all")
-    arguments = parser.parse_args()
-    sys.exit(main(arguments.path, arguments.group))
+    sys.exit(main(sys.argv[1]))

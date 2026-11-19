@@ -49,16 +49,9 @@ impl HeldCommand {
 
 #[async_trait]
 impl Commands for HeldCommand {
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<orch_engine::commands::BeforeCommand<'_>>,
-    ) -> Result<(), CommandsError> {
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
         if command.kind != CommandKind::NodeMountMeasure {
-            return self.inner.issue_prepared(command, before).await;
-        }
-        if let Some(check) = before {
-            check().map_err(CommandsError::BeforeEffect)?;
+            return self.inner.issue(command).await;
         }
         *self.cleanup.command.lock().unwrap() = Some(command.id);
         self.cleanup.entered.notify_one();

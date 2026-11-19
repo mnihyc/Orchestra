@@ -641,7 +641,6 @@ async fn inline_parent(fixture: &Fixture, keep_result: bool) -> TestResult<(Job,
         engine: fixture.engine.clone(),
         plan,
         provisioning_runtime: Some(runtime),
-        operation: None,
     };
     let answer = json!(SourceInfo {
         kind: SourceKind::Directory,

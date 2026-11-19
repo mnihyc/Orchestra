@@ -29,12 +29,7 @@ impl std::fmt::Debug for FirstEffect<'_> {
     }
 }
 
-impl<'a> FirstEffect<'a> {
-    pub(crate) fn new(check: impl FnOnce() -> Result<(), EngineError> + Send + 'a) -> Self {
-        Self {
-            check: Some(Box::new(check)),
-        }
-    }
+impl FirstEffect<'_> {
     pub(crate) fn pending(&self) -> bool {
         self.check.is_some()
     }
@@ -91,7 +86,7 @@ impl<'c> Unit<'c> {
         check: impl FnOnce() -> Result<(), EngineError> + Send + 'c,
     ) -> Self {
         let mut unit = Self::new(conn, now);
-        unit.first_effect = FirstEffect::new(check);
+        unit.first_effect.check = Some(Box::new(check));
         unit
     }
 

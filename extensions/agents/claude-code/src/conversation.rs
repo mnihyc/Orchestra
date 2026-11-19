@@ -10,29 +10,26 @@
 //! A call into the task can be dropped by its caller at any moment (the link gives every call a deadline);
 //! the task finishes what it was asked all the same, so that the session is never left half changed.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::AtomicU64;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use orch_agent_contract::adapter::{AdapterError, EventSink};
 use orch_agent_contract::credentials::CredentialNeed;
 use orch_agent_contract::descriptor::ApprovalMode;
 use orch_agent_contract::events::{
-    ApprovalClosed, ContextCount, ContextFill, CredentialNeeded, HarnessRequestKind, ModelTokens,
-    SessionEvent, SessionLost, TokenUsage, TurnStarted, UsageUpdated, turn_error,
+    ApprovalClosed, ContextCount, ContextFill, CredentialNeeded, HarnessRequestKind, SessionEvent,
+    SessionLost, TurnStarted, turn_error,
 };
 use orch_agent_contract::flow;
-use orch_agent_contract::requests::UsageRequest;
 use orch_agent_contract::session::{
     ApprovalDecision, ProviderAccess, SessionSpec, ThreadId, TurnId, TurnStart, TurnSteer,
 };
-use orch_types::{Clock, Id, Json, Time};
+use orch_types::{Clock, Id, Json};
 use serde_json::json;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::approvals::PermissionAsk;
-use crate::child_usage::{Heard, Settling};
 use crate::config::{EXIT_GRACE, READY_TIMEOUT, STEER_ACK_WAIT};
 use crate::events::{EventMapper, MapperSettings};
 use crate::failure;
@@ -145,10 +142,6 @@ fn encoded_weight(value: &impl serde::Serialize) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-fn background_command_id(task: &orch_agent_contract::background::BackgroundTask) -> String {
-    json!([task.id, task.run_id]).to_string()
-}
-
 fn command_weight(command: &Command) -> usize {
     let blocks = |blocks: &Vec<Json>| {
         blocks
@@ -185,14 +178,6 @@ fn command_weight(command: &Command) -> usize {
             .model
             .capacity()
             .saturating_add(turn.effort.as_ref().map_or(0, String::capacity))
-            .saturating_add(turn.cache_lifetimes.as_ref().map_or(0, |values| {
-                values.iter().fold(
-                    values
-                        .capacity()
-                        .saturating_mul(std::mem::size_of::<String>()),
-                    |weight, value| weight.saturating_add(value.capacity()),
-                )
-            }))
             .saturating_add(flow::json_weight(&turn.params)),
         _ => 0,
     })
@@ -254,26 +239,6 @@ pub struct Params {
 /// Starts the task of a conversation.
 #[must_use]
 pub fn start(params: Params) -> ConversationHandle {
-    start_with(params, Arc::new(crate::child_usage::Files))
-}
-
-/// Starts the task of a conversation that reads the transcripts of sub-agents by `files`.
-#[must_use]
-pub fn start_with(
-    params: Params,
-    files: Arc<dyn crate::child_usage::Transcripts>,
-) -> ConversationHandle {
-    start_with_settler(params, files).0
-}
-
-/// As [`start_with`], and the handle of the conversation's settler of sub-agent requests too, so that a case can make
-/// the settler fail and see what the conversation does without it. Nothing else calls it.
-#[doc(hidden)]
-#[must_use]
-pub fn start_with_settler(
-    params: Params,
-    files: Arc<dyn crate::child_usage::Transcripts>,
-) -> (ConversationHandle, Settling) {
     let (sender, receiver) = flow::channel(command_weight);
     let (process_tx, process_rx) = crate::process::event_channel();
     let mut mapper = EventMapper::new(
@@ -284,34 +249,11 @@ pub fn start_with_settler(
         },
         Arc::clone(&params.clock),
     );
-    mapper.set_retry_notice_attempt(params.setup.config.retry_notice_attempt);
-    mapper.configure_native_counters(&params.spec.provider);
-    if let Some(directory) = params.setup.outputs_directory() {
-        mapper.set_image_outputs(directory);
-    }
     mapper.set_native_session(&params.session_id);
-    let windows = Arc::new(AtomicU64::new(0));
-    mapper.share_windows(Arc::clone(&windows));
     let first_origin = params.origin.clone();
-    // What a sub-agent made is settled from its transcript by a task of its own, so that no file is waited for here.
-    let (settling, gates) = Settling::spawn_with(
-        params.sink.clone(),
-        params.thread_id,
-        params.setup.files_home(),
-        params.setup.config.child_usage_wait(),
-        files,
-    );
-    let failing = settling.clone();
     let conversation = Conversation {
         params,
         mapper,
-        settling,
-        gates,
-        gates_closed: false,
-        windows,
-        main_rows: HashMap::new(),
-        next_gate: 0,
-        outbox: Mutex::new(Outbox::default()),
         process: None,
         process_tx,
         process_rx,
@@ -324,13 +266,11 @@ pub fn start_with_settler(
         native_wake_wait: None,
         consumed_background: std::collections::HashSet::new(),
         silent_native: None,
-        unadmitted_reply: UnadmittedReply::default(),
         live: None,
         live_reviewer: None,
         needs_restart: false,
         requests: HashMap::new(),
         context_asks: HashMap::new(),
-        settings_ask: None,
         asks: HashMap::new(),
         steers: HashMap::new(),
         request_counter: 0,
@@ -343,7 +283,7 @@ pub fn start_with_settler(
         instruction_sources: Vec::new(),
     };
     tokio::spawn(conversation.run(receiver));
-    (ConversationHandle { sender }, failing)
+    ConversationHandle { sender }
 }
 
 /// The harness's permission mode for what a turn states: plan mode while it plans, otherwise the mode of the
@@ -382,269 +322,9 @@ struct NativeWakeWait {
     bytes: usize,
 }
 
-#[derive(Clone, Copy)]
-struct SilentNative {
-    origin: TurnId,
-    /// The actual native notice UUID namespaces calls that happen after the owning turn ended.
-    notice: Option<Id>,
-}
-
-/// An idle reply awaiting the result's exact stopped-run provenance.
-#[derive(Default)]
-struct UnadmittedReply {
-    frames: Vec<(Frame, Time)>,
-    bytes: usize,
-    rejected: bool,
-}
-
-impl UnadmittedReply {
-    fn reject(&mut self) {
-        *self = Self {
-            rejected: true,
-            ..Self::default()
-        };
-    }
-
-    fn push(&mut self, frame: &Frame, bytes: usize, arrived: Time) {
-        if self.rejected {
-            return;
-        }
-        if self.bytes.saturating_add(bytes) > crate::config::FRAME_MAX_BYTES {
-            self.reject();
-            return;
-        }
-        self.bytes += bytes;
-        self.frames.push((frame.clone(), arrived));
-    }
-}
-
-/// How many things may wait in the outbox before the conversation stops reading the program: what the sink's own
-/// lane holds. While a gate is shut nothing is sent, and the program is slowed as a slow sink would slow it.
-const OUTBOX_MAX: usize = flow::QUEUE_ITEMS;
-
-/// What waits to go to the host, in the order it happened.
-enum Out {
-    /// An event of the session, with the segment it was made in.
-    Event(Id, Box<SessionEvent>),
-    /// A request report: the segment, the turn and the request.
-    Request(Id, TurnId, Box<UsageRequest>),
-    /// The use of a turn that ends, with the window of totals its result closed, and what the rows of the main
-    /// conversation's own requests of the turn, reported before the result, carry of that use (`MainRows::carried`: the
-    /// requests that ended with their stop reason in full, the others as far as the result's own tally of the main
-    /// conversation leaves room). When it goes out, which is after the reports of the requests named for the window, it
-    /// states the figure that and the sub-agents' requests named for the window carry of it, and what the requests of
-    /// other turns' sub-agents added to the totals in that window is left out of it: the engine closes a turn as its use
-    /// less the stated figure, and counts the rows whenever they come.
-    Usage(Id, Box<UsageUpdated>, u64, TokenUsage),
-    /// The gate holds a turn's use, up to the configured wait, until the figures of the rows inside that use are final,
-    /// so that the stated figure and the rows agree. Only the settler opens it.
-    Gate(u64),
-}
-
-#[derive(Default)]
-struct Outbox {
-    queue: VecDeque<Out>,
-    /// The gates the settler has opened that the queue has not yet passed.
-    open: HashSet<u64>,
-    /// The settler is gone: nothing waits for it.
-    abandoned: bool,
-    /// The use of the last turns that ended, as it went out: with what other turns' sub-agents added left out, and
-    /// with the figure its own rows carry of it.
-    sent: VecDeque<Sent>,
-}
-
-/// The figures of the main conversation's own requests a turn has reported: each request once, as its first final
-/// report said it (the engine keeps the first final report of a request). The requests that ended with their stop
-/// reason (`done`) are kept apart from the others (a stop cut them off, or their stream was lost, or a failing result
-/// closed them): the program's totals hold the first for certain, and the others as the cause decides.
-#[derive(Default)]
-struct MainRows {
-    seen: HashSet<String>,
-    done: TokenUsage,
-    others: TokenUsage,
-}
-
-impl MainRows {
-    fn add(&mut self, request: &UsageRequest) {
-        // A report the engine refuses (`UsageRequest::check`, which the engine asks of every report it is given) is
-        // not counted by it, so its figure is not carried by the use's statement either: the use would hold what no row
-        // counts, and the turn's remainder must keep it.
-        if request.subagent
-            || EventMapper::is_notice_request(&request.id)
-            || request.outcome.is_none()
-            || request.tokens.is_empty()
-            || request.check().is_err()
-            || !self.seen.insert(request.id.clone())
-        {
-            return;
-        }
-        let figures = request.tokens.usage();
-        if request
-            .outcome
-            .as_ref()
-            .map(orch_agent_contract::requests::RequestOutcome::code)
-            == Some("done")
-        {
-            self.done = self.done.plus(figures);
-        } else {
-            self.others = self.others.plus(figures);
-        }
-    }
-
-    /// What the use's statement carries of these rows, given the main conversation's own tally in the result (`usage`),
-    /// which is all the use holds of the main conversation: the requests that ended with their stop reason in full (the
-    /// program adds a request to its totals when its message ends, so these are in the use, whatever the tally says of
-    /// them), and of the others no more than is left of the tally, since the totals hold such a request only in part or
-    /// not at all, as the cause decides (measured on the pinned program: a stop, a stream lost and retried).
-    fn carried(&self, tally: Option<TokenUsage>) -> TokenUsage {
-        match tally {
-            Some(tally) => self.done.plus(crate::events::within(
-                self.others,
-                crate::events::less(tally, self.done),
-            )),
-            None => self.done.plus(self.others),
-        }
-    }
-}
-
-/// The use of a turn as it went out.
-struct Sent {
-    turn: TurnId,
-    used: TokenUsage,
-    models: Vec<ModelTokens>,
-    carried: Option<TokenUsage>,
-}
-
-/// How many turns' use is remembered, to be said again as it was.
-const SENT_USES_MAX: usize = 16;
-
-impl Outbox {
-    /// Remembers the use of a turn as it goes out.
-    fn remember(&mut self, usage: &UsageUpdated) {
-        self.sent.retain(|sent| sent.turn != usage.turn_id);
-        let models = usage
-            .report
-            .as_ref()
-            .map(|report| report.models.clone())
-            .unwrap_or_default();
-        self.sent.push_back(Sent {
-            turn: usage.turn_id,
-            used: usage.turn,
-            models,
-            carried: usage
-                .report
-                .as_ref()
-                .and_then(|report| report.carried_by_rows),
-        });
-        while self.sent.len() > SENT_USES_MAX {
-            self.sent.pop_front();
-        }
-    }
-
-    /// A report of use that comes after the turn's own (the breakdown of the context, a notice of the harness's own
-    /// turn) is made from what the mapper kept, which still holds what other turns' sub-agents added: the figure of
-    /// the turn, and what its rows carry of it, are the ones that went out, wherever it is said from, since the engine
-    /// keeps what it heard last. A report that holds only quantities (`counters_only`) says nothing of the turn's use,
-    /// and is left as it is.
-    fn as_sent(&self, event: &mut SessionEvent) {
-        let SessionEvent::UsageUpdated(usage) = event else {
-            return;
-        };
-        if usage
-            .report
-            .as_ref()
-            .is_some_and(|report| report.counters_only)
-        {
-            return;
-        }
-        let Some(sent) = self.sent.iter().find(|sent| sent.turn == usage.turn_id) else {
-            return;
-        };
-        usage.turn = sent.used;
-        if let Some(report) = usage.report.as_mut() {
-            report.carried_by_rows = sent.carried;
-            if !report.models.is_empty() && !sent.models.is_empty() {
-                report.models.clone_from(&sent.models);
-            }
-        }
-    }
-}
-
-/// Whether an event asks a person or the engine for an answer, or takes such a question back. Such an event is never
-/// held behind a gate: the program waits for the answer, and the engine would answer what the adapter has already
-/// let go (a question taken back when its turn ended) if it learnt of that late.
-fn asks(event: &SessionEvent) -> bool {
-    matches!(
-        event,
-        SessionEvent::ApprovalRequested(_)
-            | SessionEvent::ApprovalClosed(_)
-            | SessionEvent::CredentialNeeded(_)
-            | SessionEvent::OrchToolCall(_)
-    )
-}
-
-impl Outbox {
-    /// What goes out next: what is first in the queue, unless it is a gate that is not open; then only what asks
-    /// (or takes an ask back) goes out, in its order, and the rest waits.
-    fn next(&mut self) -> Option<Out> {
-        let held = !self.abandoned
-            && matches!(self.queue.front(), Some(Out::Gate(gate)) if !self.open.contains(gate));
-        if held {
-            let at = self
-                .queue
-                .iter()
-                .position(|out| matches!(out, Out::Event(_, event) if asks(event)))?;
-            // The call a question names is shown before the question, if its start waits behind the gate too.
-            let named = match self.queue.get(at) {
-                Some(Out::Event(_, event)) => match &**event {
-                    SessionEvent::ApprovalRequested(requested) => requested
-                        .request
-                        .detail
-                        .native_item_ref()
-                        .map(str::to_owned),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(named) = named
-                && let Some(item) = self.queue.iter().take(at).position(|out| {
-                    matches!(out, Out::Event(_, event)
-                        if matches!(&**event, SessionEvent::ItemStarted(started) if started.native_ref == named))
-                })
-            {
-                return self.queue.remove(item);
-            }
-            return self.queue.remove(at);
-        }
-        let out = self.queue.pop_front()?;
-        if let Out::Gate(gate) = &out {
-            self.open.remove(gate);
-        }
-        Some(out)
-    }
-
-    /// Whether the conversation may go on reading the program: what waits is less than the sink's lane holds.
-    fn has_room(&self) -> bool {
-        self.queue.len() < OUTBOX_MAX
-    }
-}
-
 struct Conversation {
     params: Params,
     mapper: EventMapper,
-    /// How the requests of sub-agents are handed to the task that settles them.
-    settling: Settling,
-    /// The gates that task has opened.
-    gates: mpsc::UnboundedReceiver<u64>,
-    gates_closed: bool,
-    /// The numbers of the windows of totals, which no mapper of this conversation uses twice.
-    windows: Arc<AtomicU64>,
-    /// What the main conversation's own requests of the turns under way have reported so far, by turn: the figures
-    /// of the rows the turn's use holds (a request that ended before the turn's result is in the use that result
-    /// reports, and its figure is final).
-    main_rows: HashMap<TurnId, MainRows>,
-    next_gate: u64,
-    outbox: Mutex<Outbox>,
     process: Option<Running>,
     process_tx: flow::Sender<(u64, ProcessEvent)>,
     process_rx: flow::Receiver<(u64, ProcessEvent)>,
@@ -658,8 +338,7 @@ struct Conversation {
     last_turn_id: Option<TurnId>,
     native_wake_wait: Option<NativeWakeWait>,
     consumed_background: std::collections::HashSet<String>,
-    silent_native: Option<SilentNative>,
-    unadmitted_reply: UnadmittedReply,
+    silent_native: Option<TurnId>,
     live: Option<TurnSettings>,
     /// Declaration for the process that actually emitted native review facts.
     live_reviewer: Option<orch_agent_contract::review::ApprovalReviewer>,
@@ -669,8 +348,6 @@ struct Conversation {
     requests: HashMap<String, oneshot::Sender<ControlOutcome>>,
     /// Requests for what fills the context, by their id.
     context_asks: HashMap<String, ContextAsk>,
-    /// A native read-back is owned by its requesting boundary, never a later reserved turn.
-    settings_ask: Option<(String, Option<TurnId>, Instant)>,
     asks: HashMap<String, PermissionAsk>,
     steers: HashMap<String, PendingSteer>,
     request_counter: u64,
@@ -701,7 +378,6 @@ impl Conversation {
     async fn run(mut self, mut commands: flow::Receiver<Command>) {
         loop {
             let wake = self.next_wake();
-            let reading = self.lock_outbox().has_room();
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(command) => {
@@ -714,48 +390,16 @@ impl Conversation {
                         break;
                     }
                 },
-                event = self.process_rx.recv(), if reading => {
+                event = self.process_rx.recv() => {
                     if let Some((generation, event)) = event {
                         self.on_process_event(generation, event).await;
                     }
                 }
-                gate = self.gates.recv(), if !self.gates_closed => match gate {
-                    Some(gate) => {
-                        self.lock_outbox().open.insert(gate);
-                        self.drain().await;
-                    }
-                    None => {
-                        self.gates_closed = true;
-                        self.lock_outbox().abandoned = true;
-                        self.drain().await;
-                    }
-                },
                 () = sleep_until(wake) => self.on_timer().await,
                 () = self.params.sink.closed() => {
                     if let Some(mut process) = self.process.take() { process.kill(); }
                     break;
                 },
-            }
-        }
-        self.flush().await;
-    }
-
-    /// What waits behind a gate goes out when the settler opens the gate (it reports what the sub-agents of the
-    /// turn made, within the one budget of [`crate::child_usage`], and then opens it), or when the settler is gone.
-    async fn flush(&mut self) {
-        loop {
-            self.drain().await;
-            if self.params.sink.is_closed() || self.lock_outbox().queue.is_empty() {
-                return;
-            }
-            match self.gates.recv().await {
-                Some(gate) => {
-                    self.lock_outbox().open.insert(gate);
-                }
-                None => {
-                    self.gates_closed = true;
-                    self.lock_outbox().abandoned = true;
-                }
             }
         }
     }
@@ -778,11 +422,7 @@ impl Conversation {
             .filter(|steer| steer.reply.is_some())
             .map(|steer| steer.deadline)
             .min();
-        let settings = self
-            .settings_ask
-            .as_ref()
-            .map(|(_, _, at)| *at + READY_TIMEOUT);
-        [idle, steer, self.impatience_due(), settings]
+        [idle, steer, self.impatience_due()]
             .into_iter()
             .flatten()
             .min()
@@ -807,15 +447,6 @@ impl Conversation {
 
     async fn on_timer(&mut self) {
         let now = Instant::now();
-        if self
-            .settings_ask
-            .as_ref()
-            .is_some_and(|(_, _, at)| *at + READY_TIMEOUT <= now)
-            && let Some((request, turn, _)) = self.settings_ask.take()
-        {
-            self.emit_all(self.mapper.native_settings_unavailable(&request, turn))
-                .await;
-        }
         for steer in self.steers.values_mut() {
             if steer.deadline <= now
                 && let Some(reply) = steer.reply.take()
@@ -840,51 +471,15 @@ impl Conversation {
         }
     }
 
-    fn lock_outbox(&self) -> std::sync::MutexGuard<'_, Outbox> {
-        self.outbox.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn put(&self, out: Out) {
-        self.lock_outbox().queue.push_back(out);
-    }
-
-    /// Sends what is first in the outbox, up to a gate that is not open yet.
-    async fn drain(&self) {
-        loop {
-            let next = self.lock_outbox().next();
-            match next {
-                None => return,
-                Some(Out::Gate(..)) => {}
-                Some(Out::Usage(segment, mut usage, window, main)) => {
-                    let carried = self.settling.take_window(window, usage.turn_id);
-                    crate::child_usage::leave_out(&mut usage, &carried.others);
-                    if let Some(report) = usage.report.as_mut() {
-                        report.carried_by_rows = Some(carried.own.plus(main));
-                    }
-                    self.lock_outbox().remember(&usage);
-                    self.send_event(segment, SessionEvent::UsageUpdated(*usage))
-                        .await;
-                }
-                Some(Out::Event(segment, mut event)) => {
-                    self.lock_outbox().as_sent(&mut event);
-                    self.send_event(segment, *event).await;
-                }
-                Some(Out::Request(segment, turn, request)) => {
-                    let _ = self
-                        .params
-                        .sink
-                        .request(self.params.thread_id, segment, turn, *request)
-                        .await;
-                }
-            }
-        }
-    }
-
-    async fn send_event(&self, segment: Id, event: SessionEvent) {
+    async fn emit(&self, event: SessionEvent) {
         if self
             .params
             .sink
-            .session(self.params.thread_id, segment, event)
+            .session(
+                self.params.thread_id,
+                self.params.spec.settings.segment_id,
+                event,
+            )
             .await
             .is_err()
             && let Some(kill) = self.process.as_ref().and_then(Running::kill_handle)
@@ -893,98 +488,37 @@ impl Conversation {
         }
     }
 
-    async fn emit(&self, event: SessionEvent) {
-        self.put(Out::Event(
-            self.params.spec.settings.segment_id,
-            Box::new(event),
-        ));
-        self.drain().await;
-    }
-
-    /// Hands what the mapper heard of sub-agents to the settler.
-    fn hear_children(&mut self) {
-        let segment = self.params.spec.settings.segment_id;
-        for heard in self.mapper.take_child_heard() {
-            match heard {
-                Heard::Printed { turn, printed } => self.settling.printed(segment, turn, *printed),
-                Heard::Placed(placement) => self.settling.placed(placement),
-                Heard::Dropped(keys) => self.settling.dropped(keys),
-            }
-        }
-    }
-
-    /// A turn whose result closed `window` is complete: its use goes out after the reports of the requests named for the
-    /// window, and so does its completion.
-    fn end_turn(&mut self, window: Option<u64>) {
-        let Some(window) = window.filter(|_| self.settling.owes()) else {
-            return;
-        };
-        let gate = self.next_gate;
-        self.next_gate += 1;
-        self.put(Out::Gate(gate));
-        self.settling.gate(window, gate);
-    }
-
     async fn emit_all(&mut self, events: Vec<SessionEvent>) {
-        self.hear_children();
-        let segment = self.params.spec.settings.segment_id;
-        let window = self.mapper.take_usage_window();
-        let main_use = self.mapper.take_main_use();
         let mut requests = Some(self.mapper.take_requests());
-        // The gate of a turn that ends goes before its use, where there is one: the use is made up when the reports
-        // are in.
-        let mut gates: HashMap<usize, TurnId> = HashMap::new();
-        for (at, event) in events.iter().enumerate() {
-            if let SessionEvent::TurnCompleted(end) = event {
-                let usage = events[..at].iter().position(|before| {
-                    matches!(before, SessionEvent::UsageUpdated(usage) if usage.turn_id == end.turn_id)
-                });
-                gates.insert(usage.unwrap_or(at), end.turn_id);
-            }
-        }
-        let ending: HashSet<TurnId> = gates.values().copied().collect();
-        for (at, event) in events.into_iter().enumerate() {
-            if gates.contains_key(&at) {
+        for event in events {
+            if matches!(event, SessionEvent::TurnCompleted(_)) {
                 for (turn, request) in requests.take().unwrap_or_default() {
-                    self.put_request(segment, turn, request);
+                    let _ = self
+                        .params
+                        .sink
+                        .request(
+                            self.params.thread_id,
+                            self.params.spec.settings.segment_id,
+                            turn,
+                            request,
+                        )
+                        .await;
                 }
-                self.end_turn(window);
             }
-            match event {
-                SessionEvent::UsageUpdated(usage)
-                    if window.is_some() && ending.contains(&usage.turn_id) =>
-                {
-                    // What the rows of the main conversation's requests carry of the use (see `MainRows::carried`).
-                    let main = self
-                        .main_rows
-                        .get(&usage.turn_id)
-                        .map_or_else(TokenUsage::default, |rows| rows.carried(main_use));
-                    self.put(Out::Usage(
-                        segment,
-                        Box::new(usage),
-                        window.unwrap_or_default(),
-                        main,
-                    ));
-                }
-                event => self.put(Out::Event(segment, Box::new(event))),
-            }
+            self.emit(event).await;
         }
         for (turn, request) in requests.take().unwrap_or_default() {
-            self.put_request(segment, turn, request);
+            let _ = self
+                .params
+                .sink
+                .request(
+                    self.params.thread_id,
+                    self.params.spec.settings.segment_id,
+                    turn,
+                    request,
+                )
+                .await;
         }
-        // The turns that ended have said their use: what their requests reported is not kept.
-        for turn in &ending {
-            self.main_rows.remove(turn);
-        }
-        self.drain().await;
-    }
-
-    /// Queues a request report. The main conversation's own requests of a turn are counted as the turn reports them, and
-    /// the turn's statement of what its rows carry of its use includes their figures as far as the use holds them
-    /// (`MainRows::carried`).
-    fn put_request(&mut self, segment: Id, turn: TurnId, request: UsageRequest) {
-        self.main_rows.entry(turn).or_default().add(&request);
-        self.put(Out::Request(segment, turn, Box::new(request)));
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -1058,9 +592,6 @@ impl Conversation {
             }
             Command::Close { reply } => {
                 self.shutdown().await;
-                // What waits behind a gate goes out before Close answers: a host that tears the session down on the
-                // answer would lose it.
-                self.flush().await;
                 let _ = reply.send(());
                 return true;
             }
@@ -1100,7 +631,7 @@ impl Conversation {
             .into_iter()
             .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
             .map(|task| NativeBackgroundCommand {
-                id: background_command_id(&task),
+                id: json!([task.id, task.run_id]).to_string(),
                 native_item_ref: Some(task.native_item_ref),
                 turn_id: Some(task.origin_turn),
                 command: Some(task.label),
@@ -1136,7 +667,7 @@ impl Conversation {
             .mapper
             .background_tasks()
             .into_iter()
-            .find(|task| background_command_id(task) == id)
+            .find(|task| json!([task.id, task.run_id]).to_string() == id)
         else {
             return NativeBackgroundEnd {
                 id: id.to_owned(),
@@ -1163,7 +694,7 @@ impl Conversation {
                         .mapper
                         .background_tasks()
                         .into_iter()
-                        .find(|task| background_command_id(task) == id)
+                        .find(|task| json!([task.id, task.run_id]).to_string() == id)
                         .and_then(|task| match task.state {
                             BackgroundTaskState::Stopped => Some(BackgroundEndState::Ended),
                             BackgroundTaskState::Completed | BackgroundTaskState::Failed => {
@@ -1214,19 +745,7 @@ impl Conversation {
     }
 
     fn reconfigure(&mut self, spec: SessionSpec) {
-        let page_reader_changed = crate::sessions::native_page_fetch(
-            spec.settings.native_model.as_deref(),
-            &spec.settings.model,
-        )
-        .unwrap_or(true)
-            != crate::sessions::native_page_fetch(
-                self.params.spec.settings.native_model.as_deref(),
-                &self.params.spec.settings.model,
-            )
-            .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
-            || page_reader_changed
-            || spec.settings.background_wake != self.params.spec.settings.background_wake
+        let changed = spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
             || spec.settings.subagent_limits != self.params.spec.settings.subagent_limits
             || ((spec.settings.approval_mode == ApprovalMode::Auto
@@ -1242,7 +761,7 @@ impl Conversation {
             || spec.session_key != self.params.spec.session_key
             || spec.exec != self.params.spec.exec
             || spec.provider != self.params.spec.provider;
-        let mut mapper = EventMapper::new(
+        self.mapper = EventMapper::new(
             MapperSettings {
                 directory: spec.settings.directory.clone(),
                 cwd: spec.settings.cwd.clone(),
@@ -1250,18 +769,7 @@ impl Conversation {
             },
             Arc::clone(&self.params.clock),
         );
-        mapper.share_windows(Arc::clone(&self.windows));
-        if self.process.is_some() {
-            mapper.inherit_process_report(&self.mapper);
-        }
-        mapper.set_retry_notice_attempt(self.params.setup.config.retry_notice_attempt);
-        mapper.configure_native_counters(&spec.provider);
-        if let Some(directory) = self.params.setup.outputs_directory() {
-            mapper.set_image_outputs(directory);
-        }
-        mapper.set_native_session(&self.params.session_id);
-        self.hear_children();
-        self.mapper = mapper;
+        self.mapper.set_native_session(&self.params.session_id);
         self.params.spec = spec;
         if changed && self.process.is_some() {
             self.needs_restart = true;
@@ -1270,14 +778,6 @@ impl Conversation {
 
     fn turn_settings(turn: &TurnStart) -> TurnSettings {
         TurnSettings {
-            cache_lifetimes: crate::sessions::native_cache_lifetimes(
-                turn.native_model.as_deref(),
-                &turn.model,
-            ),
-            page_fetch: crate::sessions::native_page_fetch(
-                turn.native_model.as_deref(),
-                &turn.model,
-            ),
             model: turn.model.clone(),
             effort: turn.effort.clone(),
             approval_mode: turn.approval_mode,
@@ -1307,13 +807,7 @@ impl Conversation {
                 "the native continuation is gone".to_owned(),
             ));
         };
-        self.mapper
-            .expect_permission_mode(mode_of(&Self::turn_settings(turn)));
-        let model_events = self.mapper.begin_turn_with_model(
-            turn.turn_id,
-            &turn.model,
-            crate::parameters::Values::from_json(&turn.params).context,
-        );
+        self.mapper.begin_turn(turn.turn_id);
         self.turn = Some(ActiveTurn {
             turn_id: turn.turn_id,
         });
@@ -1324,80 +818,11 @@ impl Conversation {
             native_turn_ref: token.to_owned(),
         }))
         .await;
-        self.emit_all(model_events).await;
         // The controller committed the visible wake cause and author before releasing any output.
         for line in wait.frames {
             Box::pin(self.on_line(&line)).await;
         }
         Ok(())
-    }
-
-    fn stopped_origin(&self, run: Option<&str>, source: Option<(&str, &str)>) -> Option<TurnId> {
-        use orch_agent_contract::background::BackgroundTaskState;
-        let mut stopped = self.mapper.background_tasks().into_iter().filter(|task| {
-            task.state == BackgroundTaskState::Stopped
-                && match run {
-                    Some(run) => task.run_id.as_deref() == Some(run),
-                    None => source
-                        .is_some_and(|(id, tool)| task.id == id && task.native_item_ref == tool),
-                }
-        });
-        let origin = stopped.next()?.origin_turn;
-        stopped
-            .all(|task| task.origin_turn == origin)
-            .then_some(origin)
-    }
-
-    async fn capture_unadmitted_reply(&mut self, frame: &Frame, bytes: usize) -> bool {
-        let arrived = self.params.clock.time();
-        match frame.kind() {
-            FrameKind::User => {
-                // A replay supplied its own provenance. Respect the earlier refusal
-                // when the result arrives.
-                self.unadmitted_reply.reject();
-                false
-            }
-            FrameKind::Assistant | FrameKind::StreamEvent => {
-                if frame
-                    .session_id()
-                    .is_some_and(|id| id != self.params.session_id.as_str())
-                {
-                    self.unadmitted_reply.reject();
-                } else {
-                    self.unadmitted_reply.push(frame, bytes, arrived);
-                }
-                true
-            }
-            FrameKind::Result => {
-                let held = std::mem::take(&mut self.unadmitted_reply);
-                if !held.rejected
-                    && !held.frames.is_empty()
-                    && frame.session_id() == Some(self.params.session_id.as_str())
-                    && frame.raw().pointer("/origin/kind").and_then(Json::as_str)
-                        == Some("task-notification")
-                    && let Some(run) = frame.raw().pointer("/origin/runId").and_then(Json::as_str)
-                    && !run.is_empty()
-                    && let Some(origin) = self.stopped_origin(Some(run), None)
-                    && let Some(source) = frame.uuid().and_then(|uuid| uuid.parse::<Id>().ok())
-                {
-                    // The result can identify a native notice whose user echo was omitted.
-                    // Use the received times and the result's own UUID for these observations.
-                    for (held, at) in held.frames {
-                        let events = self
-                            .mapper
-                            .observe_unadmitted_native_at(&held, origin, source, at);
-                        self.emit_all(events).await;
-                    }
-                    let events = self
-                        .mapper
-                        .observe_unadmitted_native_at(frame, origin, source, arrived);
-                    self.emit_all(events).await;
-                    self.on_turn_over().await;
-                }
-                true
-            }
-            _ => false,
-        }
     }
 
     async fn capture_native_followup(&mut self, frame: &Frame, line: &str) -> bool {
@@ -1428,31 +853,6 @@ impl Conversation {
         {
             return false;
         }
-        if frame.has_native_notice_origin()
-            && frame.text("session_id") == Some(self.params.session_id.as_str())
-            && let Some(notice) = frame
-                .text("uuid")
-                .and_then(|value| value.parse::<Id>().ok())
-        {
-            let run = match frame.raw().pointer("/origin/runId") {
-                None | Some(Json::Null) => None,
-                Some(Json::String(run)) if !run.is_empty() => Some(run.as_str()),
-                _ => {
-                    self.unadmitted_reply.reject();
-                    return false;
-                }
-            };
-            if let Some(origin) = self.stopped_origin(run, frame.stopped_task_notice()) {
-                // The native stop notice can call the model itself. Meter it under the proved
-                // source without admitting a continuation or releasing any of its output.
-                self.silent_native = Some(SilentNative {
-                    origin,
-                    notice: Some(notice),
-                });
-                self.unadmitted_reply = UnadmittedReply::default();
-                return false;
-            }
-        }
         if self.native_wake_wait.is_none() {
             if !matches!(
                 frame.kind(),
@@ -1460,13 +860,8 @@ impl Conversation {
             ) {
                 return false;
             }
-            use orch_agent_contract::background::{
-                BackgroundTaskState, BackgroundTasks, NativeBackgroundWake,
-            };
+            use orch_agent_contract::background::{BackgroundTasks, NativeBackgroundWake};
             let known = self.mapper.background_tasks();
-            let stopped = known
-                .iter()
-                .any(|task| task.state == BackgroundTaskState::Stopped);
             let key = |task: &orch_agent_contract::background::BackgroundTask| {
                 json!([task.id, task.run_id]).to_string()
             };
@@ -1482,17 +877,12 @@ impl Conversation {
                 })
                 .collect();
             if completed.is_empty() {
-                if stopped {
-                    return self.capture_unadmitted_reply(frame, line.len()).await;
-                }
-                self.unadmitted_reply = UnadmittedReply::default();
                 // Late tool results have their own path above; unowned model output is never shown.
                 return matches!(
                     frame.kind(),
                     FrameKind::Assistant | FrameKind::StreamEvent | FrameKind::Result
                 );
             }
-            self.unadmitted_reply = UnadmittedReply::default();
             let task_ids: Vec<_> = completed.iter().map(key).collect();
             self.consumed_background.extend(task_ids.iter().cloned());
             let token = format!("{}:{}", self.generation, orch_types::new_id());
@@ -1570,19 +960,13 @@ impl Conversation {
             }
         }
         self.params.spec.settings.approval_mode = settings.approval_mode;
-        self.mapper.expect_permission_mode(mode_of(&settings));
         self.bring_up_to_date(&settings).await?;
         self.ensure_process(&settings).await?;
-        self.unadmitted_reply = UnadmittedReply::default();
         self.live_reviewer = reviewer;
         self.idle_since = None;
         self.heard_at = Instant::now();
         self.retrying_since = None;
-        let model_events = self.mapper.begin_turn_with_model(
-            turn.turn_id,
-            &settings.model,
-            crate::parameters::Values::from_json(&settings.params).context,
-        );
+        self.mapper.begin_turn(turn.turn_id);
         self.last_turn_id = Some(turn.turn_id);
         self.turn = Some(ActiveTurn {
             turn_id: turn.turn_id,
@@ -1593,7 +977,7 @@ impl Conversation {
             native_turn_ref: turn.turn_id.to_string(),
         }))
         .await;
-        self.emit_all(model_events).await;
+        self.emit_all(Vec::new()).await;
         if !self.write(&message).await {
             // The process went between the handshake and now; the turn ends with the session.
             self.lose_session("the harness process ended before it took the input")
@@ -1619,27 +1003,15 @@ impl Conversation {
             != crate::parameters::Values::from_json(&wanted.params);
         // The model and the effort reach the harness through its environment, which only a new process
         // reads; the permission mode is the one thing that is changed in the running one.
-        let page_reader_changed =
-            live.page_fetch.unwrap_or(true) != wanted.page_fetch.unwrap_or(true);
         let must_restart = self.needs_restart
             || live.model != wanted.model
             || live.effort != wanted.effort
             || live.sandbox_mode != wanted.sandbox_mode
-            || page_reader_changed
             || (live.approval_mode == ApprovalMode::Bypass)
                 != (wanted.approval_mode == ApprovalMode::Bypass)
             || params_changed;
         if must_restart && self.background_busy() {
             self.needs_restart = true;
-            if page_reader_changed {
-                return Err(AdapterError::Other {
-                    code: "busy".into(),
-                    message:
-                        "The page reader can change after this session's background work finishes."
-                            .into(),
-                    retryable: true,
-                });
-            }
             return Ok(());
         }
         if must_restart {
@@ -1647,7 +1019,6 @@ impl Conversation {
             return Ok(());
         }
         if live.approval_mode != wanted.approval_mode || live.plan != wanted.plan {
-            self.mapper.forget_permission_report();
             let accepted = self
                 .control(json!({ "subtype": "set_permission_mode", "mode": mode_of(wanted) }))
                 .await;
@@ -1673,8 +1044,6 @@ impl Conversation {
         };
         live.plan = false;
         let mode = crate::approvals::permission_mode(live.approval_mode);
-        self.mapper.expect_permission_mode(mode);
-        self.mapper.forget_permission_report();
         let id = self.next_request_id();
         let (reply, _) = oneshot::channel();
         self.requests.insert(id.clone(), reply);
@@ -1694,7 +1063,6 @@ impl Conversation {
 
     async fn ensure_process(&mut self, settings: &TurnSettings) -> Result<(), AdapterError> {
         if self.process.is_some() {
-            self.ask_native_settings(settings).await;
             return Ok(());
         }
         let session_id = self.params.session_id.clone();
@@ -1758,7 +1126,7 @@ impl Conversation {
             origin: &origin,
             turn: settings,
             oauth_token: token.as_deref(),
-        })?;
+        });
         if through_executor(&self.params.spec)
             && let Err(error) = tokio::fs::create_dir_all(&spec.cwd).await
         {
@@ -1777,20 +1145,15 @@ impl Conversation {
             Err(error) => return Err(AdapterError::HarnessUnavailable(error.to_string())),
         };
         self.process = Some(running);
-        self.settings_ask = None;
         // A process that begins the conversation counts its use from nothing; one that resumes or forks it
         // starts from what the harness restored.
         self.mapper.process_started(matches!(origin, Origin::New));
-        self.unadmitted_reply = UnadmittedReply::default();
-        self.mapper
-            .expect_process_resume(matches!(origin, Origin::Resume));
         self.reported_permission_mode = None;
         self.needs_restart = false;
         match self.handshake().await {
             Ok(()) => {
                 self.live = Some(settings.clone());
                 self.live_reviewer = reviewer;
-                self.ask_native_settings(settings).await;
                 Ok(())
             }
             Err(error) => {
@@ -1901,39 +1264,6 @@ impl Conversation {
         }
     }
 
-    /// Read-only native settings inspection; it sends no user input or model request.
-    async fn ask_native_settings(&mut self, settings: &TurnSettings) {
-        let pins =
-            crate::sessions::expected_managed_pins(&self.params.setup, &self.params.spec, settings);
-        self.mapper.expect_managed_pins(pins);
-        if !self.params.setup.managed_home {
-            return;
-        }
-        if self
-            .settings_ask
-            .as_ref()
-            .is_some_and(|(_, _, at)| at.elapsed() < READY_TIMEOUT)
-        {
-            return;
-        }
-        if let Some((request, turn, _)) = self.settings_ask.take() {
-            self.emit_all(self.mapper.native_settings_unavailable(&request, turn))
-                .await;
-        }
-        let id = self.next_request_id();
-        self.settings_ask = Some((
-            id.clone(),
-            self.turn.as_ref().map(|turn| turn.turn_id),
-            Instant::now(),
-        ));
-        if !self
-            .write(&control_request(&id, json!({"subtype":"get_settings"})))
-            .await
-        {
-            self.settings_ask = None;
-        }
-    }
-
     /// Asks the harness what fills its context, without waiting: the answer comes as a control response, and
     /// whoever waits for it gets it then. A harness that cannot be written to answers nothing.
     async fn ask_context(
@@ -1988,10 +1318,7 @@ impl Conversation {
 
     /// Ends the process without it being an event: input closed, killed if it lingers.
     fn stop_process_quietly(&mut self) {
-        self.unadmitted_reply = UnadmittedReply::default();
         if let Some(mut process) = self.process.take() {
-            // Its files are complete once it has exited: what its sub-agents made is read then.
-            self.settling.lost(Some(process.exit_watch()));
             self.retiring.insert(process.generation());
             process.close_input();
             // A process that has not gone within the grace period is killed. The process object is moved
@@ -2003,7 +1330,6 @@ impl Conversation {
         }
         self.live = None;
         self.live_reviewer = None;
-        self.settings_ask = None;
         self.idle_since = None;
     }
 
@@ -2048,10 +1374,7 @@ impl Conversation {
                 ));
             }
             self.mapper.begin_rejected_wake(turn_id);
-            self.silent_native = Some(SilentNative {
-                origin: turn_id,
-                notice: None,
-            });
+            self.silent_native = Some(turn_id);
             if let Some(wait) = self.native_wake_wait.take() {
                 for line in wait.frames {
                     Box::pin(self.on_line(&line)).await;
@@ -2148,16 +1471,10 @@ impl Conversation {
         match event {
             ProcessEvent::Line(line) => self.on_line(&line).await,
             ProcessEvent::TooLong => {
-                let events = self
-                    .mapper
-                    .protocol_error("the harness wrote a line longer than a frame may be");
-                self.emit_all(events).await;
+                tracing::warn!("the harness wrote a line longer than a frame may be")
             }
             ProcessEvent::Unreadable(error) => {
-                let events = self
-                    .mapper
-                    .protocol_error(&format!("a line of the harness could not be read: {error}"));
-                self.emit_all(events).await;
+                tracing::warn!("a line of the harness could not be read: {error}")
             }
             ProcessEvent::Exited(info) => self.on_exit(generation, &info).await,
         }
@@ -2168,17 +1485,10 @@ impl Conversation {
         let frame = match Frame::parse(line) {
             Ok(frame) => frame,
             Err(error) => {
-                let events = self.mapper.protocol_error(&error.to_string());
-                self.emit_all(events).await;
+                tracing::debug!("{error}");
                 return;
             }
         };
-        // A future stream method is visible even while idle, without admitting unknown native work.
-        if EventMapper::unknown_stream_event_name(&frame).is_some() {
-            let observed = self.mapper.on_frame(&frame);
-            self.emit_all(observed).await;
-            return;
-        }
         if frame.kind() == FrameKind::Result
             && frame.raw().pointer("/origin/kind").and_then(Json::as_str)
                 == Some("task-notification")
@@ -2186,16 +1496,6 @@ impl Conversation {
             && frame.get("is_error").and_then(Json::as_bool) == Some(false)
             && frame.text("result").unwrap_or_default().is_empty()
         {
-            if frame.parent_tool_use_id().is_none() {
-                self.unadmitted_reply = UnadmittedReply::default();
-            }
-            if self.silent_native.is_some()
-                && !self.mapper.turn_active()
-                && frame.parent_tool_use_id().is_none()
-            {
-                self.silent_native = None;
-                self.on_turn_over().await;
-            }
             return;
         }
         if self.turn.is_some()
@@ -2240,15 +1540,6 @@ impl Conversation {
         .await;
         self.note_trying_again(&frame);
         if frame.kind() == FrameKind::System
-            && matches!(
-                frame.subtype(),
-                Some("settings_changed" | "managed_settings_changed" | "session_state_changed")
-            )
-            && let Some(settings) = self.live.clone()
-        {
-            self.ask_native_settings(&settings).await;
-        }
-        if frame.kind() == FrameKind::System
             && let Some(mode) = frame.text("permissionMode")
         {
             self.reported_permission_mode = Some(mode.to_owned());
@@ -2266,19 +1557,8 @@ impl Conversation {
         match frame.kind() {
             FrameKind::ControlRequest => self.on_control_request(&frame).await,
             FrameKind::ControlResponse => {
-                let modes = self.mapper.permission_mode_answer(&frame);
-                self.emit_all(modes).await;
                 if let Some((id, outcome)) = frame.control_outcome() {
-                    if self
-                        .settings_ask
-                        .as_ref()
-                        .is_some_and(|(pending, _, _)| pending == &id)
-                    {
-                        if let Some((_, turn, _)) = self.settings_ask.take() {
-                            let events = self.mapper.native_settings(&frame, &outcome, turn);
-                            self.emit_all(events).await;
-                        }
-                    } else if let Some(ask) = self.context_asks.remove(&id) {
+                    if let Some(ask) = self.context_asks.remove(&id) {
                         self.on_context_answer(ask, outcome).await;
                     } else if let Some(reply) = self.requests.remove(&id) {
                         let _ = reply.send(outcome);
@@ -2299,28 +1579,8 @@ impl Conversation {
                 let is_result = frame.kind() == FrameKind::Result;
                 let shortened = frame.kind() == FrameKind::System
                     && frame.subtype() == Some("compact_boundary");
-                let rejected_native = self.silent_native.is_some() && self.mapper.turn_active();
-                if let Some(observed) = self.silent_native.filter(|_| !self.mapper.turn_active())
-                    && let Some(notice) = observed.notice
-                    && frame.parent_tool_use_id().is_none()
-                    && (matches!(
-                        frame.kind(),
-                        FrameKind::Assistant | FrameKind::StreamEvent | FrameKind::Result
-                    ) || (frame.kind() == FrameKind::System
-                        && frame.subtype() == Some("api_retry")))
-                {
-                    let events =
-                        self.mapper
-                            .observe_unadmitted_native(&frame, observed.origin, notice);
-                    self.emit_all(events).await;
-                    if is_result {
-                        self.silent_native = None;
-                        self.on_turn_over().await;
-                    }
-                    return;
-                }
                 let mut events = self.mapper.on_frame(&frame);
-                if rejected_native {
+                if self.silent_native.is_some() {
                     events.retain(|event| matches!(event, SessionEvent::BackgroundTasks(_)));
                     self.emit_all(events).await;
                     if is_result {
@@ -2417,8 +1677,6 @@ impl Conversation {
             return;
         }
         let Some(ask) = PermissionAsk::from_frame(frame) else {
-            let observed = self.mapper.unrecognized_control(frame);
-            self.emit_all(observed).await;
             let subtype = frame
                 .get("request")
                 .and_then(|request| request.get("subtype"))
@@ -2452,9 +1710,7 @@ impl Conversation {
             .is_some_and(|live| live.approval_mode == ApprovalMode::Bypass)
             && !matches!(
                 ask.kind(),
-                HarnessRequestKind::Plan
-                    | HarnessRequestKind::UserInput
-                    | HarnessRequestKind::McpElicitation
+                HarnessRequestKind::Plan | HarnessRequestKind::UserInput
             )
         {
             let answer = if self.turn.is_none() {
@@ -2563,7 +1819,6 @@ impl Conversation {
             .await;
         }
         if let Some(mut process) = self.process.take() {
-            self.settling.lost(Some(process.exit_watch()));
             process.kill();
         }
         self.live = None;
@@ -2607,7 +1862,6 @@ impl Conversation {
         };
         tracing::warn!(code = %error.code, "the harness is stopped and its turn ended: {:?}", error.said);
         if let Some(mut process) = self.process.take() {
-            self.settling.lost(Some(process.exit_watch()));
             process.kill();
         }
         self.live = None;
@@ -2618,10 +1872,7 @@ impl Conversation {
         self.on_turn_over().await;
     }
 
-    /// The turn is over: whatever was still waiting on a person or on the turn is let go. A question is the turn's, as
-    /// the engine's approval of it is (the engine cancels what is pending when a turn ends), whoever asked it: that of
-    /// a sub-agent that goes on in the background is refused with the turn like the rest, and an answer that was on
-    /// its way finds nothing to answer.
+    /// The turn is over: whatever was still waiting on a person or on the turn is let go.
     async fn on_turn_over(&mut self) {
         self.turn = None;
         let open: Vec<_> = self.asks.drain().collect();
@@ -2654,11 +1905,6 @@ impl Conversation {
             }
         }
         self.idle_since = Some(Instant::now());
-        if self.process.is_some()
-            && let Some(settings) = self.live.clone()
-        {
-            self.ask_native_settings(&settings).await;
-        }
     }
 
     async fn on_exit(&mut self, generation: u64, info: &ExitInfo) {
@@ -2687,19 +1933,9 @@ impl Conversation {
 
     /// The process is gone and took the turn with it.
     async fn lose_session(&mut self, why: &str) {
-        // The process has exited: its files are complete, and what its sub-agents made is read to the end.
-        self.settling.lost(None);
         self.process = None;
         self.live = None;
         self.live_reviewer = None;
-        self.unadmitted_reply = UnadmittedReply::default();
-        if let Some(observed) = self.silent_native.take()
-            && let Some(notice) = observed.notice
-        {
-            self.mapper
-                .abort_unadmitted_native(observed.origin, notice, why);
-            self.emit_all(Vec::new()).await;
-        }
         let open: Vec<_> = self.asks.drain().collect();
         for (request_ref, _) in open {
             self.emit(SessionEvent::ApprovalClosed(ApprovalClosed { request_ref }))
@@ -2742,203 +1978,4 @@ pub fn message_blocks(text: &str, images: Vec<Json>) -> Vec<Json> {
     let mut blocks = vec![text_block(text)];
     blocks.extend(images);
     blocks
-}
-
-#[cfg(test)]
-mod outbox_tests {
-    use super::*;
-
-    fn request() -> Out {
-        Out::Request(orch_types::new_id(), orch_types::new_id(), Box::default())
-    }
-
-    fn kinds(outbox: &mut Outbox) -> Vec<&'static str> {
-        std::iter::from_fn(|| outbox.next())
-            .map(|out| match out {
-                Out::Event(..) => "event",
-                Out::Request(..) => "request",
-                Out::Usage(..) => "usage",
-                Out::Gate(..) => "gate",
-            })
-            .collect()
-    }
-
-    #[test]
-    fn nothing_goes_out_behind_a_gate_until_it_is_opened_however_long_that_takes() {
-        let mut outbox = Outbox::default();
-        outbox.queue.push_back(request());
-        outbox.queue.push_back(Out::Gate(1));
-        outbox.queue.push_back(request());
-        assert_eq!(kinds(&mut outbox), ["request"]);
-        assert_eq!(
-            kinds(&mut outbox),
-            Vec::<&str>::new(),
-            "no passing of time opens a gate: only the settler does"
-        );
-        assert_eq!(outbox.queue.len(), 2, "what waits behind the gate stays");
-        outbox.open.insert(1);
-        assert_eq!(kinds(&mut outbox), ["gate", "request"]);
-        assert!(outbox.open.is_empty(), "a gate is passed once");
-    }
-
-    #[test]
-    fn a_gate_opened_before_the_queue_reaches_it_is_passed_when_it_does() {
-        let mut outbox = Outbox::default();
-        outbox.open.insert(3);
-        outbox.queue.push_back(request());
-        outbox.queue.push_back(Out::Gate(3));
-        outbox.queue.push_back(request());
-        assert_eq!(kinds(&mut outbox), ["request", "gate", "request"]);
-        assert!(outbox.open.is_empty());
-    }
-
-    #[test]
-    fn gates_are_ignored_where_the_settler_is_gone() {
-        let mut outbox = Outbox {
-            abandoned: true,
-            ..Outbox::default()
-        };
-        outbox.queue.push_back(Out::Gate(4));
-        outbox.queue.push_back(request());
-        assert_eq!(kinds(&mut outbox), ["gate", "request"]);
-    }
-
-    fn event(event: SessionEvent) -> Out {
-        Out::Event(orch_types::new_id(), Box::new(event))
-    }
-
-    fn closed(request_ref: &str) -> SessionEvent {
-        SessionEvent::ApprovalClosed(ApprovalClosed {
-            request_ref: request_ref.to_owned(),
-        })
-    }
-
-    #[test]
-    fn a_use_said_again_repeats_the_figure_and_the_statement_that_went_out_and_a_report_of_quantities_is_left_alone()
-     {
-        use orch_agent_contract::events::{ModelTokens, TokenUsage, UsageUpdated};
-        let tokens = |input: i64, output: i64| TokenUsage {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
-            ..TokenUsage::default()
-        };
-        let turn = orch_types::new_id();
-        let update =
-            |used: TokenUsage, report: orch_agent_contract::events::TurnUsageReport| UsageUpdated {
-                turn_id: turn,
-                turn: used,
-                thread: used,
-                context_window: None,
-                context_used: None,
-                report: Some(report),
-            };
-        let mut outbox = Outbox::default();
-        outbox.remember(&update(
-            tokens(20, 3),
-            orch_agent_contract::events::TurnUsageReport {
-                carried_by_rows: Some(tokens(15, 2)),
-                ..orch_agent_contract::events::TurnUsageReport::default()
-            },
-        ));
-        // The breakdown comes after, made from what the mapper kept: the figure and the statement are the ones sent.
-        let mut again = SessionEvent::UsageUpdated(update(
-            tokens(110, 13),
-            orch_agent_contract::events::TurnUsageReport::default(),
-        ));
-        outbox.as_sent(&mut again);
-        let SessionEvent::UsageUpdated(again) = again else {
-            panic!("a use");
-        };
-        assert_eq!(again.turn, tokens(20, 3));
-        assert_eq!(
-            again
-                .report
-                .as_ref()
-                .and_then(|report| report.carried_by_rows),
-            Some(tokens(15, 2)),
-            "a statement that the engine rule can meet: no more than the use it came with"
-        );
-        // A silent notice turn that did one web search reports quantities only, for the turn that started it.
-        let search = orch_agent_contract::events::TurnUsageReport {
-            counters_only: true,
-            models: vec![ModelTokens {
-                model: "m".to_owned(),
-                tokens: TokenUsage::default(),
-                tokens_reported: false,
-                counts: std::collections::BTreeMap::from([("web_search".to_owned(), 1)]),
-            }],
-            ..orch_agent_contract::events::TurnUsageReport::default()
-        };
-        let mut counted = SessionEvent::UsageUpdated(update(TokenUsage::default(), search.clone()));
-        outbox.as_sent(&mut counted);
-        let SessionEvent::UsageUpdated(counted) = counted else {
-            panic!("a use");
-        };
-        assert_eq!(
-            counted.turn,
-            TokenUsage::default(),
-            "it says nothing of the turn's use"
-        );
-        assert_eq!(
-            counted.report,
-            Some(search),
-            "and arrives as it was made, count and all"
-        );
-    }
-
-    #[test]
-    fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
-        let lost = || {
-            event(SessionEvent::SessionLost(SessionLost {
-                reason: "gone".to_owned(),
-            }))
-        };
-        let mut outbox = Outbox::default();
-        outbox.queue.push_back(request());
-        outbox.queue.push_back(Out::Gate(1));
-        outbox.queue.push_back(lost());
-        outbox.queue.push_back(event(closed("a")));
-        outbox.queue.push_back(lost());
-        outbox.queue.push_back(event(closed("b")));
-        assert_eq!(
-            kinds(&mut outbox),
-            ["request", "event", "event"],
-            "the two that take an ask back, and nothing else, pass the gate"
-        );
-        let names: Vec<_> = outbox
-            .queue
-            .iter()
-            .map(|out| match out {
-                Out::Event(..) => "event",
-                Out::Request(..) => "request",
-                Out::Usage(..) => "usage",
-                Out::Gate(..) => "gate",
-            })
-            .collect();
-        assert_eq!(
-            names,
-            ["gate", "event", "event"],
-            "the gate and what waits behind it"
-        );
-        outbox.open.insert(1);
-        assert_eq!(kinds(&mut outbox), ["gate", "event", "event"]);
-    }
-
-    #[test]
-    fn the_program_is_read_only_while_the_outbox_holds_less_than_the_sinks_lane() {
-        let mut outbox = Outbox::default();
-        assert!(outbox.has_room());
-        for _ in 0..OUTBOX_MAX - 1 {
-            outbox.queue.push_back(request());
-        }
-        assert!(outbox.has_room());
-        outbox.queue.push_back(request());
-        assert!(
-            !outbox.has_room(),
-            "the program is slowed as a slow sink would slow it"
-        );
-        outbox.queue.pop_front();
-        assert!(outbox.has_room());
-    }
 }

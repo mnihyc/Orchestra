@@ -15,12 +15,11 @@ use orch_authz::{Caller, Principal};
 use orch_db::queries::{environments::hosting as rows, storage};
 use orch_engine::updates::Target;
 use orch_link_contract::commands::{
-    AgentStartResult, BlobRef, Command, CommandKind as K, CommandResult, Empty, ExportedVolume,
+    BlobRef, Command, CommandKind as K, CommandResult, Empty, ExportedVolume,
     NodeRuntimeExportResult, NodeRuntimeVolumesExportResult, ProviderRefreshResult, VolumeArchive,
 };
-use orch_types::{Hash, Id, Json, Time};
+use orch_types::{Hash, Id, Time};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
 
 /// The provider's state, which a replacement that kept its home keeps.
 async fn provider_status(world: &World, provider: Id) -> String {
@@ -367,78 +366,4 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
             .all(|call| call.body["name"] != json!(format!("orch-home-{provider}")))
     );
     world.engine().stop();
-}
-
-/// A unit the system made is the provider's own place for its sign-in: nothing there is a person's account to be
-/// left alone, so a harness whose home was not chosen is told that Orch makes it (in the unit's private state, one
-/// for each provider and profile), and not left to the harness's own default, where its adapter could not keep a
-/// sign-in that is given to it or take it away again.
-///
-/// Making the unit does not start the harness; the first read of the provider and a Start by hand do. The case asks
-/// for the start by hand, and when no start comes it says what the unit's machine was asked instead.
-#[tokio::test]
-async fn the_harness_of_a_unit_the_system_made_is_told_to_keep_a_home_made_by_orch() {
-    let world = World::new().await;
-    serve(&world);
-    let host = ScriptedHost::on(&world, "Owned home host", 16384).await;
-    runtimes::provider_template(&world).await;
-    let provider = runtimes::managed_subscription(&world, "Owned harness home").await;
-    let starts: Arc<Mutex<Vec<Json>>> = Arc::default();
-    let before = host.count(K::NodeRuntimeStart);
-    let job = runtimes::queue(
-        &world,
-        provider,
-        orch_engine::jobs::provider_provision::Mode::Make,
-    )
-    .await;
-    host.wait_for(K::NodeRuntimeStart, before + 1).await;
-    let runtime = host.started().unwrap();
-    let recorded = Arc::clone(&starts);
-    let unit = runtimes::enrol_with(&world, runtime, move |unit| {
-        answers_refresh(unit, "ready".to_owned());
-        unit.added
-            .machine
-            .handler
-            .on(K::AgentStart, move |command: &Command| {
-                recorded.lock().unwrap().push(command.body().unwrap());
-                Ok(CommandResult::AgentStart(AgentStartResult {
-                    reused: false,
-                    harness_version: "1.0.0".to_owned(),
-                    descriptor: serde_json::from_value(common::descriptor()).unwrap(),
-                }))
-            });
-    })
-    .await;
-    let (state, _, error) = wait_over(&world, job).await;
-    assert_eq!(state, "succeeded", "{error:?}");
-    let started = world
-        .engine()
-        .start_provider_runtime(provider, Some(world.ada))
-        .await;
-    let waited = std::time::Instant::now();
-    while starts.lock().unwrap().is_empty() && waited.elapsed() < std::time::Duration::from_secs(30)
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let seen = starts.lock().unwrap().clone();
-    assert!(
-        !seen.is_empty(),
-        "no start of the unit's harness came; the start by hand answered {started:?}; the unit's machine ({}) was asked, \
-         in order: {:?}",
-        unit.id,
-        unit.added
-            .machine
-            .handler
-            .executions()
-            .iter()
-            .map(|run| run.kind)
-            .collect::<Vec<_>>()
-    );
-    for body in &seen {
-        assert_eq!(
-            body["runtime"]["home"],
-            json!({"kind": "made_by_orch"}),
-            "{body}"
-        );
-    }
 }

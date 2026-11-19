@@ -496,47 +496,6 @@ async fn a_sub_agent_that_ended_is_told_to_the_thread_s_followers_only_where_the
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn selected_subagent_destinations_keep_the_existing_level_and_opt_in_rules() {
-    let world = World::new().await;
-    let thread = world.thread("Review login").await;
-    let selected = destination(&world, world.project, "all", &["subagent.ended"]).await;
-    destination(&world, world.topic, "important", &["subagent.ended"]).await;
-    destination(&world, world.root, "all", &["turn.failed"]).await;
-
-    subagent_ran(&world, thread, "reviewer-off").await;
-    assert!(
-        outbox(&world).await.is_empty(),
-        "sub-agent notices remain opt-in"
-    );
-
-    world
-        .set(world.topic, "notify.subagents", json!(true))
-        .await;
-    subagent_ran(&world, thread, "reviewer-selected").await;
-    let expected = vec![(
-        "webhook".to_owned(),
-        None,
-        Some(selected),
-        vec!["subagent.ended".to_owned()],
-    )];
-    assert_eq!(
-        outbox(&world).await,
-        expected,
-        "only the matching kind at level all is delivered, once"
-    );
-
-    world
-        .set(world.topic, "notify.subagents", json!(false))
-        .await;
-    subagent_ran(&world, thread, "reviewer-off-again").await;
-    assert_eq!(
-        outbox(&world).await,
-        expected,
-        "switching the existing notification setting off stops further deliveries"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_that_completed_is_told_to_those_who_follow_the_thread_at_all_and_may_view_it() {
     let world = World::new().await;
     let thread = world.thread("Fix login").await;
@@ -1086,26 +1045,6 @@ async fn a_service_identity_follows_nothing_and_is_told_nothing() {
     .await
     .unwrap();
     assert_eq!(rows, 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_provider_job_retains_its_provider_destination_in_the_notification() {
-    let world = World::new().await;
-    let job = new_id();
-    sqlx::query("INSERT INTO jobs (id,kind,provider_id,state,created_by,finished_at) VALUES ($1,'provider_provision',$2,'failed',$3,now())")
-        .bind(job).bind(world.provider).bind(world.ada).execute(world.pool.pool()).await.unwrap();
-    let mut conn = world.pool.acquire().await.unwrap();
-    let told = job_finished(&mut conn, job, world.clock.now())
-        .await
-        .unwrap();
-    assert_eq!(told.people, [world.ada]);
-    let data: Json = sqlx::query_scalar("SELECT data FROM notifications WHERE user_id=$1 AND kind='job.finished' AND data->>'job_id'=$2")
-        .bind(world.ada).bind(job.to_string()).fetch_one(&mut *conn).await.unwrap();
-    assert_eq!(data["provider_id"], json!(world.provider));
-    assert_eq!(
-        data["path"],
-        json!(format!("/resources/providers/{}", world.provider))
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

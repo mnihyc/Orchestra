@@ -35,8 +35,6 @@ struct Fixture {
     runtime: Id,
     host_machine: Added,
     placement_home: Id,
-    source: Option<Id>,
-    copy_keeper: Option<Added>,
 }
 
 impl Fixture {
@@ -49,36 +47,10 @@ impl Fixture {
     }
 
     async fn with_legacy(legacy: bool) -> TestResult<Self> {
-        Self::with_kind(legacy, false).await
-    }
-    async fn with_kind(legacy: bool, duplicate: bool) -> TestResult<Self> {
-        Self::with_transfer(legacy, duplicate, false).await
-    }
-    async fn with_transfer(legacy: bool, duplicate: bool, physical: bool) -> TestResult<Self> {
-        Self::with_intent(legacy, duplicate, physical, false).await
-    }
-    async fn moving(physical: bool) -> TestResult<Self> {
-        Self::with_intent(false, true, physical, true).await
-    }
-    async fn with_intent(
-        legacy: bool,
-        duplicate: bool,
-        physical: bool,
-        moving: bool,
-    ) -> TestResult<Self> {
         let world = World::on_a_key("synthetic-provider-creator-fixture").await;
         let host_machine = world
             .add_machine("Provider creator physical host", &["node"])
             .await;
-        let copy_keeper = if physical {
-            Some(
-                world
-                    .add_machine("Actual owner copy keeper", &["provider"])
-                    .await,
-            )
-        } else {
-            None
-        };
         world.engine().stop();
         let engine = Engine::new(EngineParts {
             db: world.pool.clone(),
@@ -90,8 +62,7 @@ impl Fixture {
         });
         let (token, host, template, runtime) = (new_id(), new_id(), new_id(), new_id());
         let expires = world.clock.now() + chrono::Duration::hours(1);
-        let source = duplicate.then(new_id);
-        let mut policy = KeyScope {
+        let policy = KeyScope {
             rules: vec![KeyRule {
                 target: KeyTarget {
                     kind: KeyTargetKind::Object(ObjectKind::Org),
@@ -106,115 +77,15 @@ impl Fixture {
             }],
             ..KeyScope::default()
         };
-        if let Some(source) = source {
-            policy.rules[0].allow[0].operation = "ProviderDuplicate".into();
-            policy.rules[0].allow[0].actions = vec![KeyAction::Write];
-            policy.rules.push(KeyRule {
-                target: KeyTarget {
-                    kind: KeyTargetKind::Object(ObjectKind::Provider),
-                    id: Some(source),
-                    reach: KeyReach::SelfOnly,
-                },
-                resources: Some(vec![KeyTargetKind::Object(ObjectKind::Provider)]),
-                allow: vec![KeyOperation {
-                    operation: "ProviderDuplicate".into(),
-                    actions: vec![KeyAction::Read],
-                }],
-            });
-        }
         let scopes = if legacy {
             vec!["provider.manage".to_owned()]
         } else {
             vec![]
         };
         let subtree = legacy.then_some(world.root);
-        let mut tx = world.pool.begin().await?;
-        if let Some(keeper) = &copy_keeper {
-            sqlx::query("UPDATE machines SET owner_id=$2,home_id=$3,org_id=$3 WHERE id=$1")
-                .bind(keeper.id)
-                .bind(world.ada)
-                .bind(world.root)
-                .execute(&mut *tx)
-                .await?;
-            ownership::start_resource(
-                &mut tx,
-                ObjectRef {
-                    kind: ResourceKind::Machine.into(),
-                    id: keeper.id,
-                },
-                world.ada,
-                NewAccess::OnlyMe,
-                world.clock.time(),
-            )
-            .await?;
-        }
-        if let Some(source) = source {
-            orch_db::queries::resources::routes::insert_provider(
-                &mut tx,
-                &orch_db::queries::resources::routes::NewProvider {
-                    id: source,
-                    name: "Actual copied source",
-                    owner_id: world.ada,
-                    home_id: world.root,
-                    upstreams: &json!([{"protocol":"openai-responses","base_url":"https://api.example.test/v1","options":{}}]),
-                    protocols: &["openai-responses".into()],
-                    machine_id: copy_keeper.as_ref().map(|keeper|keeper.id),
-                    key_machine_id: copy_keeper.as_ref().map(|keeper|keeper.id),
-                    arrangements: &["separated".into()],
-                    runtime_config: &json!({}),
-                    status: "needs_setup",
-                },
-                world.clock.now(),
-            )
-            .await?;
-            ownership::start_resource(
-                &mut tx,
-                ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id: source,
-                },
-                world.ada,
-                NewAccess::OnlyMe,
-                world.clock.time(),
-            )
-            .await?;
-        }
-        if moving {
-            let outside = new_id();
-            orch_db::queries::hierarchy::testing::insert_node(
-                &mut tx,
-                outside,
-                "org",
-                None,
-                "Move source",
-                world.ada,
-            )
-            .await?;
-            orch_db::queries::access::testing::insert_member(&mut tx, outside, world.ada, outside)
-                .await?;
-            orch_db::queries::access::testing::name_owner(
-                &mut tx,
-                outside,
-                ("user", world.ada),
-                world.clock.now(),
-            )
-            .await?;
-            sqlx::query("UPDATE providers SET home_id=$2,org_id=$2 WHERE id=$1")
-                .bind(source.ok_or("move source absent")?)
-                .bind(outside)
-                .execute(&mut *tx)
-                .await?;
-            for (index, rule) in policy.rules.iter_mut().enumerate() {
-                rule.allow[0].operation = "ProviderMoveOut".into();
-                rule.allow[0].actions = vec![if index == 0 {
-                    KeyAction::Write
-                } else {
-                    KeyAction::Manage
-                }];
-            }
-        }
         let operation_scope = (!legacy).then(|| policy.clone());
         let stored_policy = operation_scope.as_ref().map(|scope| json!(scope));
+        let mut tx = world.pool.begin().await?;
         identity::create_api_token_scoped(
             &mut tx,
             &identity::NewApiToken {
@@ -240,56 +111,14 @@ impl Fixture {
                 Some(Time::new(expires)),
             )?
             .for_token(token),
-        );
-        let caller = if let Some(source) = source {
-            use orch_api_contract::{
-                duplicate_sources::{PROVIDER, Source},
-                duplicates::ProviderDuplicate,
-                routes::Endpoint,
-            };
-            let subject = targets::page_object(
-                &mut tx,
-                ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id: source,
-                },
-            )
-            .await?;
-            crate::operation_scope::sources::bind_required(
-                if moving {
-                    orch_api_contract::duplicates::ProviderMoveOut::ROUTE
-                } else {
-                    ProviderDuplicate::ROUTE
-                },
-                if moving {
-                    &orch_api_contract::duplicate_sources::PROVIDER_MOVE
-                } else {
-                    &PROVIDER
-                },
-                &[
-                    crate::operation_scope::sources::Facts::one(
-                        Source::Subject,
-                        KeyTargetKind::Object(ObjectKind::Provider),
-                        subject,
-                    ),
-                    crate::operation_scope::sources::Facts::one(
-                        Source::Destination,
-                        KeyTargetKind::Object(ObjectKind::Provider),
-                        target,
-                    ),
-                ],
-            )?
-            .admit(&caller, false)?
-        } else {
-            caller
-                .admit_facets(&[KeyFacet {
-                    operation: "ProviderCreate".into(),
-                    action: KeyAction::Manage,
-                    resource_kind: KeyTargetKind::Object(ObjectKind::Provider),
-                    target,
-                }])?
-                .into_caller()
-        };
+        )
+        .admit_facets(&[KeyFacet {
+            operation: "ProviderCreate".into(),
+            action: KeyAction::Manage,
+            resource_kind: KeyTargetKind::Object(ObjectKind::Provider),
+            target,
+        }])?
+        .into_caller();
         let origin = CapturedOperation::capture(&caller)?;
         let placement_home = if legacy {
             let outside = new_id();
@@ -342,15 +171,6 @@ impl Fixture {
             .bind(world.provider)
             .bind(json!({"runtime.template_id":template,"runtime.host_id":host}))
             .execute(&mut *tx).await?;
-        if physical {
-            orch_db::queries::settings::delete_secret(
-                &mut tx,
-                "provider",
-                world.provider,
-                "api_key",
-            )
-            .await?;
-        }
         let row = match super::super::queue(
             &mut tx,
             world.clock.now(),
@@ -363,57 +183,15 @@ impl Fixture {
             jobs::provider_jobs::Queued::Made(row) => row,
             _ => return Err("fresh provider Make was not queued".into()),
         };
-        if let Some(source) = source {
-            let raw = crate::operation_scope::http_origin::HttpOrigin::capture(
-                origin.clone(),
-                crate::operation_scope::request_origin::Credential::Token {
-                    id: token,
-                    hash: Hash::of(token.as_bytes()).as_bytes().to_vec(),
-                },
-                false,
-                false,
-                Some(Time::new(expires)),
-            )?;
-            if moving {
-                let source_row = orch_db::queries::resources::routes::providers(&mut tx, &[source])
-                    .await?
-                    .pop()
-                    .ok_or("actual source gone")?;
-                let fingerprint =
-                    crate::providers::deleting::fingerprint(&mut tx, &source_row).await?;
-                retain_move(
-                    &mut tx,
-                    &raw,
-                    (source, fingerprint),
-                    world.provider,
-                    world.root,
-                    row.id,
-                    world.clock.as_ref(),
-                )
-                .await?;
-            } else {
-                retain_duplicate(
-                    &mut tx,
-                    &raw,
-                    source,
-                    world.provider,
-                    world.root,
-                    row.id,
-                    world.clock.as_ref(),
-                )
-                .await?;
-            }
-        } else {
-            retain(
-                &mut tx,
-                &origin,
-                world.provider,
-                world.root,
-                row.id,
-                Time::new(world.clock.now()),
-            )
-            .await?;
-        }
+        retain(
+            &mut tx,
+            &origin,
+            world.provider,
+            world.root,
+            row.id,
+            Time::new(world.clock.now()),
+        )
+        .await?;
         // The retained birth comes first. Its exact ordinary scheduler candidate is then recorded;
         // no old or unrelated runtime is attached to establish the accepted creator origin.
         // The legacy case leaves that step to the actual schedule method under test.
@@ -474,81 +252,7 @@ impl Fixture {
             runtime,
             host_machine,
             placement_home,
-            source,
-            copy_keeper,
         })
-    }
-
-    async fn subscription() -> TestResult<Self> {
-        let s = Self::moving(true).await?;
-        let source = s.source.ok_or("moving source absent")?;
-        let mut tx = s.world.pool.begin().await?;
-        // The subscription's real profile needs its own current Use authority. The transport
-        // world's owner_id attributes that profile without creating an Owners entry.
-        ownership::start_resource(
-            &mut tx,
-            ObjectRef {
-                kind: ObjectKind::Agent,
-                id: s.world.agent,
-            },
-            s.world.ada,
-            NewAccess::OnlyMe,
-            s.world.clock.time(),
-        )
-        .await?;
-        sqlx::query("UPDATE providers SET kind='subscription',harness_kind='fake',agent_id=$2,upstreams='[]',protocols=ARRAY[]::text[] WHERE id=ANY($1)").bind(vec![source,s.world.provider]).bind(s.world.agent).execute(&mut *tx).await?;
-        let mut descriptor = crate::test_common::descriptor();
-        descriptor["credentials"] = json!({"issues":[{"form":"fake_login","custody":"transferred","lifetime_secs":null}],"accepts":["fake_login"]});
-        sqlx::query("UPDATE agents SET descriptor=$2 WHERE id=$1")
-            .bind(s.world.agent)
-            .bind(descriptor)
-            .execute(&mut *tx)
-            .await?;
-        for key in [orch_settings_contract::registry::keys::RUNTIME_HOME] {
-            let mut config: Json =
-                sqlx::query_scalar("SELECT runtime_config FROM providers WHERE id=$1")
-                    .bind(s.world.provider)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            config[key] = json!({"kind":"made_by_orch"});
-            sqlx::query("UPDATE providers SET runtime_config=$2 WHERE id=$1")
-                .bind(s.world.provider)
-                .bind(config)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("UPDATE providers SET credential_home=$2 WHERE id=$1")
-            .bind(s.world.provider)
-            .bind(json!({"kind":"made_by_orch"}))
-            .execute(&mut *tx)
-            .await?;
-        let owner = jobs::job(&mut tx, s.job.id()).await?.ok_or("job absent")?;
-        let mut authority = read(&owner)?.ok_or("creator absent")?;
-        authority.kind = "subscription".into();
-        authority.harness = Some("fake".into());
-        authority.agent = Some(s.world.agent);
-        let target = provider_rows::state(&mut tx, s.world.provider)
-            .await?
-            .ok_or("target absent")?;
-        authority.runtime_config_hash = body_hash(&target.runtime_config)?;
-        let source = orch_db::queries::resources::routes::providers(&mut tx, &[source])
-            .await?
-            .pop()
-            .ok_or("source absent")?;
-        authority
-            .duplicate
-            .as_mut()
-            .ok_or("source proof absent")?
-            .moving = Some(crate::providers::deleting::fingerprint(&mut tx, &source).await?);
-        jobs::merge_plan(
-            &mut tx,
-            s.job.id(),
-            &json!({FIELD:authority}),
-            s.world.clock.now(),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(s)
     }
 
     async fn schedule(&mut self) -> TestResult {
@@ -588,50 +292,6 @@ impl Fixture {
         Ok(())
     }
 
-    async fn queue_copy(&self, mut command: Outgoing) -> TestResult<Outgoing> {
-        // The transport double completes stored rows but does not create them. Keep the real
-        // queued frame before dispatch, so only the native answer can become a copy receipt.
-        let deadline = command.deadline.unwrap_or_else(|| {
-            Time::new(
-                self.world.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            )
-        });
-        command.deadline = Some(deadline);
-        self.reserve(&command).await?;
-        let mut tx = self.world.pool.begin().await?;
-        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-        let key = command.key.wire();
-        assert!(
-            command_authorized(
-                &mut tx,
-                command.id,
-                command.machine,
-                key.as_deref(),
-                command.kind.as_str(),
-                &command.body,
-                self.world.clock.as_ref(),
-            )
-            .await?,
-            "the actual owner copy must pass its first queue boundary"
-        );
-        orch_db::queries::link::insert_command(
-            &mut tx,
-            &orch_db::queries::link::NewCommand {
-                id: command.id,
-                machine_id: command.machine,
-                kind: command.kind.as_str(),
-                body: &command.body,
-                serial_key: key.as_deref(),
-                deadline_at: deadline.get(),
-            },
-            self.world.clock.now(),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(command)
-    }
-
     async fn allows(&self, command: &Outgoing) -> TestResult<bool> {
         let mut tx = self.world.pool.begin().await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
@@ -647,7 +307,7 @@ impl Fixture {
             command.key.wire().as_deref(),
             command.kind.as_str(),
             &body,
-            self.world.clock.as_ref(),
+            Time::new(self.world.clock.now()),
         )
         .await?;
         tx.rollback().await?;
@@ -735,7 +395,7 @@ async fn provider_journal_keeps_old_ids_and_refuses_changed_or_aborted_forward_f
             command.key.wire().as_deref(),
             command.kind.as_str(),
             &command.body,
-            s.world.clock.as_ref()
+            Time::new(s.world.clock.now())
         )
         .await?,
         "retained command evidence without its creator origin must not become ordinary work"
@@ -760,7 +420,7 @@ async fn provider_journal_keeps_old_ids_and_refuses_changed_or_aborted_forward_f
             next.key.wire().as_deref(),
             next.kind.as_str(),
             &next.body,
-            s.world.clock.as_ref()
+            Time::new(s.world.clock.now())
         )
         .await?,
         "an owned cancellation independently refuses the next queued frame"
@@ -906,7 +566,7 @@ async fn revoked_provider_creator_refuses_new_work_while_owned_make_undo_removes
             actual.key.as_deref(),
             &actual.kind,
             &actual.body,
-            s.world.clock.as_ref()
+            Time::new(s.world.clock.now())
         )
         .await?,
         "existing owned compensation has a disjoint command identity"
@@ -1227,7 +887,7 @@ async fn legacy_provider_manage_keeps_its_home_boundary_while_scheduling_account
     let owner = jobs::job(&mut tx, s.job.id())
         .await?
         .ok_or("legacy provider job absent")?;
-    let current = principal(&mut tx, &owner, s.world.clock.as_ref())
+    let current = principal(&mut tx, &owner, Time::new(s.world.clock.now()))
         .await?
         .ok_or("legacy provider principal absent")?;
     assert!(
@@ -1276,7 +936,7 @@ async fn legacy_provider_manage_keeps_its_home_boundary_while_scheduling_account
                 command.key.wire().as_deref(),
                 command.kind.as_str(),
                 &command.body,
-                s.world.clock.as_ref()
+                Time::new(s.world.clock.now())
             )
             .await?,
             "{boundary}"
@@ -1362,7 +1022,7 @@ async fn legacy_provider_placement_still_requires_current_account_provider_host_
                 command.key.wire().as_deref(),
                 command.kind.as_str(),
                 &command.body,
-                s.world.clock.as_ref()
+                Time::new(s.world.clock.now())
             )
             .await?,
             "the legacy provider.manage boundary must not replace withdrawn account {}",
@@ -1373,854 +1033,6 @@ async fn legacy_provider_placement_still_requires_current_account_provider_host_
     }
     assert_eq!(s.job.row().await?.plan, before);
     assert_eq!(s.world.commands.issued_of("node.image.ensure"), 0);
-    s.engine.stop();
-    Ok(())
-}
-
-#[tokio::test]
-async fn copied_provider_make_keeps_its_actual_namespace_source_destination_and_raw_bearer_at_first_send()
--> TestResult {
-    for change in [
-        "live",
-        "revoked",
-        "bearer",
-        "source_read",
-        "destination_write",
-        "namespace",
-    ] {
-        let s = Fixture::with_kind(false, true).await?;
-        let command = s.image()?;
-        s.reserve(&command).await?;
-        assert!(
-            s.allows(&command).await?,
-            "positive native duplicate Make must be usable before each isolated withdrawal"
-        );
-        assert!(s.source.is_some());
-        assert_eq!(s.origin.operation(), "ProviderDuplicate");
-        let mut scope = s.policy.clone();
-        match change {
-            "live" => {}
-            "revoked" => {
-                sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
-                    .bind(s.token)
-                    .bind(s.world.clock.now())
-                    .execute(s.world.pool.pool())
-                    .await?;
-            }
-            "bearer" => {
-                sqlx::query("UPDATE api_tokens SET token_hash=$2 WHERE id=$1")
-                    .bind(s.token)
-                    .bind(
-                        Hash::of(b"another synthetic raw bearer")
-                            .as_bytes()
-                            .to_vec(),
-                    )
-                    .execute(s.world.pool.pool())
-                    .await?;
-            }
-            "source_read" => {
-                scope.rules.pop();
-            }
-            "destination_write" => {
-                scope.rules.remove(0);
-            }
-            "namespace" => {
-                for rule in &mut scope.rules {
-                    rule.allow[0].operation = "ProviderGet".into();
-                    rule.allow[0].actions = vec![KeyAction::Read];
-                }
-            }
-            _ => unreachable!(),
-        }
-        if matches!(change, "source_read" | "destination_write" | "namespace") {
-            sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
-                .bind(s.token)
-                .bind(json!(scope))
-                .execute(s.world.pool.pool())
-                .await?;
-        }
-        assert_eq!(s.allows(&command).await?, change == "live", "{change}");
-        assert_eq!(
-            s.world.commands.issued_of("node.image.ensure"),
-            0,
-            "the first-send checker cannot issue or replace its native command"
-        );
-        s.engine.stop();
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn only_the_real_owners_duplicate_job_can_issue_its_exact_static_copy_to_its_actual_enrolled_recipient()
--> TestResult {
-    use orch_link_contract::commands::{
-        MachineKey, PROVIDER_COPY_FORM, ProviderCredentialCopy, ProviderCredentialIssue,
-    };
-    for change in [
-        "live",
-        "source",
-        "target",
-        "job",
-        "recipient",
-        "lease",
-        "form",
-        "scope",
-        "bearer",
-        "keeper_home",
-    ] {
-        let s = Fixture::with_transfer(false, true, true).await?;
-        let owner = s.job.row().await?;
-        let authority = read(&owner)?.ok_or("actual native copy authority missing")?;
-        let source = s.source.ok_or("actual source missing")?;
-        let keeper = s.copy_keeper.as_ref().ok_or("actual keeper missing")?.id;
-        assert_eq!(
-            authority
-                .duplicate
-                .as_ref()
-                .and_then(|copy| copy.copy_keeper),
-            Some(keeper)
-        );
-        let mut conn = s.world.pool.acquire().await?;
-        let target = orch_db::queries::resources::machine(&mut conn, s.world.machine_id)
-            .await?
-            .ok_or("actual enrolled recipient missing")?;
-        drop(conn);
-        let mut body = ProviderCredentialIssue {
-            return_credential: None,
-            lease_id: None,
-            copy: Some(ProviderCredentialCopy {
-                handover: None,
-                job_id: owner.id,
-                source_provider_id: source,
-                target_provider_id: s.world.provider,
-                headers: vec![],
-            }),
-            provider_id: source,
-            form: PROVIDER_COPY_FORM.into(),
-            recipient: MachineKey {
-                machine_id: target.id,
-                public_key: target.link().public_key,
-            },
-        };
-        match change {
-            "source" => {
-                body.copy
-                    .as_mut()
-                    .ok_or("copy purpose missing")?
-                    .source_provider_id = new_id();
-            }
-            "target" => {
-                body.copy
-                    .as_mut()
-                    .ok_or("copy purpose missing")?
-                    .target_provider_id = new_id();
-            }
-            "job" => {
-                body.copy.as_mut().ok_or("copy purpose missing")?.job_id = new_id();
-            }
-            "recipient" => {
-                body.recipient.machine_id = new_id();
-            }
-            "lease" => {
-                body.lease_id = Some(new_id());
-            }
-            "form" => {
-                body.form = "api_key".into();
-            }
-            _ => {}
-        }
-        let command = Outgoing::new(new_id(), keeper, SerialKey::Provider(source), &body)?;
-        if matches!(
-            change,
-            "source" | "target" | "job" | "recipient" | "lease" | "form"
-        ) {
-            assert!(s.reserve(&command).await.is_err(), "{change}");
-            continue;
-        }
-        s.reserve(&command).await?;
-        assert!(
-            s.allows(&command).await?,
-            "the exact actual native owner copy must be usable"
-        );
-        if change == "scope" {
-            let mut scope = s.policy.clone();
-            scope.rules.pop();
-            sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
-                .bind(s.token)
-                .bind(json!(scope))
-                .execute(s.world.pool.pool())
-                .await?;
-        }
-        if change == "bearer" {
-            sqlx::query("UPDATE api_tokens SET token_hash=$2 WHERE id=$1")
-                .bind(s.token)
-                .bind(Hash::of(b"another copy bearer").as_bytes().to_vec())
-                .execute(s.world.pool.pool())
-                .await?;
-        }
-        if change == "keeper_home" {
-            sqlx::query("UPDATE machines SET home_id=NULL,org_id=NULL WHERE id=$1")
-                .bind(keeper)
-                .execute(s.world.pool.pool())
-                .await?;
-        }
-        assert_eq!(s.allows(&command).await?, change == "live", "{change}");
-        assert_eq!(
-            s.world.commands.issued_of("provider.credential.issue"),
-            0,
-            "source verification cannot issue or replace native work"
-        );
-    }
-    Ok(())
-}
-#[tokio::test]
-async fn an_unclaimed_owner_copy_purpose_is_never_ordinary_or_autonomous_credential_work()
--> TestResult {
-    use orch_link_contract::commands::{
-        MachineKey, PROVIDER_COPY_FORM, ProviderCredentialCopy, ProviderCredentialIssue,
-    };
-    let s = Fixture::new().await?;
-    let body = serde_json::to_value(ProviderCredentialIssue {
-        return_credential: None,
-        lease_id: None,
-        copy: Some(ProviderCredentialCopy {
-            handover: None,
-            job_id: new_id(),
-            source_provider_id: s.world.provider,
-            target_provider_id: new_id(),
-            headers: vec![],
-        }),
-        provider_id: s.world.provider,
-        form: PROVIDER_COPY_FORM.into(),
-        recipient: MachineKey {
-            machine_id: s.world.machine_id,
-            public_key: "not an enrolled recipient key".into(),
-        },
-    })?;
-    let mut tx = s.world.pool.begin().await?;
-    assert!(
-        !command_authorized(
-            &mut tx,
-            new_id(),
-            s.world.machine_id,
-            None,
-            "provider.credential.issue",
-            &body,
-            s.world.clock.as_ref()
-        )
-        .await?
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_actual_owner_copy_needs_its_issued_receipt_and_audits_accepted_native_effects_after_revocation()
--> TestResult {
-    use orch_link_contract::commands::{
-        MachineKey, PROVIDER_COPY_FORM, ProviderCredentialAccept, ProviderCredentialCopy,
-        ProviderCredentialIssue, Sealed, SealedCredential,
-    };
-    let s = Fixture::with_transfer(false, true, true).await?;
-    let source = s.source.ok_or("actual source absent")?;
-    let keeper = s.copy_keeper.as_ref().ok_or("actual keeper absent")?;
-    let mut conn = s.world.pool.acquire().await?;
-    let recipient = orch_db::queries::resources::machine(&mut conn, s.world.machine_id)
-        .await?
-        .ok_or("actual enrolled recipient absent")?;
-    drop(conn);
-    let purpose = ProviderCredentialCopy {
-        handover: None,
-        job_id: s.job.id(),
-        source_provider_id: source,
-        target_provider_id: s.world.provider,
-        headers: vec![],
-    };
-    // The scripted physical peer supplies an opaque native result. The connector conformance
-    // case independently drives the real seal/open/store implementation with two identities.
-    let sealed = SealedCredential {
-        form: PROVIDER_COPY_FORM.into(),
-        credential: Sealed {
-            value: "synthetic-opaque-peer-result".into(),
-        },
-        expires_at: None,
-    };
-    let result = sealed.clone();
-    keeper
-        .machine
-        .handler
-        .on(CommandKind::ProviderCredentialIssue, move |_| {
-            Ok(CommandResult::ProviderCredentialIssue(result.clone()))
-        });
-    let issue = Outgoing::new(
-        new_id(),
-        keeper.id,
-        SerialKey::Provider(source),
-        &ProviderCredentialIssue {
-            return_credential: None,
-            lease_id: None,
-            copy: Some(purpose.clone()),
-            provider_id: source,
-            form: PROVIDER_COPY_FORM.into(),
-            recipient: MachineKey {
-                machine_id: recipient.id,
-                public_key: recipient.link().public_key,
-            },
-        },
-    )?;
-    let body = ProviderCredentialAccept {
-        provider_id: s.world.provider,
-        copy: Some(purpose),
-        form: sealed.form,
-        credential: sealed.credential,
-        expires_at: None,
-    };
-    let accept = Outgoing::new(
-        new_id(),
-        s.world.machine_id,
-        SerialKey::Provider(s.world.provider),
-        &body,
-    )?;
-    assert!(
-        s.reserve(&accept).await.is_err(),
-        "accept cannot invent a source issue receipt"
-    );
-    let issue = s.queue_copy(issue).await?;
-    tokio::time::timeout(crate::test_common::PATIENCE, s.job.command(issue.clone()))
-        .await
-        .map_err(|_| "owner copy timed out waiting for the source issue receipt")?
-        .map_err(|error| format!("{error:?}"))?;
-    assert_eq!(s.world.commands.issued_of("provider.credential.issue"), 1);
-    let mut replaced = body.clone();
-    replaced.credential.value = "another opaque result".into();
-    let changed = Outgoing::new(
-        new_id(),
-        s.world.machine_id,
-        SerialKey::Provider(s.world.provider),
-        &replaced,
-    )?;
-    assert!(
-        s.reserve(&changed).await.is_err(),
-        "accept must carry precisely the real issued result"
-    );
-    s.world
-        .machine
-        .handler
-        .hold(CommandKind::ProviderCredentialAccept);
-    s.world
-        .machine
-        .handler
-        .on(CommandKind::ProviderCredentialAccept, |_| {
-            Ok(CommandResult::ProviderCredentialAccept(Empty {}))
-        });
-    let accept = s.queue_copy(accept).await?;
-    let replay = accept.clone();
-    let job = s.job.clone();
-    let mut waiting = tokio::spawn(async move { job.command(accept).await });
-    tokio::select! {
-        started = tokio::time::timeout(
-            crate::test_common::PATIENCE,
-            s.world.machine.handler.started(replay.id),
-        ) => {
-            if started.is_err() {
-                waiting.abort();
-                return Err("owner copy timed out waiting for the target accept to start".into());
-            }
-        }
-        ended = &mut waiting => {
-            return Err(format!("owner copy target accept ended before reaching its held handler: {ended:?}").into());
-        }
-    }
-    let mut conn = s.world.pool.acquire().await?;
-    assert!(
-        identity::revoke_api_token(&mut conn, s.token, s.world.ada, s.world.clock.now()).await?
-    );
-    drop(conn);
-    assert!(
-        !s.allows(&replay).await?,
-        "new first-send work is now refused"
-    );
-    s.world.machine.handler.release();
-    tokio::time::timeout(crate::test_common::PATIENCE, &mut waiting)
-        .await
-        .map_err(|_| {
-            waiting.abort();
-            "owner copy timed out waiting for the accepted target receipt after revocation"
-        })??
-        .map_err(|error| format!("{error:?}"))?;
-    // Drive the same opaque data-only ACK facade after native completion. It grants no
-    // user restoration or fresh queue/send permission, and repeated ACKs audit once.
-    for command in [issue.id, replay.id, issue.id, replay.id] {
-        let mut tx = s.world.pool.begin().await?;
-        let ack = recorded_copy(&mut tx, command)
-            .await?
-            .ok_or("exact native copy ACK absent")?;
-        ack.lock_source(&mut tx).await?;
-        ack.reconcile(&mut tx, s.world.clock.as_ref()).await?;
-        tx.commit().await?;
-    }
-    let mut conn = s.world.pool.acquire().await?;
-    let audits: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE details->>'purpose'='provider_duplicate' AND details->>'job'=$1")
-        .bind(s.job.id().to_string()).fetch_one(&mut *conn).await?;
-    assert_eq!(
-        audits, 2,
-        "one source issue and one target accept, despite repeat ACK and raw revocation"
-    );
-    drop(conn);
-    let before = s.job.row().await?.plan;
-    let mut tx = s.world.pool.begin().await?;
-    sqlx::query(
-        "UPDATE commands SET body=jsonb_set(body,'{provider_id}',to_jsonb($2::uuid)) WHERE id=$1",
-    )
-    .bind(replay.id)
-    .bind(new_id())
-    .execute(&mut *tx)
-    .await?;
-    assert!(
-        recorded_copy(&mut tx, replay.id).await.is_err(),
-        "a changed native frame is not an ACK witness"
-    );
-    tx.rollback().await?;
-    assert_eq!(s.job.row().await?.plan, before);
-    assert!(!s.allows(&replay).await?);
-    assert_eq!(s.world.commands.issued_of("provider.credential.issue"), 1);
-    assert_eq!(s.world.commands.issued_of("provider.credential.accept"), 1);
-    assert_eq!(keeper.machine.handler.runs_of(issue.id), 1);
-    assert_eq!(s.world.machine.handler.runs_of(replay.id), 1);
-    s.engine.stop();
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_owner_provider_move_keeps_its_actual_source_until_the_successful_native_commit()
--> TestResult {
-    let s = Fixture::moving(false).await?;
-    let source = s.source.ok_or("move source absent")?;
-    let command = s.image()?;
-    s.reserve(&command).await?;
-    assert!(
-        s.allows(&command).await?,
-        "the actual Manage/Write moving declaration admits its native Make"
-    );
-    assert!(
-        orch_db::queries::resources::routes::providers(
-            &mut *s.world.pool.acquire().await?,
-            &[source]
-        )
-        .await?
-        .len()
-            == 1
-    );
-    let provision = ProviderProvision::of(s.engine.clone(), &s.job.row().await?);
-    provision
-        .commit(&s.job)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    let mut conn = s.world.pool.acquire().await?;
-    assert!(
-        orch_db::queries::resources::routes::providers(&mut conn, &[source])
-            .await?
-            .is_empty()
-    );
-    assert_eq!(
-        provider_rows::state(&mut conn, s.world.provider)
-            .await?
-            .ok_or("copy disappeared")?
-            .machine_id,
-        Some(s.world.machine_id)
-    );
-    let audits: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE object_id=$1 AND action=ANY($2)")
-            .bind(source)
-            .bind(vec!["content.copied_out", "provider.deleted"])
-            .fetch_one(&mut *conn)
-            .await?;
-    assert_eq!(audits, 2);
-    drop(conn);
-    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
-        .bind(s.token)
-        .bind(s.world.clock.now())
-        .execute(s.world.pool.pool())
-        .await?;
-    provision
-        .commit(&s.job)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    s.engine.stop();
-    Ok(())
-}
-#[tokio::test]
-async fn a_provider_move_cannot_end_its_source_after_raw_closure_or_changed_reviewed_work()
--> TestResult {
-    for change in ["raw", "source", "scope", "owner"] {
-        let s = Fixture::moving(false).await?;
-        let source = s.source.ok_or("source absent")?;
-        match change {
-            "raw" => {
-                sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
-                    .bind(s.token)
-                    .bind(s.world.clock.now())
-                    .execute(s.world.pool.pool())
-                    .await?;
-            }
-            "source" => {
-                sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
-                    .bind(source)
-                    .execute(s.world.pool.pool())
-                    .await?;
-            }
-            "scope" => {
-                let mut scope = s.policy.clone();
-                scope.rules.pop();
-                sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE id=$1")
-                    .bind(s.token)
-                    .bind(json!(scope))
-                    .execute(s.world.pool.pool())
-                    .await?;
-            }
-            "owner" => {
-                sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE object_kind='provider' AND object_id=$1 AND permission='access.own' AND removed_at IS NULL").bind(source).bind(s.world.clock.now()).execute(s.world.pool.pool()).await?;
-            }
-            _ => unreachable!(),
-        }
-        let provision = ProviderProvision::of(s.engine.clone(), &s.job.row().await?);
-        assert!(provision.commit(&s.job).await.is_err(), "{change}");
-        let mut conn = s.world.pool.acquire().await?;
-        assert_eq!(
-            orch_db::queries::resources::routes::providers(&mut conn, &[source])
-                .await?
-                .len(),
-            1,
-            "{change}"
-        );
-        assert!(
-            provider_rows::state(&mut conn, s.world.provider)
-                .await?
-                .ok_or("target absent")?
-                .machine_id
-                .is_none(),
-            "{change}"
-        );
-        s.engine.stop();
-    }
-    Ok(())
-}
-#[tokio::test]
-async fn a_late_provider_source_delete_failure_rolls_back_the_copy_runtime_commit_and_audits()
--> TestResult {
-    let s = Fixture::moving(false).await?;
-    let source = s.source.ok_or("source absent")?;
-    let mut conn = s.world.pool.acquire().await?;
-    let sql = format!(
-        "CREATE FUNCTION refuse_moving_source() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id='{}'::uuid AND NEW.deleted_at IS NOT NULL THEN RAISE EXCEPTION 'synthetic late source failure'; END IF; RETURN NEW; END $$",
-        source
-    );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .execute(&mut *conn)
-        .await?;
-    sqlx::query("CREATE TRIGGER refuse_moving_source BEFORE UPDATE ON providers FOR EACH ROW EXECUTE FUNCTION refuse_moving_source()").execute(&mut *conn).await?;
-    drop(conn);
-    let provision = ProviderProvision::of(s.engine.clone(), &s.job.row().await?);
-    assert!(provision.commit(&s.job).await.is_err());
-    let mut conn = s.world.pool.acquire().await?;
-    assert_eq!(
-        orch_db::queries::resources::routes::providers(&mut conn, &[source])
-            .await?
-            .len(),
-        1
-    );
-    assert!(
-        provider_rows::state(&mut conn, s.world.provider)
-            .await?
-            .ok_or("copy absent")?
-            .machine_id
-            .is_none()
-    );
-    let audits: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE object_id=$1 AND action=ANY($2)")
-            .bind(source)
-            .bind(vec!["content.copied_out", "provider.deleted"])
-            .fetch_one(&mut *conn)
-            .await?;
-    assert_eq!(audits, 0);
-    s.engine.stop();
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_subscription_move_startup_keeps_the_actual_move_and_rechecks_its_raw_origin_and_physical_target()
--> TestResult {
-    use crate::harnesses::preparation::{Source as _, Target};
-    let s = Fixture::subscription().await?;
-    let owner = s.job.row().await?;
-    let authority = read(&owner)?.ok_or("creator absent")?;
-    let source = harness::Source {
-        job: owner.id,
-        origin: authority.origin.clone(),
-        until: authority
-            .duplicate
-            .as_ref()
-            .ok_or("source absent")?
-            .raw
-            .until(),
-    };
-    let target = Target::Harness(crate::harnesses::HarnessKey {
-        provider: s.world.provider,
-        agent: s.world.agent,
-        machine: s.world.machine_id,
-    });
-    let mut tx = s.world.pool.begin().await?;
-    let ready = source
-        .checkpoint(&mut tx, s.world.clock.as_ref(), target)
-        .await?;
-    assert_eq!(ready.caller().admitted_operation(), Some("ProviderMoveOut"));
-    assert!(ready.caller().admitted_required_roles().is_some());
-    ready.check(s.world.clock.as_ref())?;
-    let command = Outgoing::new(
-        new_id(),
-        s.world.machine_id,
-        SerialKey::Harness {
-            provider_id: s.world.provider,
-            agent_id: s.world.agent,
-        },
-        &orch_link_contract::commands::AgentStop {
-            provider_id: s.world.provider,
-            agent_id: s.world.agent,
-            logout: None,
-        },
-    )?;
-    let native = source
-        .command(&mut tx, s.world.clock.as_ref(), target, &command)
-        .await?;
-    let serial = command.key.wire();
-    let queued = orch_db::queries::link::NewCommand {
-        id: command.id,
-        machine_id: command.machine,
-        kind: command.kind.as_str(),
-        serial_key: serial.as_deref(),
-        body: &command.body,
-        deadline_at: s.world.clock.now()
-            + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-    };
-    let callers = native
-        .current_issue_callers(
-            &mut tx,
-            &queued,
-            s.world.clock.as_ref(),
-            s.world.access.as_ref(),
-        )
-        .await?
-        .ok_or("the genuine native startup command lost its current source proof")?;
-    assert!(!callers.is_empty());
-    assert!(callers.iter().all(|(caller, _)| {
-        caller.as_ref().is_some_and(|caller| {
-            caller.admitted_operation() == Some("ProviderMoveOut")
-                && caller.admitted_required_roles().is_some()
-        })
-    }));
-    let changed = orch_db::queries::link::NewCommand {
-        machine_id: s.copy_keeper.as_ref().ok_or("keeper absent")?.id,
-        ..queued
-    };
-    assert!(
-        native
-            .current_issue_callers(
-                &mut tx,
-                &changed,
-                s.world.clock.as_ref(),
-                s.world.access.as_ref(),
-            )
-            .await?
-            .is_none(),
-        "the target's private proof cannot be sent to the equally live source keeper"
-    );
-    tx.rollback().await?;
-    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
-        .bind(s.token)
-        .bind(s.world.clock.now())
-        .execute(s.world.pool.pool())
-        .await?;
-    let mut tx = s.world.pool.begin().await?;
-    assert!(
-        source
-            .checkpoint(&mut tx, s.world.clock.as_ref(), target)
-            .await
-            .is_err()
-    );
-    assert!(
-        native
-            .current_issue_callers(
-                &mut tx,
-                &queued,
-                s.world.clock.as_ref(),
-                s.world.access.as_ref(),
-            )
-            .await?
-            .is_none(),
-        "native dispatch keeps the same revoked raw origin as startup"
-    );
-    tx.rollback().await?;
-    assert_eq!(s.world.machine.handler.runs_of(command.id), 0);
-    s.engine.stop();
-    Ok(())
-}
-
-#[tokio::test]
-async fn owned_sign_in_return_needs_the_genuine_forward_receipt_and_cannot_revive_the_old_actor()
--> TestResult {
-    use orch_link_contract::commands::{
-        MachineKey, ProviderCredentialAccept, ProviderCredentialIssue, Sealed, SealedCredential,
-    };
-    let s = Fixture::subscription().await?;
-    let owner = s.job.row().await?;
-    let authority = read(&owner)?.ok_or("creator absent")?;
-    let mut conn = s.world.pool.acquire().await?;
-    let (keeper, recipient, purpose) = transfer::context(&mut conn, &owner, &authority)
-        .await?
-        .ok_or("native handover absent")?;
-    let issued = Outgoing::new(
-        new_id(),
-        keeper,
-        SerialKey::Provider(purpose.source_provider_id),
-        &ProviderCredentialIssue {
-            lease_id: None,
-            copy: Some(purpose.clone()),
-            provider_id: purpose.source_provider_id,
-            form: purpose
-                .handover
-                .as_ref()
-                .ok_or("native form absent")?
-                .form
-                .clone(),
-            recipient: recipient.clone(),
-            return_credential: None,
-        },
-    )?;
-    drop(conn);
-    s.reserve(&issued).await?;
-    remember_command(&s.job, &issued)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    let sealed = SealedCredential {
-        form: "fake_login".into(),
-        credential: Sealed {
-            value: "synthetic-native-sealed-login".into(),
-        },
-        expires_at: None,
-    };
-    let mut tx = s.world.pool.begin().await?;
-    orch_db::queries::link::insert_command(
-        &mut tx,
-        &orch_db::queries::link::NewCommand {
-            id: issued.id,
-            machine_id: issued.machine,
-            kind: issued.kind.as_str(),
-            body: &issued.body,
-            serial_key: issued.key.wire().as_deref(),
-            deadline_at: s.world.clock.now() + chrono::Duration::minutes(1),
-        },
-        s.world.clock.now(),
-    )
-    .await?;
-    sqlx::query("UPDATE commands SET state='succeeded',result=$2 WHERE id=$1")
-        .bind(issued.id)
-        .bind(json!(sealed))
-        .execute(&mut *tx)
-        .await?;
-    jobs::merge_plan(
-        &mut tx,
-        s.job.id(),
-        &json!({"abort":{"kind":"cancelled"}}),
-        s.world.clock.now(),
-    )
-    .await?;
-    tx.commit().await?;
-    sqlx::query("UPDATE api_tokens SET revoked_at=$2 WHERE id=$1")
-        .bind(s.token)
-        .bind(s.world.clock.now())
-        .execute(s.world.pool.pool())
-        .await?;
-    let mut returning = purpose;
-    returning
-        .handover
-        .as_mut()
-        .ok_or("handover absent")?
-        .returning = true;
-    let original: MachineKey = returning
-        .handover
-        .as_ref()
-        .ok_or("handover absent")?
-        .original
-        .clone();
-    let inverse = Outgoing::new(
-        new_id(),
-        recipient.machine_id,
-        SerialKey::Provider(s.world.provider),
-        &ProviderCredentialIssue {
-            lease_id: None,
-            copy: Some(returning.clone()),
-            provider_id: s.world.provider,
-            form: "fake_login".into(),
-            recipient: original,
-            return_credential: Some(sealed),
-        },
-    )?;
-    let owner = s.job.row().await?;
-    let mut conn = s.world.pool.acquire().await?;
-    assert!(
-        transfer::inverse_binding(
-            &mut conn,
-            &owner,
-            &authority,
-            inverse.machine,
-            inverse.key.wire().as_deref(),
-            inverse.kind.as_str(),
-            &inverse.body
-        )
-        .await?
-    );
-    let mut borrowed = inverse.body.clone();
-    borrowed["copy"]["job_id"] = json!(new_id());
-    assert!(
-        !transfer::inverse_binding(
-            &mut conn,
-            &owner,
-            &authority,
-            inverse.machine,
-            inverse.key.wire().as_deref(),
-            inverse.kind.as_str(),
-            &borrowed
-        )
-        .await?
-    );
-    assert!(
-        principal(&mut conn, &owner, s.world.clock.as_ref())
-            .await
-            .is_err(),
-        "the original revoked actor stays refused independently of its exact owned return"
-    );
-    let unproven = serde_json::to_value(ProviderCredentialAccept {
-        copy: Some(returning),
-        provider_id: s.source.ok_or("source absent")?,
-        form: "fake_login".into(),
-        credential: Sealed {
-            value: "a return with no actual issued receipt".into(),
-        },
-        expires_at: None,
-    })?;
-    assert!(
-        !transfer::inverse_binding(
-            &mut conn,
-            &owner,
-            &authority,
-            keeper,
-            SerialKey::Provider(s.source.ok_or("source absent")?)
-                .wire()
-                .as_deref(),
-            "provider.credential.accept",
-            &unproven
-        )
-        .await?
-    );
     s.engine.stop();
     Ok(())
 }

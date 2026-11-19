@@ -64,9 +64,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError};
 
-pub mod creation;
 pub mod current;
-mod effective;
 mod preparation;
 pub use preparation::PreparedAgentShare;
 
@@ -131,8 +129,6 @@ pub struct Found {
     pub org: Id,
     /// The node it lies at or beside; none for a direct or a group chat.
     pub node: Option<Id>,
-    /// Actual policy home; group chats keep their own permission page at this home.
-    pub policy_node: Option<Id>,
     /// For a place: `org`, `project`, `topic` or `thread`.
     pub place_kind: Option<String>,
     /// What it is called: a title, or the name of the place or chat.
@@ -185,8 +181,6 @@ pub struct ThreadShares {
 /// The ordinary agent-sharing producer examined in a transaction its caller must roll back.
 #[derive(Debug, Clone)]
 pub struct ShareTrial {
-    /// Exact effective native reads before any proposed gift or human-viewer change.
-    pub effective_before: BTreeMap<Id, orch_api_contract::share::AgentReadBefore>,
     /// Current live shares before the trial.
     pub before: Vec<Record>,
     /// Proposed live shares, never committed or announced.
@@ -201,37 +195,6 @@ pub struct ShareTrial {
     pub copies: Vec<(Id, i64, i64, bool)>,
     /// Frozen areas of an already sent copy, rather than a changed request with the same client id.
     pub copy_parts: BTreeMap<Id, ShareParts>,
-}
-
-/// A native share whose transaction still belongs to its entrypoint's confirmation.
-/// Dropping it rolls back both the entries and the queued copy delivery.
-pub struct PendingShare<T> {
-    tx: Tx,
-    finished: Finished,
-    output: T,
-}
-
-impl<T> PendingShare<T> {
-    /// The same native transaction, before the history becomes available to recipients.
-    pub fn connection(&mut self) -> &mut Conn {
-        &mut self.tx
-    }
-
-    /// Publish the ordinary native result and its original follow-up work together.
-    pub async fn publish(self, engine: &Engine) -> Result<T, ShareError> {
-        engine.commit(self.tx, self.finished).await?;
-        Ok(self.output)
-    }
-}
-
-/// One native creation over its actual recipients, still awaiting entrypoint confirmation.
-pub type PendingAgentShare = PendingShare<Vec<Record>>;
-
-impl PendingAgentShare {
-    /// An accepted replay has already published its material and needs no new confirmation.
-    pub fn is_fresh(&self) -> bool {
-        self.output.iter().any(|record| record.fresh)
-    }
 }
 
 /// Why something could not be shared, or taken back.
@@ -364,11 +327,6 @@ fn invalid(field: &str, message: impl Into<String>) -> ShareError {
 #[error("{0}")]
 pub struct ParcelFault(pub String);
 
-/// A native parcel writer's once-only first-effect check; never serialized or a permission grant.
-pub type BeforeParcel<'a> = Box<dyn FnOnce() -> Result<(), EngineError> + Send + 'a>;
-/// A keeper's unchanged native fault or the exact caller boundary failure.
-pub type ParcelFailure = orch_authz::pages::EffectFailure<ParcelFault, EngineError>;
-
 /// What keeps the files of a copy until the thread's next turn writes them into its workspace, and takes a
 /// delivered copy out of it. The blob store and the workspace are other parts: the engine asks through this and
 /// the program that connects them attaches it.
@@ -388,15 +346,6 @@ pub trait Parcels: Send + Sync {
     /// Takes a copy that was taken back out of the workspace it was written into, if it was; and lets go of the
     /// files kept for it.
     async fn withdraw(&self, conn: &mut Conn, copy: &CopyRow) -> Result<(), ParcelFault>;
-
-    /// The same native withdrawal, with the caller's opaque check at its actual first mutation.
-    /// Delegating keepers must carry it through their own awaited metadata/queue preparation.
-    async fn withdraw_before(
-        &self,
-        conn: &mut Conn,
-        copy: &CopyRow,
-        before: BeforeParcel<'_>,
-    ) -> Result<(), ParcelFailure>;
 
     /// Writes one file under the directory of a thread's workspace, with the writer that delivers the files of a
     /// message: a file that is there with the same bytes is left alone, and one that differs is not replaced.
@@ -886,7 +835,6 @@ impl Engine {
                         object: id,
                         org: row.org_id,
                         node: Some(row.node_id),
-                        policy_node: Some(row.node_id),
                         place_kind: None,
                         name: row.title,
                         people_chat: false,
@@ -919,9 +867,6 @@ impl Engine {
                     object: row.node_id.unwrap_or(row.id),
                     org: row.org_id,
                     node: row.node_id,
-                    policy_node: row.node_id.or_else(|| {
-                        (row.kind == orch_db::queries::chats::KIND_GROUP).then(|| row.home())
-                    }),
                     place_kind: None,
                     name,
                     people_chat: people,
@@ -964,7 +909,6 @@ fn node_found(place: &PlaceRow) -> Found {
         object: place.id,
         org: place.org_id,
         node: Some(place.id),
-        policy_node: Some(place.id),
         place_kind: Some(place.kind.clone()),
         name: place.name.clone(),
         people_chat: false,
@@ -1237,18 +1181,6 @@ impl Engine {
         let parts = prepared.parts;
         let inside = request.inside.unwrap_or(true);
         let destinations = prepared.destinations.clone();
-        crate::link_origin::check(tx, principal, request.link_origin)
-            .await
-            .map_err(|error| match error {
-                EngineError::BeforeEffect(_) => invalid(
-                    "link_origin",
-                    "the sender cannot compose in this link's source context",
-                ),
-                error => ShareError::Internal(error),
-            })?;
-        let effective_before = self
-            .effective_reads_before(tx, prepared, principal.now())
-            .await?;
         if request.viewers_read == Some(true) {
             self.give_viewers_read_in(
                 tx,
@@ -1327,7 +1259,6 @@ impl Engine {
                 }
                 if missing.is_empty() {
                     return Ok(ShareTrial {
-                        effective_before,
                         before,
                         live: Vec::new(),
                         destinations: destinations
@@ -1424,7 +1355,6 @@ impl Engine {
         }
         let source_inside = live.first().is_some_and(|record| record.inside);
         Ok(ShareTrial {
-            effective_before,
             before,
             live,
             destinations: destinations
@@ -1463,54 +1393,12 @@ impl Engine {
     /// The same atomic writer, consuming operands prepared freshly by the action guard.
     pub async fn share_prepared_with_agents_guarded(
         &self,
-        tx: Tx,
+        mut tx: Tx,
         principal: Principal,
         origin: &Origin,
         request: &ShareWithAgents,
         prepared: &PreparedAgentShare,
     ) -> Result<Vec<Record>, ShareError> {
-        self.pending_prepared_agent_share(tx, principal, origin, request, prepared)
-            .await?
-            .publish(self)
-            .await
-    }
-
-    /// The native writer, retaining the transaction for an entrypoint's informed disclosure.
-    pub async fn pending_prepared_agent_share(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        request: &ShareWithAgents,
-        prepared: &PreparedAgentShare,
-    ) -> Result<PendingAgentShare, ShareError> {
-        crate::link_origin::check(&mut tx, &principal, request.link_origin)
-            .await
-            .map_err(|error| match error {
-                EngineError::BeforeEffect(_) => invalid(
-                    "link_origin",
-                    "the sender cannot compose in this link's source context",
-                ),
-                error => ShareError::Internal(error),
-            })?;
-        orch_db::audit::scope_link_origin(
-            request.link_origin,
-            principal.user(),
-            Box::pin(self.share_prepared_with_agents_guarded_inner(
-                tx, principal, origin, request, prepared,
-            )),
-        )
-        .await
-    }
-
-    async fn share_prepared_with_agents_guarded_inner(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        request: &ShareWithAgents,
-        prepared: &PreparedAgentShare,
-    ) -> Result<PendingAgentShare, ShareError> {
         let caller = principal.caller().clone();
         let caller = &caller;
         let now = principal.now().get();
@@ -1620,12 +1508,8 @@ impl Engine {
             }
             unit.finish().await.map_err(ShareError::from)?
         };
-        creation::observe(&mut tx, caller, prepared, &records).await?;
-        Ok(PendingAgentShare {
-            tx,
-            finished,
-            output: records,
-        })
+        self.commit(tx, finished).await?;
+        Ok(records)
     }
 
     /// Writes only a live privilege gift inside the caller's guarded transaction.
@@ -1770,7 +1654,7 @@ impl Engine {
             ));
         }
         let ordinary = principal.ordinary(conn).await?;
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(conn, node).await?,
             None => Policy::default(),
         };
@@ -1934,7 +1818,7 @@ impl Engine {
         found: &Found,
         wanted: Vec<Row>,
     ) -> Result<Vec<Row>, ShareError> {
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(tx, node).await?,
             None => Policy::default(),
         };
@@ -2149,27 +2033,10 @@ impl Engine {
         delta: &Delta,
         share_inside: Option<bool>,
     ) -> Result<(), ShareError> {
-        self.apply_delta_with_boundary(tx, principal, origin, found, delta, share_inside, None)
-            .await
-    }
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the same native delta and its one shared first-effect boundary"
-    )]
-    async fn apply_delta_with_boundary(
-        &self,
-        tx: &mut Conn,
-        principal: &Principal,
-        origin: &Origin,
-        found: &Found,
-        delta: &Delta,
-        share_inside: Option<bool>,
-        mut boundary: Option<&mut crate::unit::FirstEffect<'_>>,
-    ) -> Result<(), ShareError> {
         if delta.is_empty() {
             return Ok(());
         }
-        let policy = match found.policy_node {
+        let policy = match found.node {
             Some(node) => self.policy_at(tx, node).await?,
             None => Policy::default(),
         };
@@ -2221,7 +2088,7 @@ impl Engine {
                     }]),
                     ..PageChange::default()
                 };
-                let outcome = pages::change_by_share_fenced(
+                let outcome = pages::change_by_share(
                     tx,
                     principal,
                     target,
@@ -2229,16 +2096,8 @@ impl Engine {
                     policy,
                     share_inside,
                     origin,
-                    || match boundary.as_deref_mut() {
-                        Some(before) => before.check(),
-                        None => Ok(()),
-                    },
                 )
-                .await
-                .map_err(|error| match error {
-                    pages::EffectFailure::Native(error) => ShareError::from(error),
-                    pages::EffectFailure::BeforeEffect(error) => ShareError::Internal(error),
-                })?;
+                .await?;
                 if outcome.changed {
                     match found.subject {
                         Subject::Document(id) => {
@@ -2270,26 +2129,6 @@ impl Engine {
         expires_at: Option<Time>,
         now: DateTime<Utc>,
     ) -> Result<(), ShareError> {
-        self.name_agents_in_chat_with_boundary(
-            tx, principal, found, holder, wanted, expires_at, now, None,
-        )
-        .await
-    }
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the native chat grant operands and the same first-effect boundary"
-    )]
-    async fn name_agents_in_chat_with_boundary(
-        &self,
-        tx: &mut Conn,
-        principal: &Principal,
-        found: &Found,
-        holder: Id,
-        wanted: &[Row],
-        expires_at: Option<Time>,
-        now: DateTime<Utc>,
-        mut boundary: Option<&mut crate::unit::FirstEffect<'_>>,
-    ) -> Result<(), ShareError> {
         let page = PageKey::new("chat", found.object, "live");
         let mut changed = false;
         for row in wanted {
@@ -2308,9 +2147,6 @@ impl Engine {
             let end = expires_at.map(Time::get);
             if let Some(existing) = existing {
                 if end.is_some() && existing.expires_at != end {
-                    if let Some(before) = boundary.as_deref_mut() {
-                        before.check()?;
-                    }
                     access::rewrite_entry(
                         tx,
                         existing.id,
@@ -2325,9 +2161,6 @@ impl Engine {
                 continue;
             }
             let id = orch_types::new_id();
-            if let Some(before) = boundary.as_deref_mut() {
-                before.check()?;
-            }
             access::insert_entry(
                 tx,
                 &NewEntry {
@@ -2378,7 +2211,7 @@ impl Engine {
         conn: &mut Conn,
         found: &Found,
     ) -> Result<(i64, Option<Id>), ShareError> {
-        let at = found.policy_node.unwrap_or(found.org);
+        let at = found.node.unwrap_or(found.org);
         let def = definition_of(keys::SHARING_SNAPSHOT_MAX_BYTES)?;
         let snapshot = orch_settings::Snapshot::load(
             conn,
@@ -2589,6 +2422,20 @@ impl Engine {
 // ---------------------------------------------------------------- telling the thread
 
 impl Engine {
+    /// The marker and the notice of a share, for `thread`: `begun` is whether it was made or ended.
+    pub(crate) async fn put_share_line(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: Id,
+        record: &Record,
+        found: &Found,
+        by: Id,
+        begun: bool,
+    ) -> Result<(), EngineError> {
+        self.put_share_line_in(unit, thread, record, found, by, begun, true)
+            .await
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the same history marker with one bounded source-name projection"
@@ -2663,7 +2510,7 @@ impl Engine {
         if record.mode == ShareMode::Live {
             return Ok(());
         }
-        let body = notice_body(record, found, begun, source_name_visible);
+        let body = notice_body(record, found, begun);
         let id = format!("{}:{}", if begun { "share" } else { "unshare" }, record.id);
         let notice = json!({
             "id": id, "kind": "share", "at": Time::new(unit.now()), "from": display,
@@ -2679,19 +2526,15 @@ impl Engine {
 }
 
 /// What the notice for a thread's next turn says.
-fn notice_body(record: &Record, found: &Found, begun: bool, source_name_visible: bool) -> String {
-    let what = if !source_name_visible {
-        "the shared material".to_owned()
-    } else {
-        match record.subject {
-            Subject::Node(_) => format!(
-                "the {} \"{}\"",
-                found.place_kind.as_deref().unwrap_or("place"),
-                found.name
-            ),
-            Subject::Chat(_) => format!("the chat \"{}\"", found.name),
-            Subject::Document(_) => format!("the document \"{}\"", found.name),
-        }
+fn notice_body(record: &Record, found: &Found, begun: bool) -> String {
+    let what = match record.subject {
+        Subject::Node(_) => format!(
+            "the {} \"{}\"",
+            found.place_kind.as_deref().unwrap_or("place"),
+            found.name
+        ),
+        Subject::Chat(_) => format!("the chat \"{}\"", found.name),
+        Subject::Document(_) => format!("the document \"{}\"", found.name),
     };
     match (&record.copy, begun) {
         (Some(copy), true) => format!(
@@ -2739,22 +2582,10 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
         let principal = Principal::load(&mut conn, caller.clone(), Time::new(now)).await?;
-        self.shares_of_in(&mut conn, &principal, origin, subject, now)
-            .await
-    }
-    /// The same native source/copy selector on an enclosing operation's current snapshot.
-    pub async fn shares_of_in(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        origin: &Origin,
-        subject: Subject,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<Record>, ShareError> {
         let (found, _) = self
-            .find_subject(conn, principal, origin, now, subject)
+            .find_subject(&mut conn, &principal, origin, now, subject)
             .await?;
-        let mut records = self.live_records(conn, &found, now).await?;
+        let mut records = self.live_records(&mut conn, &found, now).await?;
         let object_kind = match subject {
             Subject::Node(_) => "node",
             Subject::Chat(_) => "chat",
@@ -2763,10 +2594,10 @@ impl Engine {
         let id = match subject {
             Subject::Node(id) | Subject::Chat(id) | Subject::Document(id) => id,
         };
-        for row in rows::copies_of(conn, object_kind, id).await? {
+        for row in rows::copies_of(&mut conn, object_kind, id).await? {
             if let Some(mut record) = copy_record(row) {
                 record.input = self
-                    .comment_input(conn, &record, record.by.unwrap_or_default())
+                    .comment_input(&mut conn, &record, record.by.unwrap_or_default())
                     .await?;
                 records.push(record);
             }
@@ -2785,19 +2616,7 @@ impl Engine {
         let now = self.inner.clock.now();
         let mut conn = self.inner.db.acquire().await?;
         let principal = Principal::load(&mut conn, caller.clone(), Time::new(now)).await?;
-        self.shares_to_place_in(&mut conn, &principal, origin, node, now)
-            .await
-    }
-    /// The same native ancestor-holder/live-giver selector on the reader's own snapshot.
-    pub async fn shares_to_place_in(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        origin: &Origin,
-        node: Id,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<Record>, ShareError> {
-        let place = rows::places(conn, &[node])
+        let place = rows::places(&mut conn, &[node])
             .await?
             .into_iter()
             .next()
@@ -2806,9 +2625,9 @@ impl Engine {
         if !holders.contains(&node) {
             holders.push(node);
         }
-        let mut records = self.records_to(conn, &holders, now).await?;
+        let mut records = self.records_to(&mut conn, &holders, now).await?;
         records = self
-            .visible_to(conn, principal, origin, now, records)
+            .visible_to(&mut conn, &principal, origin, now, records)
             .await?;
         Ok(records)
     }
@@ -2892,63 +2711,6 @@ impl Engine {
 
 // ---------------------------------------------------------------- changing and taking back
 
-/// Prepared immutable native update, never request-deserialized or persisted as authority.
-pub struct PreparedShareUpdate {
-    actor: Id,
-    transaction: i64,
-    record: Record,
-    found: Found,
-    delta: Delta,
-    wanted: BTreeSet<Row>,
-    standing: BTreeMap<Row, Id>,
-    end: Option<Time>,
-    read_first: Option<bool>,
-    source_name_visible: bool,
-}
-impl PreparedShareUpdate {
-    /// The exact current stored contribution.
-    pub fn record(&self) -> &Record {
-        &self.record
-    }
-    /// The native effective first-reading selector, including disabling an existing true flag.
-    pub fn controls_recipient(&self) -> bool {
-        self.read_first
-            .is_some_and(|next| next != self.record.read_first)
-    }
-    /// Bound source names before writing the existing human history marker.
-    pub fn bound_source_name(&mut self, visible: bool) {
-        self.source_name_visible = visible;
-    }
-}
-/// Native changed/no-op outcome, carrying its actual completed contribution.
-pub struct ShareUpdateResult {
-    /// The actual current contribution after the native writer.
-    pub record: Record,
-    /// A native mutation occurred; retries of unchanged state remain explicit.
-    pub changed: bool,
-}
-
-/// Prepared immutable native removal; no request body or saved permission proof.
-pub struct PreparedShareRemoval {
-    actor: Id,
-    transaction: i64,
-    located: Located,
-    record: Record,
-    found: Found,
-    destination_thread: Option<PlaceRow>,
-    source_name_visible: bool,
-}
-impl PreparedShareRemoval {
-    /// Its actual stored subject/contribution association.
-    pub fn record(&self) -> &Record {
-        &self.record
-    }
-    /// Existing source labels are clipped before native human history/cleanup notices.
-    pub fn bound_source_name(&mut self, visible: bool) {
-        self.source_name_visible = visible;
-    }
-}
-
 /// A share looked for by its identifier: a live one, or a copy.
 #[derive(Debug, Clone)]
 enum Located {
@@ -2989,98 +2751,6 @@ impl Engine {
             .ok_or(ShareError::NotFound)
     }
 
-    /// The native live/copy contribution and current source/recipient serialization footprint.
-    /// This is factual preparation only and grants no operation or recipient control.
-    pub async fn lock_agent_share_record_in(
-        &self,
-        conn: &mut Conn,
-        id: Id,
-    ) -> Result<Record, ShareError> {
-        let first = self
-            .agent_share_record_in(conn, id, self.inner.clock.now())
-            .await?;
-        if first.copy.is_some() {
-            sqlx::query("SELECT id FROM agent_shares WHERE id=$1 FOR UPDATE")
-                .bind(id)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
-        }
-        let record = self
-            .agent_share_record_in(conn, id, self.inner.clock.now())
-            .await?;
-        // Match the native page writer: its scope/subject precedes grant entries.
-        // Raw locks preserve retained-source copy cleanup; liveness stays native.
-        let node = match record.subject {
-            Subject::Node(id) => {
-                hierarchy::lock(conn, id).await?;
-                Some(id)
-            }
-            Subject::Document(id) => {
-                document_rows::containers::lock_document_scope(conn, id).await?;
-                sqlx::query_scalar("SELECT node_id FROM documents WHERE id=$1 FOR UPDATE")
-                    .bind(id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?
-            }
-            Subject::Chat(id) => {
-                let node: Option<Id> =
-                    sqlx::query_scalar::<_, Option<Id>>("SELECT node_id FROM chats WHERE id=$1")
-                        .bind(id)
-                        .fetch_optional(&mut *conn)
-                        .await
-                        .map_err(orch_db::DbError::from)?
-                        .flatten();
-                if let Some(node) = node {
-                    hierarchy::lock(conn, node).await?;
-                }
-                sqlx::query_scalar::<_, Option<Id>>(
-                    "SELECT node_id FROM chats WHERE id=$1 FOR UPDATE",
-                )
-                .bind(id)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?
-                .flatten()
-            }
-        };
-        if record.copy.is_none() {
-            let ids = record.grants.iter().map(|g| g.entry_id).collect::<Vec<_>>();
-            sqlx::query(
-                "SELECT id FROM permission_entries WHERE id=ANY($1) ORDER BY id FOR UPDATE",
-            )
-            .bind(&ids)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        }
-        let mut places = vec![record.to];
-        places.extend(node);
-        // Native root epochs cover placement/authority changes; pin only actual mutation rows.
-        hierarchy::with_ancestors(conn, &places).await?;
-        threads::lock(conn, record.to).await?;
-        let current = self
-            .agent_share_record_in(conn, id, self.inner.clock.now())
-            .await?;
-        if current.subject != record.subject || current.to != record.to || current.by != record.by {
-            return Err(ShareError::StalePrepared);
-        }
-        Ok(current)
-    }
-
-    /// The exact stored native contribution, never a share UUID treated as a source identity.
-    pub async fn agent_share_record_in(
-        &self,
-        conn: &mut Conn,
-        id: Id,
-        now: DateTime<Utc>,
-    ) -> Result<Record, ShareError> {
-        match self.locate_share(conn, id, now).await? {
-            Located::Live(record) | Located::Copy(record) => Ok(record),
-        }
-    }
-
     /// Changes the areas or the end of a live share; what the request leaves out stays.
     pub async fn update_share(
         &self,
@@ -3106,32 +2776,15 @@ impl Engine {
         share: Id,
         change: &orch_api_contract::share::ShareAgentUpdateBody,
     ) -> Result<Record, ShareError> {
-        let prepared = self
-            .prepare_share_update_in(&mut tx, &principal, origin, share, change)
-            .await?;
-        self.update_prepared_share_guarded(tx, principal, origin, &prepared, || Ok(()))
-            .await
-            .map(|result| result.record)
-    }
-
-    /// Native effect-free update operands, after its stored contribution/recipient footprint is locked.
-    pub async fn prepare_share_update_in(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        origin: &Origin,
-        share: Id,
-        change: &orch_api_contract::share::ShareAgentUpdateBody,
-    ) -> Result<PreparedShareUpdate, ShareError> {
         let now = principal.now().get();
-        let record = match self.locate_share(conn, share, now).await? {
+        let record = match self.locate_share(&mut tx, share, now).await? {
             Located::Live(record) => record,
             Located::Copy(_) => {
                 return Err(invalid("share", "a copy has no areas or end to change"));
             }
         };
         let (found, loaded) = self
-            .find_subject(conn, principal, origin, now, record.subject)
+            .find_subject(&mut tx, &principal, origin, now, record.subject)
             .await?;
         if found.people_chat && !loaded.is_some_and(|chat| chat.standing.in_chat) {
             return Err(ShareError::NotFound);
@@ -3152,14 +2805,14 @@ impl Engine {
             .read_first
             .is_some_and(|next| next != record.read_first)
         {
-            let to = if threads::thread(conn, record.to).await?.is_some() {
+            let to = if threads::thread(&mut tx, record.to).await?.is_some() {
                 ShareTo::Threads(vec![ShareToThread {
                     thread_id: record.to,
                 }])
             } else {
                 ShareTo::Nodes(vec![ShareToNode { node_id: record.to }])
             };
-            self.destinations(conn, principal, &to, ShareMode::Live, true)
+            self.destinations(&mut tx, &principal, &to, ShareMode::Live, true)
                 .await?;
         }
         let mut wanted: BTreeSet<Row> =
@@ -3209,13 +2862,13 @@ impl Engine {
         let mut may_add: Vec<Row> = if found.people_chat || strict_add.is_empty() {
             strict_add
         } else {
-            self.rows_the_sharer_may_give(conn, principal, &found, strict_add)
+            self.rows_the_sharer_may_give(&mut tx, &principal, &found, strict_add)
                 .await?
         };
         may_add.extend(if found.people_chat || soft_add.is_empty() {
             soft_add
         } else {
-            self.export_rows_the_sharer_may_give(conn, principal, &found, soft_add)
+            self.export_rows_the_sharer_may_give(&mut tx, &principal, &found, soft_add)
                 .await?
         });
         for row in &wanted {
@@ -3231,92 +2884,18 @@ impl Engine {
                 delta.remove(*row, *entry);
             }
         }
-        let transaction = sqlx::query_scalar("SELECT txid_current()")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        Ok(PreparedShareUpdate {
-            actor: principal.user(),
-            transaction,
-            record,
-            found,
-            delta,
-            wanted,
-            standing,
-            end,
-            read_first: change.read_first,
-            source_name_visible: true,
-        })
-    }
-
-    /// The same writer consumes those native operands and its opaque check at the first actual mutation.
-    pub async fn update_prepared_share_guarded<'a>(
-        &self,
-        tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        prepared: &PreparedShareUpdate,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<ShareUpdateResult, ShareError> {
-        self.pending_prepared_share_update(tx, principal, origin, prepared, before)
-            .await?
-            .publish(self)
-            .await
-    }
-
-    /// Keep a changed contribution in the same native transaction until its disclosure is confirmed.
-    pub async fn pending_prepared_share_update<'a>(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        prepared: &PreparedShareUpdate,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<PendingShare<ShareUpdateResult>, ShareError> {
-        let transaction: i64 = sqlx::query_scalar("SELECT txid_current()")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        if transaction != prepared.transaction || principal.user() != prepared.actor {
-            return Err(ShareError::StalePrepared);
-        }
-        let mut boundary = crate::unit::FirstEffect::new(before);
-        let now = principal.now().get();
-        let share = prepared.record.id;
-        let record = &prepared.record;
-        let found = &prepared.found;
-        let delta = &prepared.delta;
-        let wanted = &prepared.wanted;
-        let standing = &prepared.standing;
-        let end = prepared.end;
         if found.people_chat {
             let missing: Vec<Row> = wanted
                 .iter()
                 .filter(|row| !standing.contains_key(row))
                 .copied()
                 .collect();
-            self.name_agents_in_chat_with_boundary(
-                &mut tx,
-                &principal,
-                found,
-                record.to,
-                &missing,
-                end,
-                now,
-                Some(&mut boundary),
-            )
-            .await?;
-            for (row, entry) in standing {
+            self.name_agents_in_chat(&mut tx, &principal, &found, record.to, &missing, end, now)
+                .await?;
+            for (row, entry) in &standing {
                 if !wanted.contains(row) {
-                    self.take_entry_out_with_boundary(
-                        &mut tx,
-                        principal.user(),
-                        found,
-                        *entry,
-                        now,
-                        Some(&mut boundary),
-                    )
-                    .await?;
+                    self.take_entry_out(&mut tx, principal.user(), &found, *entry, now)
+                        .await?;
                 } else if let Some(end) = end
                     && let Some(existing) = access::find_entry_for_share_by(
                         &mut tx,
@@ -3331,7 +2910,6 @@ impl Engine {
                     )
                     .await?
                 {
-                    boundary.check()?;
                     access::rewrite_entry(
                         &mut tx,
                         existing.id,
@@ -3350,27 +2928,12 @@ impl Engine {
                     Some("org" | "project" | "topic")
                 ))
             .then_some(record.inside);
-            self.apply_delta_with_boundary(
-                &mut tx,
-                &principal,
-                origin,
-                found,
-                delta,
-                reach,
-                Some(&mut boundary),
-            )
-            .await?;
+            self.apply_delta(&mut tx, &principal, origin, &found, &delta, reach)
+                .await?;
         }
-        if let Some(read_first) = prepared.read_first {
-            let current = self.live_records(&mut tx, found, now).await?;
+        if let Some(read_first) = change.read_first {
+            let current = self.live_records(&mut tx, &found, now).await?;
             if let Some(current) = current.iter().find(|entry| entry.id == share) {
-                if current
-                    .grants
-                    .iter()
-                    .any(|entry| entry.permission == "doc.view" && entry.read_first != read_first)
-                {
-                    boundary.check()?;
-                }
                 rows::read_first(
                     &mut tx,
                     &current
@@ -3383,37 +2946,29 @@ impl Engine {
                 .await?;
             }
         }
-        let mut shares = self.live_records(&mut tx, found, now).await?;
+        let mut shares = self.live_records(&mut tx, &found, now).await?;
         let updated = shares
             .drain(..)
             .find(|each| each.id == share)
             .ok_or(ShareError::NotFound)?;
         let destination_thread = threads::thread(&mut tx, updated.to).await?.is_some();
         let finished = {
-            let mut unit = Unit::with_first_effect(&mut tx, now, || boundary.check());
+            let mut unit = Unit::new(&mut tx, now);
             if destination_thread {
-                self.put_share_line_in(
+                self.put_share_line(
                     &mut unit,
                     updated.to,
                     &updated,
-                    found,
+                    &found,
                     principal.user(),
                     true,
-                    prepared.source_name_visible,
                 )
                 .await?;
             }
             unit.finish().await?
         };
-        let changed = !boundary.pending();
-        Ok(PendingShare {
-            tx,
-            finished,
-            output: ShareUpdateResult {
-                record: updated,
-                changed,
-            },
-        })
+        self.commit(tx, finished).await?;
+        Ok(updated)
     }
 
     /// Takes a share back. A live share ends at the agent's next call; a copy that was not delivered yet is
@@ -3440,27 +2995,12 @@ impl Engine {
         origin: &Origin,
         share: Id,
     ) -> Result<(), ShareError> {
-        let prepared = self
-            .prepare_share_removal_in(&mut tx, &principal, origin, share)
-            .await?;
-        self.revoke_prepared_share_guarded(tx, principal, origin, &prepared, None)
-            .await
-            .map(|_| ())
-    }
-    /// Effect-free native live/copy removal operands; its source/recipient rows are prepared by the caller.
-    pub async fn prepare_share_removal_in(
-        &self,
-        conn: &mut Conn,
-        principal: &Principal,
-        origin: &Origin,
-        share: Id,
-    ) -> Result<PreparedShareRemoval, ShareError> {
         let now = principal.now().get();
-        let located = self.locate_share(conn, share, now).await?;
+        let located = self.locate_share(&mut tx, share, now).await?;
         let (record, found, destination_thread) = match &located {
             Located::Live(record) => {
                 let (found, loaded) = self
-                    .find_subject(conn, principal, origin, now, record.subject)
+                    .find_subject(&mut tx, &principal, origin, now, record.subject)
                     .await?;
                 if found.people_chat && !loaded.is_some_and(|chat| chat.standing.in_chat) {
                     // Whoever shared it may take it back even from a chat they left.
@@ -3471,81 +3011,27 @@ impl Engine {
                 (
                     record.clone(),
                     found,
-                    rows::places(conn, &[record.to]).await?.into_iter().next(),
+                    rows::places(&mut tx, &[record.to])
+                        .await?
+                        .into_iter()
+                        .next(),
                 )
             }
             Located::Copy(record) => {
                 let found = self
-                    .found_for_copy(conn, principal, origin, now, record)
+                    .found_for_copy(&mut tx, &principal, origin, now, record)
                     .await?;
                 (
                     record.clone(),
                     found,
-                    rows::places(conn, &[record.to]).await?.into_iter().next(),
+                    rows::places(&mut tx, &[record.to])
+                        .await?
+                        .into_iter()
+                        .next(),
                 )
             }
         };
-        if let Located::Copy(_) = &located {
-            let copy = record.copy.as_ref().ok_or(ShareError::NotFound)?;
-            if copy.created_by != principal.user() {
-                match nodes::check_named(
-                    conn,
-                    principal,
-                    copy.thread_id,
-                    PermissionName::OfNode(NodePermission::Interact),
-                    Act::Use,
-                    Policy::default(),
-                )
-                .await?
-                {
-                    Decision::Allowed { .. } => {}
-                    Decision::Refused(refusal) => {
-                        return Err(ShareError::Denied(Box::new(refusal)));
-                    }
-                }
-            }
-        }
-        let transaction = sqlx::query_scalar("SELECT txid_current()")
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        Ok(PreparedShareRemoval {
-            actor: principal.user(),
-            transaction,
-            located,
-            record,
-            found,
-            destination_thread,
-            source_name_visible: true,
-        })
-    }
-    /// The existing native removal, with one check carried to page, blob-unpin or command-issue leaves.
-    pub async fn revoke_prepared_share_guarded(
-        &self,
-        mut tx: Tx,
-        principal: Principal,
-        origin: &Origin,
-        prepared: &PreparedShareRemoval,
-        before: Option<BeforeParcel<'_>>,
-    ) -> Result<bool, ShareError> {
-        let transaction: i64 = sqlx::query_scalar("SELECT txid_current()")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        if transaction != prepared.transaction || principal.user() != prepared.actor {
-            return Err(ShareError::StalePrepared);
-        }
-        let checked = before.is_some();
-        let mut boundary = match before {
-            Some(before) => crate::unit::FirstEffect::new(before),
-            None => crate::unit::FirstEffect::default(),
-        };
-        let now = principal.now().get();
-        let located = &prepared.located;
-        let record = &prepared.record;
-        let found = &prepared.found;
-        let destination_thread = &prepared.destination_thread;
-        match located {
+        match &located {
             Located::Live(_) => {
                 let mut delta = Delta::default();
                 for grant in &record.grants {
@@ -3555,15 +3041,8 @@ impl Engine {
                 }
                 if found.people_chat {
                     for grant in &record.grants {
-                        self.take_entry_out_with_boundary(
-                            &mut tx,
-                            principal.user(),
-                            found,
-                            grant.entry_id,
-                            now,
-                            Some(&mut boundary),
-                        )
-                        .await?;
+                        self.take_entry_out(&mut tx, principal.user(), &found, grant.entry_id, now)
+                            .await?;
                     }
                 } else {
                     // Whoever manages the page takes back any share; whoever shared it, the entries they made,
@@ -3574,44 +3053,37 @@ impl Engine {
                             Some("org" | "project" | "topic")
                         ))
                     .then_some(record.inside);
-                    self.apply_delta_with_boundary(
-                        &mut tx,
-                        &principal,
-                        origin,
-                        found,
-                        &delta,
-                        reach,
-                        Some(&mut boundary),
-                    )
-                    .await?;
+                    self.apply_delta(&mut tx, &principal, origin, &found, &delta, reach)
+                        .await?;
                 }
             }
             Located::Copy(_) => {
                 let copy = record.copy.clone().ok_or(ShareError::NotFound)?;
-                if let Some(parcels) = self.parcels() {
-                    if checked {
-                        parcels
-                            .withdraw_before(&mut tx, &copy, Box::new(|| boundary.check()))
-                            .await
-                            .map_err(|error| match error {
-                                pages::EffectFailure::Native(fault) => {
-                                    ShareError::Internal(EngineError::unreadable(format!(
-                                        "a copy could not be taken out of the workspace: {fault}"
-                                    )))
-                                }
-                                pages::EffectFailure::BeforeEffect(error) => {
-                                    ShareError::Internal(error)
-                                }
-                            })?;
-                    } else {
-                        parcels.withdraw(&mut tx, &copy).await.map_err(|fault| {
-                            ShareError::Internal(EngineError::unreadable(format!(
-                                "a copy could not be taken out of the workspace: {fault}"
-                            )))
-                        })?;
+                if copy.created_by != principal.user() {
+                    // Whoever could share the same thing now: the thing is readable by them and the thread theirs to drive.
+                    match nodes::check_named(
+                        &mut tx,
+                        &principal,
+                        copy.thread_id,
+                        PermissionName::OfNode(NodePermission::Interact),
+                        Act::Use,
+                        Policy::default(),
+                    )
+                    .await?
+                    {
+                        Decision::Allowed { .. } => {}
+                        Decision::Refused(refusal) => {
+                            return Err(ShareError::Denied(Box::new(refusal)));
+                        }
                     }
                 }
-                boundary.check()?;
+                if let Some(parcels) = self.parcels() {
+                    parcels.withdraw(&mut tx, &copy).await.map_err(|fault| {
+                        ShareError::Internal(EngineError::unreadable(format!(
+                            "a copy could not be taken out of the workspace: {fault}"
+                        )))
+                    })?;
+                }
                 rows::revoke_copy(&mut tx, copy.id, principal.user(), now).await?;
                 let mut audit = AuditEntry::new(
                     Actor::User(principal.user()),
@@ -3628,27 +3100,25 @@ impl Engine {
             }
         }
         let finished = {
-            let mut unit = Unit::with_first_effect(&mut tx, now, || boundary.check());
+            let mut unit = Unit::new(&mut tx, now);
             if destination_thread
                 .as_ref()
                 .is_some_and(|place| place.kind == "thread")
             {
-                self.put_share_line_in(
+                self.put_share_line(
                     &mut unit,
                     record.to,
-                    record,
-                    found,
+                    &record,
+                    &found,
                     principal.user(),
                     false,
-                    prepared.source_name_visible,
                 )
                 .await?;
             }
             unit.finish().await.map_err(ShareError::from)?
         };
-        let changed = !boundary.pending();
         self.commit(tx, finished).await?;
-        Ok(changed)
+        Ok(())
     }
 
     /// What a copy is of, found again for a person who takes it back: the thing may be gone, and then it is
@@ -3679,7 +3149,6 @@ impl Engine {
                     object: copy.object_id,
                     org: place.org_id,
                     node: None,
-                    policy_node: None,
                     place_kind: None,
                     name: String::new(),
                     people_chat: false,
@@ -3689,18 +3158,15 @@ impl Engine {
         }
     }
 
-    async fn take_entry_out_with_boundary(
+    /// Takes one entry out without the page's check: for the person who made it, and for an entry of a chat.
+    async fn take_entry_out(
         &self,
         conn: &mut Conn,
         by: Id,
         found: &Found,
         entry: Id,
         now: DateTime<Utc>,
-        boundary: Option<&mut crate::unit::FirstEffect<'_>>,
     ) -> Result<(), ShareError> {
-        if let Some(before) = boundary {
-            before.check()?;
-        }
         if !access::remove_entry(conn, entry, by, now).await? {
             return Ok(());
         }

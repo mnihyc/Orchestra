@@ -133,7 +133,7 @@ pub enum Feed {
     Job(Id),
     /// A fork/switch batch's current authorized members and aggregate progress.
     Fork(Id),
-    /// Live model requests visible under `me`, `system`, `node:<id>` or `provider:<id>` usage scope.
+    /// Live model requests visible under `me`, `node:<id>` or `provider:<id>` usage scope.
     Usage(String),
     /// A thread: its rows, the growing text of its items, and who is
     /// looking.
@@ -352,7 +352,6 @@ impl std::str::FromStr for Feed {
             "usage" => {
                 let mut scope = match parts.next() {
                     Some("me") => "me".to_owned(),
-                    Some("system") => "system".to_owned(),
                     Some(kind @ ("node" | "provider")) => format!("{kind}:{}", id(parts.next())?),
                     _ => return Err(bad()),
                 };
@@ -721,7 +720,8 @@ pub enum UserEvent {
         /// The draft; `null` when it was sent or cleared.
         draft: Option<Draft>,
     },
-    /// Their current state, including a newly joined chat and its newest message position.
+    /// They read a chat, changed their level in it, hid it, or were
+    /// mentioned in it.
     ChatState {
         /// Their state in that chat.
         state: ChatState,
@@ -744,7 +744,7 @@ pub enum UserEvent {
     Chat {
         /// The chat.
         chat_id: Id,
-        /// The newest message sequence; metadata and system changes never advance it.
+        /// The chat's sequence with that message.
         seq: Seq,
         /// When it was written.
         at: Time,
@@ -1133,7 +1133,7 @@ pub(crate) mod fixtures {
             "id": A, "kind": "thread", "parent_id": B, "org_id": B,
             "path": [{ "id": B, "kind": "org", "name": "Acme", "redacted": false }],
             "name": "Fix the login", "description": "", "color": null, "readme": null, "owner": user(), "owners": 1,
-            "title_source": "user", "auto_updated_at": null,
+            "title_source": "user", "description_source": "auto", "auto_updated_at": null,
             "tags": [], "tags_source": "auto",
             "page": "follows", "chat_id": B, "archived": false, "archived_at": null, "archived_by": null,
             "revision": 3, "created_at": AT, "updated_at": AT
@@ -1153,7 +1153,6 @@ pub(crate) mod fixtures {
             "starting_step": null, "blocked": null,
             "queue": { "held": false, "by": null, "at": null, "held_inputs": 0, "revision": 1 },
             "binding": null, "environment": null, "environment_permissions": [],
-            "program_model": null,
             "directory": "", "source": null, "links": [], "suggested_links": [], "work": null,
             "attention": { "uncommitted": null, "unpushed": null, "failed": false, "as_of": null, "stale": false, "reason": null },
             "model": null, "model_display": null, "effort": null, "cwd": "/work", "directory_threads": 1,
@@ -1249,11 +1248,6 @@ mod tests {
     fn every_feed() -> Vec<(Feed, String)> {
         vec![
             (Feed::Usage("me".to_owned()), "usage:me".to_owned()),
-            (Feed::Usage("system".to_owned()), "usage:system".to_owned()),
-            (
-                Feed::Usage(format!("system:org:{A}")),
-                format!("usage:system:org:{A}"),
-            ),
             (
                 Feed::Usage(format!("me:org:{A}")),
                 format!("usage:me:org:{A}"),
@@ -1607,7 +1601,7 @@ mod tests {
     fn the_other_durable_feeds_carry_their_own_rows() {
         let node = json!({
             "id": A, "kind": "thread", "parent_id": B, "name": "Fix the login", "archived": false,
-            "address": null, "color": null, "docs": 0, "docs_seq": 0,
+            "address": null, "color": null, "docs": 0,
             "restricted": false, "deleted": true, "tree_seq": 77, "topic": null,
             "thread": { "state": "idle",
                 "display": { "seq": 412, "read_seq": 0, "state": "idle", "queued_inputs": 0,
@@ -1659,7 +1653,7 @@ mod tests {
 
         let chat = json!({
             "chat": {
-                "id": A, "kind": "direct", "org_id": B, "node": null, "name": null, "visibility": "private", "members": [], "guests": [],
+                "id": A, "kind": "direct", "org_id": B, "node": null, "name": null, "members": [], "guests": [],
                 "created_by": null, "created_at": AT, "seq": 12, "last_message_seq": 12, "last_message_at": AT,
                 "can": { "send": true, "moderate": false, "export": true, "reason": null }, "my": null, "preview": null
             },
@@ -1746,8 +1740,7 @@ mod tests {
                 "content": [{ "type": "text", "text": "Read the handler" }], "delivery": "queue", "review_comments": [],
                 "updated_at": AT } }),
             json!({ "what": "chat_state", "state": {
-                "chat_id": A, "org_id": B, "last_message_seq": 31,
-                "level": null, "engaged": true, "effective_level": "all",
+                "chat_id": A, "level": null, "engaged": true, "effective_level": "all",
                 "last_read_seq": 9, "read_revision": 0, "mentions_unread": 0, "hidden": false } }),
             json!({ "what": "chat_draft", "chat_id": A, "draft": { "parts": [], "reply_to": null, "updated_at": AT } }),
             json!({ "what": "chat", "chat_id": A, "seq": 31, "at": AT }),

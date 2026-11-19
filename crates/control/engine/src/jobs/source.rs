@@ -27,7 +27,6 @@ use serde_json::json;
 use super::runner::{Done, Failure, Job, MakeError, Phase, Phased, Stop, Undone, initial_progress};
 use crate::{Engine, EngineError, commands::Outgoing, unit::Unit};
 
-pub mod operation;
 pub mod publication_authority;
 
 /// The ordering is shared by the API and automatic first-input preparation.
@@ -529,18 +528,8 @@ impl Action {
 /// Inserts one serialized file job while the API's current action guard still holds.
 pub async fn begin(
     conn: &mut Conn,
-    plan: Plan,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<JobRow, MakeError> {
-    begin_before(conn, plan, now, || Ok(())).await
-}
-
-/// The same native writer with a live cut after its complete native preparation and before INSERT.
-pub async fn begin_before(
-    conn: &mut Conn,
     mut plan: Plan,
     now: chrono::DateTime<chrono::Utc>,
-    before: impl FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<JobRow, MakeError> {
     environments::hosting::lock_environment(conn, plan.environment)
         .await?
@@ -630,7 +619,6 @@ pub async fn begin_before(
         },
     ))
     .map_err(|error| orch_db::DbError::Other(sqlx::Error::Decode(error.into())))?;
-    before().map_err(EngineError::BeforeEffect)?;
     let job = rows::insert(
         conn,
         &NewJob {
@@ -732,10 +720,6 @@ pub async fn begin_before(
 
 /// Rechecks current caller rights and the frozen binding before a native effect.
 pub async fn principal(conn: &mut Conn, job: &Job, plan: &Plan) -> Result<Principal, Stop> {
-    let row = job.row().await?;
-    if operation::is_restricted(&row) {
-        return operation::principal_at(conn, &row, plan, Time::new(job.now())).await;
-    }
     principal_at(conn, plan, Time::new(job.now())).await
 }
 
@@ -814,24 +798,6 @@ pub(crate) async fn load_principal(
     user: Id,
     token: Option<Id>,
 ) -> Result<Principal, Stop> {
-    let row = job.row().await?;
-    if crate::jobs::lifecycle_commands::environment::present(&row) {
-        let checked = crate::jobs::lifecycle_commands::environment::principal(
-            conn,
-            &row,
-            job.engine().inner.clock.as_ref(),
-            job.engine().inner.access.as_ref(),
-            None,
-        )
-        .await?;
-        if checked.principal.user() != user {
-            return Err(
-                Failure::new("access.denied", "The native lifecycle actor changed.").into(),
-            );
-        }
-        checked.check(job.engine().inner.clock.as_ref())?;
-        return Ok(checked.principal);
-    }
     load_principal_at(conn, user, token, Time::new(job.now())).await
 }
 
@@ -881,7 +847,7 @@ pub(crate) async fn load_principal_at(
 }
 
 pub async fn check(job: &Job, plan: &Plan) -> Result<(), Stop> {
-    if operation::received(job, plan).await? || publication_authority::received(job, plan).await? {
+    if publication_authority::received(job, plan).await? {
         return Ok(());
     }
     // An existing directory needs only a read. The effect rechecks write authority after stat
@@ -1021,13 +987,6 @@ async fn check_with_write(
     write: bool,
     pending: Option<Id>,
 ) -> Result<(), Stop> {
-    let owner = job.row().await?;
-    if operation::is_restricted(&owner) {
-        if operation::received(job, plan).await? {
-            return Ok(());
-        }
-        return operation::check(job, plan, write).await;
-    }
     let mut tx = job.engine().db().begin().await?;
     orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
     check_in(&mut tx, job, plan, write, pending).await?;
@@ -1043,13 +1002,6 @@ async fn check_in(
     write: bool,
     pending: Option<Id>,
 ) -> Result<(), Stop> {
-    let owner = rows::job(conn, job.id()).await?.ok_or(Stop::Lost)?;
-    if operation::is_restricted(&owner) {
-        if operation::reconcile_at(conn, &owner, plan).await? {
-            return Ok(());
-        }
-        return operation::before_mutation(conn, job, plan, write).await;
-    }
     check_at(conn, job.id(), Time::new(job.now()), plan, write, pending).await
 }
 
@@ -1085,25 +1037,12 @@ async fn check_at(
         None
     } else {
         let owner = rows::job(conn, job).await?;
-        if let Some(owner) = owner.as_ref().filter(|row| operation::is_restricted(row)) {
-            Some(operation::principal_at(conn, owner, plan, now).await?)
-        } else if let Some(owner) = owner.filter(publication_authority::is_restricted) {
+        if let Some(owner) = owner.filter(publication_authority::is_restricted) {
             Some(publication_authority::principal(conn, &owner, plan, now).await?)
         } else {
             Some(principal_at(conn, plan, now).await?)
         }
     };
-    check_native_at(conn, job, plan, write, pending, principal.as_ref()).await
-}
-
-pub(crate) async fn check_native_at(
-    conn: &mut Conn,
-    job: Id,
-    plan: &Plan,
-    write: bool,
-    pending: Option<Id>,
-    principal: Option<&Principal>,
-) -> Result<(), Stop> {
     let permission = if matches!(
         plan.action,
         Action::Prepare { .. } | Action::Worktree { .. }
@@ -1222,16 +1161,7 @@ pub async fn creator_command_authorized(
     };
     if publication_authority::is_restricted(&owner) {
         return publication_authority::command_authorized(
-            conn,
-            &owner,
-            publication_authority::CommandRef {
-                id: command,
-                machine,
-                key,
-                kind,
-                body,
-            },
-            now,
+            conn, &owner, command, machine, key, kind, body, now,
         )
         .await;
     }
@@ -1379,33 +1309,6 @@ pub async fn creator_command_current_callers(
     body: &Json,
     clock: &dyn orch_types::Clock,
 ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
-    let known = rows::lock_source_command_owners(conn, command).await?;
-    if known.len() == 1
-        && let Some(owner) = rows::job(conn, known[0]).await?
-        && operation::is_restricted(&owner)
-    {
-        let Some(private) = orch_db::queries::link::command_with_authority(conn, command).await?
-        else {
-            return Ok(None);
-        };
-        if private.command.machine_id != machine
-            || private.command.serial_key() != key
-            || private.command.kind != kind
-            || private.command.body != *body
-        {
-            return Ok(None);
-        }
-        let Some(value) = private.authority else {
-            return Ok(None);
-        };
-        let authority: crate::commands::CommandAuthority = serde_json::from_value(value)?;
-        if let crate::commands::CommandAuthority::SourcePreparation(authority) = authority {
-            return authority
-                .current_callers(conn, &private.command, clock)
-                .await;
-        }
-        return Ok(None);
-    }
     if !creator_command_authorized(conn, command, machine, key, kind, body, clock.time()).await? {
         return Ok(None);
     }
@@ -1536,82 +1439,11 @@ fn creator_body(plan: &Plan, job: Id, kind: &str, body: &Json) -> Result<bool, E
     Ok(*body == expected)
 }
 
-pub(crate) async fn lock_attempt_at(
-    conn: &mut Conn,
-    owner: &JobRow,
-    plan: &Plan,
-    runtime: Option<Id>,
-) -> Result<Option<threads::ThreadRow>, EngineError> {
-    let (frozen, directory, worktree) = match &plan.action {
-        Action::Prepare {
-            source, directory, ..
-        } => (source, directory, None),
-        Action::Worktree { source, body, .. } => {
-            (source, &body.choice.directory, Some(&body.choice))
-        }
-        _ => return Ok(None),
-    };
-    let Some(thread) = plan.thread else {
-        return Ok(None);
-    };
-    let Some(row) = threads::lock(conn, thread).await? else {
-        return Ok(None);
-    };
-    let Some(value) = row.source.as_ref() else {
-        return Ok(None);
-    };
-    let info: SourceInfo = serde_json::from_value(value.get("info").unwrap_or(value).clone())?;
-    let native_plan = serde_json::to_value(plan)?;
-    if row.environment_id != Some(plan.environment)
-        || row.workspace_dir != *directory
-        || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
-        || value.get("source") != Some(&json!(frozen))
-        || value.get("worktree").filter(|value| !value.is_null())
-            != worktree.map(|choice| json!(choice)).as_ref()
-        || value.get("native_plan") != Some(&native_plan)
-    {
-        return Ok(None);
-    }
-    let pending = if let Some(runtime) = runtime {
-        // Inline preparation belongs to the provisioning parent and its derived native effect;
-        // it legitimately has no standalone source job in SourceInfo.
-        let effect = crate::ids::derived(
-            "source.provision.files",
-            &[owner.id.as_bytes(), thread.as_bytes()],
-        );
-        let owns_effect = match &plan.action {
-            Action::Prepare { effect_id, .. } => *effect_id == Some(effect),
-            Action::Worktree { body, .. } => body.job_id == effect,
-            _ => false,
-        };
-        if !owns_effect {
-            return Ok(None);
-        }
-        Some((owner, runtime))
-    } else {
-        if owner.kind != kind::WORKSPACE_PREPARE
-            || owner.node_id != Some(thread)
-            || owner.environment_id != Some(plan.environment)
-            || info.job.as_ref().map(|job| job.id) != Some(owner.id)
-            || serde_json::to_value(serde_json::from_value::<Plan>(owner.plan.clone())?)?
-                != native_plan
-        {
-            return Ok(None);
-        }
-        None
-    };
-    if matching_target(conn, plan, pending).await?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(row))
-}
-
 #[derive(Debug, Clone)]
 pub struct Preparing {
     engine: Engine,
     plan: Plan,
     provisioning_runtime: Option<Id>,
-    operation: Option<operation::Request>,
 }
 impl Preparing {
     pub fn of(engine: Engine, row: &JobRow) -> Result<Self, EngineError> {
@@ -1620,7 +1452,6 @@ impl Preparing {
             engine,
             plan,
             provisioning_runtime: None,
-            operation: operation::Request::from_job(row)?,
         })
     }
 
@@ -1658,14 +1489,6 @@ impl Preparing {
             .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
-        let mut command = job.prepare_command(command).await?;
-        if let Some(origin) = &self.operation {
-            let row = job.row().await?;
-            let authority = operation::SourceCommand::capture(&row, origin, &command)?;
-            command.authority = Some(crate::commands::CommandAuthority::source_preparation(
-                authority,
-            ));
-        }
         job.command(command).await
     }
 
@@ -1676,7 +1499,68 @@ impl Preparing {
         conn: &mut Conn,
         owner: &JobRow,
     ) -> Result<Option<threads::ThreadRow>, EngineError> {
-        lock_attempt_at(conn, owner, &self.plan, self.provisioning_runtime).await
+        let (frozen, directory, worktree) = match &self.plan.action {
+            Action::Prepare {
+                source, directory, ..
+            } => (source, directory, None),
+            Action::Worktree { source, body, .. } => {
+                (source, &body.choice.directory, Some(&body.choice))
+            }
+            _ => return Ok(None),
+        };
+        let Some(thread) = self.plan.thread else {
+            return Ok(None);
+        };
+        let Some(row) = threads::lock(conn, thread).await? else {
+            return Ok(None);
+        };
+        let Some(value) = row.source.as_ref() else {
+            return Ok(None);
+        };
+        let info: SourceInfo = serde_json::from_value(value.get("info").unwrap_or(value).clone())?;
+        let native_plan = serde_json::to_value(&self.plan)?;
+        if row.environment_id != Some(self.plan.environment)
+            || row.workspace_dir != *directory
+            || !matches!(info.state, SourceState::Pending | SourceState::Preparing)
+            || value.get("source") != Some(&json!(frozen))
+            || value.get("worktree").filter(|value| !value.is_null())
+                != worktree.map(|choice| json!(choice)).as_ref()
+            || value.get("native_plan") != Some(&native_plan)
+        {
+            return Ok(None);
+        }
+        let pending = if let Some(runtime) = self.provisioning_runtime {
+            // Inline preparation belongs to the provisioning parent and its derived native effect;
+            // it legitimately has no standalone source job in SourceInfo.
+            let effect = crate::ids::derived(
+                "source.provision.files",
+                &[owner.id.as_bytes(), thread.as_bytes()],
+            );
+            let owns_effect = match &self.plan.action {
+                Action::Prepare { effect_id, .. } => *effect_id == Some(effect),
+                Action::Worktree { body, .. } => body.job_id == effect,
+                _ => false,
+            };
+            if !owns_effect {
+                return Ok(None);
+            }
+            Some((owner, runtime))
+        } else {
+            if owner.kind != kind::WORKSPACE_PREPARE
+                || owner.node_id != Some(thread)
+                || owner.environment_id != Some(self.plan.environment)
+                || info.job.as_ref().map(|job| job.id) != Some(owner.id)
+                || serde_json::to_value(serde_json::from_value::<Plan>(owner.plan.clone())?)?
+                    != native_plan
+            {
+                return Ok(None);
+            }
+            None
+        };
+        if matching_target(conn, &self.plan, pending).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(row))
     }
 
     // No transaction survives the native cleanup wait. Publication checks this again afterwards.
@@ -1750,12 +1634,6 @@ impl Preparing {
         if let Some(reason) = super::runner::abort_reason(&owner)? {
             return Err(reason);
         }
-        if self.operation.is_some() {
-            if owner.plan.get("file_prepare_started") == Some(&json!(self.plan)) {
-                return Ok(());
-            }
-            operation::before_mutation(&mut tx, job, &self.plan, true).await?;
-        }
         if self.plan.thread.is_some() && self.lock_attempt(&mut tx, &owner).await?.is_none() {
             return Err(Failure::new(
                 "conflict.stale_preflight",
@@ -1797,14 +1675,7 @@ impl Preparing {
                     .command(
                         job,
                         Outgoing::new(
-                            if self.operation.is_some() {
-                                crate::ids::derived(
-                                    "source.stat",
-                                    &[effect.as_bytes(), job.id().as_bytes()],
-                                )
-                            } else {
-                                crate::ids::derived("source.stat", &[effect.as_bytes()])
-                            },
+                            crate::ids::derived("source.stat", &[effect.as_bytes()]),
                             self.plan.machine,
                             SerialKey::Environment(self.plan.environment),
                             &FsStat {
@@ -1876,14 +1747,7 @@ impl Preparing {
                             self.command(
                                 job,
                                 Outgoing::new(
-                                    if self.operation.is_some() {
-                                        crate::ids::derived(
-                                            "source.mkdir",
-                                            &[effect.as_bytes(), job.id().as_bytes()],
-                                        )
-                                    } else {
-                                        crate::ids::derived("source.mkdir", &[effect.as_bytes()])
-                                    },
+                                    crate::ids::derived("source.mkdir", &[effect.as_bytes()]),
                                     self.plan.machine,
                                     SerialKey::Environment(self.plan.environment),
                                     &FsMkdir {
@@ -2580,7 +2444,6 @@ pub async fn provision_files(
         let mut preparing = Preparing {
             engine: job.engine().clone(),
             provisioning_runtime: Some(runtime),
-            operation: None,
             plan: Plan {
                 environment,
                 generation,
@@ -2736,7 +2599,6 @@ pub(crate) async fn undo_provision_sources(job: &Job, why: &Stop) -> Result<(), 
                 engine: job.engine().clone(),
                 plan,
                 provisioning_runtime: Some(runtime),
-                operation: None,
             };
             if preparing.lock_attempt(&mut tx, &owner).await?.is_some() {
                 attempts.push(preparing);

@@ -484,73 +484,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "system"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -1051,24 +984,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "provider"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "results"
+              "kind": "resolved",
+              "value": "unit_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -1093,25 +1012,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "host"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -1310,70 +1214,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "AdminMessageCreate",
-    "method": "POST",
-    "path": "/admin/messages",
-    "title": "Sends an administrator message to every active person in the installation.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AdminMessageCreate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminMessageList",
-    "method": "GET",
-    "path": "/admin/messages",
-    "title": "Lists installation messages, newest first, for a current system administrator.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AdminMessageList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "AdminMetricList",
     "method": "GET",
     "path": "/admin/metrics",
@@ -1432,17 +1272,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "system"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -1467,26 +1296,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -1524,22 +1337,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
             },
             "usage": "response_content"
           }
@@ -1884,37 +1681,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "provider"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "results"
+              "kind": "resolved",
+              "value": "runtime_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "host",
-              "machine",
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "references"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -2208,145 +1978,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "AdminTokenDelete",
-    "method": "DELETE",
-    "path": "/admin/tokens/{id}",
-    "title": "Revokes the selected API token through current system administration.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminTokenDelete",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "token"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "token"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminTokenList",
-    "method": "GET",
-    "path": "/admin/tokens",
-    "title": "Lists the system's unrevoked API tokens, including expired tokens, without secret values.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminTokenList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_org_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_project_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_topic_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_thread_names"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUploadContentGet",
-    "method": "GET",
-    "path": "/admin/uploads/{id}/content",
-    "title": "Opens one completed upload through this browser session's current system administration.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUploadContentGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "upload_storage"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "AdminUsageCatalogueSet",
     "method": "POST",
     "path": "/admin/usage/catalogue",
@@ -2405,16 +2036,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "system"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -2583,268 +2204,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "AdminUserSessionDelete",
-    "method": "DELETE",
-    "path": "/admin/users/{id}/sessions/{session_id}",
-    "title": "Ends one session of this exact person and its access tokens.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserSessionDelete",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "session"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "session"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUserSessionList",
-    "method": "GET",
-    "path": "/admin/users/{id}/sessions",
-    "title": "Lists the live browser sessions of this exact person.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserSessionList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "results"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUserSessionsDelete",
-    "method": "DELETE",
-    "path": "/admin/users/{id}/sessions",
-    "title": "Ends all this person's unrevoked sessions, including the caller's if selected.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserSessionsDelete",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "account"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "session_subjects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "session"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "account"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUserTokenActivityList",
-    "method": "GET",
-    "path": "/admin/users/{id}/tokens/{token_id}/activity",
-    "title": "Reads this person's recent token calls, including retained history after revocation.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserTokenActivityList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "token"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUserTokenDelete",
-    "method": "DELETE",
-    "path": "/admin/users/{id}/tokens/{token_id}",
-    "title": "Revokes the selected API token of this exact person.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserTokenDelete",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "token"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "token"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AdminUserTokenList",
-    "method": "GET",
-    "path": "/admin/users/{id}/tokens",
-    "title": "Lists one person's API tokens with their current scope and activity timestamps.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": false,
-        "operation": "AdminUserTokenList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "key"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_org_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_project_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_topic_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "token_thread_names"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "AdminUserUpdate",
     "method": "PATCH",
     "path": "/admin/users/{id}",
@@ -2909,59 +2268,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AgentDuplicate",
-    "method": "POST",
-    "path": "/agents/{id}/duplicate",
-    "title": "Duplicates an agent profile's readable configuration using the native destination creation and machine rules.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AgentDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "agent"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_profile_machine"
             },
             "usage": "required"
           }
@@ -3072,20 +2378,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "agent_names_threads"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resource_read_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -3191,140 +2483,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "agent_names_threads"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resource_read_context"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AgentMoveOut",
-    "method": "POST",
-    "path": "/agents/{id}/move-out",
-    "title": "Creates the new native profile and atomically accepts the original profile's stop and deletion.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AgentMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "agent"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_profile_machine"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AgentMoveOutPreview",
-    "method": "POST",
-    "path": "/agents/{id}/move-out/preview",
-    "title": "Reviews an owner's native profile copy and source stop/deletion consequences.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AgentMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "agent"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_profile_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "agent"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "agent"
-              }
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -3359,78 +2517,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "source_or_recipient"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "shared_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -5657,511 +4743,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "AskAttachmentCreate",
-    "method": "POST",
-    "path": "/ask/conversations/{id}/attachments",
-    "title": "Links a finished private upload to this conversation without an environment.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskAttachmentCreate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskAttachmentGet",
-    "method": "GET",
-    "path": "/ask/conversations/{id}/attachments/{hash}",
-    "title": "Reads a private conversation attachment as its owner or inspecting root administrator.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskAttachmentGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskCreate",
-    "method": "POST",
-    "path": "/ask/conversations",
-    "title": "Begins a personal conversation with a fixed root organization.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskCreate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskDelete",
-    "method": "DELETE",
-    "path": "/ask/conversations/{id}",
-    "title": "Permanently deletes this personal conversation.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskDelete",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskEvents",
-    "method": "GET",
-    "path": "/ask/conversations/{id}/events",
-    "title": "Streams ordered Ask events under current reader authority.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskEvents",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskExport",
-    "method": "GET",
-    "path": "/ask/conversations/{id}/export",
-    "title": "Exports the complete conversation as its owner or an audited root org administrator.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskExport",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskGet",
-    "method": "GET",
-    "path": "/ask/conversations/{id}",
-    "title": "Reads a personal conversation as its owner or an audited root org administrator.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskKeep",
-    "method": "POST",
-    "path": "/ask/conversations/{id}/keep",
-    "title": "Keeps temporary Ask or forks a permanent built-in thread as a new Private thread.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskKeep",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "ask_keep_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskList",
-    "method": "GET",
-    "path": "/ask/conversations",
-    "title": "Lists the caller's readable personal conversations.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "ask_roots"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskMessageCreate",
-    "method": "POST",
-    "path": "/ask/conversations/{id}/messages",
-    "title": "Submits to the built-in dialogue as the admitted person, including a permanent kept thread.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskMessageCreate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "ask_attachment_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskModelsGet",
-    "method": "GET",
-    "path": "/ask/models",
-    "title": "Lists the person's current API-model choices for a root-org Ask.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskModelsGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "ask_model_root"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "ask_model_providers"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskStop",
-    "method": "POST",
-    "path": "/ask/conversations/{id}/stop",
-    "title": "Stops the owner's current Ask turn without starting another input.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskStop",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "AskUpdate",
-    "method": "PATCH",
-    "path": "/ask/conversations/{id}",
-    "title": "Changes the owner's display and bounded retention preferences.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "AskUpdate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "thread"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "AuthEmailCodeSend",
     "method": "POST",
     "path": "/auth/email-code",
@@ -6262,14 +4843,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "method": "POST",
     "path": "/auth/register",
     "title": "Registers a user: answers `201` with a session, or `202` when the address is to be confirmed first.",
-    "delegation": "authentication_protocol",
-    "variants": []
-  },
-  {
-    "operation_id": "AuthSessionRestore",
-    "method": "POST",
-    "path": "/auth/session",
-    "title": "Restores this browser's cookie session, or answers null when no cookie is present.",
     "delegation": "authentication_protocol",
     "variants": []
   },
@@ -6585,61 +5158,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -6666,61 +5184,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
             },
             "usage": "required"
           }
@@ -7015,203 +5478,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "ChatDuplicate",
-    "method": "POST",
-    "path": "/chats/{id}/duplicate",
-    "title": "Duplicates a readable group conversation with a fresh native group and a creator-only roster.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_groups"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ChatDuplicatePreview",
-    "method": "POST",
-    "path": "/chats/{id}/duplicate/preview",
-    "title": "Counts the original contributors eligible for the existing optional explicit notice.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatDuplicatePreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "ChatExportGet",
     "method": "GET",
     "path": "/chats/{id}/export",
@@ -7234,50 +5500,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "chat"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_export_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_export_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_export_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_export_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -7370,34 +5592,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "message_name_groups"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ChatJoin",
-    "method": "POST",
-    "path": "/chats/{id}/join",
-    "title": "Join a public group at its actual readable home.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatJoin",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
             },
             "usage": "required"
           }
@@ -7613,117 +5807,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "approval_chats"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ChatManagerSet",
-    "method": "PUT",
-    "path": "/chats/{id}/members/{user_id}/manager",
-    "title": "Makes an existing member a manager, or takes back that flag while preserving a manager.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatManagerSet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_inspection_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_groups"
             },
             "usage": "response_content"
           }
@@ -9115,324 +7198,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "ChatMoveOut",
-    "method": "POST",
-    "path": "/chats/{id}/move-out",
-    "title": "Copies a group and ends it here in one act, with fresh creator-only membership.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_groups"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ChatMoveOutPreview",
-    "method": "POST",
-    "path": "/chats/{id}/move-out/preview",
-    "title": "Reviews an active manager's copy and irreversible ending of this group and history.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ChatMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "chat"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "ChatOpeningGet",
     "method": "GET",
     "path": "/chats/{id}/opening",
@@ -9549,31 +7314,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "notice_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "notice_place_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -9869,83 +7609,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "message_name_groups"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "CopyDestinationsJudge",
-    "method": "POST",
-    "path": "/copy-destinations/judge",
-    "title": "Judges explicit copy and move destinations through current native source and creation rules without effects.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "CopyDestinationsJudge",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill",
-              "environment",
-              "thread",
-              "document",
-              "document_container",
-              "chat",
-              "host",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "copy_destination_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill",
-              "environment",
-              "thread",
-              "document",
-              "document_container",
-              "chat",
-              "host",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "copy_destination_sources"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -10196,72 +7859,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_reference_chats"
-            },
-            "usage": "required"
           }
         ]
       },
@@ -10278,72 +7875,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_reference_chats"
             },
             "usage": "required"
           }
@@ -10370,8 +7901,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
+              "kind": "permission_object"
             },
             "usage": "required"
           },
@@ -10381,140 +7911,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
+              "kind": "permission_object"
             },
             "usage": "response_content"
           }
@@ -10922,61 +8319,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_entry"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -11001,74 +8343,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -11080,61 +8356,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_document"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_containers"
             },
             "usage": "response_content"
           }
@@ -11161,66 +8382,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "document_container"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -11238,66 +8401,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "document_container"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -11343,45 +8448,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "conversion_document"
+              "value": "document"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "conversion_document"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "conversion_document"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "conversion_limit_nodes"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -11433,8 +8502,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
+              "kind": "permission_object"
             },
             "usage": "required"
           },
@@ -11444,140 +8512,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
+              "kind": "permission_object"
             },
             "usage": "response_content"
           }
@@ -12006,30 +8941,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "file_limit_nodes"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -12040,91 +8951,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "selector": "the handler resolves the supplied finished-upload reference",
         "facets": [
           {
+            "action": "read",
+            "resources": [
+              "upload"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "attachment_source"
+            },
+            "usage": "required"
+          },
+          {
             "action": "write",
             "resources": [
               "document"
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "file_limit_nodes"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
             },
             "usage": "required"
           }
@@ -12522,72 +9365,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "moved_document_containers"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -12662,24 +9439,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "document"
-              }
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "notice_job_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -12926,72 +9689,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_document_containers"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -13044,68 +9741,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "DocumentSummaryOptionsGet",
-    "method": "GET",
-    "path": "/documents/{id}/summary-options",
-    "title": "Reads one document's summary options, preserving its actual document permission and ancestry.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "DocumentSummaryOptionsGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "document"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "DocumentSummaryOptionsSet",
-    "method": "PUT",
-    "path": "/documents/{id}/summary-options",
-    "title": "Sets or inherits one document's summary options; this creates no model request or paragraph.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "DocumentSummaryOptionsSet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "document"
-              }
             },
             "usage": "required"
           }
@@ -13210,31 +9845,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "document_reference_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_summary_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_summary_providers"
             },
             "usage": "required"
           }
@@ -13357,34 +9967,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "selected_entries"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_entries"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "affected_entries"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -13414,61 +10000,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "typed_entry"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
-            },
-            "usage": "required"
           }
         ]
       },
@@ -13487,61 +10018,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "typed_entry"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
             },
             "usage": "required"
           }
@@ -13565,80 +10041,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "directory"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "document",
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "tree_entries"
+              "kind": "resolved",
+              "value": "directory_and_results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -13651,80 +10061,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "directory"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
               "document",
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "tree_entries"
+              "kind": "resolved",
+              "value": "directory_and_results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_containers"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -13749,8 +10093,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_destinations"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
@@ -13760,74 +10104,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "created_entries"
             },
             "usage": "response_content"
           }
@@ -13846,20 +10124,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "required"
           },
@@ -13870,8 +10136,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_destinations"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
@@ -13882,198 +10148,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
-            },
-            "usage": "response_content"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "DocumentTreeOperate.move_out",
-        "name": "move_out",
-        "selector": "command=move_out; owner-only copy into another root and native source deletion",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "created_entries"
             },
             "usage": "response_content"
           }
@@ -14092,20 +10168,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "required"
           },
@@ -14116,8 +10180,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_destinations"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
@@ -14128,75 +10192,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "affected_entries"
             },
             "usage": "response_content"
           }
@@ -14214,19 +10211,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "required"
           },
@@ -14236,74 +10222,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "response_content"
           }
@@ -14322,20 +10242,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "affected_entries"
             },
             "usage": "required"
           },
@@ -14346,75 +10254,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "affected_entries"
             },
             "usage": "response_content"
           }
@@ -14433,20 +10274,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "affected_entries"
             },
             "usage": "required"
           },
@@ -14457,8 +10286,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_destinations"
+              "kind": "resolved",
+              "value": "restoration_destinations"
             },
             "usage": "required"
           },
@@ -14469,75 +10298,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "affected_entries"
             },
             "usage": "response_content"
           }
@@ -14555,19 +10317,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_selected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_affected"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "required"
           },
@@ -14577,74 +10328,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "operation_results"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_contexts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "operation_containers"
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "response_content"
           }
@@ -15652,17 +11337,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "close_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -15718,17 +11392,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -15795,75 +11458,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "trust_reply_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -15896,135 +11490,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_template"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_host"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "environment"
             ],
             "target": {
               "kind": "resolved",
               "value": "created_environment"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_created_threads"
             },
             "usage": "response_content"
           }
@@ -16138,17 +11608,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "close_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -16174,152 +11633,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "EnvironmentDuplicate",
-    "method": "POST",
-    "path": "/environments/{id}/duplicate",
-    "title": "Copies a readable Environment workspace into a fresh native environment of the chosen placement class.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentDuplicate.managed",
-        "name": "managed",
-        "selector": "a managed source with no machine choice, or an explicit managed destination",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "home"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_template"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_host"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentDuplicate.connected",
-        "name": "connected",
-        "selector": "a connected source with no managed choice, or an explicit connected machine",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "home"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
             },
             "usage": "required"
           }
@@ -16452,17 +11765,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "copy_destination"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "copy_reply_environment"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -16571,16 +11873,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -16728,17 +12020,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "environment"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "snapshot_reply_environment"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -16753,9 +12034,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "variants": [
       {
         "legacy_tokens": true,
-        "operation": "EnvironmentFilesRestore.environment",
-        "name": "environment",
-        "selector": "new restore waits for writers or uses the native Environment management control alternative",
+        "operation": "EnvironmentFilesRestore",
+        "name": "",
+        "selector": "",
         "facets": [
           {
             "action": "manage",
@@ -16767,121 +12048,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_files"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_content"
-            },
-            "usage": "response_content"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentFilesRestore.threads",
-        "name": "threads",
-        "selector": "new restore interrupts its actual reviewed writers through native Thread Interact",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_files"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restore_writers"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_content"
-            },
-            "usage": "response_content"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentFilesRestore.existing",
-        "name": "existing",
-        "selector": "the saved review already created its actual Job; no new file act occurs",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "job"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_existing_job"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restore_machine_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -16910,75 +12076,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_threads"
-            },
-            "usage": "required"
           }
         ]
       },
@@ -16996,75 +12093,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_threads"
             },
             "usage": "required"
           }
@@ -17313,107 +12341,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_templates"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_hosts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_machines"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_names_threads"
             },
             "usage": "required"
           }
@@ -17444,97 +12373,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_servers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_machines"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_library_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_mcp_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -17570,8 +12408,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server_parent"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -17583,73 +12421,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_server"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
             },
             "usage": "response_content"
           }
@@ -17687,8 +12458,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server_parent"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -17700,73 +12471,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_server"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
             },
             "usage": "response_content"
           }
@@ -17820,422 +12524,22 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_environments"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
           {
             "action": "write",
             "resources": [
-              "environment",
-              "host",
               "machine",
               "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "provider",
-              "agent",
-              "mount",
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_content"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "EnvironmentMoveOut",
-    "method": "POST",
-    "path": "/environments/{id}/move-out",
-    "title": "Copies through the original provision and ends the original only at successful native commit.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentMoveOut.managed",
-        "name": "managed",
-        "selector": "a native managed destination",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
               "kind": "resolved",
-              "value": "home"
+              "value": "destination"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_template"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_host"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentMoveOut.connected",
-        "name": "connected",
-        "selector": "a native connected directory destination",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "home"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "EnvironmentMoveOutPreview",
-    "method": "POST",
-    "path": "/environments/{id}/move-out/preview",
-    "title": "Reviews the original native deletion before independently copying an environment.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentMoveOutPreview.managed",
-        "name": "managed",
-        "selector": "a native managed destination",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "home"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_template"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "creation_host"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentMoveOutPreview.connected",
-        "name": "connected",
-        "selector": "a native connected directory destination",
-        "facets": [
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "home"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creation_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18287,46 +12591,22 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_environments"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
           {
             "action": "write",
             "resources": [
-              "environment",
-              "host",
               "machine",
               "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_destinations"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "provider",
-              "agent",
-              "mount",
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18351,21 +12631,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "capability_environment"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "capability_environment"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18524,87 +12793,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "named_place"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_hosts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_publishers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18643,87 +12835,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "named_place"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_hosts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_publishers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "review_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18882,28 +12997,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "retained_waiting_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -18967,46 +13060,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_environments"
+              "kind": "resolved",
+              "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "provider",
-              "agent",
-              "mount",
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19031,21 +13088,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "batch_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19070,46 +13116,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_environments"
+              "kind": "resolved",
+              "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "provider",
-              "agent",
-              "mount",
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "lifecycle_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19192,28 +13202,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "retained_waiting_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19242,39 +13230,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_files"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "restore_content"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restore_writer_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19398,81 +13353,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "environment"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_setting_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_setting_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_setting_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_setting_threads"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "EnvironmentSnapshotList",
-    "method": "GET",
-    "path": "/environments/{id}/snapshots",
-    "title": "Whole-workspace exports kept by this reader, or inspected in browser administration.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentSnapshotList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
               "kind": "path",
               "value": "id"
             },
@@ -19491,9 +13371,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "variants": [
       {
         "legacy_tokens": true,
-        "operation": "EnvironmentSourcePrepare.prepare",
-        "name": "prepare",
-        "selector": "native source action is a checkout or directory preparation",
+        "operation": "EnvironmentSourcePrepare",
+        "name": "",
+        "selector": "",
         "facets": [
           {
             "action": "manage",
@@ -19516,69 +13396,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "bound_thread"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "source_problem_environment"
-            },
-            "usage": "response_content"
-          }
-        ]
-      },
-      {
-        "legacy_tokens": true,
-        "operation": "EnvironmentSourcePrepare.worktree",
-        "name": "worktree",
-        "selector": "native source action creates an own worktree from existing workspace content",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "bound_thread"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "worktree_environment"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "source_problem_environment"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19671,97 +13488,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_read_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_sync_library_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_sync_job_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -19863,7 +13589,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "changed_home"
             },
             "usage": "required"
@@ -19876,75 +13602,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "environment_update_threads"
             },
             "usage": "response_content"
           }
@@ -19971,48 +13628,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_templates"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_environments"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "template",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20037,37 +13656,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_environments"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "template",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20095,16 +13687,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20186,28 +13768,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "upload_job_environment"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "job_machine_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20508,50 +14068,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20580,50 +14096,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -20645,70 +14117,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "remaining_batch_subjects"
+              "kind": "resolved",
+              "value": "batch_threads"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_waiting_machines"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_topics"
-            },
-            "usage": "response_content"
           },
           {
             "action": "read",
@@ -20716,8 +14131,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_threads"
+              "kind": "resolved",
+              "value": "batch_threads"
             },
             "usage": "response_content"
           }
@@ -20734,19 +14149,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "variants": [
       {
         "legacy_tokens": true,
-        "operation": "ForkBatchCreate.switch",
-        "name": "switch",
-        "selector": "the actual selected native batch",
+        "operation": "ForkBatchCreate.fork",
+        "name": "fork",
+        "selector": "result creates a new thread",
         "facets": [
           {
-            "action": "manage",
+            "action": "read",
             "resources": [
               "thread",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_sources"
+              "kind": "resolved",
+              "value": "source_material"
             },
             "usage": "required"
           },
@@ -20756,42 +14171,76 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "sources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "destinations"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "created_threads"
+            },
+            "usage": "response_content"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ForkBatchCreate.switch",
+        "name": "switch",
+        "selector": "result changes existing execution binding",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
               "thread",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
+              "kind": "resolved",
+              "value": "sources"
             },
-            "usage": "response_content"
+            "usage": "required"
           },
           {
-            "action": "read",
+            "action": "write",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
               "agent",
               "provider",
               "environment",
               "machine",
-              "host",
-              "template",
-              "mount"
+              "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "resolved",
+              "value": "destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "response_content"
           }
@@ -20815,69 +14264,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_subjects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_waiting_machines"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "batch_names_threads"
+              "kind": "resolved",
+              "value": "batch_threads"
             },
-            "usage": "response_content"
+            "usage": "required"
           }
         ]
       }
@@ -20892,19 +14285,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "variants": [
       {
         "legacy_tokens": true,
-        "operation": "ForkBatchPreflight.switch",
-        "name": "switch",
-        "selector": "the actual selected native batch",
+        "operation": "ForkBatchPreflight.fork",
+        "name": "fork",
+        "selector": "result creates a new thread",
         "facets": [
           {
-            "action": "manage",
+            "action": "read",
             "resources": [
               "thread",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_sources"
+              "kind": "resolved",
+              "value": "source_material"
             },
             "usage": "required"
           },
@@ -20914,42 +14307,76 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "sources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "destinations"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "created_threads"
+            },
+            "usage": "response_content"
+          }
+        ]
+      },
+      {
+        "legacy_tokens": true,
+        "operation": "ForkBatchPreflight.switch",
+        "name": "switch",
+        "selector": "result changes existing execution binding",
+        "facets": [
+          {
+            "action": "manage",
+            "resources": [
               "thread",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
+              "kind": "resolved",
+              "value": "sources"
             },
-            "usage": "response_content"
+            "usage": "required"
           },
           {
-            "action": "read",
+            "action": "write",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
               "agent",
               "provider",
               "environment",
               "machine",
-              "host",
-              "template",
-              "mount"
+              "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "resolved",
+              "value": "destinations"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "sources"
             },
             "usage": "response_content"
           }
@@ -21747,16 +15174,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "environment"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -21777,16 +15194,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "node"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -21805,16 +15212,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "system"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "system"
-            ],
-            "target": {
-              "kind": "system"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -21865,61 +15262,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "page"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "history_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "history_org_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "history_project_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "history_topic_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "history_thread_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -21949,54 +15291,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "account"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "holder_results"
+              "kind": "resolved",
+              "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holder_org_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holder_project_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holder_topic_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holder_thread_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22052,53 +15350,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment",
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_managed"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host",
-              "template",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_used"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "environment",
-              "provider",
-              "template",
-              "machine",
-              "mount",
-              "mcp_server",
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22127,53 +15378,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment",
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_managed"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host",
-              "template",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_used"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "environment",
-              "provider",
-              "template",
-              "machine",
-              "mount",
-              "mcp_server",
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_delete_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22230,72 +15434,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_retained_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_threads"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -22320,74 +15458,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "host"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_retained_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "host_names_threads"
             },
             "usage": "required"
           }
@@ -22417,104 +15489,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "HostMoveOut",
-    "method": "POST",
-    "path": "/hosts/{id}/move-out",
-    "title": "Keeps the physical registration while resetting ownership, entries and tags at the new home.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "HostMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "host"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "registration_move_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "HostMoveOutPreview",
-    "method": "POST",
-    "path": "/hosts/{id}/move-out/preview",
-    "title": "Reviews an owner-only registration-preserving move to another root organization.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "HostMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "host"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "registration_move_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "host"
-              }
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22809,17 +15783,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22876,50 +15839,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -22948,50 +15867,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -23020,50 +15895,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -23101,45 +15932,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "topic",
               "thread",
               "document",
-              "document_container",
-              "chat",
-              "environment",
-              "provider",
-              "agent",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
+              "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "imported_objects"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "import"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "import_undo_creator"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -23177,11 +15976,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "topic",
               "thread",
               "document",
-              "document_container",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "imported_objects"
             },
             "usage": "required"
@@ -23372,17 +16170,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "creator_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_reader_environments"
             },
             "usage": "required"
           },
@@ -23955,7 +16742,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "job_subjects"
             },
             "usage": "required"
@@ -23968,17 +16755,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "job_machine_names"
             },
             "usage": "response_content"
           }
@@ -24004,9 +16780,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "environment",
@@ -24018,7 +16791,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "import"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "job_subjects"
             },
             "usage": "required"
@@ -24031,17 +16804,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "job_machine_names"
             },
             "usage": "response_content"
           }
@@ -24076,9 +16838,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "environment",
@@ -24090,21 +16849,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "import"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "job_subjects"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "job_machine_names"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -24131,21 +16879,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "provider"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "job_subjects"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "job_machine_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -24173,63 +16910,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "loss_target"
+              "value": "affected_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "host",
-              "machine",
-              "environment",
-              "provider",
-              "mount",
-              "mcp_server",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "loss_affected"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "machine",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "loss_target"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "provider",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "loss_related"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "loss_thread_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -24257,46 +16940,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "loss_target"
+              "value": "affected_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "machine",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "loss_target"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "provider",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "loss_related"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "loss_thread_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -24323,7 +16969,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_resources"
             },
             "usage": "required"
@@ -24351,8 +16997,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "registration_machine"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -24363,7 +17009,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "registration_home"
+              "value": "home"
             },
             "usage": "required"
           },
@@ -24374,74 +17020,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "created_resource"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_threads"
+              "value": "created_agent"
             },
             "usage": "response_content"
           }
@@ -24468,21 +17047,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -24531,101 +17099,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine",
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "enrollment_selected_resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "machine"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "machine_readiness_machines"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
+              "kind": "resolved",
+              "value": "enrollment_machine"
             },
             "usage": "required"
           }
@@ -24705,75 +17183,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_environment"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -24798,8 +17207,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -24809,8 +17218,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "machine_selected_environments"
+              "kind": "resolved",
+              "value": "results"
             },
             "usage": "required"
           }
@@ -24896,87 +17305,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_readiness_machines"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -25003,76 +17333,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
             },
             "usage": "required"
           }
@@ -25099,174 +17361,22 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_selected_mounts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
+              "mount",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "machine_selected_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_mount_address_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_mount_address_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_mount_address_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_mount_address_threads"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MachineMoveOut",
-    "method": "POST",
-    "path": "/machines/{id}/move-out",
-    "title": "Keeps the physical registration while resetting ownership, entries and tags at the new home.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MachineMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "machine"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
               "kind": "resolved",
-              "value": "registration_move_destination"
+              "value": "results"
             },
             "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MachineMoveOutPreview",
-    "method": "POST",
-    "path": "/machines/{id}/move-out/preview",
-    "title": "Reviews an owner-only registration-preserving move to another root organization.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MachineMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "machine"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "registration_move_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "machine"
-              }
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -25319,8 +17429,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -25330,87 +17440,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_readiness_machines"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -25437,8 +17468,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -25448,76 +17479,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -25544,8 +17507,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -25555,87 +17518,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_readiness_machines"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -25795,8 +17679,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -25806,76 +17690,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -25902,8 +17718,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -25913,87 +17729,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_readiness_machines"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -26020,8 +17757,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -26031,76 +17768,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "machine_reply_threads"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -26127,8 +17796,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -26138,8 +17807,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "machine"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "machine_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -26166,8 +17835,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "manage",
+            "resources": [
+              "machine"
+            ],
+            "target": {
+              "kind": "path",
+              "value": "machine_id"
             },
             "usage": "required"
           },
@@ -26177,110 +17857,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_owned_environment"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_import_environment"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_import_machine"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -26320,73 +17900,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_server"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -26411,80 +17924,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "forgotten_copies"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "McpServerDuplicate",
-    "method": "POST",
-    "path": "/mcp-servers/{id}/duplicate",
-    "title": "Duplicates a readable native MCP definition, carrying declared secrets only for an actual owner.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "McpServerDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_destination_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_native_mcp_machine"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -26625,17 +18066,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_context"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "machine"
             ],
             "target": {
@@ -26704,183 +18134,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "McpServerMoveOut",
-    "method": "POST",
-    "path": "/mcp-servers/{id}/move-out",
-    "title": "Copies the native configuration and ends its original definition in the same accepted act.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "McpServerMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_destination_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_native_mcp_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_deleted_copies"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "McpServerMoveOutPreview",
-    "method": "POST",
-    "path": "/mcp-servers/{id}/move-out/preview",
-    "title": "Reviews the original native MCP definition and every copied-file deletion consequence.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "McpServerMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_destination_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_native_mcp_machine"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_deleted_copies"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mcp_server"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_subject"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "McpServerReimport",
     "method": "POST",
     "path": "/mcp-servers/{id}/reimport",
@@ -26899,8 +18152,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -26910,110 +18163,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_owned_environment"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_import_environment"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_import_machine"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -27038,8 +18191,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -27049,88 +18202,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mcp_server"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "server"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_created_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mcp_owned_environment"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -27176,48 +18251,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
+              "account",
               "org"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "account_organizations"
+              "kind": "resolved",
+              "value": "current_account_and_organizations"
             },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "account_organization_context"
-            },
-            "usage": "response_content"
+            "usage": "required"
           }
         ]
       }
@@ -27239,142 +18280,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
+              "account",
+              "org"
             ],
             "target": {
-              "kind": "current_account"
+              "kind": "resolved",
+              "value": "current_account_and_organizations"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "account_organizations"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "account_organization_context"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "favorite_nodes"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "favorite_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "favorite_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "favorite_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "favorite_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "read_state_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "subscription_nodes"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "personal_state_chats"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -27396,21 +18309,12 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
+              "account",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "personal_state_chats"
+              "kind": "resolved",
+              "value": "current_account_and_chats"
             },
             "usage": "required"
           }
@@ -27518,54 +18422,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "export"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -27729,81 +18589,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
+              "account",
+              "org"
             ],
             "target": {
-              "kind": "current_account"
+              "kind": "resolved",
+              "value": "current_account_and_organization"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_org"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_providers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_answer"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_members"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_document"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "first_document_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -27946,54 +18739,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "import"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "artifact_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -28112,17 +18861,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "current_account"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -28150,68 +18888,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "exception_nodes"
+              "kind": "resolved",
+              "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "exception_defaults"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "exception_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "exception_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "exception_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "exception_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -28363,16 +19043,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "current_account"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "current_account"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -29421,45 +20091,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "MeUploadList",
-    "method": "GET",
-    "path": "/me/uploads",
-    "title": "Lists the caller's unfinished sessions and completed custody without their own attachments.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MeUploadList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "upload_namespace"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "upload_owner_names"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "MeVisitCreate",
     "method": "POST",
     "path": "/me/visits",
@@ -29479,35 +20110,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "current_account"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MessageGet",
-    "method": "GET",
-    "path": "/messages/{id}",
-    "title": "Reads a message received by this account, or sent from a scope it may administer.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MessageGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "system"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "message_scope"
             },
             "usage": "required"
           }
@@ -29557,72 +20159,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_mount"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -29648,48 +20184,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MountDuplicate",
-    "method": "POST",
-    "path": "/mounts/{id}/duplicate",
-    "title": "Duplicates a mount's readable configuration under the source copy-out policy, with fresh destination privileges.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MountDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "mount"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
             },
             "usage": "required"
           }
@@ -30011,72 +20505,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_location_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -30112,126 +20540,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MountMoveOut",
-    "method": "POST",
-    "path": "/mounts/{id}/move-out",
-    "title": "Atomically copies native mount configuration and deletes the source with its original guards.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MountMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "mount"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_source_machines"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "MountMoveOutPreview",
-    "method": "POST",
-    "path": "/mounts/{id}/move-out/preview",
-    "title": "Reads the native uses, physical-location and deletion plan of an owner's cross-root mount move.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "MountMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "mount"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_source_machines"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "mount"
-              }
             },
             "usage": "response_content"
           }
@@ -30295,36 +20603,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "mount"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "mount"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_use_scopes"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "mount_use_environments"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -30386,17 +20666,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "search_names"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "search_resource_origins"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -30452,7 +20721,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "destinations"
             },
             "usage": "required"
@@ -30464,7 +20733,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "destinations"
             },
             "usage": "response_content"
@@ -30908,86 +21177,16 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "action": "read",
             "resources": [
               "topic",
-              "project"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "binding_context"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
+              "project",
               "agent",
               "provider",
-              "environment",
-              "template",
-              "host",
-              "machine",
-              "mount"
+              "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "binding_choices"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "binding_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "binding_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "binding_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "binding_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -31248,45 +21447,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "opening_node_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_summary_targets"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_summary_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_summary_providers"
             },
             "usage": "required"
           }
@@ -31778,38 +21938,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "delete_subject"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deletion_resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deletion_destinations"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -31839,38 +21969,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "delete_subject"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "delete_review_node"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "delete_review_places"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -31895,63 +21997,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deleted_environment_hosts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deleted_environment_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deleted_environment_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deleted_environment_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "deleted_environment_names_threads"
             },
             "usage": "required"
           }
@@ -32014,19 +22061,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -32081,8 +22115,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "copy_originals"
+              "kind": "resolved",
+              "value": "source"
             },
             "usage": "required"
           },
@@ -32100,132 +22134,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "document"
             ],
             "target": {
               "kind": "resolved",
               "value": "created_document"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_containers"
             },
             "usage": "response_content"
           }
@@ -32252,74 +22165,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
+              "kind": "permission_object"
             },
             "usage": "required"
           },
@@ -32330,62 +22176,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "created_document"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_containers"
+              "value": "created_resource"
             },
             "usage": "response_content"
           }
@@ -32407,134 +22198,23 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "selector": "",
         "facets": [
           {
-            "action": "write",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
             "action": "read",
             "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "import_sources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "document"
+            ],
+            "target": {
+              "kind": "permission_object"
             },
             "usage": "required"
           },
@@ -32544,63 +22224,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "created_documents"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "document_names_containers"
+              "kind": "resolved",
+              "value": "created_resources"
             },
             "usage": "response_content"
           }
@@ -32624,55 +22249,12 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "document"
+              "document",
+              "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "listed_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
             },
             "usage": "required"
           }
@@ -32687,55 +22269,12 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "document"
+              "document",
+              "document_container"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "listed_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
             },
             "usage": "required"
           }
@@ -32762,54 +22301,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "document"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "listed_documents"
+              "kind": "resolved",
+              "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "entry_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -32831,91 +22326,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "environment",
-              "host"
+              "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_subjects"
+              "kind": "resolved",
+              "value": "listed_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_hosts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_templates"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_providers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fleet_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -32940,7 +22357,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
@@ -32948,35 +22365,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "write",
             "resources": [
-              "host",
               "machine",
               "template"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "destinations"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mount",
-              "mcp_server",
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_batch_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33001,7 +22397,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
@@ -33009,35 +22405,14 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "write",
             "resources": [
-              "host",
               "machine",
               "template"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "destinations"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mount",
-              "mcp_server",
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_batch_content"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33062,77 +22437,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_environments"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recycled_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33157,48 +22465,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_templates"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_environments"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "template",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33223,37 +22493,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "affected_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_environments"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "template",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "update_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33278,122 +22521,16 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org",
               "project",
               "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "document_container",
               "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_contents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
             ],
             "target": {
               "kind": "resolved",
-              "value": "export_creator"
+              "value": "export_sources"
             },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_people"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "agent",
-              "provider",
-              "machine",
-              "host",
-              "template",
-              "mount",
-              "skill",
-              "mcp_server",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_references"
-            },
-            "usage": "response_content"
+            "usage": "required"
           }
         ]
       }
@@ -33418,74 +22555,16 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org",
               "project",
               "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "document_container",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "export_contents"
+              "kind": "resolved",
+              "value": "export_sources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "export_name_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33630,55 +22709,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "import_sources"
             },
             "usage": "required"
           },
@@ -33694,21 +22729,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "import_destinations"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "import_creator"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -33721,55 +22745,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "import_sources"
             },
             "usage": "required"
           },
@@ -33785,7 +22765,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "import_destinations"
             },
             "usage": "required"
@@ -33802,21 +22782,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "import_delegation_targets"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "import_creator"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -33838,69 +22807,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "import_sources"
             },
             "usage": "required"
           },
@@ -33916,19 +22827,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "import_existing_targets"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "import_matched_accounts"
             },
             "usage": "required"
           }
@@ -33952,69 +22852,28 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "import_sources"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "read",
+            "resources": [
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "document_container",
+              "chat"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "import_existing_targets"
             },
             "usage": "required"
           }
@@ -34044,22 +22903,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "model_input_sources"
+              "kind": "permission_object"
             },
             "usage": "required"
           }
@@ -34089,123 +22933,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "model_input_sources"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "NodeOverviewGet",
-    "method": "GET",
-    "path": "/nodes/{id}/overview",
-    "title": "Reads the bounded visible project/topic overview through its native sources.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "NodeOverviewGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_nodes"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "provider",
-              "environment",
-              "agent",
-              "machine",
-              "host",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project",
-              "topic"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "project",
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_outside_openings"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "notification"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_delivery"
+              "kind": "permission_object"
             },
             "usage": "required"
           }
@@ -34229,116 +22957,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "host",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "available_places"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "place_template"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_hosts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_machines"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_mounts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "place_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -34370,83 +22995,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "outside_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_hosts"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_publishers"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -34480,38 +23028,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restoration_resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restoration_unarchive"
-            },
-            "usage": "required"
-          },
-          {
             "action": "read",
             "resources": [
               "org",
@@ -34522,31 +23038,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "restored_node"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "restored_content"
             },
             "usage": "response_content"
           }
@@ -34794,11 +23285,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "project",
               "topic",
               "thread",
-              "environment",
-              "provider"
+              "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "setting_subjects"
             },
             "usage": "required"
@@ -34809,55 +23299,12 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org",
               "project",
               "topic",
-              "thread"
+              "thread",
+              "environment"
             ],
             "target": {
               "kind": "resolved",
-              "value": "setting_result"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_threads"
+              "value": "setting_subjects"
             },
             "usage": "response_content"
           }
@@ -34945,11 +23392,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "project",
               "topic",
               "thread",
-              "environment",
-              "provider"
+              "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "setting_subjects"
             },
             "usage": "required"
@@ -34960,55 +23406,12 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org",
               "project",
               "topic",
-              "thread"
+              "thread",
+              "environment"
             ],
             "target": {
               "kind": "resolved",
-              "value": "setting_result"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "setting_threads"
+              "value": "setting_subjects"
             },
             "usage": "response_content"
           }
@@ -35124,24 +23527,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
+              "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -35659,7 +24047,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "legacy_tokens": true,
         "operation": "NotificationChannelList.available",
         "name": "available",
-        "selector": "channels reaching the caller, with configuration only under the native editor gate",
+        "selector": "channels offered to the caller without management fields",
         "facets": [
           {
             "action": "read",
@@ -35669,21 +24057,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "system"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "available_channels"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -35704,17 +24081,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "channel_owner"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -35786,17 +24152,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "channel_owner"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
             },
             "usage": "response_content"
           }
@@ -35905,90 +24260,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "system"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ObjectHomeSet",
-    "method": "PUT",
-    "path": "/{object}/{id}/home",
-    "title": "Moves a resource within its root to a managed home and retains that manual choice.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ObjectHomeSet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "destination_home"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ObjectTagsSet",
-    "method": "PUT",
-    "path": "/{object}/{id}/tags",
-    "title": "Replaces the display tags of an existing resource using its home catalogue.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ObjectTagsSet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
             },
             "usage": "required"
           }
@@ -36223,7 +24494,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "operation_subjects"
             },
             "usage": "required"
@@ -36263,73 +24534,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_resource"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "agent_created_threads"
             },
             "usage": "response_content"
           }
@@ -36439,8 +24643,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "chat_home"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -36452,72 +24656,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_or_existing_chat"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "chat_inspection_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_groups"
             },
             "usage": "response_content"
           }
@@ -36544,54 +24682,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -36607,54 +24701,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_name_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -36679,7 +24729,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "org_chats"
             },
             "usage": "required"
@@ -36721,22 +24771,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_resource"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "hierarchy_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -36775,22 +24809,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_org"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "hierarchy_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -36815,7 +24833,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
@@ -36855,50 +24873,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_resource"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "created_group_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "created_group_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "created_group_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "created_group_threads"
             },
             "usage": "response_content"
           }
@@ -37080,40 +25054,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "member_domain"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holdings_resources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "holdings_machines"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -37177,8 +25121,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "member_domain"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -37189,31 +25133,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "member_destination"
+              "value": "destination"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "member_account"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "member_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -37238,8 +25160,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "member_domain"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -37250,34 +25172,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "resolved",
-              "value": "member_destination"
+              "value": "destination"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "preview_accounts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "preview_places"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -37302,44 +25199,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "member_domain"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "member_effects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "member_destinations"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -37357,44 +25218,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "org"
             ],
             "target": {
-              "kind": "resolved",
-              "value": "member_domain"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "member_effects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "member_destinations"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           }
@@ -37463,73 +25288,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "membership_org"
             },
             "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "OrgMessageCreate",
-    "method": "POST",
-    "path": "/orgs/{id}/messages",
-    "title": "Sends an administrator message to this organization's members and sub-organizations.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "OrgMessageCreate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "OrgMessageList",
-    "method": "GET",
-    "path": "/orgs/{id}/messages",
-    "title": "Lists messages sent at this organization, newest first, for whoever may send there.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "OrgMessageList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -37789,33 +25547,15 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "org"
+              "org",
+              "project",
+              "topic",
+              "thread"
             ],
             "target": {
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "channel_caller_routes"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -37950,105 +25690,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "OrgOverviewGet",
-    "method": "GET",
-    "path": "/orgs/{id}/overview",
-    "title": "Opens the reader's organization overview through its native bounded readers.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "OrgOverviewGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_nodes"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "provider",
-              "environment",
-              "agent",
-              "machine",
-              "host",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "account"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_account"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_outside_openings"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "notification"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "overview_delivery"
             },
             "usage": "required"
           }
@@ -38321,35 +25962,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "hierarchy_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "tree_settings"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -39468,20 +27084,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "subject"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "notice_place_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -39855,35 +27457,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "account"
+              "account",
+              "org",
+              "project",
+              "topic",
+              "thread",
+              "document",
+              "chat"
             ],
             "target": {
               "kind": "resolved",
-              "value": "account_by_username"
+              "value": "account_and_activity_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_activity_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_activity_topics"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -39912,71 +27498,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "account_by_username"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_pins"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_context"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_places"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "profile_document_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -40341,51 +27862,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "ProviderCapabilityBackendList",
-    "method": "GET",
-    "path": "/providers/{id}/capability-backends",
-    "title": "Lists explicit capability backends of this provider at a governed place.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ProviderCapabilityBackendList",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "provider"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "capability_backend_place"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "ProviderCreate",
     "method": "POST",
     "path": "/providers",
@@ -40538,48 +28014,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ProviderDuplicate",
-    "method": "POST",
-    "path": "/providers/{id}/duplicate",
-    "title": "Duplicates readable provider configuration through its native creator, with independent credentials and runtime.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ProviderDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "provider"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -40740,20 +28174,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "provider_names_threads"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resource_read_context"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -41126,20 +28546,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "provider_names_threads"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resource_read_context"
             },
             "usage": "response_content"
           }
@@ -41562,104 +28968,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "ProviderMoveOut",
-    "method": "POST",
-    "path": "/providers/{id}/move-out",
-    "title": "Prepares the copy through its native initial Make and ends the source only at successful commit.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ProviderMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "provider"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ProviderMoveOutPreview",
-    "method": "POST",
-    "path": "/providers/{id}/move-out/preview",
-    "title": "Reviews the native source stop before moving a provider to another organization.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ProviderMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "provider"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "provider"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "ProviderPlanGet",
     "method": "GET",
     "path": "/providers/{id}/plan",
@@ -42010,16 +29318,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "permission_object"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -42583,9 +29881,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "action": "read",
             "resources": [
               "document",
-              "org",
-              "project",
-              "topic",
               "thread",
               "chat",
               "environment"
@@ -42593,50 +29888,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "reference_target"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_name_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_name_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_name_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "reference_name_threads"
             },
             "usage": "required"
           }
@@ -42662,36 +29913,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "resources": [
               "provider",
               "agent",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "requested_resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
               "environment",
               "host",
               "machine",
               "template",
               "mcp_server",
               "mount",
-              "skill",
-              "org",
-              "project",
-              "topic",
-              "thread"
+              "skill"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "resource_fact_names"
+              "kind": "resolved",
+              "value": "requested_resources"
             },
-            "usage": "response_content"
+            "usage": "required"
           }
         ]
       }
@@ -42728,61 +29962,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "requested_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_owned_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_people_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_people_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_people_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_people_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -42815,44 +29994,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "skill"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "requested_resources"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "library_owned_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill",
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resource_fact_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -43041,32 +30186,15 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "search_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -43088,32 +30216,15 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
               "thread",
               "document",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "search_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -44201,22 +31312,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "response_source"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
               "org"
             ],
             "target": {
@@ -44376,22 +31471,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "name": "snapshot_comment",
         "selector": "mode=snapshot; nonblank comment is supplied",
         "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "response_source"
-            },
-            "usage": "response_content"
-          },
           {
             "action": "read",
             "resources": [
@@ -44683,50 +31762,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "shared_source"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_threads"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -44795,50 +31830,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "shared_source"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "share_name_threads"
             },
             "usage": "response_content"
           }
@@ -45348,72 +32339,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_skill"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -45453,72 +32378,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_skill"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_threads"
             },
             "usage": "response_content"
           }
@@ -45573,72 +32432,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_skill"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -45680,72 +32473,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "created_skill"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_threads"
-            },
-            "usage": "response_content"
           }
         ]
       },
@@ -45785,72 +32512,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_skill"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_created_threads"
             },
             "usage": "response_content"
           }
@@ -45986,48 +32647,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "SkillDraftDuplicate",
-    "method": "POST",
-    "path": "/skills/{id}/draft/duplicate",
-    "title": "Duplicates the current unpublished skill draft under its existing native draft-reading rule.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillDraftDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "SkillDraftFileDelete",
     "method": "DELETE",
     "path": "/skills/{id}/draft/file",
@@ -46156,104 +32775,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "SkillDraftMoveOut",
-    "method": "POST",
-    "path": "/skills/{id}/draft/move-out",
-    "title": "Copies an unpublished skill through its native draft supplier and deletes the source in one act.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillDraftMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SkillDraftMoveOutPreview",
-    "method": "POST",
-    "path": "/skills/{id}/draft/move-out/preview",
-    "title": "Reviews a current unpublished native draft before an owner moves it.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillDraftMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "SkillDraftPublish",
     "method": "POST",
     "path": "/skills/{id}/draft/publish",
@@ -46291,48 +32812,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
     ]
   },
   {
-    "operation_id": "SkillDuplicate",
-    "method": "POST",
-    "path": "/skills/{id}/duplicate",
-    "title": "Duplicates readable current skill files through the native version or draft writer, with fresh destination privileges.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
     "operation_id": "SkillGet",
     "method": "GET",
     "path": "/skills/{id}",
@@ -46356,61 +32835,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
                 "parameter": "id",
                 "kind": "skill"
               }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_threads"
             },
             "usage": "required"
           }
@@ -46437,163 +32861,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "skill"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_groups"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_orgs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "skill_names_threads"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SkillMoveOut",
-    "method": "POST",
-    "path": "/skills/{id}/move-out",
-    "title": "Copies a published skill through its existing byte/version supplier and deletes its source atomically.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SkillMoveOutPreview",
-    "method": "POST",
-    "path": "/skills/{id}/move-out/preview",
-    "title": "Reviews the current published skill and source deletion before an owner moves it.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SkillMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "skill"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "skill"
-              }
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -46984,17 +33255,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "snapshot_environment"
             },
             "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "snapshot_origin"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -47016,152 +33276,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
               "environment",
               "provider",
               "host",
               "machine",
               "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
+              "thread",
+              "document"
             ],
             "target": {
               "kind": "resolved",
-              "value": "storage_namespace"
+              "value": "storage_subjects"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_records"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "cleanup_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "cleanup_content"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -47183,152 +33310,19 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
               "environment",
               "provider",
               "host",
               "machine",
               "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
+              "thread",
+              "document"
             ],
             "target": {
               "kind": "resolved",
-              "value": "storage_namespace"
+              "value": "storage_subjects"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_records"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "cleanup_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "cleanup_content"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -47350,261 +33344,17 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "manage",
             "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
               "environment",
               "provider",
               "host",
               "machine",
               "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
+              "thread",
+              "document"
             ],
             "target": {
               "kind": "resolved",
-              "value": "storage_namespace"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_records"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "document_container",
-              "environment",
-              "provider",
-              "host",
-              "machine",
-              "mount",
-              "skill",
-              "template",
-              "agent",
-              "mcp_server",
-              "account",
-              "system",
-              "export",
-              "import",
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "storage_names"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SummaryBatchGet",
-    "method": "POST",
-    "path": "/summaries/batch",
-    "title": "Reads stored paragraphs in a bounded source window; never creates or refreshes summaries.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SummaryBatchGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_targets"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_providers"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SummaryGet",
-    "method": "GET",
-    "path": "/summaries/{kind}/{id}",
-    "title": "Reads the current reader's paragraph without creating a cache or starting paid work.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SummaryGet",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "summary_target"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "provider"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_providers"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "SummaryRefresh",
-    "method": "POST",
-    "path": "/summaries/{kind}/{id}/refresh",
-    "title": "Accepts one original person-issued summary refresh with current source Read and provider Use.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "SummaryRefresh",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "summary_target"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "summary_inputs"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "thread",
-              "topic",
-              "document",
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "summary_target"
+              "value": "storage_subjects"
             },
             "usage": "required"
           }
@@ -47740,17 +33490,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "driver_administration"
-            },
-            "usage": "required"
-          },
-          {
             "action": "read",
             "resources": [
               "template"
@@ -47758,72 +33497,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_template"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_sources"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_groups"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "template_created_threads"
             },
             "usage": "response_content"
           }
@@ -47871,59 +33544,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               }
             },
             "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "TemplateDuplicate",
-    "method": "POST",
-    "path": "/templates/{id}/duplicate",
-    "title": "Duplicates a readable native template with current driver validation and fresh destination defaults.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "TemplateDuplicate",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "template"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_driver_administration"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -48038,83 +33658,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "home"
             },
             "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "driver_administration"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "execution_host"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -48196,126 +33739,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "template_names_threads"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "TemplateMoveOut",
-    "method": "POST",
-    "path": "/templates/{id}/move-out",
-    "title": "Atomically creates an independent native template at its destination and deletes the source.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "TemplateMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "template"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_driver_administration"
-            },
-            "usage": "required"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "TemplateMoveOutPreview",
-    "method": "POST",
-    "path": "/templates/{id}/move-out/preview",
-    "title": "Reads the native creation and deletion plan for an owner's cross-root template move.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "TemplateMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "template"
-              }
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "duplicate_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "duplicate_driver_administration"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "template"
-              }
             },
             "usage": "response_content"
           }
@@ -48430,17 +33853,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "terminal_environment"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "recording_audit_thread"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -48504,11 +33916,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "topic"
-              }
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -48531,7 +33940,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "chosen_binding"
             },
             "usage": "required"
@@ -48544,168 +33953,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved",
               "value": "created_thread"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_new_environment_homes"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_initial_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_file_sources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_agent_projects"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_agent_topics"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_agent_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "adopted_thread_content"
             },
             "usage": "response_content"
           }
@@ -48763,11 +34010,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "typed_path",
-              "value": {
-                "parameter": "id",
-                "kind": "topic"
-              }
+              "kind": "path",
+              "value": "id"
             },
             "usage": "required"
           },
@@ -48790,7 +34034,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "chosen_binding"
             },
             "usage": "required"
@@ -48798,23 +34042,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "topic",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "preview_content"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "preview_names_orgs"
+              "kind": "resolved",
+              "value": "created_thread"
             },
             "usage": "response_content"
           }
@@ -48863,25 +34095,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             ],
             "target": {
               "kind": "permission_object"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "retried_thread_content"
             },
             "usage": "response_content"
           }
@@ -48977,55 +34190,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "attachment_source"
             },
             "usage": "required"
           },
@@ -49164,6 +34333,18 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
+            "action": "write",
+            "resources": [
+              "agent",
+              "provider"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "chosen_binding"
+            },
+            "usage": "required"
+          },
+          {
             "action": "read",
             "resources": [
               "thread"
@@ -49171,25 +34352,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "environment",
-              "agent",
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "bound_thread_content"
             },
             "usage": "response_content"
           }
@@ -49416,61 +34578,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
           }
         ]
       }
@@ -49551,17 +34658,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "creator_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_reader_environments"
             },
             "usage": "required"
           },
@@ -49851,8 +34947,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "placement_environments"
+              "kind": "resolved",
+              "value": "chosen_environment"
             },
             "usage": "required"
           },
@@ -49864,25 +34960,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "environment",
-              "agent",
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "placed_thread_content"
             },
             "usage": "response_content"
           }
@@ -49928,8 +35005,20 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "legacy_tokens": true,
         "operation": "ThreadForkCreate.fork",
         "name": "fork",
-        "selector": "the native result creates a thread",
+        "selector": "result creates a new thread",
         "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread",
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "source_material"
+            },
+            "usage": "required"
+          },
           {
             "action": "manage",
             "resources": [
@@ -49942,47 +35031,24 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
+            "action": "write",
             "resources": [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "resolved",
+              "value": "created_threads"
             },
             "usage": "response_content"
           }
@@ -49992,12 +35058,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "legacy_tokens": true,
         "operation": "ThreadForkCreate.switch",
         "name": "switch",
-        "selector": "the native result replaces execution",
+        "selector": "result changes existing execution binding",
         "facets": [
           {
             "action": "manage",
             "resources": [
-              "thread"
+              "thread",
+              "environment"
             ],
             "target": {
               "kind": "path",
@@ -50006,47 +35073,28 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
+            "action": "write",
             "resources": [
-              "thread"
+              "agent",
+              "provider",
+              "environment",
+              "machine",
+              "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -50068,7 +35116,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "selector": "",
         "facets": [
           {
-            "action": "manage",
+            "action": "read",
             "resources": [
               "thread"
             ],
@@ -50084,42 +35132,30 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "path",
+              "value": "id"
+            },
+            "usage": "required"
+          },
+          {
+            "action": "write",
+            "resources": [
+              "thread"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "resolved",
+              "value": "created_thread"
             },
             "usage": "response_content"
           }
@@ -50138,8 +35174,20 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "legacy_tokens": true,
         "operation": "ThreadForkPreflight.fork",
         "name": "fork",
-        "selector": "the native result creates a thread",
+        "selector": "result creates a new thread",
         "facets": [
+          {
+            "action": "read",
+            "resources": [
+              "thread",
+              "environment"
+            ],
+            "target": {
+              "kind": "resolved",
+              "value": "source_material"
+            },
+            "usage": "required"
+          },
           {
             "action": "manage",
             "resources": [
@@ -50152,47 +35200,24 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
+            "action": "write",
             "resources": [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "resolved",
+              "value": "created_threads"
             },
             "usage": "response_content"
           }
@@ -50202,12 +35227,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
         "legacy_tokens": true,
         "operation": "ThreadForkPreflight.switch",
         "name": "switch",
-        "selector": "the native result replaces execution",
+        "selector": "result changes existing execution binding",
         "facets": [
           {
             "action": "manage",
             "resources": [
-              "thread"
+              "thread",
+              "environment"
             ],
             "target": {
               "kind": "path",
@@ -50216,47 +35242,28 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
+            "action": "write",
             "resources": [
-              "thread"
+              "agent",
+              "provider",
+              "environment",
+              "machine",
+              "template"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
             "resources": [
-              "thread",
-              "environment"
+              "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
+              "kind": "path",
+              "value": "id"
             },
             "usage": "response_content"
           }
@@ -51315,271 +36322,24 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_side_lanes"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_destinations"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_side_lanes"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "environment",
-              "agent",
-              "provider",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_thread_content"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ThreadMoveOut",
-    "method": "POST",
-    "path": "/threads/{id}/move-out",
-    "title": "Confirms the same private native Move preflight; the original ends only in its successful fork commit.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ThreadMoveOut",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "path",
-              "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
-            },
-            "usage": "required"
-          },
-          {
             "action": "write",
             "resources": [
               "thread"
             ],
             "target": {
               "kind": "resolved",
-              "value": "move_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_deleted_resources"
+              "value": "destination"
             },
             "usage": "required"
           },
           {
             "action": "read",
-            "resources": [
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
-            },
-            "usage": "response_content"
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "operation_id": "ThreadMoveOutPreview",
-    "method": "POST",
-    "path": "/threads/{id}/move-out/preview",
-    "title": "Plans a native full conversation fork and its original owner-only deletion as one act.",
-    "delegation": "business",
-    "variants": [
-      {
-        "legacy_tokens": true,
-        "operation": "ThreadMoveOutPreview",
-        "name": "",
-        "selector": "",
-        "facets": [
-          {
-            "action": "manage",
             "resources": [
               "thread"
             ],
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_copied_pages"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "write",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "move_destination"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "provider",
-              "agent",
-              "environment",
-              "host",
-              "machine",
-              "template",
-              "mcp_server",
-              "mount",
-              "skill"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_deleted_resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_subjects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine",
-              "host",
-              "template",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "fork_content"
             },
             "usage": "response_content"
           }
@@ -51612,24 +36372,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_side_lanes"
-            },
-            "usage": "required"
-          },
-          {
             "action": "write",
             "resources": [
               "thread"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "move_destinations"
+              "kind": "resolved",
+              "value": "destination"
             },
             "usage": "required"
           },
@@ -51641,32 +36390,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_side_lanes"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "move_review_content"
             },
             "usage": "response_content"
           }
@@ -51724,52 +36447,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "id"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "provider",
-              "agent",
-              "environment",
-              "system",
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_controls"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic",
-              "schedule"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_schedules"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -51935,87 +36612,9 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "thread"
             ],
             "target": {
-              "kind": "path",
-              "value": "id"
+              "kind": "permission_object"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "request_environment"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_hosts"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_publishers"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_orgs"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "project"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_projects"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "topic"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_topics"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "opening_names_threads"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -52053,61 +36652,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "path",
               "value": "id"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
             },
             "usage": "required"
           }
@@ -52384,85 +36928,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "upload"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "thread"
             ],
             "target": {
               "kind": "resolved",
               "value": "created_thread"
-            },
-            "usage": "response_content"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document",
-              "agent",
-              "provider",
-              "environment",
-              "machine"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "side_thread_content"
             },
             "usage": "response_content"
           }
@@ -52531,17 +37001,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "value": "environment"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved",
-              "value": "snapshot_reply_environment"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -52566,19 +37025,8 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "snapshot_governors"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "snapshot_origins"
+              "kind": "resolved",
+              "value": "thread_environment"
             },
             "usage": "required"
           }
@@ -53145,17 +37593,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "usage": "required"
           },
           {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_reader_environments"
-            },
-            "usage": "required"
-          },
-          {
             "action": "read",
             "resources": [
               "environment"
@@ -53358,40 +37795,10 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "results"
+              "kind": "resolved",
+              "value": "listed_environments"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template",
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document_container",
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -53451,17 +37858,6 @@ export const TOKEN_OPERATIONS: Operation[] = [
             "target": {
               "kind": "resolved_collection",
               "value": "creator_file_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "manage",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "creator_reader_environments"
             },
             "usage": "required"
           },
@@ -53936,54 +38332,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "host",
               "environment"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "results"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "host",
-              "machine",
-              "mount"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "resources"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "template"
-            ],
-            "target": {
               "kind": "resolved",
-              "value": "template"
+              "value": "available_places"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread",
-              "document_container",
-              "group"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "names"
-            },
-            "usage": "response_content"
           }
         ]
       }
@@ -54118,7 +38473,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
     "operation_id": "UploadBlobGet",
     "method": "GET",
     "path": "/uploads/{hash}",
-    "title": "Reads immutable bytes through the caller's custody or a currently readable saved source.",
+    "title": "Reads a finished upload only for the caller who holds its upload authority.",
     "delegation": "business",
     "variants": [
       {
@@ -54130,55 +38485,11 @@ export const TOKEN_OPERATIONS: Operation[] = [
           {
             "action": "read",
             "resources": [
-              "chat"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_chats"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_threads"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "document"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_documents"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "environment"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "message_source_environments"
-            },
-            "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
               "upload"
             ],
             "target": {
-              "kind": "resolved_collection",
-              "value": "message_retained_uploads"
+              "kind": "resolved",
+              "value": "upload"
             },
             "usage": "required"
           }
@@ -54688,8 +38999,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "topic",
               "thread",
               "provider",
-              "account",
-              "system"
+              "account"
             ],
             "target": {
               "kind": "resolved",
@@ -54722,8 +39032,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "topic",
               "thread",
               "provider",
-              "account",
-              "system"
+              "account"
             ],
             "target": {
               "kind": "resolved",
@@ -54945,7 +39254,7 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "account"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
@@ -54975,28 +39284,13 @@ export const TOKEN_OPERATIONS: Operation[] = [
               "topic",
               "thread",
               "document",
-              "document_container",
               "chat"
             ],
             "target": {
-              "kind": "resolved_collection",
+              "kind": "resolved",
               "value": "results"
             },
             "usage": "required"
-          },
-          {
-            "action": "read",
-            "resources": [
-              "org",
-              "project",
-              "topic",
-              "thread"
-            ],
-            "target": {
-              "kind": "resolved_collection",
-              "value": "shared_document_names"
-            },
-            "usage": "response_content"
           }
         ]
       }

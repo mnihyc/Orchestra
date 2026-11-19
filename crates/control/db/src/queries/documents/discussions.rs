@@ -380,26 +380,6 @@ pub async fn open(
     first: &NewComment<'_>,
     now: DateTime<Utc>,
 ) -> Result<Opened, DbError> {
-    open_before(conn, document, block, quote, author, first, now, || {
-        Ok::<(), DbError>(())
-    })
-    .await
-}
-/// The same replay/anchor prefix, with its opaque guard at the actual first sequence write.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the original native opening operands plus its opaque first-effect guard"
-)]
-pub async fn open_before<E: From<DbError>>(
-    conn: &mut Conn,
-    document: Id,
-    block: Id,
-    quote: &str,
-    author: Id,
-    first: &NewComment<'_>,
-    now: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<Opened, E> {
     // The replay and anchor checks must observe the writer that held this document before us.
     if super::lock(conn, document)
         .await?
@@ -423,12 +403,10 @@ pub async fn open_before<E: From<DbError>>(
     .bind(document)
     .bind(block)
     .fetch_optional(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
+    .await?;
     if live.is_none() {
         return Ok(Opened::NoSuchBlock);
     }
-    before()?;
     let Some(seq) = super::next_seq(conn, document).await? else {
         return Ok(Opened::NoSuchBlock);
     };
@@ -445,7 +423,7 @@ pub async fn open_before<E: From<DbError>>(
     .bind(now)
     .bind(seq)
     .execute(&mut *conn)
-    .await.map_err(DbError::from)?;
+    .await?;
     insert_comment(conn, document, discussion, author, first, now, seq).await?;
     super::notify(conn, document, seq).await?;
     let full = get(conn, document, discussion).await?;
@@ -504,21 +482,6 @@ pub async fn answer(
     new: &NewComment<'_>,
     now: DateTime<Utc>,
 ) -> Result<Answered, DbError> {
-    answer_before(conn, document, discussion, author, new, now, || {
-        Ok::<(), DbError>(())
-    })
-    .await
-}
-/// The same replay/discussion prefix, checked immediately before its first sequence write.
-pub async fn answer_before<E: From<DbError>>(
-    conn: &mut Conn,
-    document: Id,
-    discussion: Id,
-    author: Id,
-    new: &NewComment<'_>,
-    now: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<Answered, E> {
     // Serialize the replay check with other comments and the document sequence.
     if super::lock(conn, document)
         .await?
@@ -541,12 +504,10 @@ pub async fn answer_before<E: From<DbError>>(
     .bind(document)
     .bind(discussion)
     .fetch_optional(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
+    .await?;
     if exists.is_none() {
         return Ok(Answered::NoSuchDiscussion);
     }
-    before()?;
     let Some(seq) = super::next_seq(conn, document).await? else {
         return Ok(Answered::NoSuchDiscussion);
     };
@@ -761,39 +722,6 @@ pub async fn react(
         .await?;
     super::notify(conn, document, seq).await?;
     comment(conn, document, comment_id).await
-}
-
-/// Native content versions only, for validating an already produced comment/discussion answer.
-/// No comment text, quote, author metadata or replacement view is materialized.
-pub async fn source_versions(
-    conn: &mut Conn,
-    document: Id,
-    id: Id,
-    discussion: bool,
-) -> Result<Vec<(Id, Seq)>, DbError> {
-    if !discussion {
-        return Ok(sqlx::query_as(
-            "SELECT id,seq_updated FROM document_comments WHERE document_id=$1 AND id=$2",
-        )
-        .bind(document)
-        .bind(id)
-        .fetch_all(conn)
-        .await?);
-    }
-    let root: Option<(Id, Seq)> = sqlx::query_as(
-        "SELECT id,seq_updated FROM document_discussions WHERE document_id=$1 AND id=$2",
-    )
-    .bind(document)
-    .bind(id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    let Some(root) = root else {
-        return Ok(Vec::new());
-    };
-    let mut result = vec![root];
-    let comments:Vec<(Id,Seq)>=sqlx::query_as("SELECT id,seq_updated FROM document_comments WHERE document_id=$1 AND discussion_id=$2 ORDER BY created_at,id").bind(document).bind(id).fetch_all(conn).await?;
-    result.extend(comments);
-    Ok(result)
 }
 
 #[cfg(test)]

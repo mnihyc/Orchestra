@@ -26,9 +26,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use orch_connector_core::roles::{Call, Keys, RoleHandler, Services};
-use orch_driver_contract::imports::{
-    ImportRequest, NoteLevel as DriverNoteLevel, archive_references,
-};
+use orch_driver_contract::imports::{ImportRequest, NoteLevel as DriverNoteLevel};
 use orch_driver_contract::runtime::RuntimeKind as DriverKind;
 use orch_link_contract::commands::{
     Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode, NodeTemplateImport,
@@ -175,7 +173,6 @@ struct Inner {
     tools: Arc<ToolCache>,
     volumes: Arc<Volumes>,
     images: Arc<Images>,
-    desk: Arc<BlobDesk>,
     runtimes: Runtimes,
     facts: Arc<Facts>,
     reconciler: Arc<Reconciler>,
@@ -240,7 +237,7 @@ impl NodeRole {
             Arc::clone(&drivers),
             Arc::clone(&ledger),
             Arc::clone(&reports),
-            Arc::clone(&desk),
+            desk,
         ));
         let busy = Busy::new();
         let publisher = Arc::clone(&services.port_publisher);
@@ -287,7 +284,6 @@ impl NodeRole {
                 tools,
                 volumes,
                 images,
-                desk,
                 runtimes,
                 facts,
                 reconciler,
@@ -385,7 +381,6 @@ impl Inner {
 
     async fn template_import(
         &self,
-        command: orch_types::Id,
         body: NodeTemplateImport,
     ) -> Result<NodeTemplateImportResult, CommandError> {
         let host = self.drivers.get(&body.driver).ok_or_else(|| {
@@ -403,16 +398,6 @@ impl Inner {
                 ),
             ));
         }
-        let archives = archive_references(&body.values).map_err(|_| {
-            CommandError::new(
-                ErrorCode::Unsupported,
-                "an import archive must name a content hash",
-            )
-        })?;
-        let _announced = self.desk.announce(
-            command,
-            archives.into_iter().map(|archive| archive.hash).collect(),
-        );
         let proposal = host
             .contract()
             .import(&ImportRequest {
@@ -712,11 +697,10 @@ impl RoleHandler for NodeRole {
                 }
                 ensured.map(CommandResult::NodeImageEnsure)
             }
-            Command::NodeTemplateImport(body) => {
-                let proposal = node.template_import(id, body).await;
-                node.desk.finish(id).await;
-                proposal.map(CommandResult::NodeTemplateImport)
-            }
+            Command::NodeTemplateImport(body) => node
+                .template_import(body)
+                .await
+                .map(CommandResult::NodeTemplateImport),
             Command::NodeToolEnsure(body) => {
                 let _resources = node.runtimes.hold_resources().await;
                 let path = node

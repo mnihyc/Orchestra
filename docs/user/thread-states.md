@@ -1,9 +1,7 @@
 ---
-group: work
 title: Thread states
 screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /everything, /search, /inbox, /resources/providers/$id
 keywords: thread, icon, state, queued, held, finished, blocked, approval, unread
-summary: Read consistent thread states, unread results and supported background-work controls.
 ---
 
 # Thread states
@@ -57,6 +55,6 @@ With background wake off, **Results arrive with the next input**. Codex backgrou
 
 A continuation starts with **Woken by: Build web finished**. Several causes are separated by commas; a failure says **Review auth failed**. These labels come from the recorded tasks. A continuation waiting for access or model use shows the ordinary held-input reason with its cause. **N finished tasks waiting** means Stop is holding those wakes until the next accepted human input. It does not resume the ordinary Stop-held queue.
 
-**Stop** ends the foreground turn and holds its pending work. **End** stops one exact background task without Orch prompting the model. The harness may tell the model the task ended. End requires Interact and native support for that task kind. Where unsupported, the task says **Cannot be ended from here**. End opens a fresh native review before confirmation, so later work cannot be ended by an older task's button. Orch starts no continuation for an ended task; an unconfirmed End remains unknown until current facts confirm it.
+**Stop** ends the foreground turn and holds its pending work. **End** controls one exact background task, without sending a model instruction. End requires Interact and native support for that task kind. Where unsupported, the task says **Cannot be ended from here**. End opens a fresh native review before confirmation, so later work cannot be ended by an older task's button. An ended task does not wake the agent; an unconfirmed End remains unknown until current facts confirm it.
 
 **Lost with the session** records work lost when its owning session disappeared. A temporary disconnection is not a known empty list or proof of loss. Lost work is not restored from a transcript.

@@ -12,20 +12,19 @@ import { DAY_MS } from '@/lib/time';
 
 // ---------------------------------------------------------------- the scope
 
-/** What the figures are about: one's own use, current system administration, a place or a provider. */
-export type UsageScope = { kind: 'me' } | { kind: 'system' } | { kind: 'node'; id: string } | { kind: 'provider'; id: string };
+/** What the figures are about: one's own use, a place and everything below it, or what ran on a provider. */
+export type UsageScope = { kind: 'me' } | { kind: 'node'; id: string } | { kind: 'provider'; id: string };
 
 /** An identifier: the shape every node, provider and person has. */
 const IDENTIFIER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The scope as the API names it: `me`, `system`, `node:<id>` or `provider:<id>`. */
+/** The scope as the API names it: `me`, `node:<id>` or `provider:<id>`. */
 export function scopeText(scope: UsageScope): string {
-  return scope.kind === 'me' || scope.kind === 'system' ? scope.kind : `${scope.kind}:${scope.id}`;
+  return scope.kind === 'me' ? 'me' : `${scope.kind}:${scope.id}`;
 }
 
 /** The scope a text names; one's own use for a text that names none. */
 export function parseScope(text: unknown): UsageScope {
-  if (text === 'system') return { kind: 'system' };
   if (typeof text !== 'string') return { kind: 'me' };
   const at = text.indexOf(':');
   if (at < 0) return { kind: 'me' };
@@ -78,8 +77,6 @@ export const FILTERS = {
   topic: 'topic_id',
   person: 'user_id',
   model: 'model',
-  service:'service',
-  purpose:'purpose',
   provider: 'provider_id',
   agent: 'harness_kind',
   environment: 'environment_kind',
@@ -94,8 +91,6 @@ export const FILTER_DIMENSION: Record<FilterName, UsageDimension | undefined> = 
   effort: 'effort', tier: 'tier', tier_unknown: 'tier', program: 'program', outcome: undefined, turn: undefined, org: 'org', topic: 'topic',
   person: 'person',
   model: 'model',
-  service:'offering',
-  purpose:'purpose',
   provider: 'provider',
   agent: 'agent',
   environment: 'environment',
@@ -133,8 +128,6 @@ export interface UsageSearch {
   by?: UsageDimension;
   person?: string;
   model?: string;
-  service?:string;
-  purpose?:string;
   provider?: string;
   agent?: string;
   environment?: UsageEnvironmentKind;
@@ -145,8 +138,8 @@ export interface UsageSearch {
 }
 
 const BUCKETS: readonly UsageBucket[] = ['hour', 'day', 'week', 'month'];
-export const DIMENSIONS: readonly UsageDimension[] = ['person', 'model','offering','purpose', 'provider', 'agent', 'environment', 'effort', 'tier', 'program', 'org', 'project', 'topic', 'thread'];
-export const SPLITS: readonly Split[] = [...DIMENSIONS, 'token_kind', 'none'];
+const DIMENSIONS: readonly UsageDimension[] = ['person', 'model', 'provider', 'agent', 'environment', 'effort', 'tier', 'program', 'org', 'project', 'topic', 'thread'];
+const SPLITS: readonly Split[] = [...DIMENSIONS, 'token_kind', 'none'];
 
 function oneOf<Value extends string>(allowed: readonly Value[], value: unknown): Value | undefined {
   return allowed.find((candidate) => candidate === value);
@@ -186,7 +179,7 @@ export function readSearch(raw: Record<string, unknown>): UsageSearch {
     ...(raw.plan === 'current' || raw.plan === 'history' ? { plan: raw.plan } : {}),
     ...(raw.plan_metric === 'subscription' || raw.plan_metric === 'credits' ? { plan_metric: raw.plan_metric } : {}),
     ...(planBucket===undefined ? {} : {plan_bucket:planBucket}),
-    ...Object.fromEntries(['effort', 'tier', 'program', 'org', 'topic', 'turn','service','purpose'].flatMap((key) => key === 'tier' && (raw.tier_unknown === true || raw.tier_unknown === 'true') || text(raw[key]) === undefined ? [] : [[key, text(raw[key])]])),
+    ...Object.fromEntries(['effort', 'tier', 'program', 'org', 'topic', 'turn'].flatMap((key) => key === 'tier' && (raw.tier_unknown === true || raw.tier_unknown === 'true') || text(raw[key]) === undefined ? [] : [[key, text(raw[key])]])),
     ...(raw.tier_unknown === true || raw.tier_unknown === 'true' ? { tier_unknown: true } : raw.tier_unknown === false || raw.tier_unknown === 'false' ? { tier_unknown: false } : {}),
     ...(readOutcome(raw.outcome) === undefined ? {} : { outcome: readOutcome(raw.outcome) }),
     ...(scope === 'me' ? {} : { scope }),
@@ -210,8 +203,6 @@ export function readSearch(raw: Record<string, unknown>): UsageSearch {
 export function patchSearch(search: UsageSearch, patch: { [Member in keyof UsageSearch]?: UsageSearch[Member] | undefined }): UsageSearch {
   // An undefined member removes that choice; the remaining explicit choices retain precedence on a refresh.
   const merged: Record<string, unknown> = { ...search, ...patch };
-  if(patch.service!==undefined) merged.model=undefined;
-  if(patch.model!==undefined) merged.service=undefined;
   if (Object.hasOwn(patch, 'tier') && !Object.hasOwn(patch, 'tier_unknown')) merged.tier_unknown = undefined;
   if (Object.hasOwn(patch, 'tier_unknown') && !Object.hasOwn(patch, 'tier')) merged.tier = undefined;
   if(patch.view!==undefined && patch.view!==search.view) {
@@ -323,8 +314,6 @@ export function filtersOf(search: UsageSearch): UsageFilters {
     ...(search.topic === undefined ? {} : { topic_id: search.topic }),
     ...(search.person === undefined ? {} : { user_id: search.person }),
     ...(search.model === undefined ? {} : { model: search.model }),
-    ...(search.service===undefined?{}:{service:search.service}),
-    ...(search.purpose===undefined?{}:{purpose:search.purpose}),
     ...(search.provider === undefined ? {} : { provider_id: search.provider }),
     ...(search.agent === undefined ? {} : { harness_kind: search.agent }),
     ...(search.environment === undefined ? {} : { environment_kind: search.environment }),
@@ -335,7 +324,7 @@ export function filtersOf(search: UsageSearch): UsageFilters {
 
 /** The filters that are set, in the order the tables are listed. */
 export function activeFilters(search: UsageSearch): { name: FilterName; value: string | boolean }[] {
-  const names: FilterName[] = ['person', 'model','service','purpose', 'provider', 'agent', 'environment', 'effort', 'tier', 'tier_unknown', 'program', 'outcome', 'org', 'project', 'topic', 'thread', 'turn'];
+  const names: FilterName[] = ['person', 'model', 'provider', 'agent', 'environment', 'effort', 'tier', 'tier_unknown', 'program', 'outcome', 'org', 'project', 'topic', 'thread', 'turn'];
   return names.flatMap((name) => {
     const value = search[name];
     if (name === 'tier_unknown' && search.tier !== undefined) return [];
@@ -351,10 +340,9 @@ export function activeFilters(search: UsageSearch): { name: FilterName; value: s
  * table by thread is the reader's own use, or reports, and is asked for when it is opened.
  */
 export function tablesFor(scope: UsageScope, nodeKind: string | null): UsageDimension[] {
-  if (scope.kind === 'system') return ['org', 'person', 'model', 'offering', 'purpose', 'provider', 'agent', 'environment', 'project', 'topic', 'tier', 'effort', 'program'];
-  if (scope.kind === 'me') return ['project', 'model','offering','purpose', 'provider', 'agent', 'environment', 'tier', 'effort', 'program'];
-  if (scope.kind === 'provider') return ['person', 'model','offering','purpose', 'org', 'agent', 'environment', 'tier', 'effort', 'program'];
-  return ['person', 'model','offering','purpose', 'provider', 'agent', 'environment', ...(nodeKind === null || nodeKind === 'org' ? (['org', 'project'] as UsageDimension[]) : nodeKind === 'project' ? (['project'] as UsageDimension[]) : []), 'tier', 'effort', 'program'];
+  if (scope.kind === 'me') return ['project', 'model', 'provider', 'agent', 'environment', 'tier', 'effort', 'program'];
+  if (scope.kind === 'provider') return ['person', 'model', 'org', 'agent', 'environment', 'tier', 'effort', 'program'];
+  return ['person', 'model', 'provider', 'agent', 'environment', ...(nodeKind === null || nodeKind === 'org' ? (['org', 'project'] as UsageDimension[]) : nodeKind === 'project' ? (['project'] as UsageDimension[]) : []), 'tier', 'effort', 'program'];
 }
 
 /** Whether the tables by thread are offered at this depth: one's own use, a provider's and a place's reports have them, a place's summary has not. */
@@ -363,8 +351,7 @@ export function offersThreads(scope: UsageScope, depth: UsageDepth | null): bool
 }
 
 /** The dimension a filter can be set from, and the member of the key that carries its value; a dimension without a filter is not a row to click. */
-export function filterOf(dimension: UsageDimension,key?:{offering?:{kind:string}|null}): FilterName | null {
-  if(dimension==='offering') return key?.offering?.kind==='service'?'service':key?.offering?.kind==='model'?'model':null;
+export function filterOf(dimension: UsageDimension): FilterName | null {
   const found = (Object.entries(FILTER_DIMENSION) as [FilterName, UsageDimension][]).find(([, candidate]) => candidate === dimension);
   return found === undefined ? null : found[0];
 }

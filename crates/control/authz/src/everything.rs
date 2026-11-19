@@ -397,7 +397,7 @@ pub async fn prepare_scoped(
     for chat in anchor_chats {
         seeds.push(rows::AccessSeed {
             kind: "node".to_owned(),
-            id: chat.home(),
+            id: chat.node_id.unwrap_or(chat.org_id),
         });
         if chat.node_id.is_none() {
             seeds.push(rows::AccessSeed {
@@ -414,7 +414,7 @@ pub async fn prepare_scoped(
     let graph = &inventory.graph;
     inventory
         .direct_chats
-        .retain(|chat| graph.site_of(chat.home()).is_some());
+        .retain(|chat| graph.site_of(chat.org_id).is_some());
     let nodes: Vec<_> = inventory.graph.nodes().map(|node| node.id).collect();
     inventory.node_chats = chats::chats_of_nodes(conn, &nodes)
         .await?
@@ -498,15 +498,6 @@ async fn prepare_seeds(
         .map(|seed| seed.id)
         .collect();
     let direct_chats = chats::chats(conn, &direct_ids).await?;
-    graph
-        .extend(
-            conn,
-            &direct_chats
-                .iter()
-                .map(|chat| chat.home())
-                .collect::<Vec<_>>(),
-        )
-        .await?;
     let participants =
         orch_db::queries::search::participant_chats(conn, principal.user(), &direct_ids).await?;
     let mut sites: Vec<Site> = graph
@@ -788,26 +779,19 @@ impl Inventory {
             crate::chats::people_chat_access_in(conn, &frame, &direct_ids).await?;
         for chat in direct_chats {
             let member = participants.iter().find(|each| each.id == chat.id);
-            let root = frame.graph().site_of(chat.home());
+            let root = frame.graph().site_of(chat.org_id);
             // The same current membership rule as native Chat readers. Expiry removes
             // this contribution; an independent valid inspection still keeps its own door.
             let member_access = member.zip(root.as_ref()).is_some_and(|(member, root)| {
                 crate::chats::ordinary_participant(principal, root, member, Permission::ChatView)
             });
             let inspection = inspected_chats.get(&chat.id);
-            let administration = crate::chats::group_administration(&frame, &chat);
-            let public = crate::chats::public_reader(&frame, &chat);
-            let manager = member_access && member.is_some_and(|member| member.manager);
             let native = inspection.is_some_and(|access| access.admin_place.is_some());
             let allowed = match boundary {
                 Some(boundary) => boundary.chat(frame.graph(), &chat)?,
                 None => true,
             };
-            let view = allowed
-                && (member_access
-                    || public
-                    || administration.is_some()
-                    || (!searching && inspection.is_some()));
+            let view = allowed && (member_access || (!searching && inspection.is_some()));
             let participating = allowed && member_access && frame.follows_chat(chat.id);
             let archived = root.as_ref().is_some_and(Site::is_archived);
             if view {
@@ -819,29 +803,18 @@ impl Inventory {
             objects.insert(
                 chat.id.to_string(),
                 json!(Grant {
-                    admin_access: if !allowed
-                        || member_access
-                        || public
-                        || inspection.is_some_and(|access| access.admin_access.is_none())
-                    {
+                    admin_access: if !allowed || member_access {
                         None
                     } else {
-                        administration
-                            .as_ref()
-                            .or(inspection)
-                            .and_then(|access| access.admin_access)
+                        inspection.and_then(|access| access.admin_access)
                     },
                     participating,
                     view,
                     listed: view,
-                    named: allowed && (member_access || public || administration.is_some()),
-                    access: if allowed
-                        && (manager || administration.is_some() || native)
-                        && !archived
-                    {
+                    named: allowed && member_access,
+                    access: if allowed && native && !archived {
                         "manage"
                     } else if view
-                        && member_access
                         && !archived
                         && principal.caller().permits(Permission::ChatInteract)
                     {
@@ -852,7 +825,7 @@ impl Inventory {
                         "path_only"
                     }
                     .to_owned(),
-                    share: view && chat.kind == chats::KIND_GROUP,
+                    share: false,
                     settings: false,
                     chat: None,
                 }),

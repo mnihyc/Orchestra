@@ -6,7 +6,11 @@
 //! [`ExportPlan`]), then made ([`NodeExportCreate`], a job), and its [`Export`] is read, listed and fetched
 //! until it is removed. An archive holds what its person could export one by one and names nothing else.
 
-use crate::operations::OperationSpec as Op;
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
 
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -202,12 +206,6 @@ pub enum ExportState {
 /// An archive of what a person may read in a place: theirs alone to fetch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Export {
-    /// This private artifact was read through current browser administration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admin_access: Option<crate::access::AdminAccess>,
-    /// The actual export.json header, without package payloads or sealed values; absent until recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manifest: Option<orch_types::Json>,
     /// The archive's identifier.
     pub id: Id,
     /// The place it was made of; `null` once the place was purged, when the archive stays its person's until its
@@ -270,44 +268,52 @@ pub struct ChatExportGetQuery {
     pub files: Option<ChatExportFiles>,
 }
 
-/// The actual accepted job/archive identities without existing creator or job metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ExportCreationReceipt {
-    /// Identifies the sparse acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The job actually queued by this act.
-    pub id: Id,
-    /// The archive actually created by this act.
-    pub export_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The ordinary initial Job or its exact accepted identities when metadata Read is absent.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum ExportCreationResponse { Full(Job), Receipt(ExportCreationReceipt), }
-}
-
 crate::endpoints! {
     /// Exports a chat as a file: its written form or its messages as records, and with its files an archive of them.
     ChatExportGet: GET "/chats/{id}/export", Rule("chat.export on its node, with chat.view; or being in the direct or group chat"), query ChatExportGetQuery, none, raw, 200,
-        operation Op::facets(crate::chat_sources::EXPORT_FACETS);
+        operation Op::single(Read, &[Identity(I::Chat)], Target::Resolved("chat"));
     /// Says what an archive of a place would hold as far as the caller may read it, and what stands in its way. Nothing is made.
     NodeExportPreflight: POST "/nodes/{id}/exports/preflight", Permission("node.view"), none, json ExportRequest, json ExportPlan, 200,
-        operation Op::facets(&crate::export_sources::PREFLIGHT_FACETS);
+        operation Op::facets(&[Facet::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("export_sources"),
+        )]);
     /// Asks for an archive of what the caller may read in a place, written by a job; each thing in it is written by the caller's Export row.
-    NodeExportCreate: POST "/nodes/{id}/exports", Permission("node.view"), none, json ExportRequest, json ExportCreationResponse, 202,
-        operation Op::receipt(&Op::facets(&crate::export_sources::CREATE_FACETS));
+    NodeExportCreate: POST "/nodes/{id}/exports", Permission("node.view"), none, json ExportRequest, json Job, 202,
+        operation Op::facets(&[Facet::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Object(K::DocumentContainer),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("export_sources"),
+        )]);
     /// Lists the caller's own archives, newest first.
     MeExportList: GET "/me/exports", User, query PageQuery, none, json Page<Export>, 200,
-        operation Op::facets(&crate::artifact_sources::EXPORT_LIST_FACETS);
+        operation Op::single(Read, &[Identity(I::Export)], Target::Resolved("results"));
     /// Reads one of the caller's archives.
     ExportGet: GET "/exports/{id}", Rule("its person"), none, none, json Export, 200,
-        operation Op::facets(&crate::artifact_sources::EXPORT_GET_FACETS);
+        operation Op::single(Read, &[Identity(I::Export)], Target::Path("id"));
     /// Fetches an archive, as a zip named for the place and the day; it can be fetched again until it is removed.
     ExportDownload: GET "/exports/{id}/download", Rule("its person, in a browser session or with a token of theirs"), none, none, raw, 200,
-        operation Op::facets(&crate::artifact_sources::EXPORT_DOWNLOAD_FACETS);
+        operation Op::single(Read, &[Identity(I::Export)], Target::Path("id"));
     /// Removes an archive now; a job still writing it is cancelled.
     ExportDelete: DELETE "/exports/{id}", Rule("its person"), none, none, none, 204,
-        operation Op::facets(&crate::artifact_sources::EXPORT_DELETE_FACETS);
+        operation Op::single(Manage, &[Identity(I::Export)], Target::Path("id"));
 }
 
 #[cfg(test)]

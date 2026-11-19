@@ -174,9 +174,7 @@ def check(root: Path) -> list[str]:
     for directory in ('crates', 'apps', 'frontend/src'):
         for path in sorted((root / directory).rglob('*')):
             relative_path = path.relative_to(root)
-            # Test-only modules: a `tests` directory, or a module named `*_tests` (declared under #[cfg(test)]).
-            test_only = 'tests' in relative_path.parts or any(part.endswith('_tests') for part in relative_path.with_suffix('').parts)
-            if path.suffix not in ('.rs', '.ts', '.tsx') or test_only or 'generated' in relative_path.parts:
+            if path.suffix not in ('.rs', '.ts', '.tsx') or 'tests' in relative_path.parts or 'generated' in relative_path.parts:
                 continue
             relative = relative_path.as_posix()
             source = path.read_text()

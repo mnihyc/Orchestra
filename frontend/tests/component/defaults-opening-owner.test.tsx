@@ -9,7 +9,7 @@ import { nodeQuery } from '@/api/nodes';
 import { LiveQueryClient, queryClient } from '@/api/query';
 import { ChatPanel } from '@/features/chat/ChatPanel';
 import { ProjectSettings, ScopeEditor } from '@/features/settings/ScopeSettings';
-import { makeGroup, makeTab, setTabTarget, type Tab } from '@/features/workbench/layout';
+import { makeGroup, makeTab, type Tab } from '@/features/workbench/layout';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
 import { useWorkbench } from '@/features/workbench/store';
 import { ViewInstanceContext } from '@/features/workbench/instance';
@@ -41,7 +41,7 @@ function Slot({ tab }: { tab: Tab }) { useLayoutEffect(() => showViewOpening(tab
 function Editor({ id }: { id: string }) {
   const query = useQuery({ ...nodeQuery(id), enabled: false });
   const node = query.data;
-  return <>{node !== undefined && <output aria-label="Visible place">{node.name}</output>}{id === ACME.web ? <ProjectSettings projectId={id} section="defaults" /> : node?.kind === 'topic' ? <ScopeEditor node={node} /> : null}</>;
+  return <>{node !== undefined && <output aria-label="Visible place">{node.name}</output>}{id === ACME.web ? <ProjectSettings projectId={id} section="policies" /> : node?.kind === 'topic' ? <ScopeEditor node={node} /> : null}</>;
 }
 function draw({ contentShown = true, chatShown = true }: { contentShown?: boolean; chatShown?: boolean } = {}) {
   return show(<QueryClientProvider client={cache}>
@@ -55,7 +55,7 @@ async function mounted(options?: Parameters<typeof draw>[0]) { await act(async (
 async function prepare(kind: 'project' | 'topic', filtered = false) {
   const id = kind === 'project' ? ACME.web : ACME.fixLogin;
   const pathname = `/${kind}/${id}${kind === 'project' ? '/settings' : ''}`;
-  const search: Record<string, string> = { ...(kind === 'topic' ? { tab: 'settings' } : {}), section: 'defaults', ...(filtered ? { setting: 'agent.default_provider_id' } : {}) };
+  const search: Record<string, string> = { ...(kind === 'topic' ? { tab: 'settings' } : {}), section: 'policies', ...(filtered ? { setting: 'agent.default_provider_id' } : {}) };
   route.location = { pathname, search, searchStr: `?${new URLSearchParams(search)}`, href: `${pathname}?${new URLSearchParams(search)}` };
   content = makeTab('page', { href: route.location.href }); chat = makeTab('chat');
   const layout = { ...savedWorkbench.layout, main: { kind: 'split' as const, id: 'defaults-and-chat', direction: 'row' as const,
@@ -105,9 +105,6 @@ for (const kind of ['project', 'topic'] as const) {
 
   it(`keeps canonical ${kind} readers and makes NO Chat opening when Chat has no visible slot`, async () => {
     await prepare(kind); await mounted({ chatShown: false }); await screen.findByLabelText('Visible place');
-    await screen.findByRole('button', { name: i18n.t('settings.secrets.showNames') });
-    expect(count(`/api/v1/nodes/${metadata.node.id}/secrets`)).toBe(0);
-    await userEvent.click(screen.getByRole('button', { name: i18n.t('settings.secrets.showNames') }));
     await waitFor(() => expect(count(`/api/v1/nodes/${metadata.node.id}/secrets`)).toBe(1));
     expect(count(`/api/v1/nodes/${metadata.node.id}`)).toBe(1); expect(count(`/api/v1/nodes/${metadata.node.id}/chat-opening`)).toBe(0);
     expect(count('/api/v1/settings/registry')).toBe(1); expect(count(`/api/v1/nodes/${metadata.node.id}/settings`)).toBe(1);
@@ -130,7 +127,7 @@ it('does not preload filtered-out secret or provider readers from an initially f
   expect(requested?.searchParams.get('secret_names')).toBeNull(); expect(requested?.searchParams.get('default_provider_name')).toBeNull();
   expect(count('/api/v1/settings/registry')).toBe(1); expect(count(`/api/v1/nodes/${metadata.node.id}/settings`)).toBe(1);
   expect(count(`/api/v1/nodes/${metadata.node.id}/secrets`)).toBe(0);
-  expect(count(`/api/v1/providers/${providerId}`)).toBe(0);
+  expect(count(`/api/v1/providers/${providerId}`)).toBe(1);
 });
 
 for (const filter of ['local search', 'onlyHere'] as const) it(`does not re-request hidden metadata suppliers after ${filter} and opening invalidation`, async () => {
@@ -162,27 +159,4 @@ it('recovers the canonical visible editor when a cancelled first opening loses i
   await act(async () => { released.resolve(Response.json({ ...native, defaults: { ...metadata, node: { ...metadata.node, name: 'Late retired name' } } })); await Promise.resolve(); });
   expect(screen.getByLabelText('Visible place')).toHaveTextContent(metadata.node.name);
   expect(screen.getByLabelText('Visible place')).not.toHaveTextContent('Late retired name');
-});
-
-
-for (const change of ['list presentation', 'setting filter'] as const) it(`keeps admission scoped when ${change} changes during the native opening`, async () => {
-  await prepare('topic'); const started = deferred<undefined>(), released = deferred<Response>();
-  openingReply = () => { started.resolve(undefined); return released.promise; };
-  await mounted(); await started.promise;
-  const suffix = change === 'list presentation' ? '&_list=true&list=%7B%22usage-board.period%22%3A%22week%22%7D' : '&setting=agent.default_provider_id';
-  await act(async () => {
-    useWorkbench.setState((state) => ({ layout: setTabTarget(state.layout, content.id, { ...content.of, href: `${route.location.href}${suffix}` }) }));
-    released.resolve(Response.json({ ...native, defaults: metadata })); await Promise.resolve();
-  });
-  await screen.findByLabelText('Visible place');
-  const field = await screen.findByRole('combobox', { name: i18n.t('settingRegistry.agent.default_provider_id.title') });
-  const name = metadata.providers[0]?.provider?.name;
-  if (name === undefined) throw new Error('The native provider has its authorized name');
-  await waitFor(() => expect(field).toHaveValue(change === 'list presentation' ? name : i18n.t('places.providerDefault.selected')));
-  expect(count(`/api/v1/providers/${providerId}`)).toBe(0);
-  expect(count(`/api/v1/nodes/${metadata.node.id}/chat-opening`)).toBe(1);
-  if (change === 'list presentation') {
-    expect(count(`/api/v1/nodes/${metadata.node.id}`)).toBe(0);
-    expect(count(`/api/v1/nodes/${metadata.node.id}/settings`)).toBe(0);
-  }
 });

@@ -7,7 +7,7 @@ import { inspectLayout, type DuplicateAllowance } from '../../e2e/layout-rules-d
 import { LAYOUT_INPUT } from '../../e2e/layout-rules-helpers';
 import { executionDisplay } from '../doubles/thread-display';
 import { RUNS_ON } from '../doubles/fixtures';
-import { ACME, bodySent, replySent, scenario, signIn, arrived } from './support';
+import { ACME, bodySent, replySent, scenario, signIn } from './support';
 
 import { environmentReferenceAllowance } from './environment-reference-audit';
 
@@ -72,7 +72,7 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
 
     const tools = () => page.getByRole('region', { name: words.environmentTools.codex, exact: true });
     const consent = () => tools().getByRole('switch');
-    const opening = arrived(page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/environments/${RUNS_ON.workspace}/sync`));
+    const opening = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/environments/${RUNS_ON.workspace}/sync`);
     await cold(`/resources/environments/${RUNS_ON.workspace}?tab=tools`, tools, 'environment');
     let currentEnvironment = object(object(await (await opening).json()).environment);
     const environmentTab = page.getByRole('tablist', { name: words.workbench.areas.main, exact: true }).getByRole('tab', { selected: true });
@@ -98,21 +98,8 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     expect(typeof by.display_name).toBe('string');
     await expect(consent()).toHaveAccessibleName(words.environmentTools.anyVersionBy.replace('{{name}}', String(by.display_name)));
     await snapshot('environment-on');
-    // Capture the native bootstrap before delivery: the reload can retire its CDP body handle.
-    let received!: (value: Record<string, unknown>) => void;
-    const reopenedBootstrap = new Promise<Record<string, unknown>>((resolve) => { received = resolve; });
-    const bootstrapPath = '**/api/v1/me/bootstrap';
-    await page.route(bootstrapPath, async (route) => {
-      const response = await route.fetch(); expect(response.status()).toBe(200);
-      const startup = object(await response.json());
-      await route.fulfill({ response }); received(startup);
-    });
-    try {
-      await page.reload();
-      const startup = await reopenedBootstrap;
-      expect(object(startup.person).id).toBe(by.id);
-      expect(object(startup.admin_mode).as_admin).toBe(false);
-    } finally { await page.unroute(bootstrapPath); }
+    const reopenedAuthority = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/me/authority');
+    await page.reload(); expect((await reopenedAuthority).status()).toBe(200);
     await expect(consent()).toBeChecked(); await page.waitForLoadState('networkidle');
     await write(false); await expect(consent()).toHaveAccessibleName(words.environmentTools.anyVersion);
     await write(true);

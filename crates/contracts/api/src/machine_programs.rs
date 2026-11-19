@@ -105,26 +105,6 @@ pub struct MachinePrograms {
     pub can_manage: bool,
 }
 
-/// A completed native registry operation without retained program or machine details.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct MachineProgramsReceipt {
-    /// Identifies the restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The physical Machine whose native program operation completed.
-    pub machine_id: orch_types::Id,
-}
-
-crate::common::full_or_receipt! {
-    /// Native registry content or the completed command's identity alone.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum MachineProgramsResponse {
-        /// Current registry and individual Machine content under this operation's Read.
-        Full(MachinePrograms),
-        /// The native registry operation completed without old content.
-        Receipt(MachineProgramsReceipt),
-    }
-}
-
 /// An operation through the connector's one program registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]

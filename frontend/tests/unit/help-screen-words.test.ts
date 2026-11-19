@@ -31,7 +31,6 @@ it('uses the most specific screen, while resource details keep their actual kind
   expect(screenAbout('/project/$projectId/settings/')).toBe('screens.projectSettings.about');
   expect(screenAbout('/help/$article/')).toBe('screens.helpArticle.about');
   expect(screenAbout('/settings/your-page/')).toBe('screens.profile.about');
-  expect(screenAbout('/messages/$id/')).toBe('screens.administratorMessage.about');
   expect(screenAbout('/unknown-screen/')).toBeUndefined();
 });
 

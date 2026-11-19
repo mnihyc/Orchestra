@@ -11,13 +11,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{Setup, World, eventually, queued, turn_ended};
+use common::{World, queued, turn_ended};
 use orch_agent_contract::history::NativeHistoryFact;
 use orch_authz::Caller;
 use orch_blob_contract::store::BlobStore;
 use orch_blob_local::LocalBlobStore;
 use orch_db::queries::agent_history as rows;
-use orch_engine::config::EngineConfig;
 use orch_link_contract::commands::{
     AgentHistoryManageResult, Command, CommandError, CommandKind as K, CommandResult, ErrorCode,
     FsMaterializeResult, SessionMode,
@@ -25,41 +24,6 @@ use orch_link_contract::commands::{
 use orch_link_contract::events::TurnOutcome;
 use orch_types::{Clock, Id, new_id};
 use serde_json::json;
-
-/// The cases of this program decide when a pass of the history runs and what it finds. The engine's own sweep takes
-/// the inventory's lease at its own pace (for a moment even when it has nothing to measure), so a pass of a case may
-/// find the lease held and do nothing, a count of the commands that ran may include the sweep's, and a state that a
-/// case asserts between its passes may be gone by then: the worlds of this program have no sweep of their own. One
-/// case keeps the engine's, to prove that it runs and measures.
-fn without_sweeps(config: &mut EngineConfig) {
-    config.agent_history_sweeps = false;
-}
-
-async fn quiet() -> World {
-    World::from_setup(Setup {
-        tune: Some(without_sweeps),
-        ..Setup::default()
-    })
-    .await
-}
-
-async fn quiet_with_clock(clock: Arc<dyn Clock>) -> World {
-    World::from_setup(Setup {
-        clock: Some(clock),
-        tune: Some(without_sweeps),
-        ..Setup::default()
-    })
-    .await
-}
-
-async fn quiet_observed() -> World {
-    World::from_setup(Setup {
-        observed: true,
-        tune: Some(without_sweeps),
-        ..Setup::default()
-    })
-    .await
-}
 
 fn serve_history(world: &World) -> Arc<Mutex<HashSet<String>>> {
     let removed = Arc::new(Mutex::new(HashSet::<String>::new()));
@@ -102,13 +66,6 @@ fn serve_history(world: &World) -> Arc<Mutex<HashSet<String>>> {
     removed
 }
 
-/// How many measurements the engine has asked the machine for, whoever asked. (`World::ran` counts the kinds that
-/// the world's own machine records; the handler that serves the history is the cases' own and records nothing, so
-/// the count of it is always nought.)
-fn asked(world: &World) -> usize {
-    world.commands.issued_commands("agent.history.manage").len()
-}
-
 async fn completed(world: &World) -> (Id, Id) {
     let thread = world.thread("Retained conversation").await;
     world
@@ -128,52 +85,10 @@ async fn completed(world: &World) -> (Id, Id) {
     (thread, world.segment_of(thread).await)
 }
 
-/// Runs inventory passes until the stored row of `segment` shows what the test needs of one. A pass yields to
-/// the pass that holds the inventory lease, and the engine's own sweep takes that lease every few hundred
-/// milliseconds (for a moment even when it has nothing to measure), so a single call does not promise that
-/// this caller's pass measured; the stored row is what a test may rely on.
-async fn inventory_until(
-    world: &World,
-    segment: Id,
-    what: &str,
-    settled: fn(&rows::History) -> bool,
-) {
-    eventually(what, || async move {
-        world.engine().inventory_agent_history().await.unwrap();
-        rows::get(&mut world.pool.acquire().await.unwrap(), segment)
-            .await
-            .unwrap()
-            .is_some_and(|history| settled(&history))
-    })
-    .await;
-}
-
-/// The refusal controls need the pass's actual result: the history measured and known to be Orch's own.
-async fn inventory_owned(world: &World, segment: Id) {
-    inventory_until(
-        world,
-        segment,
-        "native history ownership to be measured",
-        |history| history.owned && history.started_by_orch,
-    )
-    .await;
-}
-
-/// The size the scripted machine reports, stored by a pass that found the home available.
-async fn inventory_measured(world: &World, segment: Id) {
-    inventory_until(
-        world,
-        segment,
-        "native history size to be measured",
-        |history| history.bytes == Some(4096) && history.error.is_none(),
-    )
-    .await;
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batched_native_observations_preserve_aliases_stale_identity_and_failed_measurement_facts()
 {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (_, segment) = completed(&world).await;
     world.engine().inventory_agent_history().await.unwrap();
@@ -278,7 +193,7 @@ fn serve_native_generations(world: &World, missing: bool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_native_only_no_tools_side_keeps_its_needed_cache_after_seven_idle_days() {
     let clock = Arc::new(orch_testkit::clock::manual());
-    let world = quiet_with_clock(clock.clone()).await;
+    let world = World::with_clock(clock.clone()).await;
     let removed = serve_history(&world);
     let parent = world.thread("Parent context").await;
     let (side, segment) = completed(&world).await;
@@ -304,7 +219,7 @@ async fn a_native_only_no_tools_side_keeps_its_needed_cache_after_seven_idle_day
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unsaid_handoff_follows_a_resumed_alias_and_only_delivered_notices_are_cleared() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     serve_native_generations(&world, false);
     let (thread, segment) = completed(&world).await;
@@ -389,7 +304,7 @@ async fn an_unsaid_handoff_follows_a_resumed_alias_and_only_delivered_notices_ar
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_home_larger_than_one_metadata_page_uses_one_shared_native_inventory_pass() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
     // Cross the existing metadata page once without opening hundreds of model sessions.
@@ -453,7 +368,7 @@ async fn a_home_larger_than_one_metadata_page_uses_one_shared_native_inventory_p
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_successful_close_queues_a_stored_measurement_even_when_the_clock_does_not_move() {
-    let world = quiet_with_clock(Arc::new(orch_testkit::clock::manual())).await;
+    let world = World::with_clock(Arc::new(orch_testkit::clock::manual())).await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
     world.engine().inventory_agent_history().await.unwrap();
@@ -516,15 +431,14 @@ async fn a_successful_close_queues_a_stored_measurement_even_when_the_clock_does
             );
         }
     }
-    let observed = asked(&world);
-    assert!(observed > 0, "the passes above asked the machine");
+    let observed = world.ran(K::AgentHistoryManage);
     world
         .engine()
         .inventory_closed_agent_history()
         .await
         .unwrap();
     assert_eq!(
-        asked(&world),
+        world.ran(K::AgentHistoryManage),
         observed,
         "an unsupported home waits for the next full inventory instead of retrying every close sweep"
     );
@@ -532,110 +446,9 @@ async fn a_successful_close_queues_a_stored_measurement_even_when_the_clock_does
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_engines_own_sweep_measures_a_closed_session_without_being_asked() {
-    // The one world of this program that keeps the engine's scheduled sweep.
-    let world = World::new().await;
-    serve_history(&world);
-    let (thread, segment) = completed(&world).await;
-    // Nothing has measured the session yet: it was made a moment ago, and nothing has closed.
-    {
-        let mut conn = world.pool.acquire().await.unwrap();
-        let fresh = rows::get(&mut conn, segment).await.unwrap().unwrap();
-        assert_eq!(fresh.bytes, None, "not measured before the close");
-        assert!(
-            rows::closed_page(&mut conn, None, 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-    let before = asked(&world);
-    // A close that the machine acknowledged marks the session for a new measurement.
-    let command = new_id();
-    sqlx::query(
-        "INSERT INTO commands(id,machine_id,kind,body,state,deadline_at,created_at,updated_at)
-        VALUES($1,$2,'session.close.fenced',$3,'queued',$4,$4,$4)",
-    )
-    .bind(command)
-    .bind(world.machine_id)
-    .bind(json!({"thread_id":thread,"segment_id":segment}))
-    .bind(world.clock.now())
-    .execute(world.pool.pool())
-    .await
-    .unwrap();
-    sqlx::query("UPDATE commands SET state='succeeded',result='{}' WHERE id=$1")
-        .bind(command)
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
-    // The sweep asks the machine to measure the session, and what it is told is stored. A failure says which of the two
-    // did not happen, and what the database holds that decides each: the close it has to find, the lease it takes, the
-    // home it asks.
-    let began = std::time::Instant::now();
-    loop {
-        let was_asked = asked(&world) > before;
-        let mut conn = world.pool.acquire().await.unwrap();
-        let waiting = rows::closed_page(&mut conn, None, 10).await.unwrap().len();
-        let stored = rows::get(&mut conn, segment).await.unwrap();
-        if was_asked
-            && waiting == 0
-            && stored
-                .as_ref()
-                .is_some_and(|history| history.bytes == Some(4096))
-        {
-            break;
-        }
-        if began.elapsed() >= common::PATIENCE {
-            let natives: Vec<(i64, i64, i64)> =
-                sqlx::query_as("SELECT closes,measured,segments FROM agent_history_natives")
-                    .fetch_all(&mut *conn)
-                    .await
-                    .unwrap();
-            let leases: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-                "SELECT holder,until FROM job_leases WHERE name='agent-history-inventory'",
-            )
-            .fetch_all(&mut *conn)
-            .await
-            .unwrap();
-            let harnesses: Vec<(String, Option<String>)> =
-                sqlx::query_as("SELECT status,status_detail FROM harnesses")
-                    .fetch_all(&mut *conn)
-                    .await
-                    .unwrap();
-            let commands: Vec<(String, String, i64)> = sqlx::query_as(
-                "SELECT kind,state,count(*) FROM commands GROUP BY kind,state ORDER BY kind,state",
-            )
-            .fetch_all(&mut *conn)
-            .await
-            .unwrap();
-            let row = stored.map(|history| {
-                (
-                    history.bytes,
-                    history.error,
-                    history.owned,
-                    history.started_by_orch,
-                    history.measure_revision,
-                )
-            });
-            panic!(
-                "the engine's own sweep did not measure the closed session within {:?}: the machine was asked {} time(s) \
-                 since the close, {waiting} closed session(s) wait; the segment (bytes, error, owned, started by Orch, \
-                 closes) {row:?}; the identities (closes, measured, segments) {natives:?}; the inventory lease {leases:?}; \
-                 the harnesses (status, detail) {harnesses:?}; the commands (kind, state, count) {commands:?}",
-                common::PATIENCE,
-                asked(&world) - before,
-            );
-        }
-        drop(conn);
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    world.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_history() {
     let clock = Arc::new(orch_testkit::clock::manual());
-    let world = quiet_with_clock(clock.clone()).await;
+    let world = World::with_clock(clock.clone()).await;
     let removed = serve_history(&world);
     let (thread, segment) = completed(&world).await;
     world
@@ -670,7 +483,7 @@ async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_histor
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn archived_and_recently_deleted_threads_are_included_in_idle_history_removal() {
     let clock = Arc::new(orch_testkit::clock::manual());
-    let world = quiet_with_clock(clock.clone()).await;
+    let world = World::with_clock(clock.clone()).await;
     let removed = serve_history(&world);
     let (archived, archived_segment) = completed(&world).await;
     let (deleted, deleted_segment) = completed(&world).await;
@@ -716,10 +529,10 @@ async fn archived_and_recently_deleted_threads_are_included_in_idle_history_remo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_observation_cannot_remove_history_after_a_new_turn_won_the_thread_lock() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
-    inventory_owned(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     let observed = rows::get(&mut world.pool.acquire().await.unwrap(), segment)
         .await
         .unwrap()
@@ -742,22 +555,16 @@ async fn an_observation_cannot_remove_history_after_a_new_turn_won_the_thread_lo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unavailable_home_keeps_its_last_size_and_reports_why_it_cannot_be_removed() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (_thread, segment) = completed(&world).await;
-    inventory_measured(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     sqlx::query("UPDATE segments SET machine_id=NULL WHERE id=$1")
         .bind(segment)
         .execute(world.pool.pool())
         .await
         .unwrap();
-    inventory_until(
-        &world,
-        segment,
-        "the missing machine to be reported",
-        |history| history.error.as_deref() == Some("history.machine_unavailable"),
-    )
-    .await;
+    world.engine().inventory_agent_history().await.unwrap();
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     assert_eq!(history.bytes, Some(4096));
@@ -776,12 +583,10 @@ async fn an_unavailable_home_keeps_its_last_size_and_reports_why_it_cannot_be_re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn measuring_an_unavailable_harness_never_starts_it_or_runs_its_attach_commands() {
-    // Observed beforehand: the first read of an unread subscription starts its harness, and once
-    // the harness is marked unavailable below, that read would be a start nothing here asked for.
-    let world = quiet_observed().await;
+    let world = World::new().await;
     serve_history(&world);
     let (_thread, segment) = completed(&world).await;
-    inventory_measured(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     let starts = world.ran(K::AgentStart);
     let hooks = world.ran(K::UnitAfterUp);
     sqlx::query("UPDATE harnesses SET status='offline' WHERE provider_id=$1")
@@ -789,13 +594,7 @@ async fn measuring_an_unavailable_harness_never_starts_it_or_runs_its_attach_com
         .execute(world.pool.pool())
         .await
         .unwrap();
-    inventory_until(
-        &world,
-        segment,
-        "the unavailable harness to be reported",
-        |history| history.error.as_deref() == Some("history.measurement_unavailable"),
-    )
-    .await;
+    world.engine().inventory_agent_history().await.unwrap();
     assert_eq!(world.ran(K::AgentStart), starts);
     assert_eq!(world.ran(K::UnitAfterUp), hooks);
     let history = rows::get(&mut world.pool.acquire().await.unwrap(), segment)
@@ -813,7 +612,7 @@ async fn measuring_an_unavailable_harness_never_starts_it_or_runs_its_attach_com
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn another_conversation_naming_the_same_native_history_protects_it() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
     let (_other, alias) = completed(&world).await;
@@ -858,10 +657,10 @@ async fn another_conversation_naming_the_same_native_history_protects_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal() {
     for plan in [false, true] {
-        let world = quiet().await;
+        let world = World::new().await;
         serve_history(&world);
         let (thread, segment) = completed(&world).await;
-        inventory_owned(&world, segment).await;
+        world.engine().inventory_agent_history().await.unwrap();
         let mut conn = world.pool.acquire().await.unwrap();
         let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
         sqlx::query("INSERT INTO approvals(id,kind,thread_id,node_id,title,request,required_permission) VALUES($1,'harness',$2,$2,'Waiting',$3,'')")
@@ -873,7 +672,7 @@ async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal(
         drop(conn);
         world.shutdown().await;
     }
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
     let (active, _) = world.running_turn(thread, "A turn before Stop").await;
@@ -897,7 +696,7 @@ async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal(
     world.wait_state(thread, "idle").await;
     world.wait_followed_up(thread).await;
     assert!(world.sync(thread).await.thread.queue.held);
-    inventory_owned(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     assert_eq!(world.input_state(input.input.id).await.0, "pending");
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
@@ -911,7 +710,7 @@ async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_native_dependencies_and_unowned_history_refuse_removal() {
-    let world = quiet().await;
+    let world = World::new().await;
     let (thread, segment) = completed(&world).await;
     let mut conn = world.pool.acquire().await.unwrap();
     let unowned = rows::get(&mut conn, segment).await.unwrap().unwrap();
@@ -949,10 +748,10 @@ async fn retained_native_dependencies_and_unowned_history_refuse_removal() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_native_creation_and_open_receipts_protect_their_exact_child_history() {
     use orch_agent_contract::history::{NativeInputPrefix, NativePrefixOpened, NativePrefixSource};
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
-    inventory_owned(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     let opened = NativePrefixOpened {
@@ -1018,7 +817,7 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
     use orch_engine::adoption::Adoption;
     use orch_link_contract::commands::{AgentDiscoverSessionsResult, AgentReadSessionResult};
 
-    let world = quiet_observed().await;
+    let world = World::observed().await;
     let removed = serve_history(&world);
     serve_native_generations(&world, false);
     let native = "external-native-history";
@@ -1051,17 +850,6 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
             report: ReportBuilder::new().finish(Fidelity::Lossless),
         }))
     });
-    orch_db::queries::access::testing::add_entry(
-        &mut world.pool.acquire().await.unwrap(),
-        &orch_db::queries::access::PageKey::new("agent", world.agent, "live"),
-        "any",
-        "agent.use",
-        ("user", Some(world.ada), None),
-        None,
-        world.clock.now(),
-    )
-    .await
-    .unwrap();
     let adopted = world
         .engine()
         .adopt_thread(
@@ -1102,13 +890,7 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
             .started_by_orch
     );
     drop(conn);
-    inventory_until(
-        &world,
-        segment,
-        "the adopted history to be reported as not Orch's own",
-        |history| history.error.as_deref() == Some("history.not_owned"),
-    )
-    .await;
+    world.engine().inventory_agent_history().await.unwrap();
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
     assert_eq!(history.native_session_ref, native);
@@ -1131,10 +913,10 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_outstanding_native_command_holds_admission_through_a_server_restart() {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
-    inventory_owned(&world, segment).await;
+    world.engine().inventory_agent_history().await.unwrap();
     let mut tx = world.pool.begin().await.unwrap();
     let observed = rows::get(&mut tx, segment).await.unwrap().unwrap();
     assert!(
@@ -1169,7 +951,7 @@ async fn an_outstanding_native_command_holds_admission_through_a_server_restart(
 }
 
 async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
-    let world = quiet().await;
+    let world = World::new().await;
     serve_history(&world);
     serve_native_generations(&world, missing);
     let directory = tempfile::tempdir().unwrap();

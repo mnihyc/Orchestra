@@ -22,13 +22,9 @@ struct SnapshotCommands {
 
 #[async_trait]
 impl Commands for SnapshotCommands {
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<crate::commands::BeforeCommand<'_>>,
-    ) -> Result<(), CommandsError> {
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
         let replay = command.id == self.id;
-        self.inner.issue_prepared(command, before).await?;
+        self.inner.issue(command).await?;
         // No second-status dependency: both early-Accepted and the ACK-race path
         // release when the runner elects to consume this already retained frame.
         if replay {

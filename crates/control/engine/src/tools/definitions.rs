@@ -11,7 +11,7 @@
 //!
 //! **A description is a text like any other that Orch says to an agent**, and a place may replace it: the key of the
 //! text is `tool_` and the tool's name in `agent.messages` ([`message_key`]). Nothing else about a definition is a
-//! setting; shared search also advertises its resolved work budgets.
+//! setting.
 //!
 //! **A call that cannot be done is answered, not failed.** A refusal is a result marked as an error, so that the
 //! model sees it and can correct itself, and it is one line that begins with its code and says what to do instead
@@ -23,7 +23,6 @@
 //! a minute; beyond it a call answers `rate_limited` with the seconds to wait ([`CallRate`]). The window is kept in
 //! memory: it exists to stop a loop, and a process that starts anew forgets at most a minute of it.
 
-use super::search_budgets::SearchBudgets;
 use crate::tools::texts;
 use chrono::{DateTime, Duration, Utc};
 use orch_agent_contract::descriptor::SideReading;
@@ -39,8 +38,6 @@ pub const SERVER_NAME: &str = orch_agent_contract::loopback::ORCH_SERVER;
 /// The tools the engine has built that a thread may enable. A thread is offered those of `orch_tools.enabled` that are
 /// among them, and no others: a tool whose behaviour another part writes joins this list when that part does. `goal` is
 /// not among them, since a goal gives it and a setting does not.
-pub(crate) const IMAGE_DESCRIPTION: &str = "Generate images with the image service explicitly selected for this thread. Give prompt and output_paths, one relative workspace path for each requested image. options are the selected backend's declared image options; the API model, prompt and count come from the selected offering and this request; hosted image options follow its declaration. Images remain in this thread even if a file cannot be written. Nothing overwrites a different existing file. To retry only delivery, give the returned delivery_ref and output_paths, without prompt or options; this never regenerates or bills the images again. The original source, current provider Use, service policy and caps govern new generation; a delivery retry needs current access to the retained result and destination. No paid fallback is inferred. Return the image references, actual file status and a reason when delivery is unavailable. Source images and an optional mask name files under your workspace; the selected backend must declare their materializer, and those paths stay local.";
-
 pub const BUILT: &[OrchTool] = &[
     OrchTool::ListShared,
     OrchTool::ReadShared,
@@ -57,11 +54,6 @@ pub const BUILT: &[OrchTool] = &[
     OrchTool::OpenPort,
     OrchTool::ClosePort,
     OrchTool::ListPortConnections,
-    OrchTool::OrchDocs,
-    OrchTool::Open,
-    OrchTool::Search,
-    OrchTool::FindOperation,
-    OrchTool::Read,
 ];
 
 /// What the key of a tool's description in `agent.messages` begins with.
@@ -145,13 +137,7 @@ impl ToolDefinition {
         }
         annotations.insert(
             "openWorldHint".to_owned(),
-            json!(matches!(
-                self.tool,
-                OrchTool::UseBrowser
-                    | OrchTool::WebSearch
-                    | OrchTool::WebFetch
-                    | OrchTool::ImageGeneration
-            )),
+            json!(self.tool == OrchTool::UseBrowser),
         );
         json!({
             "name": self.name,
@@ -173,13 +159,6 @@ pub fn message_key(tool: OrchTool) -> String {
 #[must_use]
 pub const fn shipped_description(tool: OrchTool) -> &'static str {
     match tool {
-        OrchTool::OrchDocs => orch_agent_contract::read_tools::Kind::Docs.description(),
-        OrchTool::Open => orch_agent_contract::read_tools::Kind::Open.description(),
-        OrchTool::Search => orch_agent_contract::read_tools::Kind::Search.description(),
-        OrchTool::FindOperation => {
-            orch_agent_contract::read_tools::Kind::FindOperation.description()
-        }
-        OrchTool::Read => orch_agent_contract::read_tools::Kind::Read.description(),
         OrchTool::ListShared => texts::LIST_SHARED,
         OrchTool::ReadShared => texts::READ_SHARED,
         OrchTool::SearchShared => texts::SEARCH_SHARED,
@@ -198,20 +177,11 @@ pub const fn shipped_description(tool: OrchTool) -> &'static str {
         OrchTool::ClosePort => texts::CLOSE_PORT,
         OrchTool::ListPortConnections => texts::LIST_PORT_CONNECTIONS,
         OrchTool::Goal => texts::GOAL,
-        OrchTool::Schedule => texts::SCHEDULE,
-        OrchTool::WebSearch => texts::WEB_SEARCH,
-        OrchTool::WebFetch => texts::WEB_FETCH,
-        OrchTool::ImageGeneration => IMAGE_DESCRIPTION,
     }
 }
 
 const fn title_of(tool: OrchTool) -> &'static str {
     match tool {
-        OrchTool::OrchDocs => orch_agent_contract::read_tools::Kind::Docs.title(),
-        OrchTool::Open => orch_agent_contract::read_tools::Kind::Open.title(),
-        OrchTool::Search => orch_agent_contract::read_tools::Kind::Search.title(),
-        OrchTool::FindOperation => orch_agent_contract::read_tools::Kind::FindOperation.title(),
-        OrchTool::Read => orch_agent_contract::read_tools::Kind::Read.title(),
         OrchTool::ListShared => "List what was shared",
         OrchTool::ReadShared => "Read a shared entry",
         OrchTool::SearchShared => "Search what was shared",
@@ -230,10 +200,6 @@ const fn title_of(tool: OrchTool) -> &'static str {
         OrchTool::ClosePort => "Close a port's opening",
         OrchTool::ListPortConnections => "List who reached a port",
         OrchTool::Goal => "Report on the goal",
-        OrchTool::Schedule => "Schedule future work",
-        OrchTool::WebSearch => "Search the web",
-        OrchTool::WebFetch => "Read a web page",
-        OrchTool::ImageGeneration => "Generate images",
     }
 }
 
@@ -249,22 +215,11 @@ const fn hints_of(tool: OrchTool) -> Hints {
         idempotent: None,
     };
     match tool {
-        OrchTool::OrchDocs
-        | OrchTool::Open
-        | OrchTool::Search
-        | OrchTool::FindOperation
-        | OrchTool::Read
-        | OrchTool::ListShared
+        OrchTool::ListShared
         | OrchTool::ReadShared
         | OrchTool::SearchShared
         | OrchTool::ListPorts
         | OrchTool::ListPortConnections => READS,
-        OrchTool::WebSearch | OrchTool::WebFetch => Hints {
-            read_only: true,
-            destructive: None,
-            idempotent: Some(false),
-        },
-        OrchTool::ImageGeneration => writes(false, false),
         OrchTool::OpenPort => writes(false, true),
         OrchTool::ClosePort => writes(true, true),
         OrchTool::DownloadShared => writes(false, true),
@@ -277,7 +232,6 @@ const fn hints_of(tool: OrchTool) -> Hints {
         | OrchTool::SendChatMessage
         | OrchTool::SendThreadMessage
         | OrchTool::Goal
-        | OrchTool::Schedule
         | OrchTool::Announce => writes(false, false),
     }
 }
@@ -395,71 +349,8 @@ fn goal_schema() -> Json {
     })
 }
 
-fn image_schema() -> Json {
-    // A new generation (prompt) or a delivery retry (delivery_ref), told in the descriptions and decided by the tool
-    // itself: no union at the root of a schema, which not every program that offers a tool to its model reads.
-    json!({
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "minLength": 1,
-                "description": "What to generate or how to edit the images; required for a new generation, left out when delivery_ref retries a delivery."
-            },
-            "output_paths": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "string",
-                    "minLength": 1
-                },
-                "description": "One relative workspace path for each image, each a distinct destination."
-            },
-            "options": {
-                "type": "object",
-                "description": "Declared image options; the API model, prompt and n are not option overrides."
-            },
-            "delivery_ref": {
-                "type": "string",
-                "format": "uuid",
-                "description": "The delivery_ref of an earlier result whose files were not confirmed; a retry gives only it and output_paths, without prompt, options, images or mask."
-            },
-            "max_bytes": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 40000,
-                "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000."
-            },
-            "images": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "minLength": 1
-                },
-                "description": "Relative workspace image paths; actual image bytes are supplied separately from local paths."
-            },
-            "mask": {
-                "type": "string",
-                "minLength": 1,
-                "description": "An optional relative workspace mask path, only for a declared mask-capable edit."
-            }
-        },
-        "required": [
-            "output_paths"
-        ],
-        "additionalProperties": false
-    })
-}
-
 fn input_schema_of(tool: OrchTool) -> Json {
     match tool {
-        OrchTool::OrchDocs => orch_agent_contract::read_tools::Kind::Docs.parameters(),
-        OrchTool::Open => orch_agent_contract::read_tools::Kind::Open.parameters(),
-        OrchTool::Search => orch_agent_contract::read_tools::Kind::Search.parameters(),
-        OrchTool::FindOperation => {
-            orch_agent_contract::read_tools::Kind::FindOperation.parameters()
-        }
-        OrchTool::Read => orch_agent_contract::read_tools::Kind::Read.parameters(),
         OrchTool::ListShared => object(
             vec![
                 ("limit", page_limit()),
@@ -887,12 +778,6 @@ fn input_schema_of(tool: OrchTool) -> Json {
                         "For a chat target only: the number of the message this answers, as read_shared shows it. Omit it for a thread.",
                     ),
                 ),
-                (
-                    "wake_idle",
-                    boolean(
-                        "For a thread target only: explicitly start an idle thread if its receiving topic allows broadcast.wake_idle. False when omitted.",
-                    ),
-                ),
             ],
             &["target"],
         ),
@@ -941,7 +826,7 @@ fn input_schema_of(tool: OrchTool) -> Json {
                 (
                     "wake_idle",
                     boolean(
-                        "Explicitly start a turn on idle threads where broadcast.wake_idle allows it. False when omitted; independent of broadcast.agent_options.",
+                        "Whether it starts a turn on a thread that is idle. Honoured only where the topic lets agents choose.",
                     ),
                 ),
             ],
@@ -1085,101 +970,6 @@ fn input_schema_of(tool: OrchTool) -> Json {
             &["opening"],
         ),
         OrchTool::Goal => goal_schema(),
-        OrchTool::Schedule => object(
-            vec![
-                (
-                    "command",
-                    choice(
-                        "Create (default), list or cancel a schedule on this thread.",
-                        &["create", "list", "cancel"],
-                    ),
-                ),
-                (
-                    "at",
-                    string("For create: a future RFC3339 instant, instead of in_seconds or cron."),
-                ),
-                (
-                    "in_seconds",
-                    bounded_integer(
-                        "For create: a positive delay in seconds, instead of at or cron.",
-                        1,
-                        i64::MAX,
-                    ),
-                ),
-                (
-                    "cron",
-                    bounded_string(
-                        "For create: five UTC fields: minute hour day-of-month month weekday (0 is Sunday); numbers, *, lists, ranges and /steps.",
-                        1,
-                        128,
-                    ),
-                ),
-                (
-                    "until",
-                    string(
-                        "Recurring end, inclusive RFC3339 instant; the place's duration default otherwise, not a cap.",
-                    ),
-                ),
-                (
-                    "max_runs",
-                    bounded_integer(
-                        "Positive occurrence count; the place's default otherwise, not a cap.",
-                        1,
-                        i64::MAX,
-                    ),
-                ),
-                (
-                    "note",
-                    bounded_string(
-                        "For create: the work your future input should do, visible in this thread.",
-                        1,
-                        TEXT_MAX_CHARS,
-                    ),
-                ),
-                (
-                    "id",
-                    string("For cancel: the schedule id returned by create or list."),
-                ),
-                (
-                    "cursor",
-                    string("For list: continue after this returned schedule id."),
-                ),
-                (
-                    "limit",
-                    bounded_integer("For list: rows per page, 20 by default.", 1, PAGE_MAX),
-                ),
-            ],
-            &[],
-        ),
-        OrchTool::ImageGeneration => image_schema(),
-        OrchTool::WebSearch => object(
-            vec![
-                (
-                    "query",
-                    bounded_string(
-                        "The search query; the selected backend's documented limits also apply.",
-                        1,
-                        QUERY_MAX_CHARS,
-                    ),
-                ),
-                (
-                    "count",
-                    bounded_integer(
-                        "The maximum results to show; the selected backend may permit fewer.",
-                        1,
-                        RESULTS_MAX,
-                    ),
-                ),
-            ],
-            &["query"],
-        ),
-        OrchTool::WebFetch => object(
-            vec![(
-                "url",
-                bounded_string("The public HTTP or HTTPS page to read.", 1, 8192),
-            )],
-            &["url"],
-        ),
         OrchTool::ListPortConnections => object(
             vec![
                 (
@@ -1227,55 +1017,17 @@ pub fn definition(tool: OrchTool, messages: &BTreeMap<String, String>) -> ToolDe
     {
         properties.remove("from");
     }
-    let mut description = messages
-        .get(&message_key(tool))
-        .map(|own| orch_agent_contract::tool_answers::supplied(own))
-        .unwrap_or_else(|| shipped_description(tool).to_owned());
-    if tool.is_owner_read() {
-        description.push(' ');
-        description.push_str(orch_agent_contract::read_tools::OWNER_CONDITION);
-    }
     ToolDefinition {
         tool,
         name: tool.name(),
         title: title_of(tool),
-        description,
+        description: messages
+            .get(&message_key(tool))
+            .map(|own| orch_agent_contract::tool_answers::supplied(own))
+            .unwrap_or_else(|| shipped_description(tool).to_owned()),
         input_schema,
         hints: hints_of(tool),
     }
-}
-
-/// The same per-call search budget used by validation and execution.
-#[must_use]
-pub fn definition_with_search_budgets(
-    tool: OrchTool,
-    messages: &BTreeMap<String, String>,
-    budgets: &SearchBudgets,
-) -> ToolDefinition {
-    let mut definition = definition(tool, messages);
-    if tool == OrchTool::SearchShared {
-        apply_search_budgets(&mut definition.input_schema, budgets);
-    }
-    definition
-}
-fn apply_search_budgets(schema: &mut Json, budgets: &SearchBudgets) {
-    schema["properties"]["query"]["maxLength"] = json!(budgets.query_chars);
-    schema["properties"]["max_results"]["maximum"] = json!(budgets.results);
-    schema["properties"]["context"]["maximum"] = json!(budgets.context);
-}
-/// Announcement choices and shared-search budgets from the same session snapshot.
-#[must_use]
-pub fn definition_at_with_search_budgets(
-    tool: OrchTool,
-    messages: &BTreeMap<String, String>,
-    options: &[String],
-    budgets: &SearchBudgets,
-) -> ToolDefinition {
-    let mut definition = definition_at(tool, messages, options);
-    if tool == OrchTool::SearchShared {
-        apply_search_budgets(&mut definition.input_schema, budgets);
-    }
-    definition
 }
 
 /// Advertises the place's delivery choices. Every audience still checks current recipient rights.
@@ -1296,6 +1048,9 @@ pub fn definition_at(
                 properties.remove("delivery");
             } else if let Some(delivery) = properties.get_mut("delivery") {
                 delivery["enum"] = json!(deliveries);
+            }
+            if !options.iter().any(|value| value == "wake_idle") {
+                properties.remove("wake_idle");
             }
         }
     }
@@ -1456,25 +1211,10 @@ impl Refusal {
 /// Looks at the arguments of a call and refuses the first that the tool's schema does not allow, in words that
 /// name it and say what is taken.
 pub fn check_arguments(tool: OrchTool, arguments: &Json) -> Result<(), Refusal> {
-    check_arguments_with_search_budgets(tool, arguments, &SearchBudgets::default())
-}
-/// Validate against exactly the resolved work budget passed to the tool executor.
-pub fn check_arguments_with_search_budgets(
-    tool: OrchTool,
-    arguments: &Json,
-    budgets: &SearchBudgets,
-) -> Result<(), Refusal> {
-    let mut schema = input_schema_of(tool);
-    if tool == OrchTool::SearchShared {
-        apply_search_budgets(&mut schema, budgets);
-    }
+    let schema = input_schema_of(tool);
     let Some(given) = arguments.as_object() else {
         if arguments.is_null() {
-            return check_arguments_with_search_budgets(
-                tool,
-                &Json::Object(serde_json::Map::new()),
-                budgets,
-            );
+            return check_arguments(tool, &Json::Object(serde_json::Map::new()));
         }
         return Err(Refusal::invalid(format!(
             "The arguments of {} are an object. {}",
@@ -1522,14 +1262,6 @@ pub fn check_arguments_with_search_budgets(
     {
         return Err(Refusal::invalid(
             "\"reply_to\" answers a chat message; it is only allowed when target.kind is \"chat\".",
-        ));
-    }
-    if tool == OrchTool::SendMessage
-        && given["target"]["kind"] == "chat"
-        && given.contains_key("wake_idle")
-    {
-        return Err(Refusal::invalid(
-            "\"wake_idle\" starts an agent turn; it is only allowed when target.kind is \"thread\".",
         ));
     }
     Ok(())
@@ -1736,54 +1468,6 @@ mod tests {
     }
 
     #[test]
-    fn search_explicit_parameters_can_exceed_shipped_defaults_with_one_resolved_budget() {
-        let budgets = SearchBudgets {
-            query_chars: 2000,
-            results: 201,
-            context: 6,
-        };
-        let declaration =
-            definition_with_search_budgets(OrchTool::SearchShared, &BTreeMap::new(), &budgets);
-        assert_eq!(
-            declaration.input_schema["properties"]["query"]["maxLength"],
-            2000
-        );
-        assert_eq!(
-            declaration.input_schema["properties"]["max_results"]["maximum"],
-            201
-        );
-        assert_eq!(
-            declaration.input_schema["properties"]["context"]["maximum"],
-            6
-        );
-        for args in [
-            json!({"query":"needle","max_results":201}),
-            json!({"query":"needle","context":6,"snippets":true}),
-            json!({"query":"x".repeat(1001)}),
-        ] {
-            assert!(
-                check_arguments(OrchTool::SearchShared, &args).is_err(),
-                "shipped budgets are unchanged"
-            );
-            assert!(
-                check_arguments_with_search_budgets(OrchTool::SearchShared, &args, &budgets)
-                    .is_ok(),
-                "{args}"
-            );
-        }
-        for args in [
-            json!({"query":"needle","max_results":202}),
-            json!({"query":"needle","context":7}),
-            json!({"query":"x".repeat(2001)}),
-        ] {
-            assert!(
-                check_arguments_with_search_budgets(OrchTool::SearchShared, &args, &budgets)
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
     fn every_tool_is_declared_with_a_closed_schema_whose_arguments_are_all_described_and_hints_that_are_true()
      {
         let all = all(&BTreeMap::new());
@@ -1824,14 +1508,8 @@ mod tests {
             let mcp = each.to_mcp();
             assert_eq!(
                 mcp["annotations"]["openWorldHint"],
-                matches!(
-                    each.tool,
-                    OrchTool::UseBrowser
-                        | OrchTool::WebSearch
-                        | OrchTool::WebFetch
-                        | OrchTool::ImageGeneration
-                ),
-                "browser and managed web tools reach the open web"
+                each.tool == OrchTool::UseBrowser,
+                "only the browser tool reaches the open web"
             );
             // A tool that only reads says nothing of destroying; one that changes something says both.
             assert_eq!(
@@ -1962,9 +1640,13 @@ mod tests {
         assert!(
             default.input_schema["properties"]
                 .get("wake_idle")
-                .is_some()
+                .is_none()
         );
-        let allowed = definition_at(OrchTool::Announce, &messages, &["steer".to_owned()]);
+        let allowed = definition_at(
+            OrchTool::Announce,
+            &messages,
+            &["steer".to_owned(), "wake_idle".to_owned()],
+        );
         assert_eq!(
             allowed.input_schema["properties"]["delivery"]["enum"],
             json!(["steer"])
@@ -2158,13 +1840,8 @@ mod tests {
                     OrchTool::SearchShared,
                     OrchTool::ListPorts,
                     OrchTool::ListPortConnections,
-                    OrchTool::OrchDocs,
-                    OrchTool::Open,
-                    OrchTool::Search,
-                    OrchTool::FindOperation,
-                    OrchTool::Read,
                 ],
-                "a reading side has no mutation or control path, including a workspace download: only the reading tools"
+                "a reading side has no mutation or control path, including a workspace download"
             );
         }
         assert!(offered(&enabled, Some(SideReading::NoTools)).is_empty());
@@ -2230,7 +1907,6 @@ mod tests {
         for arguments in [
             json!({"target":{"kind":"chat","path":"chat.md"},"text":"Report","reply_to":1}),
             json!({"target":{"kind":"thread","path":"Validate"},"files":["out/report.pdf"]}),
-            json!({"target":{"kind":"thread","path":"Validate"},"text":"Report","wake_idle":true}),
         ] {
             assert!(check_arguments(OrchTool::SendMessage, &arguments).is_ok());
         }
@@ -2265,10 +1941,6 @@ mod tests {
                 "reply_to",
             ),
             (json!({"chat":"chat.md","text":"Report"}), "chat"),
-            (
-                json!({"target":{"kind":"chat","path":"chat.md"},"text":"Report","wake_idle":true}),
-                "wake_idle",
-            ),
         ] {
             let refusal = check_arguments(OrchTool::SendMessage, &arguments).unwrap_err();
             assert_eq!(refusal.code, Code::Invalid);

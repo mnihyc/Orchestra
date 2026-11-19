@@ -347,10 +347,6 @@ fn the_matrix() -> Matrix {
 
 #[test]
 fn every_combination_of_failures_blocks_with_the_first_in_the_order_and_clears_cause_by_cause() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_test_writer()
-        .try_init();
     let matrix = the_matrix();
     // The provider, the model and the node interact in the order of checks 4 to 11: their whole product.
     let cases = matrix.cases(5, &[&["provider", "model", "machine"]], 20_261_015, 24);

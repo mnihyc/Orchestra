@@ -7,9 +7,9 @@
  */
 import { useTranslation } from 'react-i18next';
 
-import {serviceUnitsWords} from './services';
 import type { UsageBreakdown, UsageDimension, UsageRow } from '@/generated/api-types';
-import { creditsLine, SumCredits } from '@/features/usage/Amounts';
+import { SumCredits } from '@/features/usage/Amounts';
+import { creditsState, formatCredits } from '@/features/usage/figures';
 import { filterValue, keyDetail, keyId, keyLabel } from '@/features/usage/keys';
 import { filterOf, type FilterName, type UsageSearch } from '@/features/usage/search';
 import { errorsText, speedText, timeText } from '@/features/usage/performance';
@@ -18,7 +18,7 @@ import { formatNumber, formatPercent, formatTokens } from '@/lib/format';
 import { Button } from '@/ui/Button';
 import { cx } from '@/ui/cx';
 import { ErrorState } from '@/ui/ErrorState';
-import { SkeletonRows, type SkeletonRead } from '@/ui/Skeleton';
+import { SkeletonRows } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
 import { Tabs } from '@/ui/Tabs';
 import { UserChip } from '@/ui/UserChip';
@@ -28,7 +28,7 @@ import { Section } from '@/shell/Page';
 const PERFORMANCE_COLUMNS = { requests: 'requests', speed: 'speed', first: 'first', errors: 'errors' } as const;
 
 /** What a table is while it is read: asked for, there, or not to be had. */
-export type TableState = { state: 'loading'; read?: SkeletonRead } | { state: 'failed'; error: unknown; retry: () => void } | { state: 'ready'; table: UsageBreakdown };
+export type TableState = { state: 'loading' } | { state: 'failed'; error: unknown; retry: () => void } | { state: 'ready'; table: UsageBreakdown };
 
 export interface BreakdownsProps {
   seriesBy?: Split | undefined;
@@ -86,7 +86,7 @@ function RowsOf({ dimension, table, search, onFilter, showingMore, onMore, perfo
       id: 'name',
       header: t(`usage.tables.by.${dimension}`),
       cell: (row, shown) => {
-        const rowName = dimension === 'tier' && row.key.tier_unknown === true ? 'tier_unknown' : dimension==='offering'?filterOf(dimension,row.key):name;
+        const rowName = dimension === 'tier' && row.key.tier_unknown === true ? 'tier_unknown' : name;
         const value = rowName === 'tier_unknown' ? true : rowName === null ? null : filterValue(dimension, row.key);
         const active = rowName === null ? undefined : search[rowName];
         const pressed = value !== null && active === value;
@@ -118,11 +118,10 @@ function RowsOf({ dimension, table, search, onFilter, showingMore, onMore, perfo
                 {[
                   t('usage.tables.turnsCount', { count: row.figures.turns }),
                   t('usage.board.tokens',{tokens:formatTokens(row.figures.tokens.total_tokens, locale)}),
-                  `${t('usage.tables.credits')}: ${creditsLine(row.figures, t, locale)}`,
+                  `${t('usage.tables.credits')}: ${creditsState(row.figures).none ? '–' : formatCredits(creditsState(row.figures).sum, locale)}`,
                 ].map((part,index)=><span key={index}>{part}</span>)}
               </span>
             )}
-            {Object.keys(row.figures.service_units??{}).length>0 && <span className="text-sm text-text-muted tabular-nums">{serviceUnitsWords(row.figures.service_units,t,locale)}</span>}
             {compact.map((part)=><span key={part} className="text-sm text-text-muted">{part}</span>)}
           </span>
         );
@@ -179,7 +178,7 @@ export function Breakdowns({ tabs, tab, onTab, tableOf, search, onFilter, showin
         menuLabel: t(`usage.tables.by.${dimension}`),
         panel: <div className="flex min-w-0 flex-col gap-3">{(() => {
           const state = tableOf(dimension);
-          if (state.state === 'loading') return <SkeletonRows read={state.read} rows={4} />;
+          if (state.state === 'loading') return <SkeletonRows rows={4} />;
           if (state.state === 'failed') return <ErrorState compact error={state.error} onRetry={state.retry} />;
           return <RowsOf dimension={dimension} table={state.table} search={search} onFilter={onFilter} showingMore={showingMore} onMore={onMore} performance={performance} seriesBy={seriesBy} colors={colors} />;
         })()}</div>,

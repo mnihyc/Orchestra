@@ -1,22 +1,15 @@
 # orch-summarizer-model
 
-Model-backed titles, tags, summary text and handoffs selected by configuration.
+Model-backed title, description and tag generation selected by configuration.
 
 The built-in model producer frames redacted values and activity as material,
 calls the host's permission-checked API provider, and returns bounded text or
 tags with actual usage. Its tests cover whole prompts, hostile material,
 malformed answers and handoff bounds; the engine owns scheduling and writes.
 
-The summary paragraph has its own `summary` output and prompt; it does not maintain a written description.
-Its capability declaration adds `summarizer-model.complete` to the common summary/service mode.
-The executor wraps the existing Complete port, binding its actual logical source and selected offering.
-It never creates a caller, retries a request or records another usage row. The host retains current
-authority, input/effect guards, recovery and normalized accounting. Registering the declaration alone
-does not install the executor or start spending.
-
 `auto.summarizer.params` supplies an object of options in the selected endpoint's format.
 Endpoint request defaults apply first, then the model's configured defaults, then these explicit options.
-The same configuration and completion constructor serve every summary output,
+The same configuration and completion constructor serve every summary field, document summaries,
 handoffs and goal verification. Routing, prompt material, tools, output limits and credentials stay
 owned by their existing configuration fields.
 

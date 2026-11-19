@@ -29,7 +29,6 @@ import { Route as ThreadRoute } from '@/routes/thread/$threadId/index';
 import { RoutingFrame } from './workbench-routing/frame';
 import { delayedReads, feedCalls, FileWitness, heldFeeds, nativeEnvironment, nativeNodes, nativeRows, nativeThread, USER } from './workbench-content/fixture';
 
-const TREE_WAIT_MS = 15_000;
 const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn() }));
 vi.mock('@/realtime/live', async (original) => {
   const actual = await original<typeof Live>();
@@ -110,12 +109,11 @@ function draw() {
   const neutral = createRoute({ getParentRoute: () => root, path: '/workbench', staticData: { screen: 'page' }, component: () => null });
   const history = createMemoryHistory({ initialEntries: [page.of!.href!] }); histories.push(history);
   const router = createRouter({ routeTree: root.addChildren([ThreadRoute, neutral]), history, defaultPendingMs: 0, defaultPendingMinMs: 0 });
-  const view = render(<QueryClientProvider client={queryClient}><TooltipProvider overflow={false}><RouterProvider router={router} /></TooltipProvider></QueryClientProvider>);
+  const view = render(<QueryClientProvider client={queryClient}><TooltipProvider><RouterProvider router={router} /></TooltipProvider></QueryClientProvider>);
   mounted.push(view); return { page, files, view };
 }
 async function expanded() {
-  // The first read of the directory is awaited for what a busy machine needs (the library's default wait is one second).
-  const tree = await screen.findByRole('tree', {}, { timeout: TREE_WAIT_MS });
+  const tree = await screen.findByRole('tree');
   const src = await screen.findByRole('treeitem', { name: /src/ });
   fireEvent.click(src);
   const app = await screen.findByRole('treeitem', { name: /app.ts/ });
@@ -166,8 +164,7 @@ it('an explicitly chosen folder root survives another same-source admission with
   draw(); const { src } = await expanded();
   fireEvent.contextMenu(src);
   fireEvent.click(await screen.findByRole('menuitem', { name: 'Open folder here' }));
-  // The first read of the directory is awaited for what a busy machine needs (the library's default wait is one second).
-  const tree = await screen.findByRole('tree', {}, { timeout: TREE_WAIT_MS });
+  const tree = await screen.findByRole('tree');
   await waitFor(() => expect(tree.getAttribute('aria-label')).toContain('web/src'));
   const app = await screen.findByRole('treeitem', { name: /app.ts/ });
   tree.scrollTop = 56; heldFeeds.add(threadId); fireEvent.click(app);
@@ -244,7 +241,7 @@ it('following a genuinely different E/T cannot preserve the old source tree or r
   nativeRows.set('thread-b', { ...nativeThread('thread-b'), directory: 'web' });
   act(() => { state().openTab('page', { href: '/thread/thread-b' }); });
   await waitFor(() => expect(tree).not.toBeInTheDocument());
-  const next = await screen.findByRole('tree', {}, { timeout: TREE_WAIT_MS });
+  const next = await screen.findByRole('tree');
   expect(next).not.toBe(tree);
   expect(await screen.findByRole('treeitem', { name: /src/ })).toHaveAttribute('aria-expanded', 'false');
   await waitFor(() => expect(before.every((one) => one.unsubscribe.mock.calls.length === 1)).toBe(true));

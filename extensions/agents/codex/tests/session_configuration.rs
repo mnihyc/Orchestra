@@ -197,7 +197,7 @@ async fn a_remote_executor_uses_the_changed_cwd_on_the_same_native_conversation_
     };
     let proxy = SplitProxy::start(rig.mock.addr(), peer.address()).await;
     rig.loopback_port = Some(proxy.port());
-    assert_eq!(rig.boot().await.harness_version, "0.167.2");
+    assert_eq!(rig.boot().await.harness_version, "0.165.0");
     let thread = new_id();
     let child = rig.workspace_path().join("child");
     std::fs::create_dir_all(&child)?;
@@ -325,7 +325,7 @@ async fn native_questions_reach_the_person_and_return_content_in_each_admitted_m
             rig.loopback_port = Some(proxy.port());
         }
         let started = rig.boot().await;
-        assert_eq!(started.harness_version, "0.167.2");
+        assert_eq!(started.harness_version, "0.165.0");
         for mode in [
             ApprovalMode::Ask,
             ApprovalMode::OnRequest,

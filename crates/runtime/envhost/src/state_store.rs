@@ -158,9 +158,6 @@ const GIT_TREE_MODE: &str = "40000";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateRoot {
-    /// Complete coverage of only these paths; None retains whole-directory recording.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_paths: Option<Vec<String>>,
     /// The exact retry-stable snapshot identity.
     pub snapshot_id: Id,
     /// The frozen request identity, for recovering a published root after its reply was lost.

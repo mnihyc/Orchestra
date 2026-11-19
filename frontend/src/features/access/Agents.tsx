@@ -37,7 +37,7 @@ export function Agents({ target }: { target: AccessTarget }) {
     return <EmptyState compact icon={<Bot aria-hidden />} title={t('access.agents.title')} description={t('access.agents.none', { name: target.name })} />;
   }
   if (shares.isError) return <ErrorState compact error={shares.error} title={t('access.agents.notLoaded')} retrying={shares.isRefetching} onRetry={() => void shares.refetch()} />;
-  if (shares.isPending || page.isPending) return <SkeletonRows reads={[shares, page]} rows={4} />;
+  if (shares.isPending || page.isPending) return <SkeletonRows rows={4} />;
 
   const available = page.data === undefined ? {} : agentGivingParts(page.data);
   const mayGive = page.data !== undefined && canGiveToAgents(page.data);

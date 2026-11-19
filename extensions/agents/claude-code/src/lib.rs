@@ -17,7 +17,6 @@
 //! | [`stream`] | The harness's JSON lines, read tolerantly and written exactly |
 //! | [`sessions`] | The flags, settings and environment of one session's process |
 //! | [`events`] | The harness's messages as neutral events |
-//! | [`child_usage`] | What a sub-agent's requests cost, settled from the sub-agent's own transcript |
 //! | [`failure`] | What the harness says when a turn fails, and what Orch makes of it |
 //! | [`approvals`] | Permission requests as approvals; approval and sandbox modes |
 //! | [`provider`] | Signing in, the facts of a sign-in, credentials |
@@ -30,7 +29,6 @@
 
 pub mod adapter;
 pub mod approvals;
-pub mod child_usage;
 pub mod config;
 pub mod context_usage;
 pub mod conversation;
@@ -52,9 +50,3 @@ pub mod stream;
 pub mod tools;
 
 pub use adapter::ClaudeCodeAdapter;
-
-#[cfg(test)]
-mod published_protocol_tests;
-
-#[cfg(test)]
-mod capability_facts_tests;

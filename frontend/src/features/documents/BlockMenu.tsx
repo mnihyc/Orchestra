@@ -437,8 +437,7 @@ const people: Source<PersonSuggestion> = {
   },
 };
 
-export type PlaceChoice = (typeof sources.places)[number];
-type Place = PlaceChoice;
+type Place = (typeof sources.places)[number];
 const places: Source<Place> = {
   kind: 'link',
   char: '[[',
@@ -473,10 +472,9 @@ const emoji: Source<EmojiEntry> = {
 };
 
 /** The lists that open at the caret: blocks, people, places and documents, emoji. */
-type PlaceSuggestion = Place | { kind: 'retry'; query: string };
-export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null; places: ((query: string, editor: Editor) => Promise<PlaceChoice[]>) | null }>({
+export const Suggestions = Extension.create<{ people: ((query: string, cursor: string | null) => Promise<DocumentMentionPage>) | null }>({
   name: 'orchSuggestions',
-  addOptions() { return { people: null, places: null }; },
+  addOptions() { return {people:null}; },
   // An open list answers the arrow keys, Enter and Escape before the editor's own keys do.
   priority: 1100,
   addProseMirrorPlugins() {
@@ -488,18 +486,7 @@ export const Suggestions = Extension.create<{ people: ((query: string, cursor: s
       },
       more: { replace: true, is: (item) => item.kind === 'more', load: async (item) => item.kind === 'more' ? personPage(await currentPeople(item.query, item.cursor), item.query, item.cursor !== null) : [] },
     };
-    const currentPlaces = this.options.places;
-    const loadPlaces = async (query: string): Promise<PlaceSuggestion[]> => {
-      try { return currentPlaces === null ? await places.items(query) : await currentPlaces(query, this.editor); }
-      catch { return [{ kind: 'retry', query }]; }
-    };
-    const offeredPlaces: Source<PlaceSuggestion> = {
-      ...places, items: loadPlaces,
-      show: (one) => one.kind === 'retry' ? { id: 'retry-references', label: i18n.t('common.tryAgain'), hint: i18n.t('documents.referenceReadFailed'), icon: TriangleAlert } : places.show(one),
-      run: (editor, range, one) => { if (one.kind !== 'retry') places.run(editor, range, one); },
-      more: { replace: true, is: (one) => one.kind === 'retry', load: (one) => one.kind === 'retry' ? loadPlaces(one.query) : Promise.resolve([]) },
-    };
-    return [suggestion(this.editor, block), suggestion(this.editor, offered), suggestion(this.editor, offeredPlaces), suggestion(this.editor, emoji)];
+    return [suggestion(this.editor, block), suggestion(this.editor, offered), suggestion(this.editor, places), suggestion(this.editor, emoji)];
   },
 });
 

@@ -1108,17 +1108,6 @@ pub struct Reading {
     pub audited: bool,
 }
 
-/// The actual native alternative which admits one recording read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordingAuthority {
-    /// The session's own opener.
-    Opener,
-    /// Current management of the session's environment.
-    Environment,
-    /// Current audit authority on the session's stored thread.
-    Thread,
-}
-
 /// Who reads what a closed shell last printed: its opener; whoever manages the environment;
 /// whoever holds `audit.view` on the thread it was opened from. A read by anybody but its opener is
 /// audited.
@@ -1128,25 +1117,11 @@ pub async fn may_read_recording(
     shell: &Shell,
     policy: Policy,
 ) -> Result<Reading, Error> {
-    let authority = recording_authority(conn, principal, shell, policy).await?;
-    Ok(Reading {
-        allowed: authority.is_some(),
-        audited: matches!(
-            authority,
-            Some(RecordingAuthority::Environment | RecordingAuthority::Thread)
-        ),
-    })
-}
-
-/// The same ordinary recording door with its selected factual source, before bytes are read.
-pub async fn recording_authority(
-    conn: &mut Conn,
-    principal: &Principal,
-    shell: &Shell,
-    policy: Policy,
-) -> Result<Option<RecordingAuthority>, Error> {
     if shell.opened_by == principal.user() {
-        return Ok(Some(RecordingAuthority::Opener));
+        return Ok(Reading {
+            allowed: true,
+            audited: false,
+        });
     }
     let manages = holds_door(
         conn,
@@ -1175,12 +1150,9 @@ pub async fn recording_authority(
         }
         _ => false,
     };
-    Ok(if manages {
-        Some(RecordingAuthority::Environment)
-    } else if audits {
-        Some(RecordingAuthority::Thread)
-    } else {
-        None
+    Ok(Reading {
+        allowed: manages || audits,
+        audited: manages || audits,
     })
 }
 

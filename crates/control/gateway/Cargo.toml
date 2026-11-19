@@ -40,7 +40,6 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-orch-settings.workspace = true
 orch-access-contract.workspace = true
 orch-api-contract.workspace = true
 orch-connector-core.workspace = true

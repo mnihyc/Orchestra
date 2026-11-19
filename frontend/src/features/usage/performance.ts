@@ -19,7 +19,7 @@ export function measured(value: RequestTiming['first_token_ms'] | undefined): nu
 export function hasRequestMeasurements(timing: RequestTiming | undefined): boolean {
   if (timing === undefined) return false;
   return Object.entries(timing).some(([field, value]) => {
-    if (['wire_protocol','requested_service_tier','reported_service_tier','error_reason','upstream_status','attempt','provider_request_id'].includes(field) || value === null) return false;
+    if (field === 'wire_protocol' || field === 'requested_service_tier' || field === 'reported_service_tier' || value === null) return false;
     if (field === 'subagent' || field === 'reasoning_hidden') return value !== false;
     return typeof value === 'object' && 'state' in value ? value.state !== 'unsupported' : true;
   });
@@ -28,7 +28,6 @@ export function hasRequestMeasurements(timing: RequestTiming | undefined): boole
 /** Dense legacy/raw counts remain useful when an envelope contains only tier facts.
  * A measured request still keeps each missing token member unknown. */
 export function requestTokenCount(row: Pick<UsageEvent, 'timing' | 'scope' | 'tokens'>, output = false): number | null {
-  if(row.timing?.service_usage!==undefined && row.timing.service_usage!==null) return null;
   const member = output ? 'output_tokens' : 'input_tokens';
   return row.scope !== 'request' || !hasRequestMeasurements(row.timing)
     ? row.tokens[member]
@@ -82,13 +81,4 @@ export function choiceObservation(rows: readonly UsageComparison[], model: strin
   return rows.find((row) => row.tier_unknown !== true && row.model === model && row.effort === effort && row.tier === tier && row.program === program
     && row.performance.speed_samples >= CHOICE_SAMPLES && row.performance.first_token_samples >= CHOICE_SAMPLES
     && row.performance.speed_milli !== null && row.performance.first_token_ms !== null) ?? null;
-}
-
-/** Three disjoint input parts; a missing reported part never becomes a measured zero. */
-export function requestInputParts(row: Pick<UsageEvent,'scope'|'timing'|'tokens'>) {
-  const measured = row.scope === 'request' && hasRequestMeasurements(row.timing);
-  const input = measured ? row.timing?.reported_tokens?.input_tokens ?? null : row.tokens.input_tokens;
-  const cached = measured ? row.timing?.reported_tokens?.cached_input_tokens ?? null : row.tokens.cached_input_tokens;
-  const written = measured ? row.timing?.reported_tokens?.cache_write_tokens ?? null : row.tokens.cache_write_tokens ?? 0;
-  return { cached, written, uncached: input === null || cached === null || written === null ? null : Math.max(0,input-cached-written) };
 }

@@ -580,10 +580,10 @@ impl Restarting {
 impl Phased for Restarting {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         match phase {
-            "waiting" => Box::pin(self.waiting(job)).await?,
-            "stopping" => Box::pin(self.stopping(job)).await?,
+            "waiting" => self.waiting(job).await?,
+            "stopping" => self.stopping(job).await?,
             "starting" | "enroll" | "attach" | "after_up" => {
-                Box::pin(self.current(job)).await?;
+                self.current(job).await?;
                 if phase == "starting" {
                     job.remember(&json!({"restart_start_requested":true}))
                         .await?;
@@ -592,11 +592,12 @@ impl Phased for Restarting {
                     .run(job, if phase == "starting" { "start" } else { phase })
                     .await?;
             }
-            "commit" => Box::pin(self.commit(job)).await?,
+            "commit" => self.commit(job).await?,
             _ => return Err(failed("the restart has an unknown phase")),
         }
         Ok(Done::Finished)
     }
+
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted restart command outcome could not be recorded");

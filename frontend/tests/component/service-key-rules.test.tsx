@@ -8,9 +8,7 @@ import type { ApiTokenCreateBody } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { TOKEN_OPERATIONS } from '../doubles/token-operations';
 import { id, me } from '../doubles/fixtures';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 it('uses the actual service account for This account and keeps the manager’s fresh password', async () => {
   const service = id(0x73, 1), manager = me(1, 'ada', 'Ada'), made = vi.fn<(body: ApiTokenCreateBody) => void>();
@@ -19,8 +17,7 @@ it('uses the actual service account for This account and keeps the manager’s f
   client.setQueryData(['token-operations'], TOKEN_OPERATIONS.filter((entry) => entry.operation_id === 'MeTokenList'));
   const shown = show(<QueryClientProvider client={client}><TokenForm operationScoped serviceAccountId={service} formId="service-rule" onMake={made} pending={false} error={null} /></QueryClientProvider>);
   const user = userEvent.setup();
-  // The name and the password are what the form holds, not how they were typed: they are pasted, as a keystroke draws the whole form again.
-  await user.click(await screen.findByLabelText(i18n.t('tokens.new.name'))); await user.paste('service-reader');
+  await user.type(await screen.findByLabelText(i18n.t('tokens.new.name')), 'service-reader');
   await user.click(screen.getByRole('button', { name: i18n.t('operationKeys.addRule') }));
   const rule = await screen.findByRole('dialog', { name: i18n.t('operationKeys.addRule') });
   await user.click(within(rule).getByRole('combobox', { name: i18n.t('operationKeys.targetKind') }));
@@ -29,7 +26,7 @@ it('uses the actual service account for This account and keeps the manager’s f
   await user.click(within(rule).getByRole('checkbox', { name: i18n.t('operationKeys.kind.key') }));
   await user.click(within(rule).getByRole('button', { name: i18n.t('operationKeys.preset.read') }));
   await user.click(within(rule).getByRole('button', { name: i18n.t('operationKeys.keepRule') }));
-  await user.click(screen.getByLabelText(i18n.t('tokens.new.password'))); await user.paste('human manager proof');
+  await user.type(screen.getByLabelText(i18n.t('tokens.new.password')), 'human manager proof');
   screen.getByLabelText(i18n.t('tokens.new.name')).closest('form')?.requestSubmit();
   await waitFor(() => expect(made).toHaveBeenCalledOnce());
   expect(made.mock.calls[0]?.[0]).toMatchObject({ rules: [{ target: { kind: 'account', id: service, reach: 'self' }, resources: ['key'], allow: [{ operation: 'MeTokenList', actions: ['read'] }] }], proof: { password: 'human manager proof' } });

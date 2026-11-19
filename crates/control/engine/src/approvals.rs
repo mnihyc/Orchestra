@@ -2049,14 +2049,6 @@ pub mod access {
                 notifications::tell(&mut tx, &event, &people, sent.root).await?;
                 deciders.extend(sent.givers.nearest.iter().chain(&sent.givers.further));
             }
-            orch_db::idempotency::creation::observe_with(
-                &mut tx,
-                Some(requester),
-                "access_request_batch",
-                batch,
-                json!({"approvals":made.iter().map(|(row,_,_)|row.id).collect::<Vec<_>>()}),
-            )
-            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             deciders.sort_unstable();
             deciders.dedup();
@@ -2643,10 +2635,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::commands::Commands for NoMachineWork {
-        async fn issue_prepared(
+        async fn issue(
             &self,
             _: crate::commands::Outgoing,
-            _before: Option<crate::commands::BeforeCommand<'_>>,
         ) -> Result<(), crate::commands::CommandsError> {
             panic!("an empty source-request sweep sends no machine command")
         }

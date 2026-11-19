@@ -12,7 +12,7 @@ import { show } from './support';
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 const calls = vi.hoisted(() => ({ stop: vi.fn<(id: string) => Promise<void>>() }));
 vi.mock('@/api/share', async (load) => ({ ...await load<typeof ShareApi>(), stopAgentShare: calls.stop }));
-const material: DocumentRef = { id: 'document', title: 'Shared plan', description: '', description_line: '',
+const material: DocumentRef = { id: 'document', title: 'Shared plan', description: '', description_source: 'auto', description_line: '',
   node: TOPIC, owner: ADA, owners: 1, created_by: ADA, page: 'follows', seq: 1, block_count: 1, bytes: 40, files_bytes: 0,
   version: 1, open_discussions: 0, updated_at: '2026-11-01T00:00:00Z', updated_by: ADA, discussion_level: 'involved', seen_seq: 1, archived: false, deleted: false };
 const share: AgentShare = { id: 'contribution', what: material, to: { id: 'recipient', kind: 'thread', name: 'Receiving thread', redacted: false },

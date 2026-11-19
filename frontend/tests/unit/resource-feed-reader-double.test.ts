@@ -35,18 +35,11 @@ async function read(world: World, person: Person): Promise<Provider> {
   return answer.body as Provider;
 }
 
-function rename(world: World, person: Person, name: string) {
-  const before = world.resources.handle(person, 'GET', `/providers/${providerId}`, new URLSearchParams(), {})?.body as Provider;
-  const answer = world.resources.handle(person, 'PATCH', `/providers/${providerId}`, new URLSearchParams(), { name, expected_revision: before.revision });
-  expect(answer?.status).toBe(200);
-}
-
 it('projects the same provider separately for ordinary and explicit-admin sessions of one person', async () => {
   const world = new World(), ordinaryToken = login(world), adminToken = login(world);
   world.setAdminMode(adminToken, { as_admin: true });
   const ordinary = world.browserPerson(ordinaryToken), admin = world.browserPerson(adminToken);
   const a = listen(world, ordinary), b = listen(world, admin);
-  rename(world, admin, 'A real provider change for both readers');
   const expected = await read(world, ordinary), elevated = await read(world, admin);
   expect(expected.access.permissions).toEqual(['provider.view', 'provider.use']);
   expect(elevated.access.permissions).toContain('provider.manage');
@@ -63,10 +56,7 @@ it('projects the same provider separately for ordinary and explicit-admin sessio
 
 it('retires an in-flight former listener before publishing and admits a reopened reader independently', async () => {
   const world = new World(), token = login(world), person = world.browserPerson(token);
-  const adminToken = login(world); world.setAdminMode(adminToken, { as_admin: true });
-  const admin = world.browserPerson(adminToken);
   const old = listen(world, person);
-  rename(world, admin, 'Changed before the former reader waits');
   const nativeRead = world.requestFeeds.read.bind(world.requestFeeds);
   let release: () => void = () => undefined, started: () => void = () => undefined;
   const pending = new Promise<void>((resolve) => { release = resolve; });
@@ -83,7 +73,6 @@ it('retires an in-flight former listener before publishing and admits a reopened
   release(); await changing;
   expect(rows(old.frames)).toEqual([]);
   expect(rows(current.frames)).toEqual([]);
-  rename(world, admin, 'Changed after the current reader joined');
   await world.requestFeeds.changed();
   expect(rows(current.frames)).toHaveLength(1);
   expect(rows(current.frames)[0]?.row).toEqual(await read(world, person));

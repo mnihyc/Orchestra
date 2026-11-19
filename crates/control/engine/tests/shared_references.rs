@@ -860,7 +860,6 @@ async fn person_snapshots_and_agent_exports_write_references_for_each_receiving_
             &Caller::session(d.world.ada),
             &Origin::default(),
             &ShareWithAgents {
-                link_origin: None,
                 viewers_read: None,
                 read_first: None,
                 download: None,

@@ -385,13 +385,9 @@ struct ReleaseReplay {
 
 #[async_trait]
 impl Commands for ReleaseReplay {
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<crate::commands::BeforeCommand<'_>>,
-    ) -> Result<(), CommandsError> {
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
         let replay = command.id == self.command;
-        self.inner.issue_prepared(command, before).await?;
+        self.inner.issue(command).await?;
         if replay {
             self.machine.handler.release();
         }

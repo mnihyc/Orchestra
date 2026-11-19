@@ -31,8 +31,6 @@ use crate::engine::{Frame, Graph, Site};
 use crate::nodes::{Page, archive_allows, every_permission};
 use crate::{Act, Error, Policy, Principal, missing};
 
-pub mod context;
-
 mod provider_owner;
 pub use provider_owner::provider_owner_host_use;
 
@@ -344,18 +342,7 @@ pub async fn check_machine(
     permission: Permission,
     policy: Policy,
 ) -> Result<Decision, Error> {
-    let (object, permission) = machine_permission(conn, machine, permission).await?;
-    check(conn, principal, object, permission, policy).await
-}
-
-/// Resolves the page and permission that govern a physical machine, including a host facade.
-/// Audience expansion uses this same supplier as the permission check.
-pub async fn machine_permission(
-    conn: &mut Conn,
-    machine: Id,
-    permission: Permission,
-) -> Result<(ObjectRef, Permission), Error> {
-    Ok(match rows::hosting::host_of_machine(conn, machine).await? {
+    let (object, permission) = match rows::hosting::host_of_machine(conn, machine).await? {
         Some(host) => (
             ObjectRef {
                 kind: ObjectKind::Host,
@@ -375,7 +362,8 @@ pub async fn machine_permission(
             },
             permission,
         ),
-    })
+    };
+    check(conn, principal, object, permission, policy).await
 }
 
 /// What an act needs of one thing.
@@ -886,38 +874,6 @@ pub async fn holding(
 /// thread of another place runs on it, so that nobody mistakes whose thing it is; the identifier
 /// identifies. Environment segments use the shared short-name expression; queries remain batched.
 pub async fn addresses(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, String)>, Error> {
-    addresses_with_name_sources(conn, ids, None).await
-}
-
-/// The native address's actual organization components, before names are fetched.
-pub async fn address_name_sources(conn: &mut Conn, ids: &[Id]) -> Result<Vec<Id>, Error> {
-    let mut graph = Graph::default();
-    let found = read_into(conn, &mut graph, ids).await?;
-    let mut sources = std::collections::BTreeSet::new();
-    for resource in found {
-        if let Some(home) = resource.home.and_then(|home| graph.get(home)) {
-            sources.extend(
-                home.path
-                    .iter()
-                    .filter(|id| {
-                        graph
-                            .get(**id)
-                            .is_some_and(|node| node.kind == roles::NodeKind::Org)
-                    })
-                    .copied(),
-            );
-        }
-    }
-    Ok(sources.into_iter().collect())
-}
-
-/// The same native resource addresses within already admitted organization name sources.
-/// Missing components are omitted before name lookup; resource and public owner names stay intrinsic.
-pub async fn addresses_with_name_sources(
-    conn: &mut Conn,
-    ids: &[Id],
-    allowed: Option<&std::collections::BTreeSet<Id>>,
-) -> Result<Vec<(Id, String)>, Error> {
     let mut graph = Graph::default();
     let found = read_into(conn, &mut graph, ids).await?;
     let orgs_of = |resource: &Resource| -> Vec<Id> {
@@ -937,11 +893,7 @@ pub async fn addresses_with_name_sources(
             })
             .unwrap_or_default()
     };
-    let mut orgs: Vec<Id> = found
-        .iter()
-        .flat_map(orgs_of)
-        .filter(|id| allowed.is_none_or(|names| names.contains(id)))
-        .collect();
+    let mut orgs: Vec<Id> = found.iter().flat_map(orgs_of).collect();
     orgs.sort_unstable();
     orgs.dedup();
     let mut owners: Vec<Id> = found

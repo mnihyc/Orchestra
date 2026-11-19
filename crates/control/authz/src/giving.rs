@@ -33,18 +33,18 @@
 use orch_access_contract::decisions::{MissingAccess, MissingObject, ObjectRef, Refusal};
 use orch_access_contract::pages::{CheckedUpdate, Entry, Holder, PageKind, PageOf};
 use orch_access_contract::permissions::{
-    Choice, NamedBy, ObjectKind, Options, Permission, Placement, Profile,
+    Choice, NamedBy, ObjectKind, Permission, Placement, Profile,
 };
 use orch_access_contract::roles::{PlaceRef, Role};
 use orch_db::Conn;
 use orch_types::{Id, Json};
+use std::collections::HashSet;
 
 use crate::engine::{Frame, Graph, PageRef, Site};
 use crate::{Error, Policy, Principal, missing};
 
 /// Whether the checked options allow no more than the stored options. The option catalogue uses
-/// exact-name allowlists (of texts and of typed references) and numeric maximums; an absent member is
-/// unbounded.
+/// exact-name allowlists and numeric maximums; an absent member is unbounded.
 fn options_only_narrow(before: &Json, after: &Json) -> bool {
     match (before, after) {
         (Json::Null, _) => true,
@@ -54,10 +54,14 @@ fn options_only_narrow(before: &Json, after: &Json) -> bool {
         (Json::Object(before), Json::Null) => before
             .values()
             .all(|before| options_only_narrow(before, &Json::Null)),
-        // A list allows what it names: names are texts, or typed references such as a place an
-        // entry names, and a name is the same name only when it is written the same.
         (Json::Array(before), Json::Array(after)) => {
-            after.iter().all(|value| before.contains(value))
+            let Some(allowed): Option<HashSet<&str>> = before.iter().map(Json::as_str).collect()
+            else {
+                return false;
+            };
+            after
+                .iter()
+                .all(|value| value.as_str().is_some_and(|value| allowed.contains(value)))
         }
         (Json::Number(before), Json::Number(after)) => before
             .as_i64()
@@ -69,21 +73,17 @@ fn options_only_narrow(before: &Json, after: &Json) -> bool {
 
 /// Whether changing an entry's options or end grants anything beyond what it currently grants.
 pub(crate) fn entry_widens(before: &Entry, update: &CheckedUpdate) -> bool {
-    update.options.as_ref().is_some_and(|after| match after {
-        // The options of a provider are judged as they mean: a member left out is not the same as a
-        // member that names nothing, and the types left out are those in which the credential stays.
-        Options::ProviderUse(after) => !matches!(
-            Options::parse(Permission::ProviderUse, &before.options),
-            Ok(Options::ProviderUse(before)) if after.within(&before)
-        ),
-        after => !options_only_narrow(&before.options, &after.to_json()),
-    }) || update
-        .expires_at
-        .is_some_and(|after| match (before.expires_at, after) {
-            (Some(before), Some(after)) => after > before,
-            (Some(_), None) => true,
-            _ => false,
-        })
+    update
+        .options
+        .as_ref()
+        .is_some_and(|after| !options_only_narrow(&before.options, &after.to_json()))
+        || update
+            .expires_at
+            .is_some_and(|after| match (before.expires_at, after) {
+                (Some(before), Some(after)) => after > before,
+                (Some(_), None) => true,
+                _ => false,
+            })
 }
 
 /// How a change of a page comes about, which decides who may make it.

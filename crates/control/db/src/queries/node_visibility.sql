@@ -33,6 +33,6 @@ reader_owned AS MATERIALIZED (
              CASE WHEN n.org_id = ANY(__ROOTS__::uuid[]) AND n.id IN (SELECT object_id FROM reader_owned)
                THEN 'owned' ELSE 'ordinary' END],
            '{"view":false,"named":false,"access":"path_only","share":false,"settings":false}'::jsonb) value) page
-   WHERE n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL
+   WHERE n.deleted_at IS NULL AND t.side_of IS NULL
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
 )

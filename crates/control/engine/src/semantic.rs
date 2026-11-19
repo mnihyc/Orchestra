@@ -20,7 +20,6 @@
 //! | [`query`] | The pieces nearest a query in an org |
 //! | [`fusion`] | Reciprocal-rank fusion of the order by words and the order by meaning |
 
-pub mod administration;
 pub mod choice;
 pub mod chunks;
 pub mod embed;
@@ -28,7 +27,6 @@ pub mod fusion;
 pub mod indexer;
 pub mod plan;
 pub mod query;
-pub mod query_origin;
 pub mod state;
 pub mod vectors;
 

@@ -105,22 +105,6 @@ it('keeps a pending send from being submitted twice or replaced by password sign
   expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('network.offline'));
 });
 
-it.each(['en', 'zh-CN'] as const)('explains why password sign-in waits for a code send in %s', async (locale) => {
-  await setLocale(locale);
-  const pending = deferred<undefined>(); calls.askCode.mockReturnValueOnce(pending.promise);
-  show(<Login onward={null} callbackError={null} />);
-  const user = userEvent.setup();
-  await user.type(await screen.findByLabelText(i18n.t('auth.fields.login')), 'reader');
-  await user.click(screen.getByRole('button', { name: i18n.t('auth.login.mailCode') }));
-  const submit = screen.getByRole('button', { name: i18n.t('auth.login.submit') }), target = submit.parentElement;
-  if (target === null) throw new Error('The disabled sign-in reason must be focusable');
-  try {
-    expect(submit).toBeDisabled(); act(() => target.focus());
-    expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('auth.code.sending'));
-    expect(calls.signIn).not.toHaveBeenCalled();
-  } finally { await act(async () => { pending.reject(networkFailure()); await Promise.resolve(); }); }
-});
-
 it('keeps the first proof and code field when the second-step send fails and is retried', async () => {
   await setLocale('en');
   calls.signIn.mockRejectedValueOnce(secondStep());

@@ -208,7 +208,7 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
     };
     let fixture = Fixture {
         start,
-        version: common::expected_native_version(),
+        version: std::env::var("ORCH_EXPECTED_CODEX_VERSION").unwrap_or_else(|_| "0.162.1".into()),
         checks: &orch_adapter_codex::descriptor::manifest().checks,
         workspace: rig.workspace.path().into(),
         within: common::WAIT,
@@ -237,7 +237,7 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
                 rig.mock
                     .requests()
                     .into_iter()
-                    .map(|request| json!({"path":request.path,"model":request.body.get("model"),"status":request.status,"response_schema":request.body.pointer("/text/format/schema"),"items":request.body.get("input").and_then(|input| input.as_array()).map(|items| items.iter().filter(|item| item.get("type").and_then(|kind| kind.as_str()) != Some("message")).collect::<Vec<_>>())}))
+                    .map(|request| json!({"path":request.path,"items":request.body.get("input").and_then(|input| input.as_array()).map(|items| items.iter().filter(|item| item.get("type").and_then(|kind| kind.as_str()) != Some("message")).collect::<Vec<_>>())}))
                     .collect::<Vec<_>>()
             )
         );

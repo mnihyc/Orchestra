@@ -4,7 +4,6 @@ import { Link } from '@tanstack/react-router';
 import { useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import { ListFilter } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import {purposeLabel} from './words';
 import { eventsQuery, fetchEventsPage } from '@/api/usage';
 import { orgsQuery } from '@/api/nodes';
 import type { NodeRef, UsageEvent } from '@/generated/api-types';
@@ -16,7 +15,6 @@ import { turnOrdinal } from '@/features/thread/turnLink';
 import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
 import { Facts } from '@/features/resources/Facts';
-import { RequestFacts, TokenFacts, nativeCounterRows } from './RequestFacts';
 import { tierAvailable, tierFilter, tierId, tierLabel } from './tier';
 import { useFormatContext } from '@/lib/appearance';
 import { formatExact } from '@/lib/time';
@@ -38,7 +36,7 @@ const TOKENS_COLUMN = 'tokens';
 const FIRST_COLUMN = 'first';
 const WHOLE_COLUMN = 'whole';
 const OUTCOME_OPTIONS = ['all', ...OUTCOMES] as const;
-const REQUEST_FILTERS = ['person', 'model','service','purpose', 'provider', 'agent', 'environment', 'org', 'project', 'topic', 'thread', 'tier', 'effort', 'program'] as const;
+const REQUEST_FILTERS = ['person', 'model', 'provider', 'agent', 'environment', 'org', 'project', 'topic', 'thread', 'tier', 'effort', 'program'] as const;
 /** The API's explicit absent-choice filter, rather than a translated option label. */
 const NO_CHOICE = 'none';
 export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { scope: UsageScope; search: UsageSearch; span: Span; onSearch: (patch: Patch) => void; orgChoices?: readonly NodeRef[] }) {
@@ -118,7 +116,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
   const harness=(row:UsageEvent)=>row.harness_kind===null ? t('usage.key.noAgent') : programNameIn(row,format.locale) ?? programNameIn(row.agent,format.locale) ?? t('resources.harnessNameUnknown');
   const agentLabel=(row:UsageEvent)=>row.agent?.name===row.harness_kind ? harness(row) : row.agent?.name ?? harness(row);
   const modelFacts=(row:UsageEvent)=>{
-    const searches = nativeCounterRows(row).some((count) => count.capability === 'web_search') ? undefined : row.timing?.web_searches;
+    const searches = row.timing?.web_searches;
     const facts=[
     ...(searches === undefined || searches.state === 'unsupported' ? [] : [{name:t('webSearch.count'),value:searches.state === 'told' ? number(searches.value) : t('webSearch.unknown')}]),
     ...(scope.kind==='provider'?[]:[{name:t('usage.chip.provider'),value:row.provider.name}]),
@@ -127,7 +125,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
     ...(row.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(row.effort,t)}]),
     ...(row.access_program===null || row.access_program===undefined?[]:[{name:t('usage.chip.program'),value:accessProgramDisplayName(row.access_program,t)}]),
     ];
-    return <div className="flex min-w-0 flex-col gap-1 text-sm wrap-anywhere"><span className="font-medium">{row.timing?.service_usage?.offering??modelDisplayName(row.model_display,t)}</span><Facts compact rows={facts} /></div>;
+    return <div className="flex min-w-0 flex-col gap-1 text-sm wrap-anywhere"><span className="font-medium">{modelDisplayName(row.model_display,t)}</span><Facts compact rows={facts} /></div>;
   };
   const columns: Column<UsageEvent>[] = [
     { id: 'time', header: t('usagePerf.time'), cell: (row, shown) => {
@@ -138,7 +136,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
         ...(scope.kind==='me'?[]:[{name:t('usage.chip.person'),value:row.user?.display_name??t('usage.key.nobody')}]),
         ...[row.project,row.topic].filter((place)=>scope.kind!=='node' || place.id!==scope.id).map((place)=>({name:t(`usage.chip.${place.kind}` as 'usage.chip.project'),value:placeName(place)})),
       ];
-      const threadName=thread===null ? row.purpose==='summary'?t('usage.records.summary'):row.purpose==='embeddings'?t('usage.records.embeddings'):purposeLabel(row.purpose,t) : scope.kind==='node' && thread.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{id:ordinal}) : placeName(thread);
+      const threadName=scope.kind==='node' && thread?.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{id:ordinal}) : placeName(thread);
       const compact = [
         ...(!shown.has(TOKENS_COLUMN) ? [{name:t('usagePerf.tokensInOut'),value:t('usagePerf.tokenPair', { input: tokens(row), output: tokens(row, true) })}] : []),
         ...(!shown.has(FIRST_COLUMN) ? [{name:t('usagePerf.requestFirstToken'),value:timeText(measured(row.timing?.first_token_ms), format.locale, t)}] : []),
@@ -151,13 +149,12 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
         {context.length>0 && <Facts compact rows={context} />}
         {!shown.has(MODEL_COLUMN) && modelFacts(row)}
         {compact.length>0 && <Facts compact rows={compact} />}
-        {!shown.has(TOKENS_COLUMN) && <TokenFacts event={row} />}
-        <RequestFacts event={row} />
+        <span className="text-sm text-text-muted">{outcome(row)}</span>
         {outcomeDetail(row).map((line)=><p key={line} className="text-sm wrap-anywhere text-text-muted">{line}</p>)}
       </div>;
     } },
-    { id: MODEL_COLUMN, header: rows.some((row)=>row.timing?.service_usage!==undefined && row.timing.service_usage!==null)?t('usagePerf.choices.splits.offering.name'):t('usagePerf.modelAndProvider'), from: 'md', cell: modelFacts },
-    { id: TOKENS_COLUMN, header: t('usagePerf.tokensInOut'), from: 'lg', align: 'end', cell: (row) => <div className="flex min-w-0 flex-col gap-1"><span className="tabular-nums">{tokens(row)} / {tokens(row, true)}</span><TokenFacts event={row} /></div> },
+    { id: MODEL_COLUMN, header: t('usagePerf.modelAndProvider'), from: 'md', cell: modelFacts },
+    { id: TOKENS_COLUMN, header: t('usagePerf.tokensInOut'), from: 'lg', align: 'end', cell: (row) => <span className="tabular-nums">{tokens(row)} / {tokens(row, true)}</span> },
     { id: FIRST_COLUMN, header: t('usagePerf.requestFirstToken'), from: 'lg', align: 'end', cell: (row) => timeText(measured(row.timing?.first_token_ms), format.locale, t) },
     { id: SPEED_COLUMN, header: t('usagePerf.requestSpeed'), from: 'md', align: 'end', cell: (row) => <span className="tabular-nums">{speedText(requestSpeed(row.tokens.output_tokens, row.timing), format.locale, t)}</span> },
     { id: WHOLE_COLUMN, header: t('usagePerf.wholeTime'), from: 'lg', align: 'end', cell: (row) => timeText(measured(row.timing?.request_ms), format.locale, t) },
@@ -177,7 +174,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
       for (const row of log.rows.values()) {
         if (key === 'tier' && tierAvailable(row)) tierChoices.set(tierId(row), tierFilter(row));
         const choice = key === 'person' ? row.user === null ? null : [row.user.id, row.user.display_name]
-          : key === 'service'?row.timing?.service_usage===undefined || row.timing.service_usage===null?null:[row.timing.service_usage.offering,row.timing.service_usage.offering]:key==='purpose'?[row.purpose,purposeLabel(row.purpose,t)]:key === 'provider' ? [row.provider.id, row.provider.name] : key === 'model' ? [row.model, modelDisplayName(row.model_display,t)]
+          : key === 'provider' ? [row.provider.id, row.provider.name] : key === 'model' ? [row.model, modelDisplayName(row.model_display,t)]
           : key === 'project' ? row.project.redacted ? null : [row.project.id, row.project.name ?? '']
           : key === 'topic' ? row.topic.redacted ? null : [row.topic.id, row.topic.name ?? '']
           : key === 'thread' ? row.thread === null || row.thread.redacted ? null : [row.thread.id, row.thread.name ?? '']
@@ -203,7 +200,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
     })}</fieldset>
     {(history.isError || liveError) && <ErrorState error={history.error} onRetry={() => { setRetry((before) => before + 1); void history.refetch(); }} />}
     <p role="status" className="text-sm text-text-muted">{t(log.paused ? 'usagePerf.paused' : 'usagePerf.live')}</p>
-    {rows.length === 0 && (history.isPending ? <SkeletonRows read={history} rows={4} /> : <p className="text-sm text-text-muted">{t('usagePerf.noRequests')}</p>)}
+    {rows.length === 0 && (history.isPending ? <SkeletonRows rows={4} /> : <p className="text-sm text-text-muted">{t('usagePerf.noRequests')}</p>)}
     <Table label={t('usagePerf.requestsView')} rows={rows} columns={columns} rowKey={(row) => row.id} />
     {history.hasNextPage && <Button size="sm" variant="ghost" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>{t('usagePerf.older')}</Button>}
   </Section>;

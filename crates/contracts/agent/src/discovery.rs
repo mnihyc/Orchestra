@@ -308,11 +308,6 @@ pub struct RecordReporter {
 }
 
 impl RecordReporter {
-    /// Adds a thing worth knowing of the record that is not a loss, such as the build that wrote it.
-    pub fn warn(&mut self, text: &str) {
-        self.report.warn(text);
-    }
-
     /// Adds one entry and its already counted attachments.
     pub fn push(&mut self, entry: &RecordedEntry) {
         match entry {
@@ -501,12 +496,6 @@ pub struct GatewayPricing {
     /// A token written to a prompt cache, where the list says.
     #[serde(default)]
     pub input_cache_write: Option<String>,
-    /// A token written with a one-hour lifetime, only where the source separately prices it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_cache_write_1h: Option<String>,
-    /// A token written with a twelve-hour lifetime, only where separately quoted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_cache_write_12h: Option<String>,
 }
 
 /// A decimal number as an integer and the number of digits after the point; exact where `f64` is not.
@@ -581,40 +570,6 @@ impl Decimal {
     }
 }
 
-/// Exact addition of already reported nonnegative decimal quantities, without rounding or unit conversion.
-/// The bound follows the existing u128 representation: 39 digits and one point; overflow stays unknown.
-#[must_use]
-pub fn add_decimal_amounts(left: &str, right: &str) -> Option<String> {
-    decimal_amounts(left, right, false)
-}
-/// Exact nonnegative remainder of reported quantities; a negative or unrepresentable remainder is unknown.
-#[must_use]
-pub fn subtract_decimal_amounts(left: &str, right: &str) -> Option<String> {
-    decimal_amounts(left, right, true)
-}
-fn decimal_amounts(left: &str, right: &str, subtract: bool) -> Option<String> {
-    const MAX_AMOUNT_CHARS: usize = 40;
-    if left.len() > MAX_AMOUNT_CHARS || right.len() > MAX_AMOUNT_CHARS {
-        return None;
-    }
-    let left = Decimal::parse(left)?;
-    let right = Decimal::parse(right)?;
-    let scale = left.scale.max(right.scale);
-    let widen = |value: Decimal| {
-        value
-            .mantissa
-            .checked_mul(10_u128.checked_pow(scale.checked_sub(value.scale)?)?)
-    };
-    let a = widen(left)?;
-    let b = widen(right)?;
-    let mantissa = if subtract {
-        a.checked_sub(b)?
-    } else {
-        a.checked_add(b)?
-    };
-    Decimal { mantissa, scale }.text()
-}
-
 /// The price of a million tokens, in credits, of a price for one token in dollars: both decimal strings,
 /// `scale` being how many credits a dollar is worth in the provider's home (`usage.catalogue_scale`). The
 /// arithmetic is exact. `None` when either is not a plain decimal.
@@ -640,7 +595,6 @@ pub fn pricing_to_rate(pricing: &GatewayPricing, scale: &str) -> Option<Rate> {
         None => None,
     };
     Some(Rate {
-        web_fetch_per_call: None,
         web_search_per_call: match &pricing.web_search {
             Some(price) => Some(
                 Decimal::parse(price)?
@@ -654,15 +608,6 @@ pub fn pricing_to_rate(pricing: &GatewayPricing, scale: &str) -> Option<Rate> {
         output_per_mtok: per_token_to_per_mtok(&pricing.completion, scale)?,
         cache_write_per_mtok: cache_write,
         tiers: None,
-        cache_write_1h_per_mtok: match &pricing.input_cache_write_1h {
-            Some(price) => Some(per_token_to_per_mtok(price, scale)?),
-            None => None,
-        },
-        cache_write_12h_per_mtok: match &pricing.input_cache_write_12h {
-            Some(price) => Some(per_token_to_per_mtok(price, scale)?),
-            None => None,
-        },
-        capacity_tiers: None,
         above: None,
     })
 }
@@ -829,30 +774,6 @@ pub struct McpDefinition {
     /// The values of its secret variables, by name.
     #[serde(default)]
     pub secrets: BTreeMap<String, Secret>,
-    /// HTTP credentials and references retained only in the machine's private copy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_credentials: Option<McpHttpCredentials>,
-}
-
-/// Native HTTP authentication that never becomes a public server definition.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct McpHttpCredentials {
-    /// Literal values or native templates; values are always secret in diagnostics.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, Secret>,
-    /// Header names mapped to machine environment variable names.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env_headers: BTreeMap<String, String>,
-    /// The machine variable whose value supplies a bearer token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearer_token_env_var: Option<String>,
-    /// Expand native `${NAME}` and `${NAME:-default}` templates in URL/header values.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub interpolate: bool,
-    /// Native credential variables that must read as empty in remote templates.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocked_env: Vec<String>,
 }
 
 impl McpDefinition {
@@ -866,43 +787,7 @@ impl McpDefinition {
             .chain(self.spec.secret_env.iter())
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
-        let mut shape = serde_json::json!({"transport":self.spec.transport,"command":self.spec.command,"url":self.spec.url,"environment":names});
-        if let Some(http) = &self.http_credentials {
-            let headers = http
-                .headers
-                .keys()
-                .chain(http.env_headers.keys())
-                .map(|name| name.to_ascii_lowercase())
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut environment = http
-                .env_headers
-                .values()
-                .chain(http.bearer_token_env_var.iter())
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            if http.interpolate {
-                for value in http
-                    .headers
-                    .values()
-                    .map(Secret::expose)
-                    .chain(self.spec.url.iter().map(String::as_str))
-                {
-                    let mut rest = value;
-                    while let Some(start) = rest.find("${") {
-                        let tail = &rest[start + 2..];
-                        let Some(end) = tail.find('}') else {
-                            break;
-                        };
-                        let name = tail[..end]
-                            .split_once(":-")
-                            .map_or(&tail[..end], |(name, _)| name);
-                        environment.insert(name.to_owned());
-                        rest = &tail[end + 1..];
-                    }
-                }
-            }
-            shape["http_credentials"] = serde_json::json!({"headers":headers,"environment":environment,"interpolate":http.interpolate});
-        }
+        let shape = serde_json::json!({"transport":self.spec.transport,"command":self.spec.command,"url":self.spec.url,"environment":names});
         Hash::of(shape.to_string().as_bytes())
     }
     /// A digest that changes when the definition does, secrets included, and reveals none of them.
@@ -951,9 +836,6 @@ impl McpDefinition {
     /// declare them agree. Every fault is returned.
     pub fn check(&self) -> Result<(), Vec<McpFault>> {
         let mut faults = Vec::new();
-        if self.http_credentials.is_some() && self.spec.transport != McpTransport::Http {
-            faults.push(McpFault::BadAuthentication);
-        }
         if let Some(McpAuthentication::Bearer { secret }) = &self.spec.authentication
             && (self.spec.transport != McpTransport::Http || !self.spec.secret_env.contains(secret))
         {
@@ -1126,8 +1008,6 @@ mod tests {
     #[test]
     fn a_free_variant_is_rated_at_nothing_and_a_missing_cache_price_counts_as_input() {
         let free = GatewayPricing {
-            input_cache_write_1h: None,
-            input_cache_write_12h: None,
             web_search: None,
             prompt: "0".into(),
             completion: "0".into(),
@@ -1140,8 +1020,6 @@ mod tests {
             ("0", "0")
         );
         let plain = GatewayPricing {
-            input_cache_write_1h: None,
-            input_cache_write_12h: None,
             web_search: None,
             prompt: "0.0000025".into(),
             completion: "0.00001".into(),
@@ -1218,37 +1096,6 @@ mod tests {
         assert_ne!(
             http.definition_fingerprint(),
             other.definition_fingerprint()
-        );
-    }
-
-    #[test]
-    fn private_http_credentials_leave_older_copies_unchanged_and_only_values_change_the_digest() {
-        let legacy = definition();
-        assert_eq!(
-            serde_json::to_value(&legacy).unwrap(),
-            json!({"spec":legacy.spec,"secrets":legacy.secrets})
-        );
-        let mut http: McpDefinition = serde_json::from_value(json!({
-            "spec":{"transport":"http","url":"https://example.test/mcp"},
-            "http_credentials":{"headers":{"X-Api-Key":"private-value"},"bearer_token_env_var":"SERVICE_TOKEN"}
-        })).unwrap();
-        let fingerprint = http.definition_fingerprint();
-        let digest = http.digest();
-        http.http_credentials
-            .as_mut()
-            .unwrap()
-            .headers
-            .insert("X-Api-Key".into(), Secret::new("changed-private-value"));
-        assert_ne!(http.digest(), digest);
-        assert_eq!(http.definition_fingerprint(), fingerprint);
-        http.http_credentials.as_mut().unwrap().bearer_token_env_var = Some("OTHER_TOKEN".into());
-        assert_ne!(http.definition_fingerprint(), fingerprint);
-        http.spec.transport = McpTransport::Stdio;
-        http.spec.command = Some(vec!["server".into()]);
-        assert!(
-            http.check()
-                .unwrap_err()
-                .contains(&McpFault::BadAuthentication)
         );
     }
 
@@ -1423,24 +1270,5 @@ mod tests {
         assert_eq!(report.by_kind["user_message"].kept, 1);
         assert_eq!(report.dropped.len(), 1);
         assert_eq!(report.dropped[0].count, ATTACHMENTS);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
-mod decimal_amount_tests {
-    use super::{add_decimal_amounts as add, subtract_decimal_amounts as subtract};
-    #[test]
-    fn reported_quantities_combine_exactly_and_an_overflow_or_negative_remainder_stays_unknown() {
-        assert_eq!(add("0.1", "0.2").as_deref(), Some("0.3"));
-        assert_eq!(
-            add("0.000000000000000000001", "0.000000000000000000002").as_deref(),
-            Some("0.000000000000000000003")
-        );
-        assert_eq!(subtract("0.3", "0.2").as_deref(), Some("0.1"));
-        assert_eq!(subtract("0.00075", "0.00075").as_deref(), Some("0"));
-        assert_eq!(subtract("0.1", "0.2"), None);
-        assert_eq!(add(&u128::MAX.to_string(), "1"), None);
-        assert_eq!(add("-1", "2"), None);
     }
 }

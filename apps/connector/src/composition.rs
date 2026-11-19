@@ -225,7 +225,6 @@ fn plugin_builtin() -> BuiltIn {
             PluginKind::Provider,
             orch_provider_contract::choice::builtin::ALL
                 .into_iter()
-                .chain(orch_provider_builtins::names())
                 .chain(["none"]),
         )
 }
@@ -286,11 +285,12 @@ fn environment_with_plugins(
 /// The built-in sources of a key's facts this program carries, as the API's program registers them too: the
 /// connector makes the vendor reader a provider's choice names, or its default, from this table alone.
 fn builtin_sources() -> anyhow::Result<Arc<orch_provider_contract::builtins::BuiltinSources>> {
-    let mut sources = orch_provider_builtins::sources()?;
-    for (name, declarations) in orch_image_backends::declarations()? {
-        sources.register_capabilities(name, declarations)?;
-    }
-    Ok(Arc::new(sources))
+    Ok(Arc::new(
+        orch_provider_contract::builtins::BuiltinSources::new([
+            orch_provider_openrouter::builtin(),
+            orch_provider_deepseek::builtin(),
+        ])?,
+    ))
 }
 
 #[cfg(test)]
@@ -1149,21 +1149,21 @@ mod tests {
 
     #[test]
     fn the_program_registers_each_vendor_reader_and_a_key_at_its_address_reads_it_by_default() {
-        use orch_provider_contract::choice::{Keeper, SourceElement, default_source};
+        use orch_provider_contract::choice::{Keeper, SourceElement, builtin, default_source};
         let table = builtin_sources().unwrap();
         assert_eq!(
             table.iter().map(|entry| entry.name).collect::<Vec<_>>(),
-            ["openrouter", "deepseek", "openai", "anthropic"]
+            builtin::KEY_FACTS
         );
         let openrouter = [url::Url::parse("https://openrouter.ai/api/v1").unwrap()];
         assert_eq!(
             default_source(SourceElement::Facts, Keeper::Key, &openrouter, &table),
-            Some("openrouter")
+            Some(builtin::OPENROUTER)
         );
         let deepseek = [url::Url::parse("https://api.deepseek.com").unwrap()];
         assert_eq!(
             default_source(SourceElement::Facts, Keeper::Key, &deepseek, &table),
-            Some("deepseek")
+            Some(builtin::DEEPSEEK)
         );
     }
 }

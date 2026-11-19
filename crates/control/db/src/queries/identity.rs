@@ -458,20 +458,6 @@ pub async fn report_device_timezone(
     Ok(written.rows_affected() == 1)
 }
 
-/// Serialize device reports with the person's native preference writes before final admission.
-/// The caller checks its live credential and actual Account gate again after this wait.
-pub async fn lock_device_timezone(
-    conn: &mut Conn,
-    user: Id,
-) -> Result<Option<(String, String)>, DbError> {
-    Ok(
-        sqlx::query_as("SELECT timezone, timezone_mode FROM users WHERE id=$1 FOR NO KEY UPDATE")
-            .bind(user)
-            .fetch_optional(conn)
-            .await?,
-    )
-}
-
 /// Sets the password hash of `user`.
 pub async fn set_password(
     conn: &mut Conn,
@@ -930,47 +916,6 @@ pub async fn live_sessions(
     .await?)
 }
 
-/// Browser session inventory without refresh/access hashes or other authentication material.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct SessionListed {
-    /// Actual session identity and owner.
-    pub id: Id,
-    pub user_id: Id,
-    /// Browser and source address metadata.
-    pub user_agent: String,
-    pub ip: Option<String>,
-    /// Creation, use and current expiry.
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-/// A bounded live session page in stable creation order.
-pub async fn session_inventory(
-    conn: &mut Conn,
-    user: Id,
-    now: DateTime<Utc>,
-    after: Option<(DateTime<Utc>, Id)>,
-    limit: i64,
-) -> Result<Vec<SessionListed>, DbError> {
-    let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    Ok(sqlx::query_as("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
-        WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>$2
-        AND ($3::timestamptz IS NULL OR created_at<$3 OR (created_at=$3 AND id>$4))
-        ORDER BY created_at DESC,id LIMIT $5")
-        .bind(user).bind(now).bind(at).bind(id).bind(limit).fetch_all(conn).await?)
-}
-/// Refresh the exact previously emitted live sessions, never a replacement page.
-pub async fn session_inventory_selected(
-    conn: &mut Conn,
-    user: Id,
-    ids: &[Id],
-    now: DateTime<Utc>,
-) -> Result<Vec<SessionListed>, DbError> {
-    Ok(sqlx::query_as("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
-        WHERE user_id=$1 AND id=ANY($2) AND revoked_at IS NULL AND expires_at>$3 ORDER BY created_at DESC,id")
-        .bind(user).bind(ids).bind(now).fetch_all(conn).await?)
-}
-
 /// Ends the session `session` of `user`, and drops its access tokens. The
 /// answer says whether there was a live session to end.
 pub async fn revoke_session(
@@ -1281,56 +1226,6 @@ pub async fn api_tokens_of(conn: &mut Conn, user: Id) -> Result<Vec<ApiTokenList
           ORDER BY t.created_at DESC, t.id"
     )))
     .bind(user)
-    .fetch_all(conn)
-    .await?)
-}
-
-/// Metadata-only system inventory row. No token hash or secret is selected.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
-pub struct ApiTokenInventory {
-    /// The same native key metadata used by personal inventories.
-    #[sqlx(flatten)]
-    pub key: ApiTokenListed,
-    /// Human or service owner, for authoritative typed placement.
-    pub owner_kind: String,
-    /// Only service identities have an owning organization.
-    pub owner_org: Option<Id>,
-}
-
-/// A bounded newest-first administrative inventory. Expired unrevoked rows remain inspectable.
-pub async fn api_token_inventory(
-    conn: &mut Conn,
-    owner: Option<Id>,
-    after: Option<(DateTime<Utc>, Id)>,
-    limit: i64,
-) -> Result<Vec<ApiTokenInventory>, DbError> {
-    let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {API_TOKEN_COLUMNS}, u.kind AS owner_kind, u.service_org_id AS owner_org
-         FROM api_tokens t JOIN users u ON u.id=t.user_id LEFT JOIN nodes n ON n.id=t.node_id
-         WHERE t.revoked_at IS NULL AND ($1::uuid IS NULL OR t.user_id=$1)
-           AND ($2::timestamptz IS NULL OR t.created_at<$2 OR (t.created_at=$2 AND t.id>$3))
-         ORDER BY t.created_at DESC,t.id LIMIT $4"
-    )))
-    .bind(owner)
-    .bind(at)
-    .bind(id)
-    .bind(limit)
-    .fetch_all(conn)
-    .await?)
-}
-
-/// Refresh only the actual emitted credential subjects; never open a replacement page.
-pub async fn api_token_inventory_selected(
-    conn: &mut Conn,
-    ids: &[Id],
-) -> Result<Vec<ApiTokenInventory>, DbError> {
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {API_TOKEN_COLUMNS}, u.kind AS owner_kind, u.service_org_id AS owner_org
-         FROM api_tokens t JOIN users u ON u.id=t.user_id LEFT JOIN nodes n ON n.id=t.node_id
-         WHERE t.revoked_at IS NULL AND t.id=ANY($1) ORDER BY t.created_at DESC,t.id"
-    )))
-    .bind(ids)
     .fetch_all(conn)
     .await?)
 }
@@ -2607,38 +2502,17 @@ pub async fn create_service_account(
     by: Id,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    create_service_account_before(conn, id, org, username, display_name, by, at, || Ok(())).await
-}
-
-/// The same native username checks and insert, with a first-effect callback after lookup.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the native columns plus their first-effect callback"
-)]
-pub async fn create_service_account_before<E: From<DbError>>(
-    conn: &mut Conn,
-    id: Id,
-    org: Id,
-    username: &str,
-    display_name: &str,
-    by: Id,
-    at: DateTime<Utc>,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<(), E> {
     let org_taken: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM orgs WHERE parent_id IS NULL AND slug = $1)",
     )
     .bind(username)
     .fetch_one(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
+    .await?;
     if org_taken {
         return Err(DbError::Unique {
             constraint: "orgs_slug_key".to_owned(),
-        }
-        .into());
+        });
     }
-    before()?;
     sqlx::query(
         "INSERT INTO users (id, kind, service_org_id, username, display_name, avatar_color,
                             created_by, created_at, updated_at, timezone, timezone_mode)
@@ -2652,8 +2526,7 @@ pub async fn create_service_account_before<E: From<DbError>>(
     .bind(by)
     .bind(at)
     .execute(conn)
-    .await
-    .map_err(DbError::from)?;
+    .await?;
     Ok(())
 }
 
@@ -2893,15 +2766,6 @@ pub async fn take_org_invitation(
     conn: &mut Conn,
     user: Id,
 ) -> Result<Option<OrgInvitation>, DbError> {
-    take_org_invitation_before(conn, user, || Ok::<(), DbError>(())).await
-}
-/// The invitation is consumed at the native first-effect boundary, after its owner row was locked.
-pub async fn take_org_invitation_before<E: From<DbError>>(
-    conn: &mut Conn,
-    user: Id,
-    before: impl FnOnce() -> Result<(), E>,
-) -> Result<Option<OrgInvitation>, E> {
-    before()?;
     Ok(sqlx::query_as(
         "WITH held AS (
              SELECT id, org_invited_by, org_invited_at FROM users
@@ -2915,8 +2779,7 @@ pub async fn take_org_invitation_before<E: From<DbError>>(
     )
     .bind(user)
     .fetch_optional(conn)
-    .await
-    .map_err(DbError::from)?)
+    .await?)
 }
 
 /// What a list of people is narrowed to.
@@ -3266,8 +3129,6 @@ pub async fn identity_provider_by_key(
 /// `session_id` (`sensitive_purpose`).
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct SignInState {
-    /// The terms hash acknowledged for this explicitly composed invitation acceptance.
-    pub accepted_terms_hash: Option<String>,
     /// Names the sign-in; the browser brings it back.
     pub state: String,
     /// The provider it was begun with.
@@ -3305,8 +3166,8 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     sqlx::query(
         "INSERT INTO oidc_states (state, identity_provider_id, nonce, pkce_verifier, redirect_path,
                                   link_user_id, invitation, session_id, sensitive_purpose,
-                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+                                  service_account_id, browser_hash, started_at, expires_at, accept_invitation, link_authority)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(&row.state)
     .bind(row.identity_provider_id)
@@ -3323,7 +3184,6 @@ pub async fn begin_sign_in(conn: &mut Conn, row: &SignInState) -> Result<(), DbE
     .bind(row.expires_at)
     .bind(row.accept_invitation)
     .bind(&row.link_authority)
-    .bind(&row.accepted_terms_hash)
     .execute(conn)
     .await?;
     Ok(())
@@ -3336,7 +3196,7 @@ pub async fn take_sign_in(conn: &mut Conn, state: &str) -> Result<Option<SignInS
         "DELETE FROM oidc_states WHERE state = $1
          RETURNING state, identity_provider_id, nonce, pkce_verifier, redirect_path, link_user_id,
                    invitation, session_id, sensitive_purpose, service_account_id, browser_hash,
-                   started_at, expires_at, accept_invitation, link_authority, accepted_terms_hash",
+                   started_at, expires_at, accept_invitation, link_authority",
     )
     .bind(state)
     .fetch_optional(conn)
@@ -3877,6 +3737,7 @@ mod tests {
                 name: slug,
                 name_by_person: true,
                 description: "",
+                description_by_person: false,
                 owner,
                 org: Some(NewOrg {
                     slug,

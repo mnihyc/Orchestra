@@ -8,8 +8,6 @@ use orch_access_contract::permissions::ObjectKind as K;
 /// Factual sources reported by the native history selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// Actual node, group and account candidates chosen by the native holder selector.
-    Holders,
     /// The actual stored page subject whose native history is selected.
     Page,
     /// Actual viewed threads a history line is about.
@@ -23,75 +21,6 @@ pub enum Source {
     /// Optional current thread labels.
     ThreadNames,
 }
-
-/// Holder identities and their independently disclosed address components.
-pub const HOLDER_SEARCH_FACETS: &[FacetSpec] = &[
-    FacetSpec::required(
-        KeyAction::Read,
-        &[
-            KeyTargetKind::Object(K::Org),
-            KeyTargetKind::Object(K::Project),
-            KeyTargetKind::Object(K::Topic),
-            KeyTargetKind::Object(K::Thread),
-            KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Group),
-            KeyTargetKind::Identity(orch_access_contract::key_scope::KeyIdentityKind::Account),
-        ],
-        TargetResolver::ResolvedCollection("holder_results"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(K::Org)],
-        TargetResolver::ResolvedCollection("holder_org_names"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(K::Project)],
-        TargetResolver::ResolvedCollection("holder_project_names"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(K::Topic)],
-        TargetResolver::ResolvedCollection("holder_topic_names"),
-    ),
-    FacetSpec::response_content(
-        &[KeyTargetKind::Object(K::Thread)],
-        TargetResolver::ResolvedCollection("holder_thread_names"),
-    ),
-];
-
-/// One native holder-search selector serves the ordinary and scoped read.
-pub const HOLDER_SEARCH: Declaration<Source> = Declaration {
-    operation: "HolderSearch",
-    bindings: &[
-        Binding {
-            source: Source::Holders,
-            target: TargetResolver::ResolvedCollection("holder_results"),
-            usage: FacetUsage::Required,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::OrgNames,
-            target: TargetResolver::ResolvedCollection("holder_org_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::ProjectNames,
-            target: TargetResolver::ResolvedCollection("holder_project_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::TopicNames,
-            target: TargetResolver::ResolvedCollection("holder_topic_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-        Binding {
-            source: Source::ThreadNames,
-            target: TargetResolver::ResolvedCollection("holder_thread_names"),
-            usage: FacetUsage::ResponseContent,
-            cardinality: Cardinality::Collection,
-        },
-    ],
-};
 
 /// Canonical history actions and kinds; the native descriptor supplies only their sources.
 pub const HISTORY_FACETS: &[FacetSpec] = &[

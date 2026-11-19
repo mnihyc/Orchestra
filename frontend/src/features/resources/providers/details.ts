@@ -9,25 +9,13 @@ export function windowName(window: { label: string; model_family?: string | null
 /** The card's fixed reading order; every key is an ordinary facts member. */
 export const FACT_MEMBERS = ['identity', 'credential', 'credential_verified', 'plan', 'windows', 'limit_reached', 'ordinary_usage_allowed', 'balances', 'spend', 'extra_usage', 'available_resets'] as const;
 export type DetailMember = (typeof FACT_MEMBERS)[number];
-export type DetailState = 'unsupported' | 'not_read_yet' | 'empty' | 'told';
+export type DetailState = NonNullable<Provider['facts_state']>[DetailMember | 'models'];
 export type Balance = Provider['facts']['balances'][number];
 export type Spend = Provider['facts']['spend'][number];
 
 /** Only the source's explicit member state decides whether a block is supported, unread or empty. */
 export function detailState(provider: Provider, member: DetailMember | 'models'): DetailState {
-  return memberState(provider.facts_state[member]);
-}
-
-/** A reason qualifies unsupported; it never becomes a read-in-progress or a fabricated amount. */
-export function memberState(value: unknown): DetailState {
-  return value === 'told' || value === 'empty' || value === 'not_read_yet' ? value : 'unsupported';
-}
-
-export function unavailableReason(provider: Provider, member: DetailMember | 'models'): string | null {
-  const value: unknown = provider.facts_state[member];
-  if (typeof value !== 'object' || value === null || !('unsupported_because' in value)) return null;
-  const detail = value.unsupported_because;
-  return typeof detail === 'object' && detail !== null && 'reason' in detail && typeof detail.reason === 'string' ? detail.reason : null;
+  return provider.facts_state[member];
 }
 
 /** Collections accept the contract's explicit empty and nullable forms without manufacturing a zero amount. */
@@ -50,8 +38,7 @@ export function amountText(value: string | null | undefined, unit: string, unkno
 
 /** The shared contract resolves field support; absent metadata preserves the earlier unknown display. */
 export function detailFieldVisible(provider: Provider, path: string): boolean {
-  const state = provider.facts_state.fields?.[path];
-  return state === undefined || memberState(state) !== 'unsupported';
+  return provider.facts_state.fields?.[path] !== 'unsupported';
 }
 
 /** A metric hides only when every known amount is explicitly unsupported; unresolved groups remain unknown. */
