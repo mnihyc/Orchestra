@@ -206,6 +206,41 @@ pub async fn credential_end(
     .flatten())
 }
 
+// Shared by scheduling and policies that consume this provider's measured windows.
+const CADENCE_MINUTES: &str = "CASE
+             WHEN p.status = 'error' THEN cadence.refused
+             WHEN EXISTS (SELECT 1 FROM threads th JOIN turns t ON t.thread_id = th.node_id
+               WHERE th.provider_id = p.id AND (t.state = 'running'
+                 OR EXTRACT(EPOCH FROM ($1 - GREATEST(t.started_at,t.completed_at))) / 60 <= cadence.recent))
+             OR (p.status='exhausted' AND EXISTS (
+               SELECT 1 FROM threads th JOIN nodes n ON n.id=th.node_id
+               JOIN thread_inputs i ON i.thread_id=th.node_id
+               WHERE th.provider_id=p.id AND n.deleted_at IS NULL AND n.archived_at IS NULL
+                 AND i.state IN ('pending','delivering')))
+             THEN cadence.active ELSE cadence.idle END";
+
+/// The configured interval for this provider's actual activity, including its source minimum.
+pub async fn observation_seconds(
+    conn: &mut Conn,
+    now: DateTime<Utc>,
+    schedule: &ReadSchedule,
+) -> Result<Option<i64>, DbError> {
+    let sql = format!("SELECT LEAST(9223372036854775807::numeric,GREATEST(
+        ({CADENCE_MINUTES})::numeric*60,CASE WHEN p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}' ~ '^[0-9]+$'
+        THEN (p.sources #>> '{{facts,descriptor,facts,min_interval_secs}}')::numeric ELSE 0 END))::bigint
+        FROM providers p CROSS JOIN (VALUES($3::bigint,$4::bigint,$5::bigint,$6::bigint)) cadence(recent,active,idle,refused)
+        WHERE p.id=$2 AND p.deleted_at IS NULL");
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(now)
+        .bind(schedule.provider_id)
+        .bind(schedule.recent)
+        .bind(schedule.active)
+        .bind(schedule.idle)
+        .bind(schedule.refused)
+        .fetch_optional(conn)
+        .await?)
+}
+
 /// Providers whose online runtime is due an observation at its cadence or a minute after a vendor reset.
 pub async fn due_reads(
     conn: &mut Conn,
@@ -226,17 +261,7 @@ pub async fn due_reads(
          JOIN UNNEST($3::uuid[],$4::bigint[],$5::bigint[],$6::bigint[],$7::bigint[])
            AS cadence(provider_id,recent,active,idle,refused) ON cadence.provider_id = p.id
          WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
-           AND (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1 - COALESCE(p.facts_requested_at,p.facts_at,p.created_at))) / 60 >= CASE
-             WHEN p.status = 'error' THEN cadence.refused
-             WHEN EXISTS (SELECT 1 FROM threads th JOIN turns t ON t.thread_id = th.node_id
-               WHERE th.provider_id = p.id AND (t.state = 'running'
-                 OR EXTRACT(EPOCH FROM ($1 - GREATEST(t.started_at,t.completed_at))) / 60 <= cadence.recent))
-             OR (p.status='exhausted' AND EXISTS (
-               SELECT 1 FROM threads th JOIN nodes n ON n.id=th.node_id
-               JOIN thread_inputs i ON i.thread_id=th.node_id
-               WHERE th.provider_id=p.id AND n.deleted_at IS NULL AND n.archived_at IS NULL
-                 AND i.state IN ('pending','delivering')))
-             THEN cadence.active ELSE cadence.idle END OR {RESET_READ_DUE})
+           AND (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1 - COALESCE(p.facts_requested_at,p.facts_at,p.created_at))) / 60 >= {CADENCE_MINUTES} OR {RESET_READ_DUE})
            AND {SOURCE_INTERVAL_DUE}
          ORDER BY COALESCE(p.facts_requested_at,p.facts_at,p.created_at),p.id LIMIT $8");
     // Only this module's constants are put into the statement.
@@ -432,17 +457,18 @@ pub async fn reset_request(conn: &mut Conn, command: Id) -> Result<Option<Json>,
 }
 
 /// The current provider binding and credential generation, without exposing any credential material.
+/// Observation writes advance both revision counters, so their difference changes only on other edits.
 /// The sealed-value digest also distinguishes two rotations made at the same stepped clock time.
 pub async fn credential_epoch(
     conn: &mut Conn,
     provider: Id,
-    revision: Option<i64>,
+    configuration_revision: Option<i64>,
 ) -> Result<Option<Json>, DbError> {
-    Ok(sqlx::query_scalar("SELECT jsonb_build_array(p.revision,p.machine_id,p.key_machine_id,p.agent_id,p.login_state,
+    Ok(sqlx::query_scalar("SELECT jsonb_build_array(p.revision-p.observation_revision,p.machine_id,p.key_machine_id,p.agent_id,p.login_state,
         COALESCE((SELECT jsonb_agg(jsonb_build_array(s.id,s.name,s.rotated_at,s.created_at,md5(s.sealed)) ORDER BY s.name)
           FROM secrets s WHERE s.owner_kind = 'provider' AND s.owner_id = p.id),'[]'::jsonb))
-        FROM providers p WHERE p.id = $1 AND p.deleted_at IS NULL AND ($2::bigint IS NULL OR p.revision = $2)")
-        .bind(provider).bind(revision).fetch_optional(conn).await?)
+        FROM providers p WHERE p.id = $1 AND p.deleted_at IS NULL AND ($2::bigint IS NULL OR p.revision-p.observation_revision = $2)")
+        .bind(provider).bind(configuration_revision).fetch_optional(conn).await?)
 }
 
 /// Whether a manager's one reserved input or turn is still pending.

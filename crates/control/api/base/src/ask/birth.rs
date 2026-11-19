@@ -119,11 +119,10 @@ pub async fn prepare(
     }
     if let Some(model) = &program.model {
         let choices = crate::routes::threads::binding::ask_models(conn, &principal, root).await?;
-        if !choices.iter().any(|choice| {
-            choice.selection.provider_id == model.provider_id
-                && choice.selection.model == model.model
-                && choice.allowed
-        }) {
+        if !choices
+            .iter()
+            .any(|choice| choice.selection.backend == model.backend && choice.allowed)
+        {
             return Err(ApiError::invalid(
                 "program.model",
                 "Choose an allowed API model in this organization",

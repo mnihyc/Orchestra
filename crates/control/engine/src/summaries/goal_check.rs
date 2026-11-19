@@ -22,9 +22,6 @@ pub(crate) const GOAL_CHECK: &str = "You judge whether a coding agent has finish
 /// The key of the instruction among the model producer's replacement prompts.
 const PROMPT_KEY: &str = "goal_check";
 
-/// The most tokens the answer may take: a word and a sentence, with room for a longer reason.
-const ANSWER_TOKENS: i64 = 200;
-
 /// The most items a turn may have for it to be read and sent to the helper.
 const TURN_ITEMS_MAX: i64 = 2_000;
 
@@ -49,9 +46,7 @@ pub(crate) enum Checked {
 /// provider and a model.
 pub(crate) async fn available(conn: &mut orch_db::Conn, node: Id) -> Result<bool, EngineError> {
     Ok(choice(conn, node).await?.is_some_and(|chosen: Choice| {
-        chosen.kind == "model"
-            && chosen.config["provider_id"].is_string()
-            && chosen.config["model_name"].is_string()
+        chosen.kind == "model" && Config::read(&chosen.config).is_ok()
     }))
 }
 
@@ -174,15 +169,23 @@ pub(crate) async fn ask(
             "the summary model is not configured".to_owned(),
         ));
     };
+    let offering = config.offering().map_err(EngineError::unreadable)?;
     let system = config
         .prompts
         .get(PROMPT_KEY)
         .and_then(Option::as_deref)
         .unwrap_or(GOAL_CHECK)
         .to_owned();
-    let budget =
-        super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-            .await?;
+    let reasons = super::budget::reasons(&mut conn, &config).await?;
+    let output = config.goal_output_reserve(reasons);
+    let budget = super::budget::input_budget(
+        &mut conn,
+        thread,
+        offering.provider,
+        &offering.offering,
+        output,
+    )
+    .await?;
     let row = orch_db::queries::threads::thread(&mut conn, thread)
         .await?
         .ok_or_else(|| EngineError::unreadable("the thread is gone"))?;
@@ -272,7 +275,14 @@ pub(crate) async fn ask(
         task: "goal_check",
         resource: None,
     };
-    let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
+    let reasoning = match host
+        .reasoning(thread, offering.provider, &offering.offering)
+        .await
+    {
+        Ok(reasoning) => reasoning,
+        Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
+    };
+    let request = config.completion_with(&reasoning, system, input, config.goal_max_output_tokens);
     let answered = match host.complete(thread, request).await {
         Ok(answer) => answer,
         Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),

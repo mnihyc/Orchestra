@@ -416,6 +416,9 @@ impl Engine {
         .await
         {
             Ok(answer) => answer,
+            Err(error @ EngineError::Commands(crate::commands::CommandsError::Stopping)) => {
+                return Err(error);
+            }
             Err(EngineError::Capability(failure)) => Answer::Done(failure.reply()),
             Err(EngineError::CapabilityPaused(pause)) => Answer::Done(pause.reply()),
             Err(error @ (EngineError::StaleToolSource | EngineError::ToolCallIdentity)) => {
@@ -604,8 +607,8 @@ impl Engine {
             OrchTool::OrchDocs | OrchTool::Open | OrchTool::Search | OrchTool::FindOperation | OrchTool::Read => Box::pin(self.read_tool_call(call, thread)).await,
             OrchTool::UseBrowser => Box::pin(self.use_browser_call(call, thread)).await,
             OrchTool::UseDisplay => Box::pin(self.use_display_call(call,thread)).await,
-            OrchTool::ListShared => self.list_shared_call(call, thread).await,
-            OrchTool::ReadShared => self.read_shared_call(call, thread).await,
+            OrchTool::ListShared => self.list_shared_call(call, thread, &settings.search_budgets).await,
+            OrchTool::ReadShared => self.read_shared_call(call, thread, &settings.search_budgets).await,
             OrchTool::SearchShared => Box::pin(self.search_shared_call(call, thread, &settings.search_budgets)).await,
             OrchTool::DownloadShared => Box::pin(self.download_shared_call(call, thread)).await,
             OrchTool::SendMessage => Box::pin(self.send_message_call(call, thread, &settings)).await,

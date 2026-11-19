@@ -284,6 +284,7 @@ pub fn start_with_settler(
         },
         Arc::clone(&params.clock),
     );
+    mapper.set_output_capture_bytes(params.spec.settings.output_capture_bytes);
     mapper.set_retry_notice_attempt(params.setup.config.retry_notice_attempt);
     mapper.configure_native_counters(&params.spec.provider);
     if let Some(directory) = params.setup.outputs_directory() {
@@ -1098,7 +1099,6 @@ impl Conversation {
         let total = tasks.len();
         let items = tasks
             .into_iter()
-            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
             .map(|task| NativeBackgroundCommand {
                 id: background_command_id(&task),
                 native_item_ref: Some(task.native_item_ref),
@@ -1116,12 +1116,10 @@ impl Conversation {
             supported: true,
             as_of: Some(self.params.clock.time()),
             state: BackgroundState::Live,
-            reason: (total > orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| "the owned native task list is partial".to_owned()),
+            reason: None,
             items,
             next_cursor: None,
-            total: (total <= orch_agent_contract::background::SNAPSHOT_COMMANDS)
-                .then(|| i64::try_from(total).unwrap_or(i64::MAX)),
+            total: Some(i64::try_from(total).unwrap_or(i64::MAX)),
         }
     }
 
@@ -1224,7 +1222,8 @@ impl Conversation {
                 &self.params.spec.settings.model,
             )
             .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
+        let changed = spec.settings.side_reading != self.params.spec.settings.side_reading
+            || spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
             || page_reader_changed
             || spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
@@ -1254,6 +1253,7 @@ impl Conversation {
         if self.process.is_some() {
             mapper.inherit_process_report(&self.mapper);
         }
+        mapper.set_output_capture_bytes(spec.settings.output_capture_bytes);
         mapper.set_retry_notice_attempt(self.params.setup.config.retry_notice_attempt);
         mapper.configure_native_counters(&spec.provider);
         if let Some(directory) = self.params.setup.outputs_directory() {
@@ -1270,6 +1270,10 @@ impl Conversation {
 
     fn turn_settings(turn: &TurnStart) -> TurnSettings {
         TurnSettings {
+            program_output: crate::sessions::native_program_output(
+                turn.native_model.as_deref(),
+                &turn.model,
+            ),
             cache_lifetimes: crate::sessions::native_cache_lifetimes(
                 turn.native_model.as_deref(),
                 &turn.model,
@@ -1624,6 +1628,7 @@ impl Conversation {
         let must_restart = self.needs_restart
             || live.model != wanted.model
             || live.effort != wanted.effort
+            || live.program_output != wanted.program_output
             || live.sandbox_mode != wanted.sandbox_mode
             || page_reader_changed
             || (live.approval_mode == ApprovalMode::Bypass)
@@ -1759,7 +1764,7 @@ impl Conversation {
             turn: settings,
             oauth_token: token.as_deref(),
         })?;
-        if through_executor(&self.params.spec)
+        if (through_executor(&self.params.spec) || crate::confinement::no_tools(&self.params.spec))
             && let Err(error) = tokio::fs::create_dir_all(&spec.cwd).await
         {
             return Err(AdapterError::HarnessError(format!(
@@ -2432,6 +2437,15 @@ impl Conversation {
                 .await;
             return;
         };
+        if crate::confinement::no_tools(&self.params.spec) {
+            let _ = self
+                .write(&control_success(
+                    &ask.control_id,
+                    ask.refusal("This conversation has no callable tools."),
+                ))
+                .await;
+            return;
+        }
         let turn_id = self
             .turn
             .as_ref()
@@ -2468,6 +2482,8 @@ impl Conversation {
             return;
         }
         let ctx = ToolContext {
+            outputs: None,
+            output_capture_bytes: self.params.spec.settings.output_capture_bytes,
             directory: &self.params.spec.settings.directory,
             cwd: &self.params.spec.settings.cwd,
         };
@@ -2679,6 +2695,7 @@ impl Conversation {
         self.lose_session(&info.describe()).await;
         if !expected && !had_turn && was_live {
             self.emit(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: format!("the harness process ended: {}", info.describe()),
             }))
             .await;
@@ -2715,6 +2732,7 @@ impl Conversation {
             let events = self.mapper.abandon_turn();
             self.emit_all(events).await;
             self.emit(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: format!("the harness process ended: {why}"),
             }))
             .await;
@@ -2891,6 +2909,7 @@ mod outbox_tests {
     fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
         let lost = || {
             event(SessionEvent::SessionLost(SessionLost {
+                uncertain: false,
                 reason: "gone".to_owned(),
             }))
         };

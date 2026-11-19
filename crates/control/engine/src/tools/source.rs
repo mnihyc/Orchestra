@@ -209,6 +209,27 @@ pub(crate) async fn original_callers_with_limits(
     access: &dyn crate::access::ResourceAccess,
     limits: &[orch_authz::CapturedCaller],
 ) -> Result<CallOrigins, EngineError> {
+    restored_callers(conn, call, clock, Some(access), limits).await
+}
+
+/// Restore the actual input operations for a bounded execution artifact. Resource Use is
+/// checked separately by its native first-effect guard, as for ordinary input preflight.
+pub(crate) async fn input_callers_with_limits(
+    conn: &mut Conn,
+    call: &super::CallContext,
+    clock: &dyn orch_types::Clock,
+    limits: &[orch_authz::CapturedCaller],
+) -> Result<CallOrigins, EngineError> {
+    Box::pin(restored_callers(conn, call, clock, None, limits)).await
+}
+
+async fn restored_callers(
+    conn: &mut Conn,
+    call: &super::CallContext,
+    clock: &dyn orch_types::Clock,
+    access: Option<&dyn crate::access::ResourceAccess>,
+    limits: &[orch_authz::CapturedCaller],
+) -> Result<CallOrigins, EngineError> {
     check_call(conn, call).await?;
     let thread = threads::thread(conn, call.thread)
         .await?
@@ -322,23 +343,25 @@ pub(crate) async fn original_callers_with_limits(
                 }
                 caller.clone()
             };
-            ordinary(
-                crate::inputs::check_sender_for_turn(
-                    &mut unit,
-                    &caller,
-                    &thread,
-                    need_provider,
-                    Some(&turn),
-                    access,
+            if let Some(access) = access {
+                ordinary(
+                    crate::inputs::check_sender_for_turn(
+                        &mut unit,
+                        &caller,
+                        &thread,
+                        need_provider,
+                        Some(&turn),
+                        access,
+                    )
+                    .await,
                 )
-                .await,
-            )
-            .inspect_err(|_| {
-                #[cfg(test)]
-                if std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some() {
-                    eprintln!("service_original_source sender");
-                }
-            })?;
+                .inspect_err(|_| {
+                    #[cfg(test)]
+                    if std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some() {
+                        eprintln!("service_original_source sender");
+                    }
+                })?;
+            }
             if crate::preflight::second_step_missing(unit.conn, caller.user(), thread.node_id)
                 .await?
             {
