@@ -62,6 +62,7 @@ pub struct Inner {
     /// The threads whose follow-up work is being carried out, and whether
     /// more was asked for meanwhile.
     pub(crate) flights: Mutex<HashMap<Id, bool>>,
+    database_recoveries: Mutex<HashMap<&'static str, crate::database_retry::Episode>>,
     /// The threads somebody thinks have work, and when that was thought.
     pub(crate) wakes: Mutex<HashMap<Id, Instant>>,
     /// The last active goal examined by the supervisor's bounded round-robin pass.
@@ -69,7 +70,7 @@ pub struct Inner {
     pub(crate) signal: Notify,
     /// Tells the task that hands woken threads to their work ([`Engine::deliver_wakes`]) that one was woken.
     pub(crate) woken: Notify,
-    pub(crate) stopped: AtomicBool,
+    pub(crate) stopped: tokio_util::sync::CancellationToken,
     pub(crate) started: AtomicBool,
     pub(crate) ask_runtime: AtomicBool,
     /// How many sweeps of everything that may be due the supervisor has made.
@@ -124,6 +125,14 @@ pub struct Inner {
     pub(crate) blobs: OnceLock<Arc<dyn BlobStore>>,
     /// The idle environments that this process is stopping now.
     pub(crate) stopping: Mutex<HashSet<Id>>,
+    /// The threads whose Stops, or the work that follows them, a task of this process is carrying out now.
+    pub(crate) stops: Mutex<HashMap<Id, Arc<tokio::sync::Notify>>>,
+    pub(crate) decision_settlements: Mutex<HashSet<Id>>,
+    pub(crate) approval_notifications: Mutex<HashSet<Id>>,
+    pub(crate) start_waits: Mutex<HashMap<Id, tokio_util::sync::CancellationToken>>,
+    pub(crate) preparation_reads: Mutex<HashMap<Id, (Id, tokio_util::sync::CancellationToken)>>,
+    /// At most one end publication per thread; seals of later turns remain independent.
+    pub(crate) end_publications: Mutex<HashSet<Id>>,
     /// Current browser profiles, counts and the API's volatile transport.
     pub(crate) browser_memory: Arc<crate::browsers::Memory>,
     /// Display sealing and transient-list hooks supplied by the API.
@@ -139,8 +148,6 @@ pub struct Inner {
     /// What this process remembers of the credentials that left their providers (the part that keeps
     /// providers): the copies issued under each lease, and the returns under way.
     pub(crate) credentials: Mutex<crate::credentials::Issuing>,
-    /// The pieces of growing text that are not written to their items yet ([`crate::streaming`]).
-    pub(crate) growing: crate::streaming::Growing,
 }
 
 /// The thread engine.
@@ -182,11 +189,12 @@ impl Engine {
                 live,
                 sessions: Mutex::new(OpenSessions::default()),
                 flights: Mutex::new(HashMap::new()),
+                database_recoveries: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
                 goal_cursor: Mutex::new(None),
                 signal: Notify::new(),
                 woken: Notify::new(),
-                stopped: AtomicBool::new(false),
+                stopped: tokio_util::sync::CancellationToken::new(),
                 started: AtomicBool::new(false),
                 ask_runtime: AtomicBool::new(false),
                 sweeps: AtomicU64::new(0),
@@ -213,9 +221,14 @@ impl Engine {
                 room_made: Mutex::new(None),
                 releasing: AtomicBool::new(false),
                 cap_waits: Mutex::new(HashMap::new()),
-                growing: crate::streaming::Growing::default(),
                 blobs: OnceLock::new(),
                 stopping: Mutex::new(HashSet::new()),
+                stops: Mutex::new(HashMap::new()),
+                decision_settlements: Mutex::new(HashSet::new()),
+                approval_notifications: Mutex::new(HashSet::new()),
+                start_waits: Mutex::new(HashMap::new()),
+                preparation_reads: Mutex::new(HashMap::new()),
+                end_publications: Mutex::new(HashSet::new()),
                 browser_memory: Arc::new(crate::browsers::Memory::default()),
                 display_memory: Arc::new(crate::displays::Memory::default()),
                 background: crate::background::Memory::default(),
@@ -274,13 +287,19 @@ impl Engine {
 
     /// Whether [`Engine::stop`] was called.
     pub(crate) fn is_stopped(&self) -> bool {
-        self.inner.stopped.load(Ordering::SeqCst)
+        self.inner.stopped.is_cancelled()
     }
 
     /// Stops what [`Engine::start`] started. Work in hand is left where it
     /// is in the database, for the next process to take up.
     pub fn stop(&self) {
-        self.inner.stopped.store(true, Ordering::SeqCst);
+        self.inner.stopped.cancel();
+        for waiting in lock(&self.inner.start_waits).values() {
+            waiting.cancel();
+        }
+        for (_, reading) in lock(&self.inner.preparation_reads).values() {
+            reading.cancel();
+        }
         self.stop_agent_history();
         self.inner.signal.notify_waiters();
         self.inner.woken.notify_waiters();
@@ -347,11 +366,15 @@ impl Engine {
                 .map(|at| (*at + grace).saturating_duration_since(Instant::now()))
                 .min();
             match next {
-                None => self.inner.woken.notified().await,
+                None => tokio::select! {
+                    ()=self.inner.woken.notified()=>{},
+                    ()=self.inner.stopped.cancelled()=>return,
+                },
                 Some(wait) if !wait.is_zero() => {
                     tokio::select! {
                         () = self.inner.woken.notified() => {}
                         () = tokio::time::sleep(wait) => {}
+                        () = self.inner.stopped.cancelled() => return,
                     }
                 }
                 Some(_) => {}
@@ -377,6 +400,68 @@ impl Engine {
         }
     }
 
+    async fn recovery_step<T>(
+        &self,
+        operation: &'static str,
+        work: impl std::future::Future<Output = Result<T, EngineError>>,
+    ) -> Option<T> {
+        if lock(&self.inner.database_recoveries)
+            .get(operation)
+            .is_some_and(|episode| !episode.ready())
+        {
+            return None;
+        }
+        match work.await {
+            Ok(value) => {
+                lock(&self.inner.database_recoveries).remove(operation);
+                Some(value)
+            }
+            Err(error) => {
+                if !lock(&self.inner.database_recoveries).contains_key(operation) {
+                    let policy = crate::database_retry::Policy::load(self.db()).await;
+                    lock(&self.inner.database_recoveries)
+                        .entry(operation)
+                        .or_insert_with(|| policy.episode());
+                }
+                if let Some(code) = error.data_code() {
+                    let report = lock(&self.inner.database_recoveries)
+                        .get_mut(operation)
+                        .and_then(|episode| {
+                            let report = episode.failed().1;
+                            episode.reject();
+                            report
+                        });
+                    if let Some(failures) = report {
+                        tracing::error!(
+                            operation,
+                            sqlstate = code,
+                            failures,
+                            "background data was refused; fresh state is needed before it is reconsidered"
+                        );
+                    }
+                    return None;
+                }
+                let report = lock(&self.inner.database_recoveries)
+                    .get_mut(operation)
+                    .and_then(|episode| episode.failed().1);
+                if let Some(failures) = report {
+                    tracing::warn!(
+                        operation,
+                        failures,
+                        "background work is waiting for database recovery"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    pub(crate) fn fresh_database_work(&self) {
+        for episode in lock(&self.inner.database_recoveries).values_mut() {
+            episode.reconsider();
+        }
+    }
+
     async fn supervise(&self) {
         if let Err(error) = self.reconcile_startup().await {
             tracing::warn!(%error, "startup supervision could not be restored; ordinary sweeps continue recovery");
@@ -391,9 +476,8 @@ impl Engine {
             // One sweep contains every recovery branch; do not embed it again in
             // both the supervisor and the task that polls the supervisor.
             self.inner.sweeps.fetch_add(1, Ordering::Relaxed);
-            if let Err(error) = Box::pin(self.sweep(recheck)).await {
-                tracing::warn!(%error, "a sweep of the engine failed; the next looks again");
-            }
+            self.recovery_step("engine sweep", Box::pin(self.sweep(recheck)))
+                .await;
             let pause = if lock(&self.inner.wakes).is_empty() {
                 self.inner.config.sweep_every
             } else {
@@ -402,11 +486,15 @@ impl Engine {
             tokio::select! {
                 () = self.inner.signal.notified() => {}
                 () = tokio::time::sleep(pause) => {}
+                () = self.inner.stopped.cancelled() => return,
             }
             // A wake is held back for as long as the transaction behind it may
             // take to commit.
             if !lock(&self.inner.wakes).is_empty() {
-                tokio::time::sleep(self.inner.config.post_commit_grace).await;
+                tokio::select! {
+                    ()=tokio::time::sleep(self.inner.config.post_commit_grace)=>{},
+                    ()=self.inner.stopped.cancelled()=>return,
+                }
             }
         }
     }
@@ -427,37 +515,44 @@ impl Engine {
             ripe
         };
         let batch = self.inner.config.sweep_batch;
-        if let Err(error) = crate::tools::source::reap(self, None).await {
-            tracing::warn!(%error, "admitted own-tool native commands await their durable outcome");
-        }
-        if crate::side_threads::history::reap_closed(self)
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                "closed side history inputs await their original native completion receipt"
-            );
-        }
-        if let Err(error) = self.sweep_running_requests(batch).await {
-            tracing::warn!(%error,"abandoned model request observations await the next sweep");
-        }
-        if let Err(error) = self.reconcile_networks().await {
-            tracing::warn!(%error, "runtime network policies could not be reconciled; the next sweep looks again");
-        }
+        // A person's Stop comes before everything else the sweep looks at, and is handed to a task of its
+        // thread that the sweep does not wait for.
+        self.recovery_step("keep_stops", self.keep_stops()).await;
+        self.recovery_step(
+            "keep_decision_settlements",
+            self.keep_decision_settlements(),
+        )
+        .await;
+        // A commit may skip a busy thread; idle threads still get their durable file work paid.
+        self.recovery_step("invalidate_work", self.invalidate_work())
+            .await;
+        self.recovery_step(
+            "keep_approval_notifications",
+            self.keep_approval_notifications(),
+        )
+        .await;
+        self.recovery_step("reap", crate::tools::source::reap(self, None))
+            .await;
+        self.recovery_step(
+            "closed side history",
+            crate::side_threads::history::reap_closed(self),
+        )
+        .await;
+        self.recovery_step("sweep_running_requests", self.sweep_running_requests(batch))
+            .await;
+        self.recovery_step("reconcile_networks", self.reconcile_networks())
+            .await;
         // Providers, and the leases that no turn holds, come before the threads they decide.
         self.keep_providers().await;
         // Environments: the jobs that make and remove them, and what is due for removal or stopping.
         self.keep_environments().await;
-        if let Err(error) = self.keep_live_mount_facts().await {
-            tracing::warn!(%error,"completed mount facts could not be refreshed; the next sweep looks again");
-        }
-        if let Err(error) = self.keep_call_recoveries().await {
-            tracing::warn!(%error,"model call recoveries await the next sweep");
-        }
+        self.recovery_step("keep_live_mount_facts", self.keep_live_mount_facts())
+            .await;
+        self.recovery_step("keep_call_recoveries", self.keep_call_recoveries())
+            .await;
         // Summaries claim their own work and await providers in independent tasks.
-        if let Err(error) = self.keep_summaries().await {
-            tracing::warn!(%error, "summary triggers could not be read; the next sweep looks again");
-        }
+        self.recovery_step("keep_summaries", self.keep_summaries())
+            .await;
         // Search by meaning indexes in a task of its own, one turn at a time, never holding the sweep.
         self.keep_indexing_due();
         let mut due: Vec<Id> = ripe;
@@ -508,18 +603,20 @@ impl Engine {
         due.extend(self.threads_with_decisions_to_deliver().await?);
         due.extend(self.threads_with_leases_to_close().await?);
         self.sync_presence(batch).await?;
-        if let Err(error) = self.expire_capability_requests().await {
-            tracing::warn!(%error, "requests for a capability could not be looked at; the next sweep looks again");
-        }
-        if let Err(error) = self.expire_chat_memberships().await {
-            tracing::warn!(%error,"timed group memberships await the next sweep");
-        }
-        if let Err(error) = self.expire_access_requests().await {
-            tracing::warn!(%error, "requests for access could not be looked at; the next sweep looks again");
-        }
-        if let Err(error) = self.reconcile_source_requests().await {
-            tracing::warn!(%error,"source requests could not be reconciled; the next sweep tries again");
-        }
+        self.recovery_step(
+            "expire_capability_requests",
+            self.expire_capability_requests(),
+        )
+        .await;
+        self.recovery_step("expire_chat_memberships", self.expire_chat_memberships())
+            .await;
+        self.recovery_step("expire_access_requests", self.expire_access_requests())
+            .await;
+        self.recovery_step(
+            "reconcile_source_requests",
+            self.reconcile_source_requests(),
+        )
+        .await;
         // The threads that wait for room in a usage cap are looked at together, the one whose oldest input is
         // oldest first, so that a cap behaves as a queue: when room is made, the first of them it fits starts.
         let queue = if recheck || self.take_room_made() {
@@ -536,9 +633,9 @@ impl Engine {
         if !queue.is_empty() {
             let engine = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = engine.release_waiting_threads().await {
-                    tracing::warn!(%error, "the threads that wait for room in a cap could not be looked at; the next sweep looks again");
-                }
+                engine
+                    .recovery_step("release_waiting_threads", engine.release_waiting_threads())
+                    .await;
             });
         }
         Ok(())
@@ -631,16 +728,51 @@ impl Engine {
         }
         let engine = self.clone();
         tokio::spawn(async move {
+            let mut retry = None;
+            let mut rejected: Option<String> = None;
             loop {
                 // Named for the development guard, which reports a transaction held long or a
                 // pooled connection asked for while this task holds one.
-                if !engine.is_stopped()
-                    && let Err(error) =
-                        orch_db::pool::serving("thread work", Box::pin(engine.reconcile(thread)))
-                            .await
-                {
-                    tracing::warn!(%error, %thread, "the work of a thread could not be carried out; it is looked at again");
+                if engine.is_stopped() {
+                    lock(&engine.inner.flights).remove(&thread);
+                    return;
                 }
+                let result = if let Some(code) = rejected.as_deref() {
+                    engine.fail_storage_work(thread, code).await
+                } else {
+                    orch_db::pool::serving("thread work", Box::pin(engine.reconcile(thread))).await
+                };
+                if let Err(error) = result {
+                    if rejected.is_none()
+                        && let Some(code) = error.data_code()
+                    {
+                        // From now on only its safe gap is retried, never the rejected work.
+                        rejected = Some(code.to_owned());
+                        continue;
+                    }
+                    if retry.is_none() {
+                        retry = Some(
+                            crate::database_retry::Policy::load(engine.db())
+                                .await
+                                .episode(),
+                        );
+                    }
+                    if let Some(episode) = retry.as_mut() {
+                        let (pause, report) = episode.failed();
+                        if let Some(failures) = report {
+                            tracing::warn!(%thread,failures,"thread work is waiting for database recovery");
+                        }
+                        // Reconciliation returned and released its transaction before this wait.
+                        if !crate::database_retry::wait(pause, &engine.inner.stopped).await {
+                            lock(&engine.inner.flights).remove(&thread);
+                            return;
+                        }
+                    }
+                    continue;
+                } else if let Some(episode) = retry.as_mut() {
+                    episode.recovered();
+                }
+                rejected = None;
                 let mut flights = lock(&engine.inner.flights);
                 match flights.get_mut(&thread) {
                     Some(again) if *again && !engine.is_stopped() => *again = false,

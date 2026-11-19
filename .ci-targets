@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract -p orch-settings-contract --lib
+test -p orch-link --lib --test commands --test large_messages
+test -p orch-db --lib --test commands_in_line --test database_watch --test migration_progress --test released_migrations
+test -p orch-engine --lib
+test -p orch-engine --test turns --test failures --test source --test forks --test provider_sign_in --test temporary_environments --test measurement_jobs --test exports --test paste_delivery
+test -p orch-api-core --lib --features test-observers
+test -p orch-api-core --test ask --test copy_out_ask --test provider_harness --test threads_drive --test realtime_environment --test terminals_connector --test kfix_binding
+web test -- tests/component/batch-kept-resources.test.tsx tests/component/component-update.test.tsx tests/component/thread-change-review.test.tsx tests/component/thread-now.test.tsx tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts tests/unit/module-doubles.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts
