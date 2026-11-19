@@ -254,7 +254,6 @@ fn persistence_column(value: &str) -> Option<&'static str> {
         "error",
         "execution_revision",
         "executor",
-        "files_end_manifest",
         "id",
         "import_fidelity",
         "import_report",
@@ -1558,6 +1557,12 @@ impl Job {
         super::recreate::capability_revocation::decorate(self, &mut command, !respect_cancel)
             .await?;
         super::retained::operation::decorate(self, &mut command, !respect_cancel).await?;
+        if respect_cancel && self.row().await?.plan.get("workspace_upload").is_some() {
+            if let Some(retained) = commands.retained_command(id).await.map_err(commands_stop)? {
+                preserve_creator_report(&mut command, &retained)?;
+            }
+            super::workspace_upload::decorate(self, &mut command).await?;
+        }
         super::lifecycle_commands::decorate(self, &mut command, respect_cancel).await?;
         let update_boundary = if respect_cancel
             && super::recreate::environment_authority::is_restricted(&self.row().await?)
@@ -2433,6 +2438,7 @@ mod tests {
             machine,
             SerialKey::Environment(environment),
             &FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 job_id: job,
                 selection: Selection {

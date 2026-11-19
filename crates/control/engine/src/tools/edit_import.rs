@@ -574,6 +574,13 @@ impl Engine {
                                 rel,
                             }),
                             DirEntryKind::Symlink | DirEntryKind::Other => {}
+                            DirEntryKind::PermissionDenied
+                            | DirEntryKind::Vanished
+                            | DirEntryKind::Unreadable => {
+                                return Ok(Err(Refusal::invalid(format!(
+                                    "The workspace entry {rel:?} could not be read."
+                                ))));
+                            }
                         }
                     }
                 }

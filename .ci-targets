@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-envhost --lib -- a_directory_page_marks_a_denied_file_and_a_vanished_sibling_beside_a_readable_file
+test -p orch-envhost --lib -- an_enumerated_name_that_vanishes_stays_marked_and_excluded_names_stay_private

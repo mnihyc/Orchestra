@@ -245,6 +245,7 @@ impl Scene {
         let (world, manager, colleague, environment, place, machine) = setup().await;
         port_policy(&world, "port_host", "ask").await;
         let ports = orch_link_contract::policy::MachinePorts {
+            loopback_tcp: Default::default(),
             allowed: vec![PortOpeningKind::Host],
             publish: Some(HostPorts {
                 incoming_address: "publisher.example.test".into(),

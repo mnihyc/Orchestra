@@ -1080,3 +1080,9 @@ pub mod tags;
 
 #[path = "nodes/tree_docs.rs"]
 pub mod tree_docs;
+
+#[path = "nodes/tree_fold.rs"]
+pub mod tree_fold;
+
+#[path = "nodes/tree_order.rs"]
+pub mod tree_order;

@@ -6,7 +6,8 @@
  * their phone; a code that is mailed is read from the outbox, as the people of the fake system would
  * read their mail.
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { crc32 } from 'node:zlib';
 import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
 import { narrowingMerge, resolvedParts } from './day100-settings.ts';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry.ts';
@@ -60,7 +61,7 @@ const REGISTRY: readonly Key[] = [
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets' || ['composer.paste_inline_context_share', 'thread.plan_first', 'thread.silent_after_secs', 'thread.plan_answered_by', 'orch_tools.owner_reads', 'threads.opening_items'].includes(def.key)).map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -92,8 +93,8 @@ const REGISTRY: readonly Key[] = [
   key('terminal.max_per_person', 'Shells per person', 'How many shells one person may have open at once in one environment.', 'shells', 'policy', WITH_SYSTEM, { type: 'integer', minimum: 1 }, 4),
   key('docs.max_bytes', 'Document size', 'The most text one document here may hold, in bytes.', 'chat_documents', 'policy', WITH_SYSTEM, { type: 'integer', minimum: 65536, 'x-unit': 'bytes' }, 2097152),
   key('invitations.forms', 'Invitation forms', 'The forms of invitation that may be made for an org of this tree.', 'joining', 'policy', ['system', 'org'], SET_OF('link', 'email'), ['link', 'email']),
-  key('invitations.default_hours', 'Invitation life', 'For how many hours an invitation is good when its inviter says nothing.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'hours' }, 168),
-  key('invitations.max_hours', 'Longest invitation', 'The most hours an invitation may be good for.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'hours' }, 720),
+  key('invitations.default_minutes', 'Invitation life', 'For how many minutes an invitation is good when its inviter says nothing.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'minutes' }, 10080),
+  key('invitations.max_minutes', 'Longest invitation', 'The most minutes an invitation may be good for.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'minutes' }, 43200),
   key('invitations.max_uses', 'Uses of a shared link', 'How many people one shared link may bring in at most.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, maximum: 1000 }, 100),
   key('auth.email_code', 'Code by mail', 'What a code sent to a person’s confirmed address may be when they sign in.', 'signing_in', 'policy', ['system', 'org'], SET_OF('sign_in', 'second_step'), []),
   key('auto.triggers', 'Triggers', 'When automatic titles and descriptions are written again.', 'automation', 'parameter', WITH_SYSTEM, { type: 'object', properties: { on: SET_OF('turn_completed', 'milestone', 'interval'), min_interval_secs: { type: 'integer', minimum: 0, 'x-unit': 'seconds' } }, required: ['on', 'min_interval_secs'], additionalProperties: false }, { on: ['turn_completed', 'milestone'], min_interval_secs: 120 }),
@@ -194,7 +195,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {
@@ -232,6 +233,18 @@ interface MadeResource {
 }
 
 const ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
+
+function keyForRow(id: string): string {
+  const body = `opat_${id}_${randomBytes(32).toString('base64url')}`;
+  const digits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  let crc = crc32(body);
+  let suffix = '';
+  for (let place = 0; place < 6; place++) {
+    suffix = digits.charAt(crc % 62) + suffix;
+    crc = Math.floor(crc / 62);
+  }
+  return body + suffix;
+}
 
 /** The part of the fake API about settings. */
 export class Settings implements Part {
@@ -1126,7 +1139,7 @@ export class Settings implements Part {
       expires_at: typeof body.expires_at === 'string' ? body.expires_at : null,
       last_used_at: null,
     };
-    const secret = `opat_${randomUUID().replaceAll('-', '')}`;
+    const secret = keyForRow(info.id);
     this.tokensOf(person).push({ info });
     if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
     this.tokenActivity.remember(info.id, person.me.id);
@@ -1289,7 +1302,7 @@ export class Settings implements Part {
       const name = asText(body.name).trim();
       if (name === '') this.invalid('name', 'must not be empty');
       const info: ApiTokenInfo = { id: randomUUID(), name, ...tokenScope(body), node: typeof body.node_id === 'string' ? this.nodeRef(body.node_id) : null, created_at: new Date().toISOString(), expires_at: typeof body.expires_at === 'string' ? body.expires_at : null, last_used_at: null };
-      const secret = `opat_${randomUUID().replaceAll('-', '')}`;
+      const secret = keyForRow(info.id);
       this.accountTokens.set(account.user.id, [...held, { info }]);
       if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
       this.tokenActivity.remember(info.id, account.user.id);

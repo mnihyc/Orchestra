@@ -69,6 +69,7 @@ impl CommandHandler for ReaderPeer {
                 }
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: body.path.clone(),
                             path: body.path,
@@ -108,6 +109,7 @@ impl CommandHandler for ReaderPeer {
                 self.fetches.fetch_add(1, Ordering::SeqCst);
                 Ok(CommandResult::FsFetch(
                     orch_link_contract::commands::FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
                         hash,
                         size,
                         mtime_ns: self

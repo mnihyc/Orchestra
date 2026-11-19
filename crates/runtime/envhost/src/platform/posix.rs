@@ -141,6 +141,23 @@ impl Dir {
         Ok(OsString::from_vec(target.into_bytes()))
     }
 
+    /// Tests the native account's access without reading file content or opening special files.
+    pub fn check_readable(&self, name: &OsStr, kind: Kind) -> io::Result<()> {
+        plain(name)?;
+        let access = match kind {
+            Kind::File => rustix::fs::Access::READ_OK,
+            Kind::Dir => rustix::fs::Access::READ_OK | rustix::fs::Access::EXEC_OK,
+            Kind::Symlink | Kind::Other => return Ok(()),
+        };
+        rustix::fs::accessat(
+            &self.fd,
+            name,
+            access,
+            AtFlags::EACCESS | AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(io_error)
+    }
+
     /// Opens the regular file called `name` for reading. A link is not followed, and a pipe or a
     /// device is not waited on: whatever is opened is checked to be a regular file.
     pub fn open_read(&self, name: &OsStr) -> io::Result<File> {
@@ -254,6 +271,23 @@ impl Dir {
     }
 
     /// Writes this directory's own changes to disk, where the system can.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;
+        Ok(Box::new(std::iter::from_fn(move || {
+            loop {
+                let entry = match listing.read()? {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(io_error(error))),
+                };
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    return Some(Ok(OsString::from_vec(name.to_vec())));
+                }
+            }
+        })))
+    }
+
     /// Visits names directly from the directory stream; false stops without collecting or sorting the rest.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         let mut listing = rustix::fs::Dir::read_from(&self.fd).map_err(io_error)?;

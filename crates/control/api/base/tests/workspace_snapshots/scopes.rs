@@ -759,9 +759,11 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
         .unwrap();
     let command = orch_engine::ids::derived("fs.record.before-turn", &[id.as_bytes()]);
     let body = serde_json::to_value(FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: site.environment,
         snapshot_id: id,
         directory: "web".into(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 7,
         max_bytes: CONTENT.len() as i64,
@@ -783,6 +785,8 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     .await
     .unwrap();
     let result = serde_json::to_value(FsRecordResult {
+        indexing: None,
+
         state: RecordState::Complete,
         tree_ref: Some("original-captured-root".into()),
         repository_head: None,

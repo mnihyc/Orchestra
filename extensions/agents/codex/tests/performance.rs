@@ -197,6 +197,71 @@ fn provider_side_web_search_remains_inside_one_response_and_its_one_count_report
 }
 
 #[test]
+fn parallel_tools_keep_valid_terminal_usage_and_all_references_whenever_the_counts_arrive() {
+    for counts_after in 0..=3 {
+        let mut requests = Requests::default();
+        requests.asked("main", at(0));
+        let original = requests.running("main").unwrap();
+        let mut reports = requests.observe(
+            "item/agentMessage/delta",
+            &json!({"threadId":"main","delta":"tools"}),
+            at(50),
+            None,
+        );
+        let tools = ["call-a", "call-b", "call-c"];
+        for index in 0..=tools.len() {
+            if index == counts_after {
+                reports.extend(requests.observe("thread/tokenUsage/updated", &json!({"threadId":"main","tokenUsage":{"last":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}}), at(95 + 10 * index as i64), None));
+            }
+            if let Some(tool) = tools.get(index) {
+                reports.extend(requests.observe(
+                    "item/started",
+                    &json!({"threadId":"main","item":{"type":"commandExecution","id":tool}}),
+                    at(100 + 10 * index as i64),
+                    None,
+                ));
+            }
+        }
+        reports.extend(requests.observe(
+            "item/started",
+            &json!({"threadId":"main","item":{"type":"commandExecution","id":"call-c"}}),
+            at(140),
+            None,
+        ));
+        for report in &reports {
+            report.check().unwrap();
+            assert_eq!(report.id, original.id);
+        }
+        let final_tools = reports
+            .iter()
+            .rev()
+            .find(|report| report.outcome.is_some())
+            .unwrap();
+        assert_eq!(final_tools.tokens.input_tokens, Some(10));
+        assert_eq!(final_tools.tokens.output_tokens, Some(2));
+        assert_eq!(final_tools.end, Some(at(100)));
+        assert_eq!(
+            final_tools.tool_refs.as_deref(),
+            Some(tools.map(str::to_owned).as_slice())
+        );
+        for tool in tools {
+            let next = requests.observe(
+                "item/completed",
+                &json!({"threadId":"main","item":{"type":"commandExecution","id":tool}}),
+                at(200),
+                None,
+            );
+            assert!(
+                next.iter()
+                    .all(|request| request.id != original.id
+                        && request.tool_refs == Some(Vec::new()))
+            );
+        }
+        assert_ne!(requests.running("main").unwrap().id, original.id);
+    }
+}
+
+#[test]
 fn parallel_tool_item_references_stay_with_their_actual_model_request() {
     let mut requests = Requests::default();
     requests.asked("main", at(0));

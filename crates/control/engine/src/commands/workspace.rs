@@ -217,6 +217,7 @@ impl SnapshotMeasureInput {
     /// The exact bounded selection the connector measures, without re-resolving its paths.
     pub fn command(&self) -> FsMeasure {
         FsMeasure {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: self.environment,
             selection: self.selection.clone(),
         }
