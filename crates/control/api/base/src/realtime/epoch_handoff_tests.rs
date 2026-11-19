@@ -331,6 +331,58 @@ async fn bump(rig: &Rig) -> Proof {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+async fn personal_admission_names_the_committed_shell_cut_without_a_second_http_read() -> Proof {
+    let rig = Rig::with_time_held().await;
+    let reader = Reader::new(&rig, &rig.token).await?;
+    let mut conn = rig.pool.acquire().await?;
+    let (personal, inbox, meta, authority) =
+        orch_db::sequences::personal_revision(&mut conn, rig.ada)
+            .await?
+            .ok_or("the personal reader is missing")?;
+    subscriptions::subscribe(
+        &reader.realtime.inner,
+        &reader.connection,
+        serde_json::from_value(json!({"id":1,"feed":"user"}))?,
+    )
+    .await?;
+    let accepted = reader.next().await?;
+    assert_eq!(accepted["op"], "subscribed");
+    assert_eq!(
+        accepted["personal_revision"],
+        json!({"personal":personal,"inbox":inbox,"meta":meta,"authority":authority})
+    );
+    // An event committed before a second source exists cannot be replayed to it;
+    // its admitted cut must still reveal the gap to the earlier HTTP snapshot.
+    let mut tx = rig.pool.begin().await?;
+    orch_db::sequences::notify_user_event(&mut tx, &[rig.ada], &json!({"what":"favorites"}))
+        .await?;
+    tx.commit().await?;
+    let peer = reader.peer(&rig, &rig.token).await?;
+    subscriptions::subscribe(
+        &peer.realtime.inner,
+        &peer.connection,
+        serde_json::from_value(json!({"id":1,"feed":"user"}))?,
+    )
+    .await?;
+    let accepted = peer.next().await?;
+    assert_eq!(accepted["op"], "subscribed");
+    assert_eq!(accepted["personal_revision"]["personal"], personal + 1);
+    assert_eq!(accepted["personal_revision"]["meta"], meta);
+    peer.finish().await;
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_personal_admission_names_the_committed_shell_cut_without_a_second_http_read()
+-> ::futures::future::LocalBoxFuture<'static, crate::realtime::epoch_handoff_tests::Proof> {
+    ::std::boxed::Box::pin(
+        self::personal_admission_names_the_committed_shell_cut_without_a_second_http_read(),
+    )
+}
+
 async fn inbox(rig: &Rig, key: &str) -> Proof<people::Announced> {
     let mut conn = rig.pool.acquire().await?;
     Ok(people::announce(
@@ -390,7 +442,7 @@ async fn enroll(rig: &Rig, node: bool) -> Proof<(String, Id)> {
                     arch: Arch::X86_64,
                 },
                 connector_version: "1.0.0".to_owned(),
-                protocol_versions: vec![1],
+                protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
                 roles: vec![if node { Role::Node } else { Role::Agent }],
             },
             &orch_db::audit::Origin::default(),

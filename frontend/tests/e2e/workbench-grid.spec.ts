@@ -1,30 +1,35 @@
 /** Real production browser, ordinary native-shaped fake thread transport; no model execution claim. */
 import { expect, test, type Page } from '@playwright/test';
-import { ACME, changeTree, configureThread, emit, scenario, signIn, threadHeld } from './support';
-import { agentMessage, marker, turn } from '../doubles/thread-rows';
+import { ACME, changeTree, configureThread, delta, emit, scenario, signIn, threadHeld } from './support';
+import { ADA } from '../doubles/thread-scenes';
+import { agentMessage, marker, turn, userMessage } from '../doubles/thread-rows';
 import type { ThreadInstructions } from '../../src/generated/api-types';
+import { reportTaskProfile, startTaskProfile } from '../performance/taskProfile';
 import { showWorkbenchView } from './workbench-support';
 
 const ids = Array.from({ length: 160 }, (_, index) => `01960000-0000-7000-8000-${String(index + 1).padStart(12, '0')}`);
 const tabId = (index: number) => `grid-content-${index}`;
 const pane = (page: Page, index: number) => page.locator(`[data-view-instance="${tabId(index)}"]`);
-async function start(page: Page, count: number) {
+async function start(page: Page, count: number, titlePrefix?: string) {
   await scenario();
-  await changeTree(ids.slice(0, count).map((id, index) => ({ id, kind: 'thread', name: `Grid agent ${index + 1}`, parent_id: ACME.fixLogin,
+  await changeTree(ids.slice(0, count).map((id, index) => ({ id, kind: 'thread', name: `${titlePrefix ?? 'Grid agent'} ${index + 1}`, parent_id: ACME.fixLogin,
     thread: { state: 'idle', blocked_reason: null, pending_approvals: 0, activity_seq: 1, last_activity_at: null } })));
   for (const id of ids.slice(0, count)) { await configureThread(id, { reset: true }); await emit(id, { thread: { state: 'idle', directory: 'web' } }); }
   await signIn(page);
   await expect(page.getByRole('button', { name: 'Layout', exact: true }).first()).toBeVisible();
   await expect.poll(() => page.evaluate(() => Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).some((key) => key?.endsWith('.workbench.workspace')))).toBe(true);
   // Seed before app startup: the running page correctly flushes its own state on unload.
-  const prepared = await page.evaluate(({ ids, tabs }) => {
+  const prepared = await page.evaluate(({ ids, tabs, titlePrefix }) => {
     const key = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).find((key) => key?.endsWith('.workbench.workspace'));
     if (key === null || key === undefined) throw new Error('The signed-in workspace was not persisted');
     const saved = JSON.parse(localStorage.getItem(key) ?? 'null') as { layout: string; [key: string]: unknown };
     const layout = JSON.parse(saved.layout) as { main: unknown; [key: string]: unknown };
     layout.main = { kind: 'group', id: 'grid-origin', tabs: ids.map((id, index) => ({ id: tabs[index], view: 'page', of: { href: `/thread/${id}` } })), active: tabs[0] };
+    if (titlePrefix !== undefined) {
+      saved.titles = Object.fromEntries(tabs.map((id, index) => [id, { title: `${titlePrefix} ${index + 1}` }]));
+    }
     return { key, value: JSON.stringify({ ...saved, layout: JSON.stringify(layout), focusedGroup: 'grid-origin', focusedTab: tabs[0], focusedMainGroup: 'grid-origin', focusedMainTab: tabs[0], activeContent: tabs[0], focusMode: false, closedTabs: [] }) };
-  }, { ids: ids.slice(0, count), tabs: ids.slice(0, count).map((_, index) => tabId(index)) });
+  }, { titlePrefix, ids: ids.slice(0, count), tabs: ids.slice(0, count).map((_, index) => tabId(index)) });
   await page.addInitScript(({ key, value }) => {
     if (sessionStorage.getItem('grid-fixture-loaded') === 'yes') return;
     localStorage.setItem(key, value); sessionStorage.setItem('grid-fixture-loaded', 'yes');
@@ -314,6 +319,29 @@ test('a full chat keeps its address and composer as an ordinary closable main ta
   await page.screenshot({ path: info.outputPath('full-chat-reopened.png'), animations: 'disabled' });
 });
 
+for (const count of [8, 20]) test(`keeps the active view tab fully visible with ${count} open views`, async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await start(page, count, 'Review workspace synchronization changes');
+  const strip = page.getByRole('tablist', { name: 'Main area', exact: true });
+  await expect(strip.getByRole('tab')).toHaveCount(count);
+  await expect.poll(() => strip.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
+  await strip.getByRole('tab').first().press('End');
+  const selected = strip.locator(`#tab-${tabId(count - 1)}`);
+  await expect(selected).toHaveAttribute('aria-selected', 'true');
+  const draft = pane(page, count - 1).getByRole('textbox', { name: 'Message to the agent' });
+  await draft.focus();
+  await expect.poll(() => strip.evaluate((list) => list.scrollTop)).toBeGreaterThan(0);
+  // A restored scroll offset can arrive after the view it belongs to has opened.
+  await strip.evaluate((list) => { list.scrollTop = 0; });
+  await expect.poll(() => selected.evaluate((tab) => {
+    const list = tab.closest('[role="tablist"]')!;
+    const viewport = list.getBoundingClientRect(), box = tab.parentElement!.getBoundingClientRect();
+    return box.top >= viewport.top - 1 && box.bottom <= viewport.bottom + 1
+      && box.left >= viewport.left - 1 && box.right <= viewport.right + 1;
+  })).toBe(true);
+  await expect(draft).toBeFocused();
+});
+
 for (const count of [11, 160]) test(`${count} tabs keep a bounded grid strip and a searchable exact-target locator`, async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 }); await start(page, count);
   await layoutAction(page, '3 rows × 3 columns');
@@ -392,4 +420,75 @@ test('Given inspectors keep their own exact source when another thread opens or 
   await expect(page).toHaveURL(new RegExp(`/thread/${ids[1]}$`));
   await page.screenshot({ path: info.outputPath('independent-given-records.png'), animations: 'disabled' });
   expect(errors).toEqual([]);
+});
+
+test('streams a running turn without a task over 50 ms and reveals another kept thread within 100 ms', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await start(page, 2);
+  const tab = (i: number) => page.locator(`#tab-${tabId(i)}`);
+  const draft = (i: number) => pane(page, i).getByRole('textbox', { name: 'Message to the agent' });
+  // Visit both bodies so the timed switch returns to a conversation which already has its rows.
+  await tab(1).click();
+  await draft(1).fill('Kept thread draft');
+  await tab(0).click();
+  await expect(draft(0)).toBeVisible();
+  await page.waitForLoadState('networkidle');
+
+  const profileRetry = test.info().retry === 1;
+  const turnProfile = await startTaskProfile(page, profileRetry);
+  const tasks = await page.evaluateHandle(() => {
+    if (!PerformanceObserver.supportedEntryTypes.includes('longtask')) throw new Error('Long task timing requires Chromium.');
+    const durations: number[] = [];
+    const observer = new PerformanceObserver((list) => durations.push(...list.getEntries().map((entry) => entry.duration)));
+    observer.observe({ entryTypes: ['longtask'] });
+    return () => {
+      durations.push(...observer.takeRecords().map((entry) => entry.duration));
+      observer.disconnect();
+      return durations;
+    };
+  });
+  const active = ids[0]!;
+  const at = new Date().toISOString();
+  await emit(active, {
+    thread: { state: 'running', current_turn_id: 'profile-turn' },
+    turns: [turn('profile-turn', { ordinal: 1, state: 'running', inputId: 'profile-input', startedAt: at })],
+    items: [
+      userMessage('profile-question', 'Profile this running turn', { author: ADA, turn: 'profile-turn', inputId: 'profile-input', at }),
+      agentMessage('profile-answer', '', { turn: 'profile-turn', status: 'in_progress', at }),
+    ],
+  });
+  let text = '';
+  for (let index = 0; index < 20; index++) {
+    const piece = `reply-${index} `;
+    await delta(active, { item_id: 'profile-answer', field: 'text', offset: text.length, len: piece.length, data: piece });
+    text += piece;
+    if ((index + 1) % 5 === 0) await expect(pane(page, 0).locator('[data-item="profile-answer"]')).toContainText(piece.trim());
+  }
+  const durations = await tasks.evaluate((finish) => finish());
+  await tasks.dispose();
+  await reportTaskProfile(turnProfile, 'running turn');
+
+  // Start on the real tab click and stop at the first frame with the retained draft visible.
+  const switchProfile = await startTaskProfile(page, profileRetry);
+  const timing = await tab(1).evaluateHandle((button, panelId) => ({
+    duration: new Promise<number>((resolve) => {
+      button.addEventListener('click', () => {
+        const start = performance.now();
+        const check = () => {
+          const field = document.querySelector<HTMLTextAreaElement>(`[data-view-instance="${panelId}"] [data-composer] textarea`);
+          if (field?.value === 'Kept thread draft' && field.getBoundingClientRect().height > 0) resolve(performance.now() - start);
+          else requestAnimationFrame(check);
+        };
+        requestAnimationFrame(check);
+      }, { once: true, capture: true });
+    }),
+  }), tabId(1));
+  await tab(1).click();
+  await expect(draft(1)).toHaveValue('Kept thread draft');
+  const switchMs = await timing.evaluate((result) => result.duration);
+  await timing.dispose();
+  await reportTaskProfile(switchProfile, 'kept tab switch');
+  console.warn('Running thread and kept tab', { longTasks: durations, switchMs });
+  expect(Math.max(0, ...durations)).toBeLessThanOrEqual(50);
+  expect(switchMs).toBeLessThan(100);
 });
