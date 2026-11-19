@@ -1,0 +1,5 @@
+fmt
+clippy
+web typecheck
+web lint
+web test -- tests/unit/acts.test.ts tests/component/port-display.test.tsx

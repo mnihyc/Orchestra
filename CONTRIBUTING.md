@@ -3,8 +3,7 @@
 Read the [architecture guide](docs/development/architecture.md) before adding
 a package. Each concept has one home; a new driver or agent implementation
 belongs behind its contract. The [component inventory](docs/development/components.md)
-records the component homes and the remaining reserved implementations. Work
-behind the existing contracts and keep each decision in its assigned layer.
+records the component homes. Work behind the existing contracts and keep each decision in its assigned layer.
 
 ## Development checks
 
@@ -33,16 +32,16 @@ the CLI and machine executables for the declared Linux musl targets.
 The frontend uses Node 24 and its lockfile. Run `npm ci`, then `npm run
 typecheck`, `npm run lint`, `npm test` and `npm run test:e2e` inside `frontend/`;
 `npm run build` produces its distributable application. A local pass does not establish a pass
-on another platform or a completed product integration gate.
+on another platform or in the release workflow.
 
 ## Changes
 
 A released migration is never edited: a change is a new numbered file. `migrations/RELEASED`
 records the SHA-384 checksum and filename of each migration shipped at a tag (the same digest SQLx
-records). The release integrator fills this ledger at the tag; until the first tag it is empty.
+records). The release process fills this ledger at each tag ([Publish a release](docs/development/releasing.md)).
 The `orch-db` released-migration test refuses a missing or changed listed file. Preserve earlier
-ledger rows when adding a release. Development databases made before the first release must be
-recreated; changing their applied checksum is not an upgrade path.
+ledger rows when adding a release. A development database whose applied checksum differs from a released file must be
+recreated: changing the checksum is not an upgrade path.
 
 - Inherit package metadata, lints and dependencies from the root manifest.
   Commit `Cargo.lock`. Explain each new dependency in the change description.
@@ -50,14 +49,14 @@ recreated; changing their applied checksum is not an upgrade path.
   layer and concrete extension implementations under `extensions/<kind>/`.
 - Return typed errors from libraries. Production code avoids `unwrap`,
   `expect`, unchecked unsafe code and unfinished branches. An exceptional
-  lint allowance must include its reason. Reserved extension modules are labelled
-  and must remain unavailable until they implement and prove their contract.
+  lint allowance must include its reason. Extension modules that are not implemented yet are labelled
+  and stay unavailable until they implement their contract and pass its checks.
 - Add tests only for business rules and observable workflow, concurrency and
   failure behavior. Do not test file layout, code structure or implementation
-  shape. Native tests that lack their required runner must record an unrun result;
-  fixture evidence remains distinct from a real harness or deployment proof.
-  Test doubles must not be described as proof of an actual provider or service.
-- Update public documentation with the change. Keep credentials, runtime
+  shape. Native tests that lack their required runner must record that they did not run;
+  a result from test data is kept apart from a result of a real harness or deployment.
+  A test double is never described as a check of an actual provider or service.
+- Update public documentation with the change, in the words of [Writing for Orch](docs/development/writing.md). Keep credentials, runtime
   state, local planning documents and scratch experiments out of commits.
 
 ## Build identity
@@ -100,7 +99,7 @@ distributed identifier or a guarantee against storage hardware failure.
 
 GitHub Actions is the authority for distributed builds. Packaging, installers,
 the updater, deployment smoke scenarios and harness canaries have their own
-gates. The scheduled workflow's current status belongs to its workflow file;
-the native conformance runner is `scripts/harness-canary/conformance` and retains
-the exact builds and named results. A failing, unrun or fixture-only gate is
-reported explicitly before a release is certified or artifacts are published.
+checks. The scheduled workflow's current status belongs to its workflow file;
+the check of the agent programs is `scripts/harness-canary/conformance`, which keeps
+the exact builds and named results. A failing check, one that did not run, or one that
+used only test data is reported before a release is published.

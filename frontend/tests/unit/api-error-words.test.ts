@@ -31,6 +31,25 @@ beforeAll(async () => { await startI18n('en'); });
 afterAll(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps a concurrent operation distinct from an outdated edit revision in ${locale}`, async () => {
+    await setLocale(locale);
+    const error=new ApiError({type:'orch:error:conflict.concurrent_change',code:'conflict.concurrent_change',
+      title:diagnostic,detail:diagnostic,status:409,request_id:'concurrent-request'},null);
+    expect(error.message).toBe(locale==='en'
+      ? 'A concurrent change interrupted this operation. Try again.'
+      : '同时发生的更改中断了此操作，请重试。');
+    expect(error.message).not.toBe(i18n.t('errors.conflict.stale_revision'));
+    expect(error.is('conflict.stale_revision')).toBe(false);
+  });
+  it(`explains a web action's missing end in ${locale}`, async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const result = errorText({ code: 'native_web_no_end', message: diagnostic }, t, { locale });
+    expect(result.message).toBe(t('ui.error.nativeWebNoEnd'));
+    expect(result.message).not.toBe(t('ui.error.nativeWebActionUnproven'));
+    expect(hasErrorCode(result.message)).toBe(false);
+  });
+
   it(`gives workspace attachment refusals a catalogued cause and recovery in ${locale}`, async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);
@@ -107,4 +126,23 @@ for(const locale of ['en','zh-CN'] as const)it(`names provider display names fro
   const message=errorText({code:'model_rerouted',message:'native English words',details:{from_model:'requested-route',to_model:'safe-route',from_display:'Chosen model',to_display:'Safety model'}},i18n.getFixedT(locale),{locale}).message;
   expect(message).toContain('Chosen model');expect(message).toContain('Safety model');
   expect(message).not.toContain('native English words');expect(message).not.toContain('requested-route');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`names the actual model upstream rule and captured amount in ${locale}`, async () => {
+  await setLocale(locale);
+  const t = i18n.getFixedT(locale);
+  const failed = (upstream: object) => errorText({code:'timeout',details:{upstream}},t,{locale});
+  expect(failed({rule:'response-header',seconds:420}).message).toContain(locale==='en'?'Upstream response-header deadline · 7':'上游响应头超时 · 7');
+  expect(failed({rule:'silence',seconds:420}).message).toContain(locale==='en'?'Upstream silence deadline · 7':'上游静默超时 · 7');
+  expect(failed({rule:'whole-reply-size',bytes:4194304}).message).toContain('4');
+  expect(failed({rule:'response-header',seconds:420}).message).not.toContain('600');
+});
+
+it.each(['en', 'zh-CN'] as const)('names the exact local program policy and its recovery act when a binding probe is refused (%s)', async (locale) => {
+  await setLocale(locale);
+  for (const key of ['agent.programs', 'tools.fetch', 'agent.harnesses']) {
+    const error = new ApiError({ type: 'orch:error:binding.incompatible', code: 'binding.incompatible', title: 'Incompatible', detail: 'The native start was refused', status: 409, request_id: 'controlled', reason: 'harness_error', policy: key }, null);
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).diagnostic)
+      .toBe(i18n.getFixedT(locale)('ui.error.harnessBuildPolicy', { key }));
+  }
 });

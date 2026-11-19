@@ -33,7 +33,7 @@ test('explicit enrollment opens one Programs workflow for agent adapters and pro
     const dialog=page.getByRole('dialog',{name:'Register a program'});
     await dialog.getByRole('textbox',{name:'Name',exact:true}).fill(name);
     await dialog.getByRole('textbox',{name:'Command',exact:true}).fill(command);
-    await dialog.getByRole('button',{name:'Register and describe'}).click();await expect(dialog).toHaveCount(0);
+    await dialog.getByRole('button',{name:'Register and read details'}).click();await expect(dialog).toHaveCount(0);
     const row=page.getByRole('list',{name:'Programs',exact:true}).getByRole('listitem').filter({hasText:name});
     await expect(row).toContainText('1.0.0');
     if(contract==='Provider source')await expect(row).toContainText('Local model');

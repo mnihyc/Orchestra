@@ -18,13 +18,13 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { show, tableDataRows } from './support';
 import { planProvider } from '../unit/provider-plan-fixtures';
 
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: NodeRef) => place.redacted ? null : place.name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (place: NodeRef) => place.redacted ? null : place.name }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }) }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
-vi.mock('@/features/navigation/DocMenu', () => ({ DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
-vi.mock('@/features/chat/open', () => ({ isPlainClick: () => true, useOpenPath: () => vi.fn() }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
+vi.mock('@/features/navigation/DocMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), isPlainClick: () => true, useOpenPath: () => vi.fn() }));
 
 const place: NodeRef = { id: 'department', kind: 'org', name: 'Research', redacted: false };
 const reach = { place, private: false };
@@ -83,7 +83,7 @@ it('keeps a private page’s explanation in its header, redacts unknown places a
 it('uses the returned resource privacy fact without treating every native-only resource as private', () => {
   const privateReach = { ...reach, private: true };
   const shown = show(<PageHeader title="Their environment" mark={<Box />} adminAccess={reach} />);
-  expect(screen.getByRole('img', { name: 'You see this as an admin of Research' })).toBeVisible();
+  expect(shown.container.querySelector('[data-as-admin-mark]')).toBeNull();
   expect(screen.queryByRole('img', { name: /^Private/ })).not.toBeInTheDocument();
   shown.rerender(<PageHeader title="Their environment" mark={<Box />} adminAccess={privateReach} />);
   expect(screen.getByRole('img', { name: 'Private · You see this as an admin of Research' })).toBeVisible();
@@ -98,11 +98,11 @@ it('names person, place and system owners rather than an empty owner cell', () =
   expect(shown.container).toHaveTextContent('System');
 });
 
-it('keeps one object mark in its page header and does not repeat it in the details card', () => {
+it('keeps the standalone provider row marked while the open page leaves the mode to the title bar', () => {
   const base = planProvider();
   const provider = { ...base, access: { ...base.access, admin_access: reach } };
   const shown = show(<><PageHeader title={provider.name} mark={<Box />} adminAccess={reach} /><ProviderUsageCard provider={provider} /></>);
-  expect(shown.container.querySelectorAll('[data-as-admin-mark]')).toHaveLength(1);
+  expect(shown.container.querySelectorAll('[data-as-admin-mark]')).toHaveLength(0);
   shown.rerender(<ProviderUsageCard compact provider={provider} />);
   expect(shown.container.querySelectorAll('[data-as-admin-mark]')).toHaveLength(1);
 });

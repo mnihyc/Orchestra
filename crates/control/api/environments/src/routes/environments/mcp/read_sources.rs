@@ -68,7 +68,7 @@ fn selected(
 
 impl native::Selected for Servers {
     type Source = Source;
-    type Query = ();
+    type Query = api::EnvironmentMcpGetQuery;
     type Value = PreparedGet;
     type Reply = EnvironmentMcp;
     const DECLARATION: &'static Declaration<Source> = &sources::MCP_GET;
@@ -77,7 +77,7 @@ impl native::Selected for Servers {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a Self::Query,
+        query: &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(PreparedGet, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let environment = ctx.id("id")?;
@@ -98,6 +98,26 @@ impl native::Selected for Servers {
             } else {
                 Vec::new()
             };
+            if modern {
+                let mut threads = BTreeMap::new();
+                if let Some(thread) = query.thread_id {
+                    let family = KeyTargetKind::Object(ObjectKind::Thread);
+                    threads.insert(
+                        family,
+                        vec![
+                            targets::page_object(
+                                conn,
+                                ObjectRef {
+                                    kind: ObjectKind::Thread,
+                                    id: thread,
+                                },
+                            )
+                            .await?,
+                        ],
+                    );
+                }
+                facts.push(collection(Source::NativeThread, threads));
+            }
             let plan = native::bind_known(ctx, Self::DECLARATION, &facts)?;
             let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
             require_get(conn, &principal, environment).await?;
@@ -156,12 +176,51 @@ impl native::Selected for Servers {
                 }
                 imports.push(row);
             }
-            let mut prepared =
-                prepare_get(ctx, conn, &principal, environment, resolved, imports).await?;
+            let mut prepared = prepare_get(
+                ctx,
+                conn,
+                &principal,
+                environment,
+                resolved,
+                imports,
+                query.thread_id,
+            )
+            .await?;
             if !modern {
                 return Ok((prepared, facts));
             }
             facts.push(collection(Source::Servers, servers));
+
+            let profile_objects: Vec<_> = prepared
+                .profiles
+                .keys()
+                .map(|id| ObjectRef {
+                    kind: ObjectKind::Agent,
+                    id: *id,
+                })
+                .collect();
+            let profile_targets = Sources::from_objects(profile_objects.iter().copied())
+                .identity_targets(conn)
+                .await?;
+            let mut selected_profiles = BTreeMap::new();
+            let mut visible_profiles = BTreeSet::new();
+            for object in profile_objects {
+                let Some(target) = profile_targets.get(&object) else {
+                    continue;
+                };
+                let family = KeyTargetKind::Object(ObjectKind::Agent);
+                if selected(&plan, caller, Source::Profiles, family, target)? {
+                    visible_profiles.insert(object.id);
+                    selected_profiles
+                        .entry(family)
+                        .or_insert_with(Vec::new)
+                        .push(target.clone());
+                }
+            }
+            prepared
+                .profiles
+                .retain(|id, _| visible_profiles.contains(id));
+            facts.push(collection(Source::Profiles, selected_profiles));
 
             let mut machines = BTreeMap::new();
             let mut allowed_machines = BTreeSet::new();
@@ -269,6 +328,11 @@ impl native::Selected for Servers {
             let imports: HashMap<_, _> = fresh.imports.iter().map(|row| (row.id, row)).collect();
             let names: HashSet<_> = fresh.library_visibility.sources().collect();
             Ok(opened.environment == fresh.environment
+                && opened.native_thread == fresh.native_thread
+                && opened
+                    .profiles
+                    .keys()
+                    .all(|id| fresh.profiles.contains_key(id))
                 && opened.execution_machine == fresh.execution_machine
                 && opened.home_paths == fresh.home_paths
                 && (!opened.import_allowed || fresh.import_allowed)
