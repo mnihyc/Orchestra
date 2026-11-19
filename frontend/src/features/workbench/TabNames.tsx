@@ -56,10 +56,10 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
       }
       const target = pageResource(page);
       if (target === null) continue;
-      let found: { tree: OrgTree; node: TreeNode } | undefined;
-      for (const tree of trees.values()) {
+      let found: { rootId:string;tree: OrgTree; node: TreeNode } | undefined;
+      for (const [rootId,tree] of trees) {
         const node = tree.nodes.get(target.id);
-        if (node !== undefined && !node.deleted) { found = { tree, node }; break; }
+        if (node !== undefined && !node.deleted) { found = { rootId,tree, node }; break; }
       }
       let title = before.get(tab.id)?.title ?? t(`everything.kinds.${target.kind}`);
       if (found !== undefined) {
@@ -69,9 +69,10 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
         title = placeLabels([placedOfRow(found.tree, found.node)], known).get(target.id) ?? found.node.name;
       }
       const path = found === undefined ? before.get(tab.id)?.path : pathTo(found.tree, found.node.id).map((node) => node.name).join(' / ');
-      const display = found?.node.thread?.display;
+      const display = found?.node.thread?.display??before.get(tab.id)?.thread?.display;
+      const rootId=found?.rootId??before.get(tab.id)?.thread?.rootId;
       const icon = target.kind === 'thread' && display !== undefined ? THREAD_GLYPHS[display.state] : target.kind === 'environment' ? Box : NODE_GLYPHS[target.kind];
-      if (before.get(tab.id)?.title !== title || before.get(tab.id)?.path !== path || before.get(tab.id)?.icon !== icon) next.set(tab.id, { title, icon, path, source: 'cache', ...(target.kind === 'thread' && display !== undefined ? { thread: { id: target.id, display } } : {}) });
+      if (before.get(tab.id)?.title !== title || before.get(tab.id)?.path !== path || before.get(tab.id)?.icon !== icon) next.set(tab.id, { title, icon, path, source: 'cache', ...(target.kind === 'thread' && display !== undefined ? { thread: { id: target.id, display,...(rootId===undefined?{}:{rootId}) } } : {}) });
     }
     if ([...next].some(([id, name]) => before.get(id) !== name)) useWorkbench.setState({ named: next });
   }, [layout, trees, t]);

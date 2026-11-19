@@ -1,0 +1,6 @@
+fmt
+test -p orch-engine --test ingest
+test -p orch-xtask
+test -p orch-api-core --test binding_options --test kfix_binding --test realtime_diagnostics --test thread_move
+test -p orch-envhost --test environment
+web test

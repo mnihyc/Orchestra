@@ -1,11 +1,4 @@
-//! A path of a workspace as a request writes it, and what it may be.
-//!
-//! A path is relative to the root of the environment's workspace and `/`-separated: no leading `/`,
-//! no empty, `.` or `..` components, at most 4 096 bytes; the empty string is the root. A path that
-//! leaves the workspace does not exist for anybody, and the request is answered as if there were
-//! nothing there without the machine being asked. Windows separators are converted. What the
-//! workspace's ignore rules leave out is the machine's to say, since the rules are applied where
-//! the files are.
+//! Native absolute addresses and relative attached-root paths; the machine proves containment.
 
 use crate::middleware::requests::ApiError;
 
@@ -17,15 +10,23 @@ pub const PATH_MAX_BYTES: usize = 4_096;
 /// the workspace, is a path here.
 pub fn clean(field: &str, raw: &str, allow_root: bool) -> ApiResult<String> {
     let converted = raw.replace('\\', "/");
-    let trimmed = converted.strip_suffix('/').unwrap_or(&converted);
-    if trimmed.starts_with('/') {
-        return Err(ApiError::not_found());
-    }
+    let native = absolute(&converted);
+    let root = converted == "/"
+        || (converted.len() == 3 && converted.as_bytes()[1] == b':' && converted.ends_with('/'));
+    let trimmed = if root {
+        converted.as_str()
+    } else {
+        converted.trim_end_matches('/')
+    };
     if trimmed.len() > PATH_MAX_BYTES || trimmed.chars().any(char::is_control) {
         return Err(ApiError::invalid(
             field,
             "a path has at most 4096 bytes and no control characters",
         ));
+    }
+    if native {
+        // Dot components, drive and link semantics belong to the selected environment's native resolver.
+        return Ok(trimmed.to_owned());
     }
     if trimmed.is_empty() {
         return if allow_root {
@@ -53,6 +54,8 @@ pub fn clean(field: &str, raw: &str, allow_root: bool) -> ApiResult<String> {
 }
 orch_api_base::__api_bind_4f59b857ad!();
 
+pub use orch_api_base::routes::workspace::paths::{absolute, cache_key, parent_of};
+
 /// The name of a mount as a request writes it: a word, as the machine knows it.
 pub fn mount(field: &str, raw: Option<&str>) -> ApiResult<Option<String>> {
     match raw {
@@ -65,22 +68,6 @@ pub fn mount(field: &str, raw: Option<&str>) -> ApiResult<Option<String>> {
             Ok(Some(name.to_owned()))
         }
     }
-}
-
-/// How a path of a mount is written in the cache of file content, apart from the paths of the
-/// workspace: a valid path never begins with `/`.
-#[must_use]
-pub fn cache_key(mount: Option<&str>, path: &str) -> String {
-    match mount {
-        Some(mount) => format!("/mount/{mount}/{path}"),
-        None => path.to_owned(),
-    }
-}
-
-/// The directory a path lies in: the path without its last component; the root for a path of one.
-#[must_use]
-pub fn parent_of(path: &str) -> &str {
-    path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
 /// The last component of a path.
@@ -105,9 +92,12 @@ pub mod tests {
             clean("path", "", false).unwrap_err().code(),
             ErrorCode::RequestInvalid
         );
+        assert_eq!(clean("path", "/etc/passwd", true).unwrap(), "/etc/passwd");
+        assert_eq!(clean("path", "/", true).unwrap(), "/");
+        assert_eq!(clean("path", "C:/", true).unwrap(), "C:/");
         assert_eq!(
-            clean("path", "/etc/passwd", true).unwrap_err().code(),
-            ErrorCode::NotFound
+            clean("path", "/tmp/../var/file", true).unwrap(),
+            "/tmp/../var/file"
         );
         assert_eq!(
             clean("path", "a/../../b", true).unwrap_err().code(),
@@ -142,6 +132,12 @@ pub mod tests {
     fn a_path_has_a_parent_and_a_name() {
         assert_eq!(parent_of("a/b/c"), "a/b");
         assert_eq!(parent_of("c"), "");
+        assert_eq!(parent_of("/file"), "/");
+        assert_eq!(parent_of("C:/file"), "C:/");
+        assert_ne!(
+            cache_key(None, "/mount/data/a/b"),
+            cache_key(Some("data"), "a/b")
+        );
         assert_eq!(name_of("a/b/c"), "c");
         assert_eq!(cache_key(None, "a/b"), "a/b");
         assert_eq!(cache_key(Some("data"), "a/b"), "/mount/data/a/b");

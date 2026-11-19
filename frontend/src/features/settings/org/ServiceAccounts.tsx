@@ -5,6 +5,7 @@
  * revoked one by one. Whoever manages the members makes and removes them; removing one ends its tokens
  * and the roles and entries that named it, and the dialog says so before it asks.
  */
+import { CopyId } from '@/ui/CopyId';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Bot, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
@@ -179,6 +180,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
                   <span className="ml-3 text-sm text-text-muted">{t('tokens.madeOn', { time: formatDateTime(token.created_at, format) })}</span>
                 </span>
                 <span className="text-sm text-text-muted">{token.last_used_at === null ? t('tokens.neverUsed') : <RelativeTime at={token.last_used_at} />}</span>
+                <CopyId value={token.id} />
                 <Button size="sm" variant="ghost" onClick={() => setReviewing(token)}>{t('operationKeys.review')}</Button>
                 <Button size="sm" variant="danger-ghost" pending={revoke.isPending && revoke.variables === token.id} onClick={() => revoke.mutate(token.id)} aria-label={t('tokens.revokeTitle', { name: token.name })}>
                   {t('tokens.revoke')}
@@ -228,6 +230,7 @@ function OrgTokens({ org }: { org: Org }) {
                   <span className="flex flex-wrap items-center gap-2">
                     <UserChip user={token.user} size={24} />
                     <span className="font-medium wrap-anywhere text-text">{token.name}</span>
+                    <CopyId value={token.id} />
                     {token.refused_here && <Badge tone="danger">{t('settings.orgTokens.refusedHere')}</Badge>}
                     {!token.lifetime_allowed && <Badge tone="warning">{t('settings.orgTokens.tooLong')}</Badge>}
                   </span>
