@@ -28,10 +28,10 @@ function checkedBrowsers(value: EnvironmentBrowsers): EnvironmentBrowsers {
 }
 
 /** The browsers of an environment, its profiles, what was found there to run one, and why they are off where they are. */
-export const browsersQuery = (environmentId: string) =>
+export const browsersQuery = (environmentId: string, options?: { closed?: boolean; query?: string; cursor?: string }) =>
   queryOptions({
-    queryKey: browserKeys.list(environmentId),
-    queryFn: async ({ signal }): Promise<EnvironmentBrowsers> => checkedBrowsers(await ok(api.GET('/environments/{id}/browsers', { params: { path: { id: environmentId } }, signal }))),
+    queryKey: options === undefined ? browserKeys.list(environmentId) : [...browserKeys.list(environmentId), options],
+    queryFn: async ({ signal }): Promise<EnvironmentBrowsers> => checkedBrowsers(await ok(api.GET('/environments/{id}/browsers', { params: { path: { id: environmentId }, ...(options === undefined ? {} : { query: options }) }, signal }))),
   });
 
 /** The same list, after the environment looked again for what it has to run a browser. */

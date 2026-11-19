@@ -554,7 +554,7 @@ async fn a_copied_program_definition_cannot_claim_registration_or_reuse_the_orig
                 options: json!({}),
             }],
             sources: Some(sources),
-            runtime_machine_id: None,
+            runtime_location: None,
             key_machine_id: None,
             access: None,
             arrangements: None,

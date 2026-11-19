@@ -1,0 +1,7 @@
+test -p orch-engine --test background --test background_wake --test failures --test foreign_machine_streams --test limits --test provider_sign_in --test shared_write --test updates
+test -p orch-api-core --test browsers --test hosted_environments --test provider_harness --test thread_continuation_search --test thread_history_scale --test threads_read --test users --test workspace_jobs_scopes
+test -p orch-conformance --test suites
+test -p orch-plugin --test adapter
+test -p orch-adapter-claude-code --test conformance -- native_translation
+test -p orch-api-core --test provider_recovery --test document_creation_scopes --test threads_bound --test blob_housekeeping --test semantic_admin --test syncs --test forks --test uploads --test workspace_files
+test -p orch-worker-core --test routes --test upkeep
