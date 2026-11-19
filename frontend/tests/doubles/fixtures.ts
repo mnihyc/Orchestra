@@ -67,6 +67,7 @@ export function meta(overrides: Partial<Meta> = {}): Meta {
     // No configured public address: link helpers retain the browser address in use.
     public_url: '',
     alternate_urls: [],
+    public_address_revision: 1,
     version: '0.1.0',
     build: 'double 1',
     needs_setup: false,

@@ -12,6 +12,18 @@ mod support;
 #[path = "kmounts_files/machine_scopes.rs"]
 mod machine_scopes;
 
+#[path = "kmounts_files/copy.rs"]
+mod copy;
+
+#[path = "kmounts_files/copy_flow.rs"]
+mod copy_flow;
+
+#[path = "kmounts_files/deletion.rs"]
+mod deletion;
+
+#[path = "kmounts_files/notifications.rs"]
+mod notifications;
+
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::mounts::*;
@@ -846,6 +858,7 @@ async fn a_mount_is_created_listed_changed_and_removed_with_its_current_revision
         .problem();
     assert_eq!(stranger.code, ErrorCode::AuthzDenied);
     let change = MountUpdateBody {
+        notify: None,
         name: None,
         description: None,
         target: Some("/mnt/data".into()),
@@ -887,6 +900,9 @@ async fn a_mount_is_created_listed_changed_and_removed_with_its_current_revision
         .app
         .call(MountDelete, &[&made.base.id])
         .token(&c.viewer.token)
+        .body(&deletion::keep(
+            &deletion::plan(&world, &c.viewer, made.base.id).await,
+        ))
         .send()
         .await
         .ok();
@@ -1027,13 +1043,15 @@ async fn a_person_adds_only_their_own_machine_location_and_other_readers_do_not_
 }
 
 #[tokio::test]
-async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
+async fn deleting_an_enabled_mount_names_the_topic_and_switches_it_off_in_one_act() {
     let world = World::new().await;
     let c = company(&world).await;
+    let project = places::make_project(&world, &c.boss, c.acme, "Build lab").await;
+    let topic = places::make_topic(&world, &c.boss, project.base.id, "Workbench").await;
     let made = world
         .app
         .call(MountCreate, &[])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
         .body(&create_body(c.acme))
         .send()
         .await
@@ -1042,7 +1060,7 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
         .unwrap();
     world
         .set_at(
-            orch_settings::Target::Node(c.acme),
+            orch_settings::Target::Node(topic.base.id),
             "env.mounts",
             json!({made.base.id.to_string(): "private"}),
         )
@@ -1050,38 +1068,66 @@ async fn an_enabled_mount_says_where_it_is_used_and_deletion_changes_nothing() {
     let used = world
         .app
         .call(MountUsesGet, &[&made.base.id])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
         .send()
         .await
         .ok();
     assert_eq!(used.scopes.len(), 1);
-    assert_eq!(used.scopes[0].node.id, c.acme);
+    assert_eq!(used.scopes[0].node.id, topic.base.id);
     assert_eq!(
         used.scopes[0].value,
         MountScopeValue::Mode(MountScopeMode::Private)
     );
-    let refused = world
+    let plan = deletion::plan(&world, &c.boss, made.base.id).await;
+    assert!(plan.mount_switch_off_blocked.is_none());
+    assert!(!plan.notify);
+    assert!(
+        plan.effects
+            .as_ref()
+            .unwrap()
+            .dependents
+            .iter()
+            .flat_map(|group| &group.visible)
+            .any(|place| place.name == "Workbench")
+    );
+    let accepted = world
         .app
         .call(MountDelete, &[&made.base.id])
-        .token(&c.viewer.token)
+        .token(&c.boss.token)
+        .body(&deletion::keep(&plan))
         .send()
         .await
-        .problem();
-    assert_eq!(refused.code, ErrorCode::ResourceInUse);
+        .ok();
+    let job = match accepted {
+        orch_api_contract::storage::CleanupJobResponse::Full(job) => job.id,
+        orch_api_contract::storage::CleanupJobResponse::Receipt(receipt) => receipt.id,
+    };
+    let row = orch_db::queries::jobs::job(&mut *world.conn().await, job)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        refused.extra["uses"]["scopes"][0]["node"]["id"],
-        json!(c.acme)
+        row.kind, "storage_cleanup",
+        "Delete uses the existing cleanup job"
     );
+    let enabled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key='env.mounts' AND value ? $1)",
+    )
+    .bind(made.base.id.to_string())
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert!(!enabled, "a deleted mount cannot remain enabled in a place");
     assert_eq!(
         world
             .app
             .call(MountGet, &[&made.base.id])
-            .token(&c.viewer.token)
+            .token(&c.boss.token)
             .send()
             .await
-            .ok()
-            .revision,
-        made.revision
+            .problem()
+            .code,
+        ErrorCode::NotFound
     );
     assert_eq!(
         world
@@ -1117,6 +1163,7 @@ async fn a_mounts_manager_sets_what_plans_preselect_and_says_what_a_locations_da
         "as shipped, a plan mounts it as it is"
     );
     let copy = MountUpdateBody {
+        notify: None,
         name: None,
         description: None,
         target: None,

@@ -6,6 +6,7 @@ import { deleteModel, updateModel } from '@/api/resources';
 import { resourceImpactQuery } from '@/api/resource-impact';
 import { openChange } from '@/features/change/target';
 import { ImpactCounts } from '@/features/storage/Impact';
+import { UpdateNotify } from '@/features/change/UpdateNotify';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 import type { Provider, ProviderModel } from '@/generated/api-types';
 import { adminSpec } from '@/ui/AdminAct';
@@ -20,17 +21,19 @@ export function ModelLifecycle({ provider, model, kind, onClose }: {provider:Pro
   const {t}=useTranslation();
   const impact=useQuery(resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:model.id}));
   const [note,setNote]=useState(''),[typed,setTyped]=useState('');
+  const [notify,setNotify]=useState<boolean>();
   const name=(impact.data?.name===''?undefined:impact.data?.name)??(model.display_name===''?undefined:model.display_name)??model.model_name;
   const change=useMutation({mutationFn:async()=>{
-    if(kind==='delete')await deleteModel(provider.id,model.id);
-    else if(note.trim()==='')await updateModel(provider.id,model.id,{enabled:false});
-    else await updateModel(provider.id,model.id,{enabled:false},note.trim());
+    const chosen = notify ?? impact.data?.notification?.default_on ?? false;
+    if(kind==='delete')await deleteModel(provider.id,model.id,chosen);
+    else await updateModel(provider.id,model.id,{enabled:false},note.trim()===''?undefined:note.trim(),undefined,chosen);
   },onSuccess:()=>{
     toast({tone:'success',title:t(kind==='delete'?'providers.models.removed':'providers.danger.disabled',{name})});onClose();
   }});
   return <ConfirmDialog open onOpenChange={(open)=>!open&&onClose()} admin={adminSpec(provider,'provider.manage')}
     title={t(kind==='delete'?'providers.danger.deleteTitle':'providers.danger.disableTitle',{name})}
     confirmLabel={t(kind==='delete'?'providers.danger.deleteConfirm':'providers.danger.disableConfirm',{name})}
+    footerStart={<UpdateNotify audience={impact.data?.notification?.audience} checked={notify ?? impact.data?.notification?.default_on ?? false} onChange={setNotify} disabled={change.isPending} />}
     danger pending={change.isPending} error={change.error??undefined} disabled={impact.isPending||impact.isError||kind==='delete'&&typed!==name} onConfirm={()=>change.mutate()}>
     <div className="flex min-w-0 flex-col gap-3">
       {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={kind} />}

@@ -395,6 +395,8 @@ pub struct ManagedPlaces {
 /// What a connector tells its environment host about itself and the machine.
 #[derive(Debug, Clone)]
 pub struct HostSettings {
+    /// The connector's live decision for this particular unverified native build.
+    pub platform_review: Option<u64>,
     /// The directory connector's independently proved native controllers.
     pub process_controls: orch_driver_contract::process_limits::ProcessControls,
     /// The connector's data directory, below which the host keeps what has to outlast a run.
@@ -442,6 +444,7 @@ impl HostSettings {
     #[must_use]
     pub fn connected(data_dir: PathBuf, roots: Vec<PathBuf>) -> Self {
         Self {
+            platform_review: None,
             process_controls: Default::default(),
             data_dir,
             limits: Limits::default(),
@@ -571,6 +574,7 @@ pub struct DetachReservation {
 
 /// One attached environment.
 pub struct Environment {
+    platform_review: Option<u64>,
     id: Id,
     /// Reattach/rebase never reuses another attachment's directory metadata cursors.
     directory_attachment: Id,
@@ -583,6 +587,8 @@ pub struct Environment {
     /// only then.
     scanned: AtomicBool,
     mounts: Mounts,
+    data_directories: Vec<(u64, crate::platform::FileNumber)>,
+    _home_root: Option<Dir>,
     watcher: Mutex<Option<Watcher>>,
     /// Orders initial directory resets before subsequent native change batches.
     directory_reads: tokio::sync::Mutex<()>,
@@ -611,6 +617,9 @@ pub struct Environment {
     wanted: Mutex<Option<Wanted>>,
     reporters: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
+
+/// How often a recording that waits for its baseline looks again.
+const FILE_STATES_POLL: Duration = Duration::from_millis(100);
 
 impl std::fmt::Debug for Environment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -811,6 +820,10 @@ impl Environment {
             ),
         };
         EnvironmentContext {
+            reviewed_native_system: self.platform_review.is_some()
+                && settings
+                    .as_ref()
+                    .is_some_and(|s| s.platform_review == self.platform_review),
             process_launcher: self.processes.launcher(),
             environment_id: self.id,
             generation: facts.generation,
@@ -937,6 +950,8 @@ impl Environment {
     /// Turns what the watch says into the state of the index, the ignore rules and the directories
     /// somebody has open.
     async fn changed(self: &Arc<Self>, change: Change) {
+        // Until the baselines are brought up to date for this batch, a recording waits for it.
+        let refreshing = self.file_states.as_ref().map(|states| states.begin_work());
         let directory_loss = matches!(&change, Change::Rescan | Change::Unavailable);
         let (paths, mut rescan) = match change {
             Change::Paths(paths) => (paths, false),
@@ -1024,6 +1039,7 @@ impl Environment {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "the index could not be brought up to date"),
         }
+        drop(refreshing);
         if !directory_loss {
             self.notify_directories(&paths, rescan).await;
         }
@@ -1032,7 +1048,10 @@ impl Environment {
     /// Prepares requested file-state baselines off the path that records or starts a turn.
     fn seed_file_states(self: &Arc<Self>) {
         let environment = Arc::clone(self);
+        // Noted before the task starts, so that a recording that looks right now sees the work.
+        let work = self.file_states.as_ref().map(|states| states.begin_work());
         let task = tokio::spawn(async move {
+            let _work = work;
             if let Err(error) = environment.prepare_file_states().await {
                 tracing::warn!(%error, environment=%environment.id, "recorded file coverage could not be prepared");
             }
@@ -1318,6 +1337,8 @@ async fn put_bytes(sink: &dyn BlobSink, hash: Hash, bytes: Vec<u8>) -> Result<()
 // The host
 
 struct HostInner {
+    // Serialize review withdrawal with an attachment admitted by that review.
+    review_transition: tokio::sync::RwLock<()>,
     #[cfg(all(test, target_os = "linux"))]
     before_record_pin: Mutex<Option<Arc<recording_admission_tests::ReadGate>>>,
     settings: RwLock<HostSettings>,
@@ -1329,6 +1350,7 @@ struct HostInner {
     executors: Vec<ExecutorFactory>,
     envs: Mutex<HashMap<Id, Arc<Environment>>>,
     retiring: Mutex<HashMap<Id, Arc<retirement::Finalizer>>>,
+    storage_locks: Arc<crate::storage_locks::StorageLocks>,
 }
 
 impl HostInner {
@@ -1374,6 +1396,7 @@ impl EnvHost {
         ));
         Self {
             inner: Arc::new(HostInner {
+                review_transition: tokio::sync::RwLock::new(()),
                 #[cfg(all(test, target_os = "linux"))]
                 before_record_pin: Mutex::new(None),
                 settings: RwLock::new(settings),
@@ -1385,12 +1408,26 @@ impl EnvHost {
                 executors,
                 envs: Mutex::new(HashMap::new()),
                 retiring: Mutex::new(HashMap::new()),
+                storage_locks: Arc::default(),
             }),
         }
     }
 
     /// The environment attached under `id`.
     pub fn environment(&self, id: Id) -> Result<Arc<Environment>> {
+        if !crate::RUNTIME_VERIFIED
+            && self
+                .inner
+                .settings
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .platform_review
+                .is_none()
+        {
+            return Err(HostError::Unsupported(
+                "the machine's native system requires confirmation".into(),
+            ));
+        }
         lock(&self.inner.envs)
             .get(&id)
             .cloned()
@@ -1401,6 +1438,66 @@ impl EnvHost {
     #[must_use]
     pub fn environments(&self) -> Vec<Arc<Environment>> {
         lock(&self.inner.envs).values().cloned().collect()
+    }
+
+    /// Mounted data remains occupied through the original attachment's actual native cleanup.
+    #[must_use]
+    pub fn mount_directory_in_use(&self, device: u64, inode: crate::platform::FileNumber) -> bool {
+        let environments = lock(&self.inner.envs);
+        let retiring = lock(&self.inner.retiring);
+        let identity = (device, inode);
+        environments
+            .values()
+            .any(|environment| environment.data_directories.contains(&identity))
+            || retiring
+                .values()
+                .any(|pending| pending.mount_directories.contains(&identity))
+    }
+
+    /// The same native storage fences used before an attachment publishes its opened roots.
+    #[must_use]
+    pub fn storage_locks(&self) -> Arc<crate::storage_locks::StorageLocks> {
+        Arc::clone(&self.inner.storage_locks)
+    }
+
+    /// Reconcile the current decision after taking the transition lock, including local file changes.
+    pub async fn review_system(&self, current: impl FnOnce() -> Option<u64> + Send) -> Result<()> {
+        if crate::RUNTIME_VERIFIED {
+            return Ok(());
+        }
+        let _transition = self.inner.review_transition.write().await;
+        let reviewed = current();
+        {
+            let mut settings = self
+                .inner
+                .settings
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if reviewed.is_some() && settings.platform_review == reviewed {
+                return Ok(());
+            }
+            settings.platform_review = None;
+        }
+        let mut failure = None;
+        for env in self.environments() {
+            if let Err(error) = self
+                .env_detach(&EnvDetach {
+                    environment_id: env.id(),
+                })
+                .await
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        self.inner
+            .settings
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .platform_review = reviewed;
+        Ok(())
     }
 
     /// Replaces what the machine's owner has switched on, as `machine.policy.set` does.
@@ -1495,6 +1592,11 @@ impl EnvHost {
         body: &EnvAttach,
         secrets: &BTreeMap<String, String>,
     ) -> Result<EnvironmentFacts> {
+        let _review = if crate::RUNTIME_VERIFIED {
+            None
+        } else {
+            Some(self.inner.review_transition.read().await)
+        };
         retirement::require_room(&lock(&self.inner.retiring), body.environment_id)?;
         let settings = self.inner.settings();
         let previous = lock(&self.inner.envs).get(&body.environment_id).cloned();
@@ -1502,6 +1604,7 @@ impl EnvHost {
             environment,
             first_scan,
             lost_shells,
+            data_holds: _data_holds,
         } = attach(&self.inner, &settings, body, secrets, previous.as_ref()).await?;
         let (cleanup, start) = {
             let mut environments = lock(&self.inner.envs);
@@ -2233,6 +2336,7 @@ impl EnvHost {
             body,
             orch_types::new_id(),
             Time::new(until),
+            Time::new(until),
             tokio_util::sync::CancellationToken::new(),
         )
         .await?
@@ -2240,13 +2344,40 @@ impl EnvHost {
         .await
     }
 
+    /// Waits until `ready_by` for the baseline of `directory` to be ready, as long as background work that
+    /// brings it up to date is going on: when none is left and the baseline is not ready, nothing more is
+    /// coming, and the recording answers what it has.
+    async fn wait_for_file_states(
+        &self,
+        states: &Arc<crate::file_states::FileStates>,
+        directory: &RelPath,
+        ready_by: Time,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        while states.needs_preparing(directory) && states.work_in_flight() {
+            if self.inner.clock.time() >= ready_by {
+                return Ok(());
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(HostError::Cancelled),
+                () = tokio::time::sleep(FILE_STATES_POLL) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Seals local state, its immutable upload source and retention before the serial key is released.
     /// The command owner signals cancellation and joins this future; it must not detach blocking work.
+    ///
+    /// A baseline that is not ready is never walked or hashed here: the pass that makes it ready runs in
+    /// the background, and this waits for it only until `ready_by`, then answers that the files are not
+    /// ready. `until` is the end of the protection of what is captured.
     pub async fn fs_record_capture(
         &self,
         body: &orch_link_contract::source::FsRecord,
         operation: Id,
         until: Time,
+        ready_by: Time,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<crate::file_states::CapturedState> {
         if cancel.is_cancelled() {
@@ -2287,14 +2418,21 @@ impl EnvHost {
             {
                 // A new directory and a re-enabled policy need their indexed baseline before
                 // this immutable identity is answered. Otherwise a scheduling race permanently
-                // freezes not_ready even though the worker completes a moment later.
+                // freezes not_ready even though the worker completes a moment later. The pass that
+                // makes it ready runs in the background (this command only waits for it, up to
+                // `ready_by`), so a large directory never holds the turn or the environment's line.
+                let scope = directory.clone();
                 let kept = states.clone();
                 let policy = crate::state_store::RecordPolicy {
                     record_days: body.record_days,
                     max_bytes: body.max_bytes,
                 };
                 blocking(move || kept.store().keep_policy(&directory, policy)).await?;
-                environment.prepare_file_states().await?;
+                if needs_seed || !states.work_in_flight() {
+                    environment.seed_file_states();
+                }
+                self.wait_for_file_states(&states, &scope, ready_by, &cancel)
+                    .await?;
             }
         }
         if cancel.is_cancelled() {
@@ -3724,29 +3862,30 @@ struct Attached {
     environment: Arc<Environment>,
     first_scan: Option<FirstScan>,
     lost_shells: Vec<Id>,
+    data_holds: Vec<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 /// Opens the workspace root and finds out how it spells its names.
 fn open_workspace(configured: &Path, allowed: Option<&[PathBuf]>) -> Result<(Workspace, bool)> {
-    if let Some(roots) = allowed {
-        let real = std::fs::canonicalize(configured)
-            .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
-        if !roots
-            .iter()
-            .any(|root| std::fs::canonicalize(root).is_ok_and(|root| real.starts_with(root)))
-        {
-            return Err(HostError::RootNotAllowed(format!(
-                "this machine's owner does not offer {}",
-                configured.display()
-            )));
-        }
-    }
-    let dir = Dir::open_path(configured)
-        .map_err(|error| HostError::io(format!("opening {}", configured.display()), error))?;
+    let workspace = match allowed {
+        Some(roots) => Workspace::open_under_roots(
+            configured,
+            roots,
+            path_style(),
+            platform::DEFAULT_CASE_SENSITIVE,
+        )?,
+        None => Workspace::open(
+            configured,
+            &[],
+            path_style(),
+            platform::DEFAULT_CASE_SENSITIVE,
+        )?,
+    };
+    let dir = workspace.root_dir()?;
     let case_sensitive =
         Workspace::probe_case_sensitivity(&dir).unwrap_or(platform::DEFAULT_CASE_SENSITIVE);
     Ok((
-        Workspace::open(configured, &[], path_style(), case_sensitive)?,
+        workspace.with_case_sensitivity(case_sensitive),
         case_sensitive,
     ))
 }
@@ -3768,7 +3907,20 @@ async fn attach(
         ));
     }
     if !crate::RUNTIME_VERIFIED {
-        return Err(HostError::Unsupported("the environment runtime is declared for Linux; this platform awaits native containment and process verification".into()));
+        if settings.platform_review.is_none() || settings.managed.is_some() {
+            return Err(HostError::Unsupported(
+                "the machine's native system requires confirmation".into(),
+            ));
+        }
+        if body
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| !mounts.is_empty())
+        {
+            return Err(HostError::Unsupported(
+                "native mount enforcement is unavailable on this system".into(),
+            ));
+        }
     }
     // The controller supplies the current or candidate generation at attach time.
     // Managed connectors also start before that generation is known to their host settings.
@@ -3890,6 +4042,22 @@ async fn attach(
         (None, _) => Mounts::none(),
     };
 
+    let mut data_directories: std::collections::BTreeSet<_> =
+        mounts.directory_identities().collect();
+    let workspace_identity = files.root().root_meta()?;
+    data_directories.insert((workspace_identity.dev, workspace_identity.ino));
+    let home_root = home.as_ref().and_then(|path| Dir::open_path(path).ok());
+    if let Some(home) = &home_root
+        && let Ok(actual) = home.stat_self()
+    {
+        data_directories.insert((actual.dev, actual.ino));
+    }
+    let data_holds = host
+        .storage_locks
+        .hold_directories(data_directories.iter().copied())
+        .await?;
+    let data_directories = data_directories.into_iter().collect();
+
     // Kept browser profiles belong outside the workspace and never enter a snapshot or a fork.
     let browser_directory = if settings.managed.is_some() {
         PathBuf::from(home_text.as_deref().unwrap_or_default()).join(".orch/browsers")
@@ -3949,7 +4117,9 @@ async fn attach(
                 settings.managed.is_some(),
             )
         });
-    displays.recover_owned().await;
+    if !cfg!(windows) {
+        displays.recover_owned().await;
+    }
     displays.set_allowed(settings.gates.vnc).await;
 
     // What the environment's commands find in their environment: its variables, and its secrets
@@ -3992,7 +4162,7 @@ async fn attach(
         Some(old) => Arc::clone(&old.executors),
         None => {
             let registry = Arc::new(Executors::new());
-            for factory in &host.executors {
+            for factory in host.executors.iter().filter(|_| !cfg!(windows)) {
                 registry.register(factory()).await?;
             }
             registry
@@ -4163,6 +4333,7 @@ async fn attach(
         }
     };
     let environment = Arc::new(Environment {
+        platform_review: settings.platform_review,
         id: body.environment_id,
         directory_attachment: orch_types::new_id(),
         directory_operations: crate::directory_pages::Attachment::new(),
@@ -4172,6 +4343,8 @@ async fn attach(
         index,
         scanned: AtomicBool::new(first_scan.is_none()),
         mounts,
+        data_directories,
+        _home_root: home_root,
         watcher: Mutex::new(None),
         directory_reads: tokio::sync::Mutex::new(()),
         watches: Mutex::new(
@@ -4209,6 +4382,7 @@ async fn attach(
         environment,
         first_scan,
         lost_shells,
+        data_holds,
     })
 }
 

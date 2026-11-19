@@ -34,8 +34,6 @@ use futures::future::BoxFuture;
 
 use orch_api_contract::operation_sources::Declaration;
 
-use orch_api_contract::storage_sources as sources;
-
 use orch_api_contract::storage_sources::Source;
 
 use orch_authz::Caller;
@@ -57,7 +55,7 @@ use orch_types::Time;
 use orch_types::new_id;
 
 use serde_json::json;
-pub(super) struct Preview;
+pub(super) struct Preview<M: Mode>(PhantomData<M>);
 
 pub(super) struct Intent {
     scope: Scope,
@@ -68,6 +66,7 @@ pub(super) struct Prepared {
     records: PreparedRecords,
     sources: Sources,
     resource_name: Option<String>,
+    deletion: Option<mount_deletion::Prepared>,
 }
 
 pub(super) struct Saved {
@@ -76,49 +75,54 @@ pub(super) struct Saved {
     sources: Sources,
 }
 
-impl Effect for Preview {
+impl<M: Mode> Effect for Preview<M> {
     type Source = Source;
     type Query = ();
-    type Body = api::CleanupRequest;
+    type Body = M::Body;
     type Value = Prepared;
     type Output = Saved;
     fn declaration(_: &Prepared) -> &'static Declaration<Source> {
-        &sources::PREFLIGHT
+        M::PREVIEW
     }
     fn prepare<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
         (): (),
-        request: api::CleanupRequest,
+        body: M::Body,
     ) -> BoxFuture<'a, ApiResult<(Prepared, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
+            let request = M::request(ctx, body)?;
             let query = query(&request);
             let scope = Scope::parse(&query)?;
             let selected =
                 (!request.items.is_empty()).then(|| request.items.iter().cloned().collect());
-            let mut book = Book::for_operation(
-                ctx,
-                conn,
-                caller,
-                scope,
-                selected,
-                &sources::PREFLIGHT,
-                true,
-            )
-            .await?;
+            let mut book =
+                Book::for_operation(ctx, conn, caller, scope, selected, M::PREVIEW, true).await?;
             let principal = native::preparation_principal(ctx, conn, caller, &book.plan).await?;
             report_sources::require_namespace(conn, &principal, scope).await?;
-            let operator = effects::initial_value::<Preview>(ctx)?;
-            let records = super::super::prepare_records(
-                ctx,
-                conn,
-                &principal,
-                &query,
-                Some(operator.as_ref()),
-                Some(&mut book),
-            )
-            .await?;
+            let operator = effects::initial_value::<Preview<M>>(ctx)?;
+            let deletion = if M::DELETE_MOUNT {
+                Some(
+                    mount_deletion::prepare(ctx, conn, &principal, &request, Some(&mut book))
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let records = if let Some(deletion) = &deletion {
+                deletion.records()
+            } else {
+                super::super::prepare_records(
+                    ctx,
+                    conn,
+                    &principal,
+                    &query,
+                    Some(operator.as_ref()),
+                    Some(&mut book),
+                )
+                .await?
+            };
             let resource_name = if let Some(object) = request.resource {
                 Some(
                     orch_engine::resource_facts::authorities(conn, &principal, &[object.id])
@@ -140,6 +144,7 @@ impl Effect for Preview {
                     records,
                     sources,
                     resource_name,
+                    deletion,
                 },
                 facts,
             ))
@@ -160,20 +165,21 @@ impl Effect for Preview {
     }
 }
 
-impl Initial for Preview {
+impl<M: Mode> Initial for Preview<M> {
     type Input = Intent;
     type Fetched = OperatorSnapshot;
     fn declaration(_: &Intent) -> &'static Declaration<Source> {
-        &sources::PREFLIGHT
+        M::PREVIEW
     }
     fn authorize<'a>(
-        _: &'a Ctx,
+        ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
         (): (),
-        request: api::CleanupRequest,
+        body: M::Body,
     ) -> BoxFuture<'a, ApiResult<(Intent, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
+            let request = M::request(ctx, body)?;
             let scope = Scope::parse(&query(&request))?;
             let target = report_sources::namespace(conn, caller, scope).await?;
             Ok((
@@ -207,7 +213,7 @@ impl Initial for Preview {
     }
 }
 
-impl ApplyOwned for Preview {
+impl<M: Mode> ApplyOwned for Preview<M> {
     fn apply_owned<'a>(
         ctx: &'a Ctx,
         mut tx: Tx,
@@ -230,7 +236,8 @@ impl ApplyOwned for Preview {
                         .map(|host| host.name.clone())
                 })
                 .unwrap_or_else(|| "Storage".into());
-            let plan = api::CleanupPlan {
+            let mut plan = api::CleanupPlan {
+                mount_switch_off_blocked: None,
                 id: new_id(),
                 expires_at: Time::new(orch_engine::updates::expires(ctx.now)),
                 confirmation_name: name,
@@ -238,7 +245,11 @@ impl ApplyOwned for Preview {
                 people: Vec::new(),
                 other_people: 0,
                 notify: false,
+                effects: None,
             };
+            if let Some(deletion) = &value.deletion {
+                deletion.plan(&mut tx, &mut plan).await?;
+            }
             let operation = orch_authz::CapturedOperation::capture(principal.caller())
                 .map_err(ApiError::internal)?;
             let checkpoint =
@@ -255,7 +266,7 @@ impl ApplyOwned for Preview {
                 node_id: None,
                 environment_id: None,
                 created_by: principal.user(),
-                plan: json!({"request": value.request, "preview": plan, "targets": targets, "sources": value.sources, "operation": operation, "session_id": session, "checkpoint": checkpoint}),
+                plan: json!({"request": value.request, "preview": plan, "targets": targets, "sources": value.sources, "operation": operation, "session_id": session, "checkpoint": checkpoint, "mount_delete":value.deletion.as_ref().map(|deletion| &deletion.snapshot)}),
                 expires_at: plan.expires_at.get(),
                 created_at: ctx.now,
             };
@@ -271,13 +282,13 @@ impl ApplyOwned for Preview {
     }
 }
 
-pub(super) async fn run(
+pub(super) async fn run<M: Mode>(
     ctx: Ctx,
     (): (),
-    _: api::CleanupRequest,
+    _: M::Body,
 ) -> ApiResult<api::CleanupPlanResponse> {
     let (tx, _) = transaction_guard::begin(&ctx).await?;
-    let done = effects::apply_owned::<Preview>(&ctx, tx).await?;
+    let done = effects::apply_owned::<Preview<M>>(&ctx, tx).await?;
     let receipt = api::CleanupPlanReceipt {
         projection: orch_api_contract::common::ReceiptProjection::Receipt,
         id: done.output.plan.id,
@@ -296,7 +307,7 @@ pub(super) async fn run(
             .collect(),
     };
     publication::receipt(&done.ctx, &receipt)?;
-    let full = match reply::render::<Stored>(&done.ctx, &done.accepted, done.output).await {
+    let full = match reply::render::<Stored<M>>(&done.ctx, &done.accepted, done.output).await {
         Ok(full) => full,
         Err(error) if matches!(error.code(), ErrorCode::AuthzDenied | ErrorCode::NotFound) => None,
         Err(error) => return Err(error),
@@ -307,9 +318,9 @@ pub(super) async fn run(
     ))
 }
 
-struct Stored;
+struct Stored<M: Mode>(PhantomData<M>);
 
-impl reply::Projection for Stored {
+impl<M: Mode> reply::Projection for Stored<M> {
     type Source = Source;
     type Input = Saved;
     type Subject = PreflightRow;
@@ -317,7 +328,7 @@ impl reply::Projection for Stored {
     type Reply = api::CleanupPlan;
     const READ_SOURCE: Source = Source::Content;
     fn declaration(_: &Saved) -> &'static Declaration<Source> {
-        &sources::PREFLIGHT
+        M::PREVIEW
     }
     fn subject<'a>(
         _: &'a Ctx,

@@ -21,13 +21,14 @@ import { CommandBox } from '@/features/resources/Facts';
 import { DetailPages, DetailSections, ResourceDetails } from '@/features/resources/DetailSections';
 import { PortPolicyValue } from '@/features/resources/machines/PortPolicyValue';
 import { canonicalExecutorOffers, ExecutorOffers, executorOfferIndex } from '@/features/resources/machines/ExecutorOffers';
-import type { Machine, MachinePolicy, MachinePolicyKey, MachinePolicySection } from '@/generated/api-types';
+import type { Machine, MachinePlatformReview, MachinePolicy, MachinePolicyKey, MachinePolicySection } from '@/generated/api-types';
 import { Section } from '@/shell/Page';
 import { Button } from '@/ui/Button';
 import { CheckboxList } from '@/ui/Checkbox';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
+import { UserChip } from '@/ui/UserChip';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
@@ -65,6 +66,7 @@ const KEYS = {
   'environment.vnc': { id: 'environment_vnc', control: { kind: 'switch' } },
   'mcp.import': { id: 'mcp_import', control: { kind: 'switch' } },
   'mcp.add': { id: 'mcp_add', control: { kind: 'switch' } },
+  'exec.platform': { id: 'exec_platform', control: { kind: 'fixed' } },
   'exec.offers': { id: 'exec_offers', control: { kind: 'executors' } },
   'environment.deliver_files': { id: 'environment_deliver_files', control: { kind: 'switch' } },
   'agent.max_sandbox': { id: 'agent_max_sandbox', control: { kind: 'choice', options: ['read_only', 'workspace', 'open'] } },
@@ -302,6 +304,37 @@ function DriverPolicyHelp({ term, what }: { term: string; what: ReactNode }) {
     more={{label:t('help.hint.more'),onOpen:()=>open('connect-a-machine','change-driver-settings')}} />;
 }
 
+function PlatformReviewRow({ machineId, review, entry, program, windows }: {
+  machineId: string; review: MachinePlatformReview; entry: MachinePolicyKey; program: string; windows: boolean;
+}) {
+  const { t } = useTranslation();
+  const cache = useQueryClient();
+  const value = review.approved ? { state: 'off' } : { state: 'approved', build: review.build };
+  const update = useMutation({
+    mutationFn: () => updateMachinePolicy(machineId, { [entry.key]: value }),
+    onSuccess: (policy) => {
+      cache.setQueryData(machinePolicyQuery(machineId).queryKey, policy);
+      if (policy.machine_view !== null && policy.machine_view !== undefined) cache.setQueryData(machineQuery(machineId).queryKey, policy.machine_view);
+    },
+  });
+  const words = keyWords(entry, t);
+  return <li className="flex flex-col gap-2 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-2">
+      <span>{words.name}</span><span className="text-sm text-text-muted" title={review.build.executable}>{review.build.os} · {review.build.arch}</span>
+      <HelpHint term={words.name} what={words.description} />
+      {entry.writable && <Button size="sm" pending={update.isPending} onClick={() => update.mutate()}>
+        {t(review.approved ? 'machines.policy.revokeSystem' : 'machines.policy.confirmSystem')}
+      </Button>}
+    </div>
+    <span className="flex flex-wrap items-center gap-2 text-sm text-text-muted">
+      {t(review.approved ? 'machines.policy.systemConfirmed' : 'machines.policy.systemUnconfirmed')}
+      {review.approval !== null && <><UserChip user={review.approval.by} size={24} /><RelativeTime at={review.approval.at} /></>}
+    </span>
+    {!entry.delegated && <ResourceDetails><CommandBox command={policyCommand(entry.key, value, program, windows)} label={t('machines.policy.copy')} /></ResourceDetails>}
+    {update.isError && <ErrorAlert error={update.error} />}
+  </li>;
+}
+
 function PolicyRow({ machineId, entry, program,windows=false }: { machineId: string; entry: MachinePolicyKey; program:string;windows?:boolean }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -349,21 +382,23 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
       {keys.length === 0 ? (
         <EmptyState compact title={t('machines.policy.noKeys')} />
       ) : (
-        <DetailSections label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
+        <DetailSections stacked label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
           // Shared keys (for example directory roots) keep one row and one editor on this page.
           const rows = keys.filter((entry) => SECTIONS.find((candidate)=>entry.definition.sections.includes(candidate))===section);
           if (rows.length === 0) return [];
           const full = rows.filter((entry) => entry.definition.delegable).every((entry) => entry.delegated);
-          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <section aria-label={t(`machines.policy.sections.${section}.name`)} className="flex min-w-0 flex-col gap-2">
+          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <div className="flex min-w-0 flex-col gap-2">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <HelpHint term={t(`machines.policy.sections.${section}.name`)} what={t(`machines.policy.sections.${section}.description`)}/>
               <Button size="sm" onClick={() => setHandover(section)}>{t('machines.policy.fullAccessAction')}</Button>
             </div>
             {full && !fullAccess && <p className="text-sm text-text-muted">{t('machines.policy.roleFullAccess')}</p>}
             <DetailPages items={rows}>{(page) => <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-              {page.map((entry) => <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} />)}
+              {page.map((entry) => entry.key === 'exec.platform' && policy.data.platform_review !== null && policy.data.platform_review !== undefined
+                ? <PlatformReviewRow key={entry.key} machineId={machine.id} entry={entry} review={policy.data.platform_review} program={program} windows={policy.data.machine.platform_os === 'windows'} />
+                : <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} />)}
             </ul>}</DetailPages>
-          </section> }];
+          </div> }];
         })} />
       )}
       {handover !== null && <Dialog open onOpenChange={(open) => !open && setHandover(null)} title={t('machines.policy.fullAccessFor', { role: t(`machines.policy.sections.${handover}.name`) })}

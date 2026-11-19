@@ -205,6 +205,7 @@ impl Authority {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

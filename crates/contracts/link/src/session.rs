@@ -429,6 +429,12 @@ pub struct MachineFactsRates {
 /// What a machine is and has, as its connector reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFacts {
+    /// Build that the machine owner can review for native directory operations on an unverified system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_platform: Option<orch_agent_programs::confirmation::PlatformBuild>,
+    /// The local bundled installation's fixed updater, absent on other machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_update: Option<orch_driver_contract::descriptor::OperationSupport>,
     /// The connector's metadata-only directory observation, before any scan it is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_directory: Option<orch_api_contract::storage::MachineDataInventory>,
@@ -464,6 +470,12 @@ pub struct MachineFacts {
     pub cpus: u32,
     /// How much memory it has.
     pub memory_bytes: i64,
+    /// Capacity of the filesystem holding this connector's data, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_volume_bytes: Option<i64>,
+    /// Maximum interval between ordinary capacity reports while the machine runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_refresh_secs: Option<u64>,
     /// The programs confirmed by the machine's local policy and present on disk.
     pub harnesses: Vec<MachineFactsHarness>,
     /// Programs found without local confirmation; absent before the connector searched.
@@ -527,12 +539,12 @@ mod tests {
     #[test]
     fn the_handshake_reads_and_writes_as_the_protocol_has_it() {
         let hello: Hello = round_trip(json!({
-            "protocol": { "min": 1, "max": 1 }, "nonce": encode_nonce(&[7; NONCE_BYTES]),
+            "protocol": { "min": 2, "max": 2 }, "nonce": encode_nonce(&[7; NONCE_BYTES]),
             "server_time": "2026-10-08T17:04:05.000Z", "gateway_id": "compose-gateway", "tls": "server"
         }));
         assert_eq!(hello.tls, TlsMode::Server);
         let auth: Auth = round_trip(json!({
-            "machine_id": MACHINE, "protocol_version": 1, "connector_version": "0.1.0",
+            "machine_id": MACHINE, "protocol_version": 2, "connector_version": "0.1.0",
             "platform": { "os": "linux", "arch": "x86_64" }, "roles": ["agent", "environment"],
             "sent_at": "2026-10-08T17:04:05.120Z",
             "proof": { "certificate_pem": "-----BEGIN CERTIFICATE-----\n…", "signature": "c2ln" }
@@ -540,7 +552,7 @@ mod tests {
         assert_eq!(auth.roles, [Role::Agent, Role::Environment]);
         let ready: Ready = round_trip(json!({
             "session_id": SESSION, "session_token": "t0k3n", "heartbeat_secs": 20,
-            "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+            "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
             "cursors": { "machine": 12, "env:0199c1a0-0000-7000-8000-00000000000c": 43 },
             "versions": { "min": "0.1.0", "recommended": "0.1.3" }
         }));
@@ -551,7 +563,7 @@ mod tests {
     #[test]
     fn a_machine_known_by_its_connection_sends_no_proof() {
         let auth: Auth = round_trip(json!({
-            "machine_id": MACHINE, "protocol_version": 1, "connector_version": "0.1.0",
+            "machine_id": MACHINE, "protocol_version": 2, "connector_version": "0.1.0",
             "platform": { "os": "macos", "arch": "aarch64" }, "roles": ["node"],
             "sent_at": "2026-10-08T17:04:05.120Z"
         }));

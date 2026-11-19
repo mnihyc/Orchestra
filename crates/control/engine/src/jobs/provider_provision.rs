@@ -597,6 +597,10 @@ impl ProviderProvision {
     }
 
     async fn placed(&self, job: &Job) -> Result<Placed, Stop> {
+        self.placed_for(job, false).await
+    }
+
+    async fn placed_for(&self, job: &Job, creating: bool) -> Result<Placed, Stop> {
         let plan = job.plan().await?;
         let mut conn = self
             .engine
@@ -615,12 +619,22 @@ impl ProviderProvision {
             .and_then(|id| id.parse::<Id>().ok());
         let runtime = match planned {
             Some(id) => env_rows::runtime(&mut conn, id).await?,
+            None if plan.get("runtime").is_some() => None,
             None => rows::live_runtime(&mut conn, provider.id).await?,
         }
         .ok_or_else(|| failed("runtime_gone", "the provider has no unit to work on"))?;
         let host = host_rows::host(&mut conn, runtime.host_id)
             .await?
             .ok_or_else(|| failed("no_host", "the host the unit is on is gone"))?;
+        super::runtime_commands::placement(
+            &mut conn,
+            job.id(),
+            runtime.id,
+            runtime.host_id,
+            host.machine_id,
+            creating,
+        )
+        .await?;
         if host.disabled || provider.status == "disabled" {
             return Err(failed(
                 "provider_unavailable",
@@ -848,6 +862,7 @@ impl ProviderProvision {
         }
         let (runtime_id, name) =
             made.ok_or_else(|| failed(INTERNAL, "no free name for the unit was found"))?;
+        super::runtime_commands::capture(&mut tx, job.id(), runtime_id).await?;
         orch_db::queries::jobs::merge_plan(
             &mut tx,
             job.id(),
@@ -1003,7 +1018,7 @@ impl ProviderProvision {
     // ------------------------------------------------------------ create, start
 
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
-        let placed = self.placed(job).await?;
+        let placed = self.placed_for(job, true).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
         let enrollment: Enrollment = match plan.get("enrollment") {
@@ -1205,9 +1220,30 @@ impl ProviderProvision {
             &NodeRuntimeCreate(serde_json::from_value(spec).map_err(EngineError::from)?),
         )
         .map_err(body_stop)?;
-        if let Err(stop) = job.command(made).await {
-            return Err(explain_creation(&plan, &placed, stop));
-        }
+        let (original, made) = super::runtime_commands::prepare_create(
+            &self.engine,
+            job.id(),
+            placed.runtime.id,
+            made,
+        )
+        .await?;
+        let created_command = made.id;
+        let created_result = job
+            .command(made)
+            .await
+            .map_err(|stop| explain_creation(&plan, &placed, stop))?;
+        let created_source = match original.as_ref() {
+            Some(original) => Some(
+                super::runtime_commands::created(
+                    &self.engine,
+                    original,
+                    created_command,
+                    &created_result,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         job.progress(0.5, Some("starting the unit")).await?;
         let started = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"create"]),
@@ -1218,9 +1254,28 @@ impl ProviderProvision {
             },
         )
         .map_err(body_stop)?;
-        job.command(started)
+        let started = match (original.as_ref(), created_source) {
+            (Some(original), Some(source)) => {
+                super::runtime_commands::prepare_start(&self.engine, original, source, started)
+                    .await?
+            }
+            _ => started,
+        };
+        let start_command = started.id;
+        let start_result = job
+            .command(started)
             .await
             .map_err(|stop| explain_creation(&plan, &placed, stop))?;
+        if let (Some(original), Some(source)) = (original.as_ref(), created_source) {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                source,
+                start_command,
+                &start_result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1265,23 +1320,15 @@ impl ProviderProvision {
                 .await?;
             }
         }
-        let mut conn = self
-            .engine
-            .inner
-            .db
-            .acquire()
-            .await
-            .map_err(EngineError::from)?;
-        env_rows::set_runtime_state(
-            &mut conn,
+        let original = super::runtime_commands::starting(
+            &self.engine,
+            job.id(),
             placed.runtime.id,
-            &[runtime_state::STOPPED, runtime_state::FAILED],
-            runtime_state::CREATING,
-            None,
+            placed.host.id,
+            placed.host.machine_id,
             job.now(),
         )
         .await?;
-        drop(conn);
         let command = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"start"]),
             placed.host.machine_id,
@@ -1291,9 +1338,33 @@ impl ProviderProvision {
             },
         )
         .map_err(body_stop)?;
-        job.command(command)
+        let command = match original.as_ref() {
+            Some(original) => {
+                super::runtime_commands::prepare_start(
+                    &self.engine,
+                    original,
+                    original.source(),
+                    command,
+                )
+                .await?
+            }
+            None => command,
+        };
+        let id = command.id;
+        let result = job
+            .command(command)
             .await
             .map_err(|stop| explain_creation(&json!({}), &placed, stop))?;
+        if let Some(original) = original.as_ref() {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                original.source(),
+                id,
+                &result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1456,6 +1527,15 @@ impl ProviderProvision {
             .await?
             .filter(|state| state.deleted_at.is_none())
             .ok_or_else(|| failed("provider_gone", "the provider was deleted"))?;
+        super::runtime_commands::placement(
+            &mut tx,
+            job.id(),
+            placed.runtime.id,
+            placed.runtime.host_id,
+            placed.host.machine_id,
+            false,
+        )
+        .await?;
         env_rows::set_runtime_state(
             &mut tx,
             placed.runtime.id,
@@ -1812,6 +1892,18 @@ impl Phased for ProviderProvision {
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        if let Ok(plan) = job.plan().await
+            && let Some(runtime) = plan
+                .get("runtime")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok())
+        {
+            match super::runtime_commands::undo_current(&self.engine, job.id(), runtime).await {
+                Ok(true) => {},
+                Ok(false) => return Undone::Partly("The original native unit or control changed; its unit and data were left unchanged.".into()),
+                Err(error) => return Undone::Deferred(format!("The original native unit could not be confirmed before cleanup: {error:?}")),
+            }
+        }
         if let Err(error) = creator_authority::copy_audit(job).await {
             tracing::warn!(job=%job.id(),?error,"a completed owner credential copy could not be audited before its compensation");
         }

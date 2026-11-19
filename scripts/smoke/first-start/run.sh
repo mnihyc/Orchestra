@@ -87,7 +87,10 @@ fi
 grep -E '^(ok|part|FAIL)' "$SMOKE_DIR/first-start/edge.txt" | cut -c1-170 || true
 
 step "the bundled node enrolls once there is an administrator, and stays"
-wait_for 180 "the node is online" bash -c "cd '$STACK' && docker compose exec -T api /opt/orchctl/orchctl doctor --only node | grep -q '^ok'"
+bundled_host_online() {
+  [ "$(sql "SELECT count(*) FROM hosts h JOIN machines m ON m.id=h.machine_id WHERE h.bundled_with_server AND m.online AND m.status='active' AND 'node'=ANY(m.roles)")" = 1 ]
+}
+wait_for 180 "the fresh installation has its own enrolled, online host" bundled_host_online
 wait_for 60 "orchctl doctor passes on the whole stack" ready "$TAG"
 expect "the node container stays up" "running" "$(compose ps --format '{{.State}}' node)"
 

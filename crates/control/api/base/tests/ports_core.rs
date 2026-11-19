@@ -1805,3 +1805,36 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
         .unwrap();
     assert_eq!(state, "expired");
 }
+
+#[tokio::test]
+async fn newly_requested_port_assertion_keys_name_the_committed_issuer_without_restarting_the_api()
+{
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let world = World::new().await;
+    let keys_before = world.app.call(PortAssertionKeysGet, &[]).send().await.ok();
+    let seed = world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *world.conn().await,
+            &candidate,
+            before.revision,
+            None,
+            world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let after = world.app.call(PortAssertionKeysGet, &[]).send().await.ok();
+    assert_eq!(after.issuer, "https://changed.example.test");
+    assert_eq!(after.keys, keys_before.keys);
+    assert_eq!(keys_before.issuer, "https://orch.test");
+}

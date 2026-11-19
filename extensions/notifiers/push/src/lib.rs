@@ -22,5 +22,5 @@ mod encryption;
 pub mod payload;
 pub mod vapid;
 
-pub use delivery::{NAME, PushNotifier, descriptor};
+pub use delivery::{Contact, NAME, PushNotifier, descriptor};
 pub use vapid::{Vapid, VapidError};

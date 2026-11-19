@@ -182,6 +182,8 @@ section! {
 section! {
     /// `[exec]`: policy key `exec.offers`
     ExecPolicy {
+        /// The specific native connector build approved for supported directory operations.
+        platform: orch_agent_programs::confirmation::PlatformConsent = Default::default(),
         /// What the exec node may offer a harness that runs elsewhere: executor kinds and tool sets.
         offers: Vec<String> = orch_agent_programs::Programs::builtin().every_offer(),
     }
