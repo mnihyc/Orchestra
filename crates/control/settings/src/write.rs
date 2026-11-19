@@ -277,10 +277,24 @@ async fn audit_change(
                         | keys::ORGS_CREATED_BY
                         | keys::AUTH_LOCAL_LOGIN
                         | keys::AUTH_EMAIL_CODE
+                        | keys::INTERFACE_KEPT_CLOSED_TABS
+                        | keys::INTERFACE_PROGRESS_DELAY_MS
+                        | keys::INTERFACE_READ_FRESHNESS_MS
+                        | keys::INTERFACE_CONNECTION_QUALITY
                 )
             })
     {
         orch_db::sequences::notify_meta_changed(conn, line.origin.request_id.as_deref()).await?;
+    }
+    if matches!(snapshot.place(), Place::System)
+        && entry.details.get("key").and_then(serde_json::Value::as_str)
+            == Some(keys::EDGE_TRANSPORT)
+    {
+        sqlx::query("SELECT pg_notify($1, '')")
+            .bind(orch_db::sequences::EDGE_CHANNEL)
+            .execute(conn)
+            .await
+            .map_err(DbError::from)?;
     }
     Ok(())
 }

@@ -855,6 +855,8 @@ pub(crate) async fn download_state(
     Ok(Some((
         Outgoing {
             authority: None,
+            input_facts: None,
+            session_offer: None,
             id,
             machine: row.machine_id,
             key: SerialKey::Environment(environment),

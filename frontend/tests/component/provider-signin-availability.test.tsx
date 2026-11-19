@@ -17,7 +17,7 @@ import { harnessName } from '../doubles/harness-names';
 
 skipOverflowFallback();
 
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#profile">{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({
@@ -69,6 +69,8 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
     await user.click(within(screen.getByRole('listbox')).getByRole('option',{name:t('providerCreation.native')}));
     await user.click(screen.getByRole('combobox', { name: t('providerCreation.program') }));
     const list=within(screen.getByRole('dialog',{name:t('providerCreation.program')}));
+    expect(list.queryByText(t('clientFacts.device.collapsedGroups'))).toBeNull();
+    expect(list.queryByText(t('clientFacts.device.save'))).toBeNull();
     for(const [name,reason] of [['Codex','not_reported'],['Claude Code','profile_needed']] as const){
       const choices=list.getAllByRole('option',{name});expect(choices).toHaveLength(1);
       expect(choices[0]).toHaveAttribute('aria-disabled','true');

@@ -1,3 +1,4 @@
+import { collectionQuery } from '@/api/collection';
 import { unplacedGrouping } from '../doubles/resource-grouping';
 /** A manager can restart one failed server from the same list used on the environment panel and page. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -10,12 +11,12 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const { read, restart, jobRead } = vi.hoisted(() => ({ read: vi.fn<() => Promise<EnvironmentMcp>>(), restart: vi.fn<(id: string,name: string) => Promise<Job>>(), jobRead: vi.fn<() => Promise<Job>>() }));
-vi.mock('@/api/environments', () => ({ environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id], queryFn: read }), restartEnvironmentMcpServer: restart }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id, 'complete'], queryFn: read }), environmentMcpPageQuery: (id: string, collection: 'found' | 'servers', q: string) => collectionQuery(['environment-mcp',id,collection],q,async()=>{ const value = await read(); return { ...value, items: value[collection] }; }), restartEnvironmentMcpServer: restart }));
 vi.mock('@/api/forks', () => ({ jobQuery: (id: string) => ({ queryKey: ['job',id], queryFn: jobRead }) }));
 afterEach(() => vi.clearAllMocks());
 
 function list(): EnvironmentMcp {
-  return { applies:'next_turn', found:[], import:{allowed:false,reason:'policy'}, servers:[
+  return { next_cursor:null, applies:'next_turn', found:[], import:{allowed:false,reason:'policy'}, servers:[
     { ...unplacedGrouping(), server:{id:'flaky',name:'flaky',address:'team.flaky',machine:null,own:true},from:null,state:'failed',reason:'The server ended (exit status: 7): before crash [masked]',tools:null },
     { ...unplacedGrouping(), server:{id:'steady',name:'steady',address:'team.steady',machine:null,own:true},from:null,state:'running',reason:null,tools:3 }
   ] };
@@ -45,7 +46,7 @@ describe('one MCP server restart', () => {
     const cache = draw(false, true);
     await screen.findByText('steady');
     read.mockRejectedValueOnce(new Error('No current server response'));
-    await act(async () => { await cache.refetchQueries({ queryKey: ['environment-mcp', 'environment'], exact: true }); });
+    await act(async () => { await cache.refetchQueries({ queryKey: ['environment-mcp', 'environment', 'servers', 'pages', ''], exact: true }); });
     expect(await screen.findByRole('alert')).toBeVisible();
     expect(screen.queryByText('steady')).not.toBeInTheDocument();
     expect(screen.queryByText('flaky')).not.toBeInTheDocument();
@@ -81,13 +82,13 @@ describe('one MCP server restart', () => {
     jobRead.mockResolvedValue(job());
     restart.mockImplementation((id,name) => { expect([id,name]).toEqual(['environment','flaky']); current = { ...current,servers:current.servers.map((server) => server.server.name === name ? {...server,state:'running',reason:null} : server) }; return Promise.resolve(job()); });
     draw(true,compact);
-    const flaky = (await screen.findByText('flaky')).closest('li')!;
+    const flaky = (await screen.findByText('flaky')).closest('tr')!;
     expect(within(flaky).getByText('Failed')).toBeVisible();
     expect(within(flaky).queryByText(/exit status: 7/)).not.toBeInTheDocument();
     await userEvent.click(within(flaky).getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('mcpWords.details') }) }));
     expect(screen.getByText(/exit status: 7/)).toHaveTextContent('[masked]');
     await userEvent.keyboard('{Escape}');
-    const steady = screen.getByText('steady').closest('li')!;
+    const steady = screen.getByText('steady').closest('tr')!;
     expect(within(steady).getByText('Running')).toBeVisible();
     await userEvent.click(within(flaky).getByRole('button',{name:'Restart'}));
     await waitFor(() => expect(within(flaky).getByText('Running')).toBeVisible());
@@ -100,4 +101,16 @@ describe('one MCP server restart', () => {
     await screen.findByText('flaky');
     expect(screen.queryByRole('button',{name:'Restart'})).not.toBeInTheDocument();
   });
+});
+
+it('retires native configuration names and import acts when the current read is refused', async () => {
+  read.mockResolvedValue({ ...list(), found: [{ name: 'private-native', source: 'codex', scope: 'user', directory: null, transport: 'stdio', imported: null, state: 'running', using: 'native' }] });
+  const cache = draw(false, true);
+  await screen.findByText('private-native');
+  read.mockRejectedValueOnce(new Error('Current connection read refused'));
+  await act(async () => { await cache.refetchQueries({ queryKey: ['environment-mcp', 'environment', 'servers', 'pages', ''], exact: true }); });
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(screen.queryByText('private-native')).not.toBeInTheDocument();
+  expect(screen.queryByRole('table', { name: i18n.t('mcpImport.found') })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: i18n.t('mcpImport.import') })).not.toBeInTheDocument();
 });

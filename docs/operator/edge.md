@@ -3,6 +3,26 @@
 The web edge listens for HTTP on `ORCH_FRONTEND_BIND` (`127.0.0.1:5180` by default). Choose how
 people reach it below. Orch manages neither DNS nor ACME; an existing front can keep doing both.
 
+## Long-distance access
+
+Use a trusted HTTPS front that negotiates HTTP/2 for people far from the API. Plain HTTP/1.1 has a small per-origin connection pool, so asset transfers can queue an API read; TLS with HTTP/2 multiplexes them. Orch’s own HTTPS listener already enables `http2 on`. If another front or CDN ends TLS, check the browser-facing connection there. Nginx documents the required [TLS and ALPN support](https://nginx.org/en/docs/http/ngx_http_v2_module.html).
+
+Check the actual address, using the installation’s public authority when it is not in the device trust store:
+
+```sh
+curl --http2 --cacert /path/to/orch-ca.pem --silent --show-error --output /dev/null --write-out '%{http_version}\n' https://orch.example/
+```
+
+`2` confirms HTTP/2. Keep certificate verification enabled; this certificate is public trust material, not the authority’s private key. A warm reload reuses content-addressed assets, while the page starts its cookie session and first authenticated read before the application scripts compete for connections. A stable 700 ms line is normal; the connection indicator warns for measured worsening relative to that person’s own usual.
+
+Orch’s own HTTPS also enables HTTP/3 beside HTTP/2. The HTTPS overlay publishes TCP and UDP at the same configured address; allow that UDP port through an external firewall. `Alt-Svc` names the port the browser actually opened, including a nonstandard published port. The shipped nginx includes the QUIC module; reachability still depends on the path to the browser. See nginx’s [HTTP/3 module](https://nginx.org/en/docs/http/ngx_http_v3_module.html) and [QUIC requirements](https://nginx.org/en/docs/quic.html). An external front may offer HTTP/3 to browsers while keeping HTTP/2 or HTTP/1.1 to the origin.
+
+Management → Settings → **HTTPS transport** (`edge.transport`) controls the built-in TLS edge. Defaults are a 16 MiB shared session cache, a one-day resumption lifetime, session tickets, early safe reads, HTTP/2 and HTTP/3, a one-day protocol advertisement, and a one-second local reload check. Saved edits publish only after commit and reload nginx gracefully; idle checks read local file identities, without a database poll or network request. Turning HTTP/3 off clears its previous advertisement. These are defaults, with no fixed upper cap; a cache of 0 disables that cache. An external TLS front keeps its own transport settings.
+
+Session resumption saves the repeat handshake. nginx manages the session ticket keys; with the shared cache enabled it rotates them across workers. TLS early data can be replayed, so the edge forwards `Early-Data: 1` and the API answers every early write with **425** before authentication or business effects. Stateful sign-in redirects also wait for the handshake even though their method is GET. Repeat the action after the handshake; ordinary safe reads can use early data. See nginx’s [session and early-data directives](https://nginx.org/en/docs/http/ngx_http_ssl_module.html) and [the HTTP early-data protocol](https://www.rfc-editor.org/rfc/rfc8470.html). No ticket key or private certificate is exposed by the setting.
+
+When the configured web address is HTTP, Management’s installation facts say beside it that it has no certificate and starts more slowly over a long line. This describes that address; it does not infer whether another reverse proxy has a certificate on a different address.
+
 ## Ways in
 
 | Way | Browser certificate | Connection to the web edge |
