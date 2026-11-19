@@ -176,6 +176,7 @@ impl PreparedEnvironments {
             crate::routes::nodes::view::refs(conn, principal, &ids, Policy::default()).await?
         };
         let mut result = Vec::new();
+        let mut room_sources = Vec::new();
         for view in super::show_inventory_prepared(ctx, conn, principal, &self.inventory).await? {
             let id = view.base.id;
             let mut place = place_of(view);
@@ -201,7 +202,29 @@ impl PreparedEnvironments {
                         .ok_or_else(ApiError::not_found)?;
                 }
             }
+            let host = place
+                .host
+                .as_ref()
+                .map(|h| h.id)
+                .filter(|h| Some(*h) == source.host && (!limited || hosts.contains(h)));
+            let machine = place
+                .machine
+                .as_ref()
+                .filter(|m| {
+                    place.environment.placement
+                        == orch_api_contract::environment::Placement::Connected
+                        && source.host.is_none()
+                        && m.online
+                        && Some(m.id) == source.machine
+                        && (!limited || machines.contains(&m.id))
+                })
+                .map(|m| m.id);
+            room_sources.push((id, host, machine));
             result.push(place);
+        }
+        let rooms = orch_db::queries::placement_room::for_environments(conn, &room_sources).await?;
+        for place in &mut result {
+            place.room = rooms.get(&place.environment.id).copied();
         }
         Ok(result)
     }

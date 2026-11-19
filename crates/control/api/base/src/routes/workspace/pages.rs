@@ -37,6 +37,7 @@ pub enum Source {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Binding {
+    pub prefix: Option<String>,
     pub environment: Id,
     pub generation: i32,
     pub machine: Option<Id>,

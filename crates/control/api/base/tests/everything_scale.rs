@@ -6,7 +6,26 @@
 )]
 
 mod places;
+mod rig;
 mod support;
+
+#[path = "everything_scale/page_budgets.rs"]
+mod page_budgets;
+
+#[path = "everything_scale/light_load.rs"]
+mod light_load;
+
+#[path = "everything_scale/simultaneous.rs"]
+mod simultaneous;
+
+#[path = "everything_scale/read_facts.rs"]
+mod read_facts;
+
+#[path = "everything_scale/diagnostics.rs"]
+mod diagnostics;
+
+#[path = "everything_scale/hotspots.rs"]
+mod hotspots;
 
 use orch_api_contract::everything::EVERYTHING_LIMIT_DEFAULT;
 use orch_authz::{Caller, Principal};
@@ -14,6 +33,58 @@ use orch_db::queries::everything::{self, Query};
 use orch_types::{Id, Time};
 use places::{join, make_org, make_project, person};
 use support::World;
+
+#[tokio::test]
+async fn deciding_whether_a_person_may_open_a_page_does_not_read_assignment_badges() {
+    use orch_access_contract::{decisions::Decision, permissions::Permission};
+    use orch_authz::engine::{Frame, Graph};
+    use orch_authz::{Act, Policy};
+    use support::Statements;
+
+    let world = World::new().await;
+    let reader = person(&world, "page-owner").await;
+    let root = make_org(&world, &reader, "Pages", "pages").await.base.id;
+    let project = make_project(&world, &reader, root, "Plans").await.base.id;
+    let mut conn = world.conn().await;
+    let principal = Principal::load(
+        &mut conn,
+        Caller::session(reader.id()),
+        Time::new(world.now()),
+    )
+    .await
+    .unwrap();
+    let (_, permission_rows) = Statements::measure(async {
+        let graph = Graph::load(&mut conn, &[project]).await.unwrap();
+        let site = graph.site_of(project).unwrap();
+        let frame = Frame::load_with_participation(
+            &mut conn,
+            &principal,
+            Policy::default(),
+            graph,
+            std::slice::from_ref(&site),
+            &[Permission::ProjectView],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(frame.has_permission(&site, Permission::ProjectView, false));
+    })
+    .await;
+    let (decision, checked_rows) = Statements::measure(orch_authz::nodes::check(
+        &mut conn,
+        &principal,
+        project,
+        Permission::ProjectView,
+        Act::Use,
+        Policy::default(),
+    ))
+    .await;
+    assert!(matches!(decision.unwrap(), Decision::Allowed { .. }));
+    assert_eq!(
+        checked_rows, permission_rows,
+        "opening permission needs the same rows as its permission frame, without assignment and follow badges"
+    );
+}
 
 #[tokio::test]
 async fn the_admin_marker_filter_is_applied_before_the_first_row_limit() {
@@ -198,16 +269,87 @@ async fn a_hundred_thousand_threads_use_indexes_and_each_level_finishes_within_o
         .execute(&mut *conn)
         .await
         .unwrap();
-    let principal = Principal::load(
+    let (principal, queries) = support::Statements::queries(Principal::load(
         &mut conn,
         Caller::session(reader.id()),
         Time::new(world.now()),
+    ))
+    .await;
+    let principal = match principal {
+        Ok(principal) => principal,
+        Err(error) => {
+            for (sql, counts) in queries.statements {
+                eprintln!(
+                    "large hierarchy access query statements={} rows={} sql={}",
+                    counts.statements,
+                    counts.rows,
+                    sql.replace('\n', " ")
+                );
+            }
+            diagnostics::principal_plan(
+                &mut conn,
+                reader.id(),
+                Time::new(world.now()),
+                MAX_STATEMENT_MS,
+            )
+            .await;
+            panic!("shared access preparation exceeded its statement budget: {error}");
+        }
+    };
+    let (projection, queries) =
+        support::Statements::queries(orch_authz::everything::project(&mut conn, &principal, None))
+            .await;
+    let projection = match projection {
+        Ok(projection) => projection,
+        Err(error) => {
+            for (sql, counts) in queries.statements {
+                eprintln!(
+                    "large hierarchy projection query statements={} rows={} sql={}",
+                    counts.statements,
+                    counts.rows,
+                    sql.replace('\n', " ")
+                );
+            }
+            diagnostics::projection_plan(&mut conn, &principal, MAX_STATEMENT_MS).await;
+            panic!("shared hierarchy projection exceeded its statement budget: {error}");
+        }
+    };
+    // The creator owns the ordinary threads; that skew must not expand their leaf identities.
+    let owner_principal = match Principal::load(
+        &mut conn,
+        Caller::session(owner.id()),
+        Time::new(world.now()),
     )
     .await
-    .unwrap();
-    let projection = orch_authz::everything::project(&mut conn, &principal, None)
-        .await
-        .unwrap();
+    {
+        Ok(principal) => principal,
+        Err(error) => {
+            diagnostics::principal_plan(
+                &mut conn,
+                owner.id(),
+                Time::new(world.now()),
+                MAX_STATEMENT_MS,
+            )
+            .await;
+            panic!("owner access preparation exceeded its statement budget: {error}");
+        }
+    };
+    let owner_projection =
+        match orch_authz::everything::project(&mut conn, &owner_principal, None).await {
+            Ok(projection) => projection,
+            Err(error) => {
+                diagnostics::projection_plan(&mut conn, &owner_principal, MAX_STATEMENT_MS).await;
+                panic!("owner hierarchy projection exceeded its statement budget: {error}");
+            }
+        };
+    assert!(
+        owner_projection.grants["objects"]
+            .as_object()
+            .unwrap()
+            .len()
+            < count as usize,
+        "owning the ordinary threads must not produce a leaf allow list"
+    );
     // A slow listing must still return its plan so the failure names the actual work to optimize.
     sqlx::query("SELECT set_config('statement_timeout','0',false)")
         .execute(&mut *conn)

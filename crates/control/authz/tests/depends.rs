@@ -147,6 +147,52 @@ async fn the_model_a_thread_runs_on_is_shown_with_whether_everyone_who_can_talk_
 }
 
 #[tokio::test]
+async fn someone_who_can_share_only_ask_is_not_offered_a_grant_for_a_threads_turns() {
+    let w = World::new().await;
+    let (owner, giver) = (w.member("model-owner").await, w.user("ask-giver").await);
+    w.give(w.root, giver, Role::Viewer).await;
+    let provider = w.provider(owner, w.root, "Questions").await;
+    w.put(
+        "provider",
+        provider,
+        P::AccessManage,
+        Holder::User { id: giver },
+        json!({}),
+    )
+    .await;
+    let entry = w
+        .put(
+            "provider",
+            provider,
+            P::ProviderUse,
+            Holder::User { id: giver },
+            json!({"purposes":["ask"]}),
+        )
+        .await;
+    let dependency = of_thread(&w, giver, w.thread, provider, "big", None).await;
+    assert!(
+        !dependency.can_give,
+        "sharing Ask cannot give ordinary turns"
+    );
+    w.change_thing(
+        owner,
+        "provider",
+        provider,
+        json!({"rows":[{"permission":"provider.use","update":[{
+            "entry_id":entry,"options":{"purposes":["ask","work"]}
+        }]}]}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        of_thread(&w, giver, w.thread, provider, "big", None)
+            .await
+            .can_give,
+        "a turn grant permits the ordinary dependency offer"
+    );
+}
+
+#[tokio::test]
 async fn the_offer_is_a_change_of_the_providers_page_for_its_manager_and_a_request_for_anybody_else()
  {
     let w = World::new().await;
@@ -178,7 +224,7 @@ async fn the_offer_is_a_change_of_the_providers_page_for_its_manager_and_a_reque
     );
     assert_eq!(
         change["rows"][0]["add"][0]["options"],
-        json!({ "models": ["big"], "efforts": ["high"] })
+        json!({ "purposes": ["work"], "models": ["big"], "efforts": ["high"] })
     );
     w.change_thing(ada, "provider", provider, change)
         .await
@@ -359,4 +405,72 @@ async fn starting_threads_given_alone_shows_and_can_open_environment_use_to_the_
         .remove(0);
     assert_eq!(project.for_permission, P::ProjectCreateTopics);
     assert_eq!(project.permission, P::EnvironmentUse);
+}
+
+#[tokio::test]
+async fn a_work_only_giver_can_include_the_exact_work_model_without_unrelated_ask_authority() {
+    for purpose in ["work", "ask"] {
+        let w = World::new().await;
+        let owner = w.member("resource-owner").await;
+        let giver = w.member("work-giver").await;
+        let provider = w.provider(owner, w.root, "Reviewed provider").await;
+        w.give(w.root, giver, Role::Viewer).await;
+        w.model(provider, "big", &["low", "high"]).await;
+        w.grant(
+            "provider",
+            provider,
+            P::AccessManage,
+            Holder::User { id: giver },
+        )
+        .await;
+        w.put(
+            "provider",
+            provider,
+            P::ProviderUse,
+            Holder::User { id: giver },
+            json!({"purposes":[purpose],"models":["big"],"efforts":["high"]}),
+        )
+        .await;
+        let dependency = of_thread(&w, giver, w.thread, provider, "big", Some("high")).await;
+        assert_eq!(dependency.can_give, purpose == "work");
+        assert_eq!(
+            serde_json::to_value(dependency.options.as_ref().unwrap()).unwrap()["purposes"],
+            json!(["work"])
+        );
+        if purpose == "work" {
+            let principal = w.principal(Caller::session(giver)).await;
+            let mut conn = w.conn().await;
+            let Offer::Give { change, .. } = depends::offer(
+                &mut conn,
+                &principal,
+                &dependency,
+                w.thread,
+                &Policies::default(),
+            )
+            .await
+            .unwrap() else {
+                panic!("the exact Work entry can be included");
+            };
+            drop(conn);
+            let change = serde_json::to_value(change).unwrap();
+            assert_eq!(
+                change["rows"][0]["add"][0]["options"]["purposes"],
+                json!(["work"])
+            );
+            w.change_thing(giver, "provider", provider, change)
+                .await
+                .unwrap();
+            assert_eq!(
+                of_thread(&w, giver, w.thread, provider, "big", Some("high"))
+                    .await
+                    .open,
+                Open::All
+            );
+            assert!(
+                !of_thread(&w, giver, w.thread, provider, "big", Some("low"))
+                    .await
+                    .can_give
+            );
+        }
+    }
 }
