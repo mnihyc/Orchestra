@@ -13,7 +13,7 @@ import type { AdminMode } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { Section } from '@/shell/Page';
-import { SectionNav } from '@/ui/SectionNav';
+import { SectionContent, SectionNav } from '@/ui/SectionNav';
 import { show } from './support';
 
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(),
@@ -65,7 +65,7 @@ for (const [locale, theme] of modes) it(`keeps one title and one navigation when
     await user.click(screen.getByRole('button', { name: 'Toggle sidebar' }));
     expect(screen.queryByRole('navigation', { name: 'Project navigation' })).not.toBeInTheDocument();
     const nav = screen.getByRole('navigation', { name: label });
-    expect(within(nav).getByRole('combobox', { name: label })).toBeInTheDocument();
+    expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
     expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
     await user.click(screen.getByRole('button', { name: 'Toggle sidebar' }));
     expect(screen.getAllByRole('navigation', { name: label })).toHaveLength(1);
@@ -74,17 +74,57 @@ for (const [locale, theme] of modes) it(`keeps one title and one navigation when
   }
 });
 
-it('activates the same real destination from the small-screen picker, retaining its scope and section', async () => {
+const sections = ['general', 'defaults', 'audit'];
+const items = (chosen: (href: string | null) => void) => sections.map((id) => ({ id, label: id,
+  link: <a href={`/topic/place?tab=settings&section=${id}`} onClick={(event) => { event.preventDefault(); chosen(event.currentTarget.getAttribute('href')); }} />,
+}));
+
+it('activates the real destination of a pressed section name, retaining its scope and section', async () => {
   const chosen = vi.fn(); const user = userEvent.setup();
-  show(<SectionNav label="Sections" current="general" items={['general', 'defaults', 'audit'].map((id) => ({ id, label: id,
-    link: <a href={`/topic/place?tab=settings&section=${id}`} onClick={(event) => { event.preventDefault(); chosen(event.currentTarget.getAttribute('href')); }} />,
-  }))} />);
-  await user.click(screen.getByRole('combobox', { name: 'Sections' }));
-  await user.type(screen.getByRole('combobox', { name: 'Sections' }), 'aud');
-  expect(screen.getAllByRole('option')).toHaveLength(1);
-  await user.keyboard('{Enter}');
+  show(<SectionNav label="Sections" current="general" items={items(chosen)} />);
+  await user.click(screen.getByRole('link', { name: 'audit' }));
   expect(chosen).toHaveBeenCalledExactlyOnceWith('/topic/place?tab=settings&section=audit');
   expect(screen.queryByRole('button', { name: /More|更多/ })).not.toBeInTheDocument();
+});
+
+it('is never a dropdown at 400 px: the names are one row that scrolls sideways, and a list from 600 px of room', () => {
+  const width = window.innerWidth;
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 400 });
+  window.dispatchEvent(new Event('resize'));
+  try {
+    show(<SectionNav label="Sections" current="defaults" items={items(vi.fn())} />);
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(within(nav).queryByRole('listbox')).not.toBeInTheDocument();
+    expect(within(nav).getAllByRole('link')).toHaveLength(sections.length);
+    expect(within(nav).getByRole('link', { name: 'defaults' })).toHaveAttribute('aria-current', 'page');
+    const row = nav.querySelector('ul');
+    expect(row).toHaveClass('flex-row', 'overflow-x-auto');
+    expect(row?.className).toContain('@min-[600px]:flex-col');
+    expect(nav.className).toContain('@min-[600px]:sticky');
+    // A list drawn inside the content of another is the row at every width, so that two lists never share a narrow column.
+    expect(within(nav).getAllByRole('listitem')).toHaveLength(sections.length);
+  } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: width }); }
+});
+
+it('draws a list inside the content of another list as a strip whatever the room', () => {
+  show(<SectionContent><SectionNav label="Groups" current="defaults" items={items(vi.fn())} /></SectionContent>);
+  const nav = screen.getByRole('navigation', { name: 'Groups' });
+  expect(nav).toHaveAttribute('data-section-strip');
+  expect(nav.querySelector('ul')?.className).not.toContain('@min-[600px]:flex-col');
+});
+
+it('asks once before a section name leads away from unsaved work, and leaves when it is confirmed', async () => {
+  const chosen = vi.fn(); const user = userEvent.setup();
+  show(<SectionNav label="Sections" current="general" unsaved items={items(chosen)} />);
+  await user.click(screen.getByRole('link', { name: 'audit' }));
+  expect(chosen).not.toHaveBeenCalled();
+  expect(await screen.findByRole('alertdialog')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: i18n.t('settingsEditors.leave.confirm') }));
+  expect(chosen).toHaveBeenCalledExactlyOnceWith('/topic/place?tab=settings&section=audit');
+  // Pressing where the page already is asks nothing.
+  await user.click(screen.getByRole('link', { name: 'general' }));
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
 });
 
 it('uses the section sidebar for every settings scope while leaving ordinary content navigation intact', () => {

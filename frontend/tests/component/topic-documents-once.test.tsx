@@ -44,9 +44,9 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>
 }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useIsPending: () => false }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => null }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useIsPending: () => false }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => null }));
 vi.mock('@/features/topic/statusUndo', () => ({ useStatusChange: () => () => Promise.resolve(topic) }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => null }));
 vi.mock('@/features/topic/TopicMenu', () => ({ TopicMenu: () => null, TopicHeaderMenu: () => null }));
@@ -54,7 +54,7 @@ vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => 
 vi.mock('@/features/topic/Activity', () => ({ TopicActivity: () => null }));
 // The list has its own route/operation proofs; this case tests the real page tab and workbench eligibility.
 vi.mock('@/features/topic/Documents', () => ({ TopicDocuments: () => <article data-testid="topic-documents">Field notes</article> }));
-vi.mock('@/features/workbench/choiceHelp', () => ({ useWorkbenchChoiceHelp: () => () => undefined }));
+vi.mock('@/features/workbench/choiceHelp', async (loadOriginal) => ({ ...await loadOriginal<object>(), useWorkbenchChoiceHelp: () => () => undefined }));
 
 registerShippedViews(() => null);
 

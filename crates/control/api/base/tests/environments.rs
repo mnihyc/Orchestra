@@ -628,6 +628,26 @@ async fn an_environment_is_changed_by_whoever_manages_it_within_what_its_machine
     )
     .await;
     let id = made.base.id;
+    orch_db::queries::environments::hosting::record_facts(
+        &mut *world.conn().await,
+        id,
+        &json!({"reported":"refreshed"}),
+        Some("/srv/ada/work"),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    let refreshed = world
+        .app
+        .call(EnvironmentGet, &[&id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        refreshed.revision, made.revision,
+        "workspace observations leave the pending environment edit current"
+    );
     offer_switches(&world, laptop).await;
     let change = |revision: i64| EnvironmentUpdateBody {
         data_sources: None,

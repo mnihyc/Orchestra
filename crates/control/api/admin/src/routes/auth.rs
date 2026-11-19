@@ -470,7 +470,7 @@ async fn refresh(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<AuthResult>> 
     let session = identity::session_by_refresh_hash(&mut tx, &hash, ctx.now)
         .await?
         .ok_or_else(invalid)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, session.user_id)
+    let user = identity::user_by_id(&mut tx, session.user_id)
         .await?
         .ok_or_else(invalid)?;
     ctx.now = ctx.app.clock.now();
@@ -484,14 +484,18 @@ async fn refresh(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<AuthResult>> 
         ));
     }
     let life = session_life(auth);
-    identity::slide_session(&mut tx, session.id, ctx.now, ctx.now + life).await?;
+    if !identity::renew_session(&mut tx, session.id, ctx.now, ctx.now + life).await? {
+        return Err(invalid());
+    }
     let access = new_token(crate::middleware::authentication::ACCESS_TOKEN_PREFIX);
     let access_expires_at = ctx.now + access_life(auth);
     identity::add_access_token(&mut tx, &token_hash(&access), session.id, access_expires_at)
         .await?;
-    identity::touch_last_seen(&mut tx, user.id, ctx.now).await?;
-    let me = people::me(&mut tx, &user, ctx.now).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    let mut conn = ctx.app.db.acquire().await?;
+    // Profile projection and last-seen bookkeeping hold no renewal lock.
+    identity::touch_last_seen(&mut conn, user.id, ctx.now).await?;
+    let me = people::me(&mut conn, &user, ctx.now).await?;
     Ok(Answer::from(AuthResult {
         access_token: access,
         access_expires_at: Time::new(access_expires_at),

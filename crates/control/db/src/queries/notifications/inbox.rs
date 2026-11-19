@@ -125,8 +125,8 @@ pub async fn mark_batch_read(
     at: DateTime<Utc>,
 ) -> Result<i64, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications WHERE user_id = $1 AND read_at IS NULL AND id = ANY($2))
       RETURNING inbox_seq",
     )
@@ -162,8 +162,8 @@ pub async fn undo_batch(
     readable: &[Id],
 ) -> Result<i64, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications WHERE user_id = $1 AND read_batch_id = $2 AND id = ANY($3))
       RETURNING inbox_seq",
     )
@@ -212,7 +212,7 @@ pub struct Counts {
 
 /// Serializes a grouped read against announcements and renewals that allocate an Inbox sequence.
 pub async fn lock_sequence(conn: &mut Conn, user: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT inbox_seq FROM users WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT inbox_seq FROM user_inboxes WHERE user_id = $1 FOR UPDATE")
         .bind(user)
         .execute(conn)
         .await?;
@@ -224,7 +224,7 @@ pub async fn counts(conn: &mut Conn, user: Id) -> Result<Option<Counts>, DbError
     Ok(sqlx::query_as(
         "SELECT (SELECT count(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL) AS unread,
                 u.inbox_seq AS seq
-           FROM users u WHERE u.id = $1",
+           FROM user_inboxes u WHERE u.user_id = $1",
     )
     .bind(user)
     .fetch_optional(conn)
@@ -255,8 +255,8 @@ pub async fn mark_read(
     at: DateTime<Utc>,
 ) -> Result<Option<i64>, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications
                  WHERE user_id = $1 AND read_at IS NULL
                    AND (id = ANY($2) OR node_id = $3::uuid OR chat_id = $4::uuid OR created_at <= $5::timestamptz))
@@ -359,8 +359,8 @@ pub async fn settle_request(
             SELECT DISTINCT user_id FROM notifications WHERE approval_id=$1
               AND data ->> '_orch_approval_settled' IS DISTINCT FROM 'true'
          ), bumped AS (
-            UPDATE users u SET inbox_seq = u.inbox_seq + 1 FROM affected a WHERE u.id = a.user_id
-            RETURNING u.id, u.inbox_seq
+            UPDATE user_inboxes u SET inbox_seq = u.inbox_seq + 1 FROM affected a WHERE u.user_id = a.user_id
+            RETURNING u.user_id AS id, u.inbox_seq
          )
          UPDATE notifications n SET read_at = COALESCE(n.read_at, $2), read_batch_id = NULL, inbox_seq = b.inbox_seq,
             data = (CASE WHEN jsonb_typeof(n.data) = 'object' THEN n.data ELSE jsonb_build_object('_orch_legacy', n.data) END)
