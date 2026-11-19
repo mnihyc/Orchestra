@@ -93,7 +93,7 @@ pub async fn finish_node_birth(
 }
 
 /// Keeps an offered preference, otherwise uses the program's first ordinary mode.
-pub(crate) fn offered_approval_mode(
+pub fn offered_approval_mode(
     descriptor: &AgentDescriptor,
     preferred: ApprovalMode,
 ) -> Result<ApprovalMode, &'static str> {
@@ -311,6 +311,15 @@ fn harness_permitted(facts: &Json, kind: &str) -> bool {
                 .iter()
                 .any(|item| item.get("kind").and_then(Json::as_str) == Some(kind))
         })
+}
+
+fn discovery_program_available(machine: &MachinePlace, kind: &str, unit: bool) -> bool {
+    // A hosted unit can fetch a program its own policy explicitly declares.
+    // An absent policy does not declare a missing program.
+    machine_has_harness(machine, kind)
+        || (unit
+            && orch_db::queries::environment_facts::policy_in(&machine.facts).is_some()
+            && harness_permitted(&machine.facts, kind))
 }
 
 fn harness_problem(machine: Option<&MachinePlace>, kind: &str) -> Option<String> {
@@ -849,6 +858,8 @@ pub struct Birth {
     pub first_input: Option<orch_api_contract::nodes::FirstInput>,
     /// Missing directories default to source preparation; an explicit choice overrides that on any machine.
     pub prepare_source: Option<bool>,
+    /// Conditional file edits saved in the creation plan, consumed before the first session.
+    pub workspace_edits: Vec<orch_api_contract::source::WorkspaceFileEdit>,
     /// The owned attempt to prepare before a first session.
     pub worktree: Option<orch_api_contract::source::WorktreeChoice>,
     /// Whether the title is left to automation: the creator gave no name, and
@@ -990,6 +1001,12 @@ async fn creation_name<'a>(
     Ok(name)
 }
 
+enum ThreadCreator<'a> {
+    Ordinary,
+    Staged(&'a mut crate::operation_scope::creators::Prefix),
+    Program(orch_access_contract::permissions::UsagePurpose),
+}
+
 impl Engine {
     /// Learns installed, locally allowed harnesses after facts arrive, without a thread or model call.
     pub async fn discover_descriptors(&self, machine: Id) -> Result<(), EngineError> {
@@ -1009,6 +1026,11 @@ impl Engine {
         if !place.online || place.deleted_at.is_some() || place.status != "active" {
             return Ok(());
         }
+        // Managed units have no local policy. Their installed-harness report proves which programs
+        // they can run; an adapter alone does not prove that its required binary exists.
+        let unit = orch_db::queries::resources::hosting::host_running(&mut conn, machine)
+            .await?
+            .is_some();
         // A harness the machine could not run is asked again after a pause, not at every report of its
         // machine (several a minute): a repaired installation is noticed within it.
         let retry_before = self.inner.clock.now() - DISCOVERY_RETRY_AFTER;
@@ -1032,6 +1054,9 @@ impl Engine {
                     })
                 });
             if !place.roles.iter().any(|role| role == "agent") || !drives {
+                continue;
+            }
+            if !discovery_program_available(&place, &profile.harness_kind, unit) {
                 continue;
             }
             let key = harnesses::HarnessKey {
@@ -1202,8 +1227,43 @@ impl Engine {
     ) -> Result<CreatedThread, CreateThreadError> {
         let name = creation_name(tx, new).await?;
         let principal = Principal::load(tx, caller.clone(), Time::new(now)).await?;
-        self.create_in(tx, &principal, new, name, birth, Some(id), None, now, None)
-            .await
+        self.create_in(
+            tx,
+            &principal,
+            new,
+            name,
+            birth,
+            Some(id),
+            None,
+            now,
+            ThreadCreator::Ordinary,
+        )
+        .await
+    }
+
+    /// An execution producer supplies its real current admission and the exact private helper.
+    /// It cannot choose another identity, placement, owner, first input, gift or source job.
+    pub(crate) async fn create_program_thread_in_transaction(
+        &self,
+        conn: &mut orch_db::Conn,
+        parent: &crate::tools::capability_service::delegation::ParentLink,
+    ) -> Result<CreatedThread, CreateThreadError> {
+        let (principal, new, birth, purpose) = parent
+            .birth(conn, self.inner.clock.as_ref(), self.inner.access.as_ref())
+            .await?;
+        let name = creation_name(conn, &new).await?;
+        self.create_in(
+            conn,
+            &principal,
+            &new,
+            name,
+            &birth,
+            Some(parent.helper()),
+            None,
+            self.inner.clock.now(),
+            ThreadCreator::Program(purpose),
+        )
+        .await
     }
 
     /// The same native creator and actual held principal, retaining a real adopted session.
@@ -1226,7 +1286,7 @@ impl Engine {
             Some(id),
             Some(adopted),
             principal.now().get(),
-            None,
+            ThreadCreator::Ordinary,
         )
         .await
     }
@@ -1290,7 +1350,7 @@ impl Engine {
                 Some(id),
                 adopted,
                 now,
-                Some(&mut prefix),
+                ThreadCreator::Staged(&mut prefix),
             )
             .await?;
         Ok((created, prefix.finish()?))
@@ -1340,7 +1400,15 @@ impl Engine {
             }
             match self
                 .create_in(
-                    &mut tx, &principal, &new, name, &birth, id, adopted, now, None,
+                    &mut tx,
+                    &principal,
+                    &new,
+                    name,
+                    &birth,
+                    id,
+                    adopted,
+                    now,
+                    ThreadCreator::Ordinary,
                 )
                 .await
             {
@@ -1384,25 +1452,27 @@ impl Engine {
         id: Option<Id>,
         adopted: Option<&str>,
         now: DateTime<Utc>,
-        creator: Option<&mut crate::operation_scope::creators::Prefix>,
+        creator: ThreadCreator<'_>,
     ) -> Result<CreatedThread, CreateThreadError> {
         let conn: &mut orch_db::Conn = &mut *tx;
         let person = principal.user();
-        let decision = nodes::check(
-            &mut *conn,
-            principal,
-            new.topic,
-            Permission::TopicStartThreads,
-            Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await
-        .map_err(|error| match error {
-            orch_authz::Error::NotFound(_) => CreateThreadError::NoSuchTopic,
-            other => other.into(),
-        })?;
-        if let Decision::Refused(refusal) = decision {
-            return Err(CreateThreadError::Denied(Box::new(refusal)));
+        if !matches!(creator, ThreadCreator::Program(_)) {
+            let decision = nodes::check(
+                &mut *conn,
+                principal,
+                new.topic,
+                Permission::TopicStartThreads,
+                Act::Use,
+                orch_authz::Policy::default(),
+            )
+            .await
+            .map_err(|error| match error {
+                orch_authz::Error::NotFound(_) => CreateThreadError::NoSuchTopic,
+                other => other.into(),
+            })?;
+            if let Decision::Refused(refusal) = decision {
+                return Err(CreateThreadError::Denied(Box::new(refusal)));
+            }
         }
         if threads::node_name(&mut *conn, new.topic).await?.is_none() {
             return Err(CreateThreadError::NoSuchTopic);
@@ -1441,6 +1511,13 @@ impl Engine {
             lacking.push((Permission::AgentUse, ObjectKind::Agent, agent.id, missing));
         }
         let settings = resolved::load(&mut *conn, new.topic).await?;
+        // A missing choice has a default only when it is unambiguous. The ordinary model and
+        // provider admission below still governs that choice; an explicit value never changes.
+        let mut chosen = new.clone();
+        if chosen.model.is_none() && settings.model.is_none() {
+            chosen.model = resources::sole_enabled_model(conn, provider.id).await?;
+        }
+        let new = &chosen;
         let (asked_model, asked_effort) = model_asked(
             &mut *conn,
             provider.id,
@@ -1455,6 +1532,10 @@ impl Engine {
             .provider_use(
                 &mut *conn,
                 &ProviderUse {
+                    purpose: match &creator {
+                        ThreadCreator::Program(purpose) => *purpose,
+                        _ => orch_access_contract::permissions::UsagePurpose::Turn,
+                    },
                     person,
                     node: new.topic,
                     provider: provider.id,
@@ -1514,12 +1595,12 @@ impl Engine {
         {
             return Err(CreateThreadError::ProviderNotAllowed(why));
         }
-        if let Some(model) = new.model.as_deref() {
+        if let Some(model) = asked_model.as_deref() {
             let row = resources::model(&mut *conn, provider.id, model).await?;
             crate::models::check_allowed(row.as_ref(), settings.models_allowed.as_deref(), model)
                 .map_err(|_| CreateThreadError::ModelNotAllowed(model.to_owned()))?;
             let row = row.ok_or_else(|| CreateThreadError::ModelNotAllowed(model.to_owned()))?;
-            if let Some(effort) = new.effort.as_deref() {
+            if let Some(effort) = asked_effort.as_deref() {
                 let parameters = model_parameters(&row)?;
                 if !parameters.efforts().iter().any(|listed| listed == effort) {
                     return Err(CreateThreadError::EffortNotListed(effort.to_owned()));
@@ -1529,8 +1610,9 @@ impl Engine {
 
         // Only for a caller who may use all of it: a profile whose harness never said what it is has it
         // say so, and the thread is made then (see `create_thread_with`).
-        let descriptor =
-            harnesses::descriptor_of(&agent)?.ok_or(CreateThreadError::AgentNotReported)?;
+        let descriptor = harnesses::current_descriptor(conn, &agent)
+            .await?
+            .ok_or(CreateThreadError::AgentNotReported)?;
         let offers = offers_of(&mut *conn, environment.id).await?;
         let colocated = colocated_of(&mut *conn, &environment).await?;
         let machine = machine_arrangements_of(&mut *conn, &provider).await?;
@@ -1547,6 +1629,18 @@ impl Engine {
         let place = initial_place(conn, &facts).await?;
         let arrangement = choose_placed(&facts, &place, machine, new.arrangement)
             .map_err(CreateThreadError::Incompatible)?;
+        let descriptor = harnesses::descriptor_at(
+            conn,
+            &agent,
+            provider.id,
+            harnesses::machine_of(
+                Some(arrangement.kind.as_str()),
+                &provider,
+                environment.machine_id,
+            ),
+        )
+        .await?
+        .unwrap_or(descriptor);
 
         // An inherited preference may belong to a different program. Only the initial default is
         // narrowed here: explicit choices are checked, and ordinary setting writes retain locks.
@@ -1561,7 +1655,7 @@ impl Engine {
                 .map_err(|error| CreateThreadError::Setting(error.to_string()))?;
             if !descriptor.approval_modes.contains(&mode) {
                 return Err(CreateThreadError::Setting(
-                    crate::sessions::APPROVAL_UNSUPPORTED.to_owned(),
+                    crate::sessions::unavailable_approval_detail(mode, &descriptor),
                 ));
             }
             None
@@ -1681,8 +1775,8 @@ impl Engine {
                 "by": crate::views::user_ref_json(&mut *unit.conn, person).await?,
                 "agent": crate::views::agent_ref_json(&mut *unit.conn, &agent).await?,
                 "provider": crate::views::provider_ref_json(&mut *unit.conn, &provider).await?,
-                "model": new.model,
-                "effort": new.effort,
+                "model": asked_model,
+                "effort": asked_effort,
                 "environment": crate::views::environment_ref_json(&mut *unit.conn, &environment, reference_time).await?,
             }
         });
@@ -1732,7 +1826,7 @@ impl Engine {
             .map_err(|error| CreateThreadError::Setting(error.to_string()))?;
         }
         if let Some(change) = &birth.page {
-            orch_authz::pages::change(
+            let outcome = orch_authz::pages::change(
                 &mut *unit.conn,
                 principal,
                 orch_authz::pages::Target::Live(thread),
@@ -1742,11 +1836,16 @@ impl Engine {
             )
             .await
             .map_err(|error| CreateThreadError::Page(error.to_string()))?;
+            if matches!(creator, ThreadCreator::Program(_)) && !outcome.skipped.is_empty() {
+                return Err(CreateThreadError::Page(
+                    "A locked access rule prevents a Private execution helper here.".into(),
+                ));
+            }
         }
         // All preceding creation work is a rollbackable database prefix. The actual
         // Thread now exists, so its self contribution and new Environment sources can
         // pass the exact original operation before any birth/source/input effect.
-        let staged = if let Some(creator) = creator {
+        let staged = if let ThreadCreator::Staged(creator) = creator {
             Some(creator.complete(unit.conn, new, birth, thread).await?)
         } else {
             None
@@ -1794,8 +1893,11 @@ impl Engine {
             thread,
             environment.id,
             &new.directory,
-            birth.prepare_source,
-            birth.worktree.as_ref(),
+            crate::jobs::source::CreationChoice {
+                prepare: birth.prepare_source,
+                worktree: birth.worktree.as_ref(),
+                workspace_edits: &birth.workspace_edits,
+            },
         )
         .await?;
         audit::append(
@@ -1859,6 +1961,35 @@ impl Engine {
                 if retained_topic {"topic"}else{"thread"},
                 if retained_topic {new.topic}else{thread},
                 serde_json::json!({"thread":thread,"topic":new.topic,"segment":segment,"input":input}),
+            )
+            .await?;
+        }
+        if let Some(model) = asked_model.as_ref() {
+            // The successful birth remembers resolved choices in the same transaction.
+            // A refused first input or failed commit leaves the previous setup untouched.
+            orch_db::queries::identity::note_model_choice(
+                unit.conn,
+                person,
+                provider.id,
+                model,
+                now,
+            )
+            .await?;
+            orch_db::queries::identity::put_interface_state(unit.conn, person, "thread_setup", &json!({
+                "place": new.topic,
+                "picks": { "provider": provider.id, "agent": agent.id, "model": model, "effort": asked_effort,
+                    "environment": environment.id, "arrangement": arrangement.kind }
+            }), now).await?;
+            orch_db::sequences::notify_user_event(
+                unit.conn,
+                &[person],
+                &json!({"what":"state", "key":"thread_setup"}),
+            )
+            .await?;
+            orch_db::sequences::notify_user_event(
+                unit.conn,
+                &[person],
+                &json!({"what":"model_recents"}),
             )
             .await?;
         }
@@ -1958,11 +2089,15 @@ pub fn arrangements_of_policy<T: serde::de::DeserializeOwned>(
     policy: Option<&Json>,
 ) -> Option<Vec<T>> {
     let policy = policy.filter(|policy| !policy.is_null())?;
-    let listed = policy.get("provider.arrangements").and_then(Json::as_array);
+    // A policy that does not hold the key says nothing about it: a host's policy has no such key, and
+    // reading its absence as an empty list forbade every way of running on a credential kept in a
+    // container of that host.
+    let listed = policy
+        .get("provider.arrangements")
+        .and_then(Json::as_array)?;
     Some(
         listed
-            .into_iter()
-            .flatten()
+            .iter()
             .filter_map(|word| word.as_str().and_then(parse))
             .collect(),
     )
@@ -2988,6 +3123,7 @@ impl Engine {
                     .provider_use(
                         &mut *conn,
                         &ProviderUse {
+                            purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                             person: thread.owner_id,
                             node: thread_id,
                             provider: provider.id,
@@ -3382,6 +3518,7 @@ pub async fn select_rebind_with_access(
         .provider_use(
             &mut *conn,
             &ProviderUse {
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person,
                 node: thread_id,
                 provider: provider.id,
@@ -3477,6 +3614,28 @@ pub async fn select_rebind_with_access(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_policy_without_the_arrangements_key_sets_no_limit_and_an_empty_list_allows_none() {
+        use serde_json::json;
+        let of = |policy: serde_json::Value| {
+            super::arrangements_of_policy::<ArrangementType>(Some(&policy))
+        };
+        // A host reports a policy of its own keys; it has none for a provider's arrangements.
+        assert_eq!(
+            of(json!({"ports": {"allowed": ["place"]}, "drivers": {}})),
+            None
+        );
+        assert_eq!(super::arrangements_of_policy::<ArrangementType>(None), None);
+        assert_eq!(of(json!({"provider.arrangements": []})), Some(Vec::new()));
+        assert_eq!(
+            of(json!({"provider.arrangements": ["separated", "key_separated"]})),
+            Some(vec![
+                ArrangementType::Separated,
+                ArrangementType::KeySeparated
+            ])
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -3499,6 +3658,48 @@ mod tests {
             .unwrap()
             .remove("needs_binary");
         assert!(!machine_has_harness(&machine, "custom"));
+    }
+
+    #[test]
+    fn descriptor_discovery_requires_an_installed_program_or_a_managed_units_declared_build() {
+        for unit in [false, true] {
+            let mut machine = MachinePlace {
+                id: Id::nil(),
+                roles: vec!["agent".into()],
+                status: "active".into(),
+                online: true,
+                placement: if unit { "managed" } else { "connected" }.into(),
+                owner_id: None,
+                deleted_at: None,
+                facts: json!({"adapters":[{"kind":"fake","needs_binary":true}],"harnesses":[],"policy":null}),
+            };
+            assert!(
+                !discovery_program_available(&machine, "fake", unit),
+                "an absent policy does not declare a missing program"
+            );
+            machine.facts["policy"] = json!({"agent.harnesses":[]});
+            assert!(!discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"]["agent.harnesses"] =
+                json!([{"kind":"fake","path":"/bin/fake"}]);
+            assert_eq!(
+                discovery_program_available(&machine, "fake", unit),
+                unit,
+                "only a managed unit can fetch its explicitly declared build"
+            );
+            machine.facts["harnesses"] = json!([{"kind":"fake","path":"/bin/fake"}]);
+            assert!(discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"]["agent.harnesses"] = json!([]);
+            assert!(!discovery_program_available(&machine, "fake", unit));
+            machine.facts["policy"] = Json::Null;
+            assert!(discovery_program_available(&machine, "fake", unit));
+            machine.facts["harnesses"] = json!([]);
+            machine.facts["adapters"][0]["needs_binary"] = json!(false);
+            machine.facts["policy"] = json!({"agent.harnesses":[]});
+            assert!(
+                discovery_program_available(&machine, "fake", unit),
+                "an adapter supplying its own program needs no installed binary"
+            );
+        }
     }
 
     #[test]
