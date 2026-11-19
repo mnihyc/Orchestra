@@ -2,7 +2,7 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { StrictMode, useState } from 'react';
+import { StrictMode, useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Client from '@/api/client';
 import { client } from '@/api/client';
@@ -10,16 +10,21 @@ import { nodeKey } from '@/api/nodes';
 import type { CreationAccessContext, StartOptions } from '@/api/start';
 import type { Node } from '@/generated/api-types';
 import { NO_PICKS, type Picks } from '@/features/start/choices';
-import { rememberSetup } from '@/features/start/lastSetup';
+import type { LastSetup } from '@/features/start/lastSetup';
 import { useStartOptions } from '@/features/start/options';
 import { i18n, setLocale } from '@/i18n';
 import { agent, environment, options, provider } from '../unit/start-fixtures';
 import { deferred } from './deferred';
-import { show } from './support';
+import { show as renderWithProviders } from './support';
+import { modelMemoryClient } from './model-memory';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
-interface Request { params: { path: { id: string }; query: { environment_id?: string; environment_new: boolean } }; signal?: AbortSignal }
+const savedSetups = new Map<string, LastSetup>();
+const seedServerSetup = (person: string, setup: LastSetup) => savedSetups.set(person, setup);
+function show(ui: ReactNode, cache?: QueryClient) { return renderWithProviders(ui, modelMemoryClient(savedSetups.get(client.session.getState().userId ?? '') ?? null, cache)); }
+
+interface Request { params: { path: { id: string }; query: { environment_id?: string; environment_new: boolean; template_id?: string; host_id?: string; host_auto?: boolean } }; signal?: AbortSignal }
 interface Reply { data?: StartOptions; error?: unknown; response: Response }
 const calls = vi.hoisted(() => ({ get: vi.fn<(_path: string, _request: Request) => Promise<Reply>>() }));
 vi.mock('@/api/client', async (load) => {
@@ -48,11 +53,14 @@ function Form({ at = 'topic', known, initial = NO_PICKS, audience }: { at?: stri
     <span data-failed>{state.failed === null ? '' : 'failed'}</span>
     <button onClick={() => setPicks((held) => ({ ...held, environment: 'e2' }))}>Choose e2</button>
     <button onClick={() => setPicks((held) => ({ ...held, model: 'm2', effort: 'low' }))}>Choose model</button>
+    <button onClick={() => setPicks((held) => ({ ...held, environment: 'new', newEnvironment: { template_id: 'alternate', host_id: 'quiet' } }))}>Choose template</button>
+    <button onClick={() => setPicks((held) => ({ ...held, newEnvironment: { template_id: 'alternate', host_id: null } }))}>Choose scheduler</button>
     <button onClick={state.retry}>Retry</button>
   </section>;
 }
 const before = client.session.getState();
 beforeEach(() => {
+  savedSetups.clear();
   calls.get.mockReset().mockResolvedValue(success(options()));
   client.session.setState({ ...before, userId: 'binding-reader', readerVersion: 1, status: 'signed_in' });
 });
@@ -63,10 +71,27 @@ function ParentNode({ node, read }: { node: Node; read: Promise<Node> }) {
   return <Form at={node.id} />;
 }
 
+it('reads the selected template and host through the real API client and keeps the scheduler in its own cache flight', async () => {
+  calls.get.mockImplementation((_path, request) => Promise.resolve(success(request.params.query.template_id === 'alternate'
+    ? options({ environment_default: 'fresh', providers: [provider(request.params.query.host_auto === true ? 'p3' : 'p2')] }) : options())));
+  const user = userEvent.setup();
+  show(<Form known="e1" />);
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p1'));
+  await user.click(screen.getByRole('button', { name: 'Choose template' }));
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p2'));
+  expect(calls.get.mock.calls.at(-1)?.[1].params.query).toMatchObject({ environment_new: true, template_id: 'alternate', host_id: 'quiet', host_auto: false });
+  await user.click(screen.getByRole('button', { name: 'Choose scheduler' }));
+  await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p3'));
+  const automatic = calls.get.mock.calls.at(-1)?.[1].params.query;
+  expect(automatic).toMatchObject({ environment_new: true, template_id: 'alternate', host_auto: true });
+  expect(automatic).not.toHaveProperty('host_id');
+});
+
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`waits for the pending topic node and sends its default in the first binding read in ${locale}`, async () => {
     await setLocale(locale);
     const parent = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    modelMemoryClient(savedSetups.get('binding-reader') ?? null, parent);
     const pending = deferred<Node>();
     const world = new World(), person = world.people.get('ada');
     if (person === undefined) throw new Error('The topic metadata needs its native reader');
@@ -88,6 +113,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`uses cached topic metadata without another node read in ${locale}`, async () => {
     await setLocale(locale);
     const parent = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    modelMemoryClient(savedSetups.get('binding-reader') ?? null, parent);
     const world = new World(), person = world.people.get('ada');
     if (person === undefined) throw new Error('The topic metadata needs its native reader');
     const node = world.places.node(person, ACME.fixLogin);
@@ -104,6 +130,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`judges an explicit environment while topic metadata is pending in ${locale}`, async () => {
     await setLocale(locale);
     const parent = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    modelMemoryClient(savedSetups.get('binding-reader') ?? null, parent);
     const pending = deferred<Node>();
     const metadata = parent.query({ queryKey: nodeKey(ACME.fixLogin), queryFn: () => pending.promise });
     const world = new World(), person = world.people.get('ada');
@@ -157,7 +184,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 
   it(`uses a remembered environment in its first request and preserves its source in ${locale}`, async () => {
     await setLocale(locale);
-    rememberSetup('binding-reader', { place: 'topic', picks: { ...NO_PICKS, environment: 'e2' } });
+    seedServerSetup('binding-reader', { place: 'topic', picks: { ...NO_PICKS, environment: 'e2' } });
     calls.get.mockResolvedValue(success(options({ environments: [environment('e1'), environment('e2')] })));
     show(<Form />);
     await waitFor(() => expect(document.querySelector('[data-environment]')).toHaveTextContent('Env e2'));
@@ -210,7 +237,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const view = show(<Form known="e1" />);
     await waitFor(() => expect(document.querySelector('[data-provider]')).toHaveTextContent('Provider p1'));
     const pending = deferred<StartOptions>(); calls.get.mockImplementation(() => pending.promise.then(success));
-    if (change === 'reader') act(() => { cache.clear(); client.session.setState({ userId: 'another-binding-reader', readerVersion: 2 }); });
+    if (change === 'reader') act(() => { cache.clear(); client.session.setState({ userId: 'another-binding-reader', readerVersion: 2 }); modelMemoryClient(null, cache); });
     else view.rerender(<Form known="e1" audience={{ threadAccess: 'private' }} />);
     expect(document.querySelector('[data-provider]')).toBeEmptyDOMElement();
     await waitFor(() => expect(calls.get).toHaveBeenCalledTimes(2));

@@ -1,0 +1,5 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/workbench-grid.spec.ts --config=playwright.profile.config.ts --project=chromium --grep "streams a running turn without a task over 50 ms|anchors the control label"
+web-e2e tests/e2e/workbench-grid.spec.ts --config=playwright.profile.config.ts --project=chromium --grep "streams a running turn without a task over 50 ms" --trace off

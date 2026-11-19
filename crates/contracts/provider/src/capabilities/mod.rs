@@ -5,6 +5,7 @@ mod catalogue;
 pub mod counters;
 mod execute;
 mod model;
+mod predicates;
 pub mod pricing;
 mod projection;
 mod resolve;

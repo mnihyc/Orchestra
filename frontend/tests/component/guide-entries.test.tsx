@@ -12,10 +12,34 @@ import { Popover } from '@/ui/Popover';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn(), access: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.access }));
 
 describe('one guide entry on the screen', () => {
+
+  it('measures returning guides together and leaves them alone when a live answer grows beside them', async () => {
+    function Entry() {
+      const entry = useGuideEntry('returning-thread', null);
+      return <span ref={entry.ref}>{!entry.hidden && <button>Thread guide</button>}</span>;
+    }
+    const styles = vi.spyOn(globalThis, 'getComputedStyle');
+    try {
+      const view = render(<><section data-guides>{Array.from({ length: 20 }, (_, i) => <Entry key={i} />)}</section><div data-answer /></>);
+      const guides = view.container.querySelector('[data-guides]')!;
+      const answer = view.container.querySelector('[data-answer]')!;
+      await act(async () => { await Promise.resolve(); });
+      expect(guides.querySelectorAll('button')).toHaveLength(1);
+      expect(styles.mock.calls.filter(([element]) => element === guides)).toHaveLength(1);
+      styles.mockClear();
+      await act(async () => { answer.append(document.createElement('p')); await Promise.resolve(); });
+      expect(styles).not.toHaveBeenCalled();
+      // Moving the first holder within the same surface changes who offers the guide.
+      const first = guides.firstElementChild!;
+      await act(async () => { guides.append(first); await Promise.resolve(); });
+      expect(first.querySelector('button')).toBeNull();
+      expect(guides.firstElementChild?.querySelector('button')).not.toBeNull();
+    } finally { styles.mockRestore(); }
+  });
 
   it('keeps inactive background guides suppressed while a modal covers the screen, then restores one entry', async () => {
     const view = show(<section data-testid="covered-help"><GuideLink guide="how-approvals-work" /><GuideLink guide="how-approvals-work" /></section>);

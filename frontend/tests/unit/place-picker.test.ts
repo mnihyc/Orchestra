@@ -47,4 +47,11 @@ describe('the places a picker offers', () => {
     const own = placesOfTree([row('org', 'org', 'Acme', null), row('web', 'project', 'Web', 'org', { custom_color: '#3a7bd5' })], ' / ');
     expect(own.find((place) => place.id === 'web')?.custom_color).toBe('#3a7bd5');
   });
+  it('keeps the complete ancestry of deep places and terminates a malformed parent cycle', () => {
+    const deep = Array.from({ length: 80 }, (_, at) => row(String(at), at === 0 ? 'org' : 'project', `Level ${at}`, at === 0 ? null : String(at - 1)));
+    expect(placesOfTree(deep, ' / ').find((place) => place.id === '79')?.path).toBe(deep.map((node) => node.name).join(' / '));
+    const cyclic = [row('a', 'project', 'One', 'b'), row('b', 'project', 'Two', 'a')];
+    expect(placesOfTree(cyclic, ' / ').find((place) => place.id === 'a')?.path).toBe('Two / One');
+  });
+
 });

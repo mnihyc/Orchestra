@@ -2,7 +2,7 @@
 group: resources
 title: Let agents open ports without asking
 screens: /thread/$threadId, /resources/environments/$id, /resources/templates/$id, /topic/$topicId, /project/$projectId, /approvals
-keywords: how do I open a port, without asking, ports, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_hours, network.allowed_hosts, template defaults
+keywords: how do I open a port, without asking, ports, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_minutes, network.allowed_hosts, template defaults
 summary: Choose who can reach an environment’s services and which openings agents may request.
 ---
 
