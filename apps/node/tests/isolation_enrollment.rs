@@ -137,6 +137,7 @@ async fn declared_runtimes_enroll_run_a_terminal_and_keep_the_same_identity_and_
                     data_sources: None,
                     environment_id: unit.environment_id,
                     workspace_root: None,
+                    workspace: Default::default(),
                     ignore: Vec::new(),
                     index: IndexMode::Live,
                     mounts: None,

@@ -132,9 +132,10 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
 }
 
 /** What the screen in view said of itself, or `null` while it has said nothing. */
-export function useCurrentHeading(): ScreenHeading | null {
+export function useCurrentHeading(enabled = true): ScreenHeading | null {
   const instance = useViewInstance();
   const held = useHeading(useShallow((state) => {
+    if (!enabled) return null;
     const owner = instance === null ? state.focused : instance.headingOwner;
     const current = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
     return { route: current?.route ?? null, heading: current?.heading ?? null };

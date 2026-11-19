@@ -81,6 +81,8 @@ export interface ThreadView {
   thread: Thread | null;
   /** How much of the conversation is held: nothing, its newest part, or a window somewhere in it. */
   loaded: Loaded;
+  /** Last admitted feed cut; metadata rows alone never advance this cursor. */
+  lastSeq: number | null;
   /** Whether older items exist than the oldest held. */
   hasOlder: boolean;
   /** Whether newer items exist than the newest held; true only for a window that was read around an item. */
@@ -121,6 +123,7 @@ export const EMPTY_VIEW: ThreadView = {
   queuePage: EMPTY_QUEUE,
   thread: null,
   loaded: 'none',
+  lastSeq: null,
   hasOlder: false,
   hasNewer: false,
   items: new Map(),
@@ -144,8 +147,18 @@ export const EMPTY_VIEW: ThreadView = {
 
 const MAIN_STREAM = 'main';
 
-/** Orders two queue positions, which are decimal strings of any length. */
+/** Orders two queue positions, which are decimal strings of any length. A message put first takes the place one below the first that waits,
+ * so a position can be zero or negative: the sign is read before the length is, or the second message put first would stand last. */
 export function comparePositions(one: string, other: string): number {
+  const below = one.startsWith('-');
+  const otherBelow = other.startsWith('-');
+  if (below !== otherBelow) return below ? -1 : 1;
+  const order = comparePlaces(below ? one.slice(1) : one, otherBelow ? other.slice(1) : other);
+  return order === 0 || !below ? order : -order;
+}
+
+/** Orders two unsigned decimal strings. */
+function comparePlaces(one: string, other: string): number {
   const [wholeOne = '0', fractionOne = ''] = one.split('.');
   const [wholeOther = '0', fractionOther = ''] = other.split('.');
   const left = wholeOne.replace(/^0+(?=\d)/, '');
@@ -184,6 +197,9 @@ export function applyRows(view: ThreadView, rows: ThreadRows): ThreadView {
       update({ read: { ...next.read, projection: rows.projection } });
     }
   }
+
+  if (typeof rows.seq === 'number' && Number.isSafeInteger(rows.seq) && rows.seq >= 0
+    && (next.lastSeq === null || rows.seq > next.lastSeq)) update({ lastSeq: rows.seq });
 
   if (rows.viewed_prompt !== undefined && (rows.seq === undefined || next.viewedPromptSeq === null || rows.seq >= next.viewedPromptSeq)) {
     update({ viewedPrompt: rows.viewed_prompt, viewedPromptSeq: rows.seq ?? null });
@@ -477,7 +493,19 @@ interface ThreadStore {
 
 export const useThreadStore = create<ThreadStore>(() => ({ byThread: new Map() }));
 
-function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView): void {
+// A text, reasoning or output delta changes a growing body. Controls that read metadata
+// can retain the same row frame until a non-delta publication, including a refusal or reset.
+const beforeStream = new WeakMap<ThreadView, { controls: ThreadView; timeline: ThreadView }>();
+export function threadRowFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.controls ?? view;
+}
+
+/** The list groups by row metadata, the first nonblank agent text and exact completed echoes. */
+export function threadTimelineFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.timeline ?? view;
+}
+
+function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView, pieces?: readonly Delta[]): void {
   const ref = threadReadTarget(threadId);
   const key = threadReadCacheKey(ref);
   useThreadStore.setState((state) => {
@@ -485,7 +513,20 @@ function update(threadId: ThreadReadTarget, change: (view: ThreadView) => Thread
     const after = change(before);
     if (after === before) return state;
     const byThread = new Map(state.byThread);
-    byThread.set(key, { ...after,ref });
+    const published = { ...after, ref };
+    if (pieces !== undefined) {
+      const timeline = threadTimelineFrame(before);
+      const regroup = pieces.some((piece) => {
+        if (piece.field !== 'text') return false;
+        const item = after.items.get(piece.item_id);
+        if (item?.kind !== 'agent_message' || item === before.items.get(piece.item_id)) return false;
+        if (item.status === 'completed') return true;
+        const previous = timeline.items.get(item.id);
+        return previous?.kind !== 'agent_message' || !/\S/.test(previous.payload.text) && /\S/.test(item.payload.text);
+      });
+      beforeStream.set(published, { controls: threadRowFrame(before), timeline: regroup ? published : timeline });
+    }
+    byThread.set(key, published);
     return { byThread };
   });
 }
@@ -541,6 +582,12 @@ export function threadReadOnly(view: ThreadView): boolean {
     || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
 }
 
+/** Stop names current work and needs no history revision, even while that history reloads. */
+export function threadStopReadOnly(view: ThreadView): boolean {
+  return view.closed !== null || view.read !== null && (view.read.selection !== null
+    || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
+}
+
 /** Read readiness is not native preparation status; viewedPrompt supplies that independent fact. */
 export function threadReadState(view: ThreadView): {
   selection: string | null;
@@ -586,7 +633,7 @@ export function flushDeltas(): void {
       const result = applyDeltas(view, batch.pieces);
       gaps.push(...result.gaps);
       return result.view;
-    });
+    }, batch.pieces);
     for (const itemId of gaps) onGap(batch.ref.threadId, itemId, batch.captured);
   }
 }
