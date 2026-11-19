@@ -472,6 +472,7 @@ error_codes! {
     AccessLocked = 409, "access.locked", "This row is locked above";
     PolicyNotDelegated = 409, "policy.not_delegated", "The machine keeps these keys to itself";
     ConflictStaleRevision = 409, "conflict.stale_revision", "It was changed meanwhile";
+    ConflictConcurrentChange = 409, "conflict.concurrent_change", "A concurrent change interrupted the operation";
     ConflictExists = 409, "conflict.exists", "It exists already";
     ConflictIdempotencyMismatch = 409, "conflict.idempotency_mismatch", "The key was used for another request";
     ConflictConfirmationRequired = 409, "conflict.confirmation_required", "Confirm before going on";
@@ -526,6 +527,7 @@ error_codes! {
     ImportNothing = 409, "import.nothing", "There is nothing in it that you may bring here";
     ImportInvalid = 422, "import.invalid", "The source is not a package or files that can be imported";
     ImportUndone = 409, "import.undone", "The import was taken back already, or is being";
+    SummaryNothingNew = 409, "summary.nothing_new", "There is nothing new to summarize";
     Gone = 410, "gone", "It expired or was used";
     DocsTooLarge = 413, "docs.too_large", "The document would be too large";
     ShareTooLarge = 413, "share.too_large", "The copy would be too large";
