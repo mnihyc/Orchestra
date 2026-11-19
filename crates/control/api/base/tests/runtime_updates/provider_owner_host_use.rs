@@ -152,10 +152,10 @@ async fn a_provider_manager_cannot_move_its_runtime_where_only_the_manager_has_h
             .fetch_one(&world.db.pool)
             .await
             .unwrap();
-    config
-        .as_object_mut()
-        .unwrap()
-        .insert("runtime.host_id".into(), json!(destination));
+    config.as_object_mut().unwrap().insert(
+        "runtime.host_id".into(),
+        json!(orch_provider_contract::pools::Target::host(destination)),
+    );
     let reply = world
         .app
         .call(provider_api::ProviderUpdate, &[&team.provider])
@@ -337,10 +337,10 @@ async fn a_provider_manager_can_preview_a_move_when_only_its_owner_has_destinati
             .fetch_one(&world.db.pool)
             .await
             .unwrap();
-    config
-        .as_object_mut()
-        .unwrap()
-        .insert("runtime.host_id".into(), json!(destination));
+    config.as_object_mut().unwrap().insert(
+        "runtime.host_id".into(),
+        json!(orch_provider_contract::pools::Target::host(destination)),
+    );
     let reply = world
         .app
         .call(provider_api::ProviderUpdate, &[&team.provider])

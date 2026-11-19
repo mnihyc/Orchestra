@@ -484,6 +484,7 @@ async fn legacy_send_ceilings_and_disabled_sending_keep_their_original_list_and_
         .call(NodeSettingSet, &[&room.topic, &"chat.enabled"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,

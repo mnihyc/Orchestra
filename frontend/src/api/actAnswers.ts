@@ -16,13 +16,15 @@ const KINDS: Readonly<Record<string, string>> = {
   machines: 'machine', templates: 'template', 'mcp-servers': 'mcp_server', mounts: 'mount', skills: 'skill',
   documents: 'document', tags: 'tag', groups: 'group', approvals: 'approval', jobs: 'job',
   exports: 'export', 'notification-channels': 'notification_channel',
+  pools:'pool',
 };
 const MEMBERS: Readonly<Record<string, string>> = {
   provider: 'provider', agent: 'agent', environment: 'environment', host: 'host',
   machine: 'machine', template: 'template', mcp_server: 'mcp_server', mount: 'mount', skill: 'skill',
   node: 'node', thread: 'thread', document: 'document', approval: 'approval', job: 'job',
+  pool:'pool',
 };
-const FULL_ROW_KINDS=new Set(['node','thread','document','provider','agent','environment','host','machine','template','mcp_server','mount','skill']);
+const FULL_ROW_KINDS=new Set(['node','thread','document','provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool']);
 
 function reachChanges(parts: readonly string[]): AgentReachChange[] {
   const id = parts[1];
@@ -47,13 +49,17 @@ export function answerChanges(act: Act, p: PathParam, dependencies: readonly Cha
   const related = dependencies.filter((change) => 'relatedViews' in change);
   const outside = dependencies.filter((change) => 'outsideViews' in change);
   const missing = dependencies.filter((change) => 'missing' in change);
-  const native = dependencies.filter((change) => !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
+  const poolReads=dependencies.filter((change)=>'poolReads' in change);
+  // These derived choices have no feed or row receipt; every mounted reader needs its own current answer.
+  const bindings = dependencies.filter((change): change is Stale => 'key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'));
+  const native = dependencies.filter((change) => !('key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'))
+    && !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change) && !('poolReads' in change));
   const answered = nativeAnswerChanges(act, p, native);
   // An entry that says its membership repair is always needed (an org moved answers with the org, not with who is in the tree it
   // went to) keeps it with whatever the answer made of the row, as the related views and the exact views are kept.
   const membership = native.filter((change) => 'people' in change && change.always === true);
   const kept = answered.some((change) => 'people' in change) ? [] : membership;
-  return [...answered, ...kept, ...related, ...outside, ...missing];
+  return [...poolReads,...answered, ...kept, ...related, ...outside, ...missing, ...(bindings.length === 0 ? [] : [{ missing: bindings, allObserved: true as const, cancelPending: true as const }])];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
@@ -180,7 +186,7 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     // The nested writer returns a server, never its parent Environment. Restricted receipts
     // contain no stored server view; only an already loaded parent MCP page may be retaken.
     if (record(answer) && record(answer.access) && record(answer.spec)) put('mcp_server', answer, true);
-    changes.push({ missing: [{ key: ['environment-mcp', parts[1]], exact: true }], cancelPending: true });
+    changes.push({ environmentMcp: parts[1] });
     return changes;
   }
   if (act.method==='POST' && parts[0]==='threads' && parts[2]==='calls' && parts[3]==='recovery' && record(answer) && 'recovery' in answer) {

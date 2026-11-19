@@ -5,6 +5,7 @@ use super::super::resume_trace::Trace;
 use super::*;
 use orch_db::queries::{hierarchy, lifecycle as controls};
 use orch_link_contract::continuations::SessionCloseFenced;
+use orch_types::Time;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
@@ -50,7 +51,7 @@ fn strict_closer(fixture: &Fixture) {
         });
 }
 
-async fn end(fixture: &Fixture, ending: Ending) -> Proof {
+async fn end(fixture: &Fixture, ending: Ending) -> Proof<Time> {
     let mut tx = fixture.world.pool.begin().await?;
     orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
     let now = fixture.world.clock.time();
@@ -90,7 +91,7 @@ async fn end(fixture: &Fixture, ending: Ending) -> Proof {
         }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(now)
 }
 
 async fn facts(fixture: &Fixture) -> Proof<Json> {
@@ -311,6 +312,7 @@ async fn resumes_unchanged(
 struct RetainedSnapshot<'a> {
     revised: &'a threads::InputRow,
     facts: &'a Json,
+    ended_at: Time,
 }
 
 async fn kept(
@@ -325,6 +327,7 @@ async fn kept(
     let RetainedSnapshot {
         revised,
         facts: before,
+        ended_at,
     } = retained;
     assert_eq!(job.row().await?.state, "cancelled");
     let current = threads::thread(&mut *fixture.world.pool.acquire().await?, fixture.thread)
@@ -370,6 +373,19 @@ async fn kept(
         .into(),
     );
     expected.cancelled_by = Some(fixture.world.ada);
+    // Cancellation retains the ending's actual cause and instant with the authored words.
+    expected.cancellation = Some(serde_json::to_value(
+        orch_api_contract::threads::InputCancellation {
+            cause: match ending {
+                Ending::Archive => orch_api_contract::threads::InputCancellationCause::ThreadEnded,
+                Ending::RemoveBinding | Ending::DisableHome => {
+                    orch_api_contract::threads::InputCancellationCause::SourceUnavailable
+                }
+            },
+            at: ended_at,
+            by: None,
+        },
+    )?);
     expected.seq_updated = old.seq_updated;
     assert_eq!(
         old, expected,
@@ -472,7 +488,7 @@ async fn after_creation(ending: Ending) -> Proof {
         Some(recipe.segment_id)
     );
     let resumes = resume_snapshot(&fixture, &job, &recipe, &trace, true).await?;
-    end(&fixture, ending).await?;
+    let ended_at = end(&fixture, ending).await?;
     assert!(
         job.row()
             .await?
@@ -491,6 +507,7 @@ async fn after_creation(ending: Ending) -> Proof {
         RetainedSnapshot {
             revised: &revised,
             facts: &before,
+            ended_at,
         },
         ending,
         &trace,
@@ -630,7 +647,7 @@ async fn archive_before_replacement_keeps_the_revision_and_pending_version_witho
     .ok_or("revised input absent")?;
     let before = facts(&fixture).await?;
     let resumes = resume_snapshot(&fixture, &job, &recipe, &trace, false).await?;
-    end(&fixture, Ending::Archive).await?;
+    let ended_at = end(&fixture, Ending::Archive).await?;
     tokio::time::timeout(common::PATIENCE, fixture.engine.drive_job(&job)).await??;
     assert_eq!(fixture.world.began(CommandKind::SessionPrefixOpen), 0);
     assert_eq!(
@@ -644,6 +661,7 @@ async fn archive_before_replacement_keeps_the_revision_and_pending_version_witho
         RetainedSnapshot {
             revised: &revised,
             facts: &before,
+            ended_at,
         },
         Ending::Archive,
         &trace,
@@ -749,7 +767,7 @@ async fn an_archive_withdraws_a_durably_prepared_restore_before_issue_and_recove
             .is_none()
     );
     let resumes = resume_snapshot(&fixture, &job, &recipe, &trace, false).await?;
-    end(&fixture, Ending::Archive).await?;
+    let ended_at = end(&fixture, Ending::Archive).await?;
     let withdrawn =
         orch_db::queries::link::command(&mut *fixture.world.pool.acquire().await?, admitted.id)
             .await?
@@ -777,6 +795,7 @@ async fn an_archive_withdraws_a_durably_prepared_restore_before_issue_and_recove
         RetainedSnapshot {
             revised: &revised,
             facts: &before,
+            ended_at,
         },
         Ending::Archive,
         &trace,

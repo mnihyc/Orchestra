@@ -59,6 +59,7 @@ impl Authority<'_> {
 pub(super) struct RecoveryInputAuthority {
     input_id: Id,
     captured: crate::inputs::InputAuthority,
+    pool_choice: Option<Id>,
 }
 
 pub(super) enum Authorized {
@@ -203,12 +204,51 @@ pub(super) async fn confirmed(
                     "the input recovery changed its bounded switch shape",
                 ));
             }
+            let active = crate::calls::read_root(
+                conn,
+                thread.node_id,
+                orch_provider_contract::calls::Purpose::Agent,
+                thread.node_id,
+            )
+            .await?
+            .filter(|row| {
+                row.state == "switching"
+                    && row.context.get("input_id") == Some(&serde_json::json!(input_id))
+            });
+            let candidate = active
+                .as_ref()
+                .and_then(|row| row.context.get("candidate"))
+                .cloned()
+                .map(serde_json::from_value::<crate::calls::SelectedCandidate>)
+                .transpose()?;
+            let pool_choice = match candidate.filter(|candidate| {
+                matches!(
+                    candidate.intent.target,
+                    orch_provider_contract::pools::Target::Pool { .. }
+                )
+            }) {
+                Some(candidate)
+                    if candidate.provider_id == recipe.forkplan.to.provider.id
+                        && candidate.model == recipe.forkplan.to.model =>
+                {
+                    Some(candidate.choice_id.ok_or_else(|| {
+                        EngineError::unreadable("the recovery switch has no accepted pool choice")
+                    })?)
+                }
+                Some(_) => {
+                    return Err(EngineError::unreadable(
+                        "the accepted pool destination changed before the switch",
+                    ));
+                }
+                None => None,
+            };
             (
                 None,
                 None,
                 Some(RecoveryInputAuthority {
                     input_id: *input_id,
                     captured: callers.captured().clone(),
+                    pool_choice,
                 }),
             )
         }
@@ -966,13 +1006,45 @@ pub(super) async fn authorize_on(
         // contract rather than inventing ThreadInteract on a read-only source.
         // A move into another environment is the use of the provider there, whether or not the
         // provider changes.
-        let provider_required = !environment_reach
-            && (recipe.result != ForkResult::Replace
-                || matches!(recipe.source_execution, ExecutionSource::Program { .. })
-                || recipe.forkplan.from.provider().id != recipe.forkplan.to.provider.id
-                || moving);
+        let provider_required = source
+            .recovery_input
+            .as_ref()
+            .is_some_and(|recovery| recovery.pool_choice.is_some())
+            || !environment_reach
+                && (recipe.result != ForkResult::Replace
+                    || matches!(recipe.source_execution, ExecutionSource::Program { .. })
+                    || recipe.forkplan.from.provider().id != recipe.forkplan.to.provider.id
+                    || moving);
         if provider_required {
-            if !principal.caller().permits(Permission::ProviderUse) {
+            // A placement under the provider the thread has is carried, as the thread is, by its first
+            // owner's use: whoever places it needs what placement needs, which is checked above.
+            let carried = recipe.result == ForkResult::Replace
+                && recipe.forkplan.from.provider().id == recipe.forkplan.to.provider.id
+                && !matches!(recipe.source_execution, ExecutionSource::Program { .. });
+            let pool = if let Some(choice) = source
+                .recovery_input
+                .as_ref()
+                .and_then(|recovery| recovery.pool_choice)
+            {
+                Some(
+                    crate::resource_choice::ProviderSelection::load(
+                        conn,
+                        choice,
+                        source.thread,
+                        recipe.forkplan.to.provider.id,
+                        Some(&recipe.forkplan.to.model),
+                        orch_access_contract::permissions::UsagePurpose::Turn,
+                        principal.caller(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            if !carried
+                && !(principal.caller().permits(Permission::ProviderUse)
+                    || pool.is_some() && principal.caller().permits(Permission::PoolUse))
+            {
                 return Err(failed(
                     "authz.denied",
                     "The accepted credential no longer includes provider.use.",
@@ -982,7 +1054,15 @@ pub(super) async fn authorize_on(
                 .provider_use(
                     conn,
                     &crate::access::ProviderUse {
-                        person: recipe.by,
+                        pool: pool.as_ref(),
+                        purpose: orch_access_contract::permissions::UsagePurpose::Turn,
+                        person: if pool.is_some() {
+                            principal.user()
+                        } else if carried {
+                            thread.owner_id
+                        } else {
+                            recipe.by
+                        },
                         node: target.map_or(
                             if recipe.result == ForkResult::Replace {
                                 source.thread
@@ -1000,6 +1080,12 @@ pub(super) async fn authorize_on(
                 .await
                 .map_err(EngineError::from)?;
             match answer {
+                // A carrier who may not use the provider for another reason is for the turns to say, as it
+                // was before an entry named places.
+                crate::access::Answer::Refused(missing)
+                    if pool.is_none()
+                        && carried
+                        && !missing.iter().any(MissingAccess::leaves_out_the_place) => {}
                 crate::access::Answer::Refused(missing) => {
                     return Err(failed(
                         "authz.denied",
