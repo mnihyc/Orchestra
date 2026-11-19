@@ -489,7 +489,7 @@ async fn locks(conn: &mut Conn, work: &Work) -> Result<(), Error> {
             .fetch_one(&mut *conn)
             .await
             .map_err(DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(host.machine)
             .fetch_one(&mut *conn)
             .await

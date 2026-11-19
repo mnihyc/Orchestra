@@ -89,7 +89,7 @@ impl Scene {
             permissions: None,
             email: None,
             max_uses: Some(3),
-            expires_in_hours: Some(1),
+            expires_in_minutes: Some(60),
             note: Some(NOTE.into()),
         }
     }

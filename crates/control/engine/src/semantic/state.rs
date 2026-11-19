@@ -68,6 +68,8 @@ pub struct OrgState {
     pub rebuild_bytes: Option<i64>,
     /// And the time it takes to make them at the measured rate.
     pub rebuild_seconds: Option<i64>,
+    /// Last recorded batch/retry, separate from current configuration.
+    pub retry: Option<orch_api_contract::admin::SemanticIndexRetry>,
 }
 
 fn generation_of(row: &rows::GenerationRow) -> Generation {
@@ -148,6 +150,10 @@ impl Engine {
             .collect();
         let sizes = rows::sizes(&mut *conn, org, &lengths, filling, ready.is_ok()).await?;
         let index = rows::index(&mut *conn, org).await?;
+        let retry = index
+            .as_ref()
+            .and_then(|row| row.retry.as_ref())
+            .map(|retry| retry.0.clone());
         let rate = index.as_ref().and_then(|row| row.rate);
         let provider_pause = if let Some(named) = &chosen.embeddings {
             rows::provider_pause_reason(&mut *conn, named.provider_id).await?
@@ -256,6 +262,7 @@ impl Engine {
             allowed_bytes: plan::allowed(sizes.content, chosen.max_disk_share),
             rebuild_bytes,
             rebuild_seconds,
+            retry,
         })
     }
 
