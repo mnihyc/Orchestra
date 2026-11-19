@@ -231,10 +231,11 @@ async fn service_use(
     caller: &Caller,
     thread: Id,
     provider: Id,
-    offering: &str,
-    groups: &[String],
+    offering: (&str, &[String]),
+    purpose: orch_access_contract::permissions::UsagePurpose,
     clock: &dyn Clock,
 ) -> Result<Option<Option<Id>>, EngineError> {
+    let (offering, groups) = offering;
     let principal = Principal::load(conn, caller.clone(), clock.time()).await?;
     let policies = crate::access::resource_policies(conn, provider).await?;
     let usable =
@@ -245,6 +246,7 @@ async fn service_use(
     // One entry has to allow the service, in the environment the thread works in.
     let place = crate::access::thread_place(conn, thread).await?;
     let allowing = granted.allowing(&orch_authz::options::Wanted {
+        purpose,
         service: Some((offering, groups)),
         at: place.as_ref(),
         ..orch_authz::options::Wanted::default()
@@ -341,6 +343,14 @@ impl ServiceCommand {
             }
             return Ok(None);
         };
+        if self
+            .native()
+            .is_some_and(CommandAuthority::reads_before_fence)
+        {
+            // The native verifier has now fenced the source after its read. Keep the paid
+            // continuation's own rows in the same source-before-command order as ordinary work.
+            self.lock_source(conn).await?;
+        }
         if let Some(recovery) = &self.recovery
             && !recovery.current(conn, self).await?
         {
@@ -421,8 +431,8 @@ impl ServiceCommand {
                 caller,
                 place,
                 self.provider,
-                &self.offering,
-                &self.groups,
+                (&self.offering, &self.groups),
+                orch_access_contract::permissions::UsagePurpose::for_capability(&self.capability),
                 clock,
             )
             .await?
@@ -577,7 +587,23 @@ impl Engine {
                 self.execute_web_model_service(sources, call, capability)
                     .await
             }
-            "program-session" => delegation::execute(self, call, capability).await,
+            "program-session" => {
+                let executor = delegation::executor::Executor::thread_tool(
+                    self, call, capability, sources, selected,
+                )
+                .await?;
+                let request = executor.request();
+                let mut executors = orch_provider_contract::capabilities::Executors::default();
+                executors
+                    .register("program-session", std::sync::Arc::new(executor))
+                    .map_err(EngineError::unreadable)?;
+                executors
+                    .execute(request)
+                    .await
+                    .map(serde_json::to_value)
+                    .map_err(delegation::executor::engine_error)?
+                    .map_err(EngineError::from)
+            }
             _ => Err(EngineError::unreadable(
                 "the selected capability executor is not installed",
             )),
@@ -601,6 +627,25 @@ impl Engine {
         harness_takes_mcp: bool,
         now: Time,
     ) -> Result<Vec<orch_agent_contract::events::OrchTool>, EngineError> {
+        self.offered_tools_with_facts(conn, thread, harness_takes_mcp, now)
+            .await
+            .map(|(tools, _)| tools)
+    }
+
+    pub(crate) async fn offered_tools_with_facts(
+        &self,
+        conn: &mut Conn,
+        thread: &threads::ThreadRow,
+        harness_takes_mcp: bool,
+        now: Time,
+    ) -> Result<
+        (
+            Vec<orch_agent_contract::events::OrchTool>,
+            super::catalogue::AcceptedOrchTools,
+        ),
+        EngineError,
+    > {
+        let mut inputs = super::ToolOfferInputs::default();
         let owned: Option<Id> =
             sqlx::query_scalar("SELECT t.input_id FROM turns t WHERE t.id=$1 AND t.thread_id=$2")
                 .bind(thread.current_turn_id)
@@ -613,14 +658,21 @@ impl Engine {
                 .await?
                 .is_some()
         {
-            return Ok(Vec::new());
+            inputs.blocker = Some(orch_api_contract::settings::OrchToolUnavailable::CapabilityWork);
+            return Ok((
+                Vec::new(),
+                super::catalogue::capture(thread, &[], inputs, now),
+            ));
         }
-        let mut tools = super::offered_for_session(conn, thread, harness_takes_mcp, now).await?;
+        let mut tools =
+            super::offered_for_session_in(conn, thread, harness_takes_mcp, now, Some(&mut inputs))
+                .await?;
         if harness_takes_mcp {
             self.append_web_service_tools(conn, thread, &mut tools)
                 .await?;
         }
-        Ok(tools)
+        let receipt = super::catalogue::capture(thread, &tools, inputs, now);
+        Ok((tools, receipt))
     }
 
     pub(crate) async fn append_web_service_tools(
@@ -961,8 +1013,10 @@ impl Engine {
                             caller,
                             call.thread,
                             provider,
-                            offering,
-                            &selected.groups,
+                            (offering, &selected.groups),
+                            orch_access_contract::permissions::UsagePurpose::for_capability(
+                                capability,
+                            ),
                             self.inner.clock.as_ref(),
                         )
                         .await?

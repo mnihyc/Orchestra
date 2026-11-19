@@ -13,7 +13,8 @@ import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { Input, PasswordInput } from '@/ui/Input';
+import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { toast } from '@/ui/Toast';
 
 /** The most characters of a name, as the server holds it. */
@@ -91,12 +92,16 @@ export function WebhookDialog({ channel, open, onOpenChange }: { channel: Notifi
       <form id="webhook-form" noValidate className="flex flex-col gap-4" onSubmit={form.submit((values) => save.mutate(values))}>
         <Input label={t('notifications.webhook.name')} autoComplete="off" {...name} />
         <Input label={t('notifications.webhook.address')} hint={t('notifications.webhook.addressHint')} type="url" autoComplete="off" inputMode="url" {...address} />
-        <PasswordInput
+        <SecretField
           label={t('notifications.webhook.secret')}
           optional
-          hint={secretHeld ? t('notifications.webhook.secretKept') : t('notifications.webhook.secretHint')}
-          autoComplete="off"
-          {...secret}
+          set={secretHeld}
+          hint={secretHeld ? undefined : t('notifications.webhook.secretHint')}
+          value={secret.value}
+          error={secret.error}
+          onBlur={secret.onBlur}
+          fieldRef={secret.ref}
+          onValueChange={(next) => form.set('secrets.secret', next)}
         />
         {save.isError && name.error === undefined && address.error === undefined && secret.error === undefined && <ErrorAlert error={save.error} />}
       </form>

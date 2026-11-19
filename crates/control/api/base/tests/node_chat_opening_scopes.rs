@@ -388,6 +388,7 @@ async fn selected_provider(room: &Room) -> Id {
         .call(NodeSettingSet, &[&room.root, &"agent.default_provider_id"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(provider),
             locked: None,
             expected_revision: None,
@@ -427,7 +428,7 @@ async fn summary_provider_scope_declines_only_its_metadata_and_never_the_admitte
         .unwrap();
     sqlx::query("UPDATE resource_summaries SET text=$2,producer=$3,source_snapshot='{}',source_refs=$4,completed_request_id=$5,completed_at=$6,completed_dirty_revision=dirty_revision WHERE id=$1")
         .bind(summary.id).bind("The admitted topic paragraph stays readable.")
-        .bind(json!({"provider_id":provider,"model_name":"private-summary-model"}))
+        .bind(json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":"private-summary-model"}}}))
         .bind(json!([target])).bind(new_id()).bind(room.world.now())
         .execute(&mut *conn).await.unwrap();
     drop(conn);
@@ -1162,6 +1163,7 @@ async fn both_requested_org_provider_names_share_the_actual_selected_provider_re
             .call(NodeSettingSet, &[&room.root, &name])
             .token(&room.ada.token)
             .body(&NodeSettingSetBody {
+                model_choice: None,
                 value,
                 locked: None,
                 expected_revision: None,
