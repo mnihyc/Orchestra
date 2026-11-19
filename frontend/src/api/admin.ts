@@ -8,6 +8,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
+import { READ_AGAIN_DOWN_MS } from '@/api/readAgain';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { resourceRows } from '@/api/listed';
 import type {
@@ -24,6 +25,7 @@ import type {
   AuditEntryPage,
   AuditExportFormat,
   BackupRestoreList,
+  BundledNodeEnrollment,
   CapabilityDef,
   HarnessBuild,
   HarnessChannelsStatus,
@@ -279,6 +281,17 @@ export function nameOwner(orgId: string, userId: string): Promise<Node> {
 }
 
 // ---------------------------------------------------------------- hosts and runtimes
+
+export const bundledNodeQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: ['admin', 'bundled-node-enrollment'] as const,
+  queryFn: ({signal}): Promise<BundledNodeEnrollment | null> => ok(api.GET('/admin/bundled-node/enrollment', {signal})),
+  refetchInterval: (query) => query.state.data ? READ_AGAIN_DOWN_MS : false,
+});
+
+export function retryBundledNode(): Promise<void> {
+  return done(api.POST('/admin/bundled-node/enrollment/retry'));
+}
 
 export const hostsKey = ['admin', 'hosts'] as const;
 

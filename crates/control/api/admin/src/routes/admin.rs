@@ -68,6 +68,7 @@ pub fn mount(registry: &mut Registry) {
     defaults::mount(registry);
     audit::mount(registry);
     system::mount(registry);
+    server_update::mount(registry);
     fleet::mount(registry);
     catalogue::mount(registry);
     programs::mount(registry);
@@ -184,6 +185,9 @@ pub mod sessions;
 
 #[path = "admin/settings.rs"]
 pub mod settings;
+
+#[path = "admin/server_update.rs"]
+pub mod server_update;
 
 #[path = "admin/system.rs"]
 pub mod system;

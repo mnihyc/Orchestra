@@ -391,6 +391,7 @@ async fn directory_place(
     }
     Ok(Some((
         MoveMachine {
+            capacity: None,
             grouping: orch_api_contract::resource_groups::ResourceGrouping {
                 availability: vec![
                     orch_api_contract::resource_groups::ResourceMachineAvailability {

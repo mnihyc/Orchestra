@@ -7,7 +7,7 @@ Each non-empty line that is not a comment is one check:
   web <npm script>              e.g. `web lint`, `web typecheck`, `web test`, `web build`; `npm ci` runs once first
   web-e2e                       the end-to-end suites against the tests' fake API
 
-The workflow uses --group rust and --group web on independent runners. With no group, run all checks.
+The workflow uses --group rust and --group web on independent runners. Explicit orch-envhost checks also use --group platform on native Windows and macOS, without Docker fixtures or unrelated programs. With no group, run all checks.
 """
 
 import argparse
@@ -49,7 +49,33 @@ def prepare_native_fixtures(path):
     return passed, environment
 
 
-def main(path, group="all"):
+# This case drives the candidate binary and a local adapter on loopback on every OS.
+NATIVE_CONNECTOR_CHECKS = {
+    "test -p orch-connector --test program -- platform_observations::a_connected_machine_completes_a_turn_with_its_own_registered_agent_program",
+    "test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory",
+}
+
+
+def native_checks(checks):
+    """Only an explicitly selected environment package belongs on a native desktop runner."""
+    selected = []
+    for check in checks:
+        word, _, rest = check.partition(" ")
+        if word != "test":
+            continue
+        arguments = shlex.split(rest)
+        packages = []
+        for index, argument in enumerate(arguments):
+            if argument in {"-p", "--package"} and index + 1 < len(arguments):
+                packages.append(arguments[index + 1])
+            elif argument.startswith("--package="):
+                packages.append(argument.partition("=")[2])
+        if (packages == ["orch-envhost"] and "--workspace" not in arguments) or check in NATIVE_CONNECTOR_CHECKS:
+            selected.append(check)
+    return selected
+
+
+def main(path, group="all", plan_native=False):
     with open(path, encoding="utf-8") as targets:
         lines = [line.strip() for line in targets]
     checks = [line for line in lines if line and not line.startswith("#")]
@@ -62,7 +88,12 @@ def main(path, group="all"):
         for check in unknown:
             print(f"unknown check: {check}", file=sys.stderr)
         return 2
-    if group != "all":
+    if plan_native:
+        print("native=" + ("true" if native_checks(checks) else "false"))
+        return 0
+    if group == "platform":
+        checks = native_checks(checks)
+    elif group != "all":
         checks = [check for check in checks
                   if (check.partition(" ")[0] in {"web", "web-e2e"}) == (group == "web")]
     if not checks:
@@ -70,7 +101,7 @@ def main(path, group="all"):
         return 0
     results = []
     fixture_environment = {}
-    if any(check.startswith("test ") for check in checks):
+    if group != "platform" and any(check.startswith("test ") for check in checks):
         passed, fixture_environment = prepare_native_fixtures(path)
         results.append(("prepare native Docker fixtures", passed))
     connector = False
@@ -78,14 +109,17 @@ def main(path, group="all"):
     for check in checks:
         word, _, rest = check.partition(" ")
         if word == "test":
-            if not connector:
+            if not connector and group != "platform":
                 connector = True
                 results.append((
                     "build the connector the tests start",
                     run("build the connector", ["cargo", "build", "--locked", "-p", "orch-connector"]),
                 ))
+            environment = fixture_environment
+            if check in NATIVE_CONNECTOR_CHECKS:
+                environment = {**environment, "ORCH_PLATFORM_PYTHON": sys.executable}
             results.append((check, run(check, ["cargo", "test", "--locked", "--no-fail-fast", *shlex.split(rest)],
-                                       env=fixture_environment)))
+                                       env=environment)))
         elif word == "clippy":
             results.append((check, run(check, ["cargo", "clippy", "--workspace", "--all-targets", "--locked",
                                                "--keep-going", "--", "-D", "warnings"])))
@@ -122,6 +156,7 @@ def main(path, group="all"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
-    parser.add_argument("--group", choices=("all", "rust", "web"), default="all")
+    parser.add_argument("--group", choices=("all", "rust", "web", "platform"), default="all")
+    parser.add_argument("--plan-native", action="store_true")
     arguments = parser.parse_args()
-    sys.exit(main(arguments.path, arguments.group))
+    sys.exit(main(arguments.path, arguments.group, arguments.plan_native))

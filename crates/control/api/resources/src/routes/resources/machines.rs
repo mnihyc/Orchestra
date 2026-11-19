@@ -169,6 +169,7 @@ const LINK_MEMBER: &str = rows::LINK_MEMBER;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    gateway::register(registry);
     reenrollment::mount(registry);
     enrollment::mount(registry);
     registry
@@ -322,12 +323,20 @@ fn installation_info(config: &ServerConfig) -> api::MachineEnrollmentInfo {
 }
 
 async fn enrollment_info(ctx: Ctx, (): (), (): ()) -> ApiResult<api::MachineEnrollmentInfo> {
-    Ok(installation_info(&installation_config(&ctx)))
+    let mut conn = ctx.app.db.acquire().await?;
+    Ok(installation_info(
+        &installation_config(&ctx, &mut conn).await?,
+    ))
 }
 
 /// Commands and readiness use the same effective catalogue as enrollment, including an admin override.
-pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
+pub(crate) async fn installation_config(ctx: &Ctx, conn: &mut Conn) -> ApiResult<ServerConfig> {
     let mut config = (*ctx.app.config).clone();
+    let addresses = crate::public_addresses::read(&ctx.app, conn)
+        .await?
+        .addresses;
+    config.system.public_url = addresses.public_url;
+    config.system.alternate_urls = addresses.alternate_urls;
     config.gateway.instances.clear();
     config.gateway.endpoints = ctx
         .app
@@ -344,7 +353,7 @@ pub(crate) fn installation_config(ctx: &Ctx) -> ServerConfig {
             .into(),
         })
         .collect();
-    config
+    Ok(config)
 }
 
 /// Never mint a secret for a command the shipped installer will refuse.
@@ -433,6 +442,10 @@ fn shown_facts(facts: &Json) -> Json {
         members.remove("installation");
         // Directory observations have their own management projection, never the generic facts blob.
         members.remove("data_directory");
+        if let Some(programs) = members.get_mut("programs").and_then(Json::as_object_mut) {
+            programs.insert("approvals".into(), json!([]));
+            programs.remove("machine_view");
+        }
         // Policy acknowledgements update the canonical policy before a later native facts event.
         // Capability support is a fact; its delegated/enabled state always comes from that policy.
         if let Some(capability) = members
@@ -539,7 +552,7 @@ async fn prepare_inventory_for(
     readable_only: bool,
 ) -> ApiResult<PreparedInventory> {
     let ids: Vec<Id> = found.iter().map(|row| row.id).collect();
-    let mut hosts = rows::hosting::machine_hosts(conn, &ids).await?;
+    let mut hosts = rows::hosting::hosts_naming(conn, &ids).await?;
     let mut resource_ids = ids.clone();
     resource_ids.extend(hosts.iter().map(|(_, host, _)| *host));
     let mut effective =
@@ -629,6 +642,8 @@ pub(crate) async fn show_inventory_prepared(
     let hosts = &prepared.hosts;
     let ids: Vec<_> = found.iter().map(|row| row.id).collect();
     let software_updates = crate::component_updates::views(&ctx.app.link, conn, &ids).await?;
+    let sources: Vec<_> = found.iter().map(|row| (row.id, &row.facts)).collect();
+    let mut execution_approvals = programs::confirmations::among(conn, &sources).await?;
     let holdings: Vec<_> = prepared
         .effective
         .iter()
@@ -688,6 +703,7 @@ pub(crate) async fn show_inventory_prepared(
                 })
                 .flatten();
             Ok(Machine {
+                execution_approvals: execution_approvals.remove(&row.id).unwrap_or_default(),
                 data_directory,
                 grouping: grouping
                     .get(&("machine".to_owned(), row.id))
@@ -724,6 +740,7 @@ pub(crate) async fn show_inventory_prepared(
                     online: is_online(&ctx.app, row.id, row.online),
                     platform_os: parse(&row.platform_os)?,
                     placement: parse(&row.placement)?,
+                    host_id: row.host_id,
                 },
                 owner: row.owner_id.and_then(|owner| owners.get(&owner).cloned()),
                 platform_arch: row.platform_arch.clone(),
@@ -941,8 +958,6 @@ async fn token_create(
     (): (),
     body: api::MachineEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let installation = installation_config(&ctx);
-    require_installable(&installation)?;
     let authed = ctx.user()?;
     if !authorization::caller_of(authed)?.reaches(None) {
         return Err(ApiError::not_found());
@@ -974,6 +989,8 @@ async fn token_create(
         Ok(Making::Refused(why)) => return Err(refused_making(&mut conn, home, why).await),
         Err(error) => return Err(refusals::problem(&mut conn, error).await),
     }
+    let installation = installation_config(&ctx, &mut conn).await?;
+    require_installable(&installation)?;
     drop(conn);
     let name_hint = body
         .name_hint
@@ -1355,6 +1372,7 @@ async fn policy_of(
     let machine = refs.get(&row.id).cloned().ok_or_else(ApiError::not_found)?;
     let Some(policy) = reported_policy(conn, row).await? else {
         return Ok(MachinePolicy {
+            platform_review: None,
             machine_view: None,
             command: Some(policy_command(conn, row).await?),
             machine,
@@ -1379,6 +1397,11 @@ async fn policy_of(
             .sections()
             .iter()
             .any(|section| readable.contains(section))
+        {
+            continue;
+        }
+        if *key == PolicyKey::ExecPlatform
+            && row.facts.get("runtime_platform").is_none_or(Json::is_null)
         {
             continue;
         }
@@ -1438,7 +1461,35 @@ async fn policy_of(
             writable,
         });
     }
+    let platform_review = if keys
+        .iter()
+        .any(|key| key.key == PolicyKey::ExecPlatform.as_str())
+    {
+        if let Some(build) = row
+            .facts
+            .get("runtime_platform")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            let approved = policy.exec_platform.accepts(&build);
+            let approval = if approved {
+                programs::confirmations::among(conn, &[(row.id, &row.facts)]).await?.remove(&row.id)
+                    .unwrap_or_default().into_iter().find_map(|decision| matches!(decision.subject, orch_api_contract::machine_programs::MachineExecutionSubject::System{ .. }).then_some(decision.approval))
+            } else {
+                None
+            };
+            Some(orch_api_contract::resources::MachinePlatformReview {
+                build,
+                approved,
+                approval,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(MachinePolicy {
+        platform_review,
         machine_view: None,
         command: Some(policy_command(conn, row).await?),
         machine,
@@ -1501,6 +1552,8 @@ pub mod individual;
 #[path = "machines/mutations.rs"]
 pub mod mutations;
 
+#[path = "machines/gateway.rs"]
+mod gateway;
 #[path = "machines/policies.rs"]
 pub mod policies;
 

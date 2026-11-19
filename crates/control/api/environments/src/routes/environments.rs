@@ -459,7 +459,7 @@ pub(crate) async fn show_inventory_prepared(
         .chain(rows.iter().flat_map(|row| {
             exec_version::stored(&row.config)
                 .into_values()
-                .map(|entry| entry.by)
+                .map(|entry| entry.confirmation.by)
         }))
         .collect();
     let people = refusals::user_refs(conn, &people).await?;
@@ -761,7 +761,7 @@ pub(crate) async fn show_inventory_prepared(
                 row.machine_id
                     .and_then(|machine| connector_versions.get(&machine))
                     .map(String::as_str),
-                orch_engine::updates::CONNECTOR_MINIMUM,
+                ctx.app.link.connector_minimum(),
             ),
             remote_write: switches.remote_write,
             terminal: switches.terminal,

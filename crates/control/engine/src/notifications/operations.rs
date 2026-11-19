@@ -62,6 +62,8 @@ pub struct OperationRecipient {
 /// A confirmed notification choice, retained on every child job of the operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotificationOperation {
+    /// The person whose confirmed act this notice records, retained across child jobs.
+    pub actor: Id,
     /// The operation that groups all independent members.
     pub id: Id,
     /// The visible operation kind, such as lost, recover or host_delete.
@@ -270,7 +272,54 @@ pub async fn extend_operation_audience(
         .drain(..)
         .map(|person| (person.user, person))
         .collect::<BTreeMap<_, _>>();
-    for (object, permission) in resources {
+    let nodes: Vec<_> = resources
+        .iter()
+        .filter(|(object, _)| object.kind.node().is_some())
+        .collect();
+    if !nodes.is_empty() {
+        let ids: Vec<_> = nodes.iter().map(|(object, _)| object.id).collect();
+        let graph = orch_authz::engine::Graph::load(conn, &ids).await?;
+        let mut asked = Vec::new();
+        let mut sites = Vec::new();
+        let mut permissions = Vec::new();
+        for (object, permission) in nodes {
+            if let Some(site) = graph.site_of(object.id) {
+                sites.push(site);
+                permissions.push(*permission);
+                if !asked.contains(permission) {
+                    asked.push(*permission);
+                    asked.extend(permission.held_through());
+                }
+            }
+        }
+        let frame = orch_authz::engine::Frame::load(
+            conn,
+            principal,
+            Default::default(),
+            graph,
+            &sites,
+            &asked,
+        )
+        .await?;
+        for (site, permission) in sites.iter().zip(permissions) {
+            for user in
+                orch_authz::holders::who_holds_for_notifications(conn, &frame, site, permission)
+                    .await?
+            {
+                all.entry(user)
+                    .or_insert_with(|| OperationRecipient {
+                        user,
+                        ..Default::default()
+                    })
+                    .resources
+                    .insert((site.kind.as_str().into(), site.id));
+            }
+        }
+    }
+    for (object, permission) in resources
+        .iter()
+        .filter(|(object, _)| object.kind.node().is_none())
+    {
         for user in managers(conn, principal, *object, *permission).await? {
             all.entry(user)
                 .or_insert_with(|| OperationRecipient {
@@ -360,11 +409,13 @@ pub async fn notify_operation(
                     .map(|id| format!("/topic/{id}"))
             })
             .or_else(|| {
-                person
-                    .providers
-                    .iter()
-                    .next()
-                    .map(|id| format!("/resources/providers/{id}"))
+                person.providers.iter().next().map(|id| {
+                    if operation.kind == "provider_delete" {
+                        "/resources/providers".into()
+                    } else {
+                        format!("/resources/providers/{id}")
+                    }
+                })
             })
             .or_else(|| {
                 person
@@ -375,6 +426,15 @@ pub async fn notify_operation(
             })
             .or_else(|| {
                 person.resources.iter().next().map(|(kind, id)| {
+                    if matches!(kind.as_str(), "org" | "project" | "topic" | "thread") {
+                        return format!("/{kind}/{id}");
+                    }
+                    if kind == "mcp_server" && operation.kind == "mcp_delete" {
+                        return "/resources/mcp".into();
+                    }
+                    if kind == "mount" && operation.kind == "mount_delete" {
+                        return "/resources/mounts".into();
+                    }
                     format!(
                         "/resources/{}/{}",
                         match kind.as_str() {
@@ -397,7 +457,7 @@ pub async fn notify_operation(
                         .iter()
                         .any(|topic| unavailable_defaults.contains(topic))));
         // A resource manager may know the work count without being able to read its threads.
-        let data = json!({"operation_kind":operation.kind,"name":operation.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
+        let data = json!({"operation_kind":operation.kind,"actor":operation.actor,"name":operation.name,"state":state,"environment_ids":person.environments,"thread_count":person.threads.len(),"default_topics":person.defaults,"provider_ids":person.providers,"resource_ids":person.resources,"path":path,"loss":operation.kind=="lost","default_lost":default_lost,"at":Time::new(at)});
         rows::publish(
             conn,
             operation.id,

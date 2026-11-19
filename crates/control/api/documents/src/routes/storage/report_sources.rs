@@ -317,6 +317,35 @@ impl Book {
         Ok(target)
     }
 
+    /// Explicit consumer edits need their own Manage target on both the preview and the accepted operation.
+    pub(super) async fn mount_consumer(
+        &mut self,
+        conn: &mut Conn,
+        object: Option<ObjectRef>,
+    ) -> ApiResult<bool> {
+        let target = match object {
+            Some(object) => self.object(conn, object).await?,
+            None => targets::system(),
+        };
+        if native::modern(&self.caller)
+            && !native::permits(
+                &self.plan,
+                self.declaration,
+                &self.caller,
+                &Source::Records,
+                target.object.kind,
+                &target,
+            )?
+        {
+            return Ok(false);
+        }
+        self.groups
+            .entry(target.object.kind)
+            .or_default()
+            .push(target);
+        Ok(true)
+    }
+
     pub async fn keep_object(
         &mut self,
         conn: &mut Conn,
@@ -544,6 +573,39 @@ impl Book {
             .ok_or_else(ApiError::not_found)?
             .clone();
         self.physical
+            .entry(KeyTargetKind::Object(ObjectKind::Machine))
+            .or_default()
+            .push(target);
+        Ok(())
+    }
+
+    /// An unavailable physical choice must not prevent keeping the data or deleting its definition.
+    pub(super) fn permits_destination(&self, machine: Id) -> ApiResult<bool> {
+        let Some(target) = self.machines.get(&machine) else {
+            return Ok(false);
+        };
+        if !native::modern(&self.caller) {
+            return Ok(true);
+        }
+        native::permits(
+            &self.plan,
+            self.declaration,
+            &self.caller,
+            &Source::Physical,
+            KeyTargetKind::Object(ObjectKind::Machine),
+            target,
+        )
+    }
+
+    /// A machine name follows the same real governor as its physical management facade.
+    pub(super) fn machine_name(&mut self, machine: Id) -> ApiResult<()> {
+        let target = self
+            .machines
+            .get(&machine)
+            .ok_or_else(ApiError::not_found)?
+            .clone();
+        self.needed_names.insert(target.object);
+        self.named
             .entry(KeyTargetKind::Object(ObjectKind::Machine))
             .or_default()
             .push(target);

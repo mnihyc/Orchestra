@@ -303,6 +303,7 @@ pub fn start_with_settler(
     );
     let failing = settling.clone();
     let conversation = Conversation {
+        physical_opening: params.spec.opening_id,
         params,
         mapper,
         settling,
@@ -422,12 +423,19 @@ impl UnadmittedReply {
 /// lane holds. While a gate is shut nothing is sent, and the program is slowed as a slow sink would slow it.
 const OUTBOX_MAX: usize = flow::QUEUE_ITEMS;
 
+/// The physical producer at the time an observation enters the outbox.
+#[derive(Clone, Copy)]
+struct Source {
+    opening_id: Id,
+    segment_id: Id,
+}
+
 /// What waits to go to the host, in the order it happened.
 enum Out {
     /// An event of the session, with the segment it was made in.
-    Event(Id, Box<SessionEvent>),
+    Event(Source, Box<SessionEvent>),
     /// A request report: the segment, the turn and the request.
-    Request(Id, TurnId, Box<UsageRequest>),
+    Request(Source, TurnId, Box<UsageRequest>),
     /// The use of a turn that ends, with the window of totals its result closed, and what the rows of the main
     /// conversation's own requests of the turn, reported before the result, carry of that use (`MainRows::carried`: the
     /// requests that ended with their stop reason in full, the others as far as the result's own tally of the main
@@ -435,7 +443,7 @@ enum Out {
     /// states the figure that and the sub-agents' requests named for the window carry of it, and what the requests of
     /// other turns' sub-agents added to the totals in that window is left out of it: the engine closes a turn as its use
     /// less the stated figure, and counts the rows whenever they come.
-    Usage(Id, Box<UsageUpdated>, u64, TokenUsage),
+    Usage(Source, Box<UsageUpdated>, u64, TokenUsage),
     /// The gate holds a turn's use, up to the configured wait, until the figures of the rows inside that use are final,
     /// so that the stated figure and the rows agree. Only the settler opens it.
     Gate(u64),
@@ -646,6 +654,8 @@ struct Conversation {
     next_gate: u64,
     outbox: Mutex<Outbox>,
     process: Option<Running>,
+    /// Captured by this native process generation, independently of a later logical reconfiguration.
+    physical_opening: Id,
     process_tx: flow::Sender<(u64, ProcessEvent)>,
     process_rx: flow::Receiver<(u64, ProcessEvent)>,
     generation: u64,
@@ -855,36 +865,38 @@ impl Conversation {
             match next {
                 None => return,
                 Some(Out::Gate(..)) => {}
-                Some(Out::Usage(segment, mut usage, window, main)) => {
+                Some(Out::Usage(source, mut usage, window, main)) => {
                     let carried = self.settling.take_window(window, usage.turn_id);
                     crate::child_usage::leave_out(&mut usage, &carried.others);
                     if let Some(report) = usage.report.as_mut() {
                         report.carried_by_rows = Some(carried.own.plus(main));
                     }
                     self.lock_outbox().remember(&usage);
-                    self.send_event(segment, SessionEvent::UsageUpdated(*usage))
+                    self.send_event(source, SessionEvent::UsageUpdated(*usage))
                         .await;
                 }
-                Some(Out::Event(segment, mut event)) => {
+                Some(Out::Event(source, mut event)) => {
                     self.lock_outbox().as_sent(&mut event);
-                    self.send_event(segment, *event).await;
+                    self.send_event(source, *event).await;
                 }
-                Some(Out::Request(segment, turn, request)) => {
+                Some(Out::Request(source, turn, request)) => {
                     let _ = self
                         .params
                         .sink
-                        .request(self.params.thread_id, segment, turn, *request)
+                        .for_opening(source.opening_id)
+                        .request(self.params.thread_id, source.segment_id, turn, *request)
                         .await;
                 }
             }
         }
     }
 
-    async fn send_event(&self, segment: Id, event: SessionEvent) {
+    async fn send_event(&self, source: Source, event: SessionEvent) {
         if self
             .params
             .sink
-            .session(self.params.thread_id, segment, event)
+            .for_opening(source.opening_id)
+            .session(self.params.thread_id, source.segment_id, event)
             .await
             .is_err()
             && let Some(kill) = self.process.as_ref().and_then(Running::kill_handle)
@@ -893,9 +905,16 @@ impl Conversation {
         }
     }
 
+    fn source(&self, segment_id: Id) -> Source {
+        Source {
+            opening_id: self.physical_opening,
+            segment_id,
+        }
+    }
+
     async fn emit(&self, event: SessionEvent) {
         self.put(Out::Event(
-            self.params.spec.settings.segment_id,
+            self.source(self.params.spec.settings.segment_id),
             Box::new(event),
         ));
         self.drain().await;
@@ -906,7 +925,10 @@ impl Conversation {
         let segment = self.params.spec.settings.segment_id;
         for heard in self.mapper.take_child_heard() {
             match heard {
-                Heard::Printed { turn, printed } => self.settling.printed(segment, turn, *printed),
+                Heard::Printed { turn, printed } => {
+                    self.settling
+                        .printed(self.physical_opening, segment, turn, *printed)
+                }
                 Heard::Placed(placement) => self.settling.placed(placement),
                 Heard::Dropped(keys) => self.settling.dropped(keys),
             }
@@ -960,13 +982,13 @@ impl Conversation {
                         .get(&usage.turn_id)
                         .map_or_else(TokenUsage::default, |rows| rows.carried(main_use));
                     self.put(Out::Usage(
-                        segment,
+                        self.source(segment),
                         Box::new(usage),
                         window.unwrap_or_default(),
                         main,
                     ));
                 }
-                event => self.put(Out::Event(segment, Box::new(event))),
+                event => self.put(Out::Event(self.source(segment), Box::new(event))),
             }
         }
         for (turn, request) in requests.take().unwrap_or_default() {
@@ -984,7 +1006,7 @@ impl Conversation {
     /// (`MainRows::carried`).
     fn put_request(&mut self, segment: Id, turn: TurnId, request: UsageRequest) {
         self.main_rows.entry(turn).or_default().add(&request);
-        self.put(Out::Request(segment, turn, Box::new(request)));
+        self.put(Out::Request(self.source(segment), turn, Box::new(request)));
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -1224,7 +1246,8 @@ impl Conversation {
                 &self.params.spec.settings.model,
             )
             .unwrap_or(true);
-        let changed = spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
+        let changed = spec.opening_id != self.params.spec.opening_id
+            || spec.settings.prompt_cache_ttl != self.params.spec.settings.prompt_cache_ttl
             || page_reader_changed
             || spec.settings.background_wake != self.params.spec.settings.background_wake
             || spec.mcp != self.params.spec.mcp
@@ -1776,6 +1799,7 @@ impl Conversation {
             Ok(running) => running,
             Err(error) => return Err(AdapterError::HarnessUnavailable(error.to_string())),
         };
+        self.physical_opening = self.params.spec.opening_id;
         self.process = Some(running);
         self.settings_ask = None;
         // A process that begins the conversation counts its use from nothing; one that resumes or forks it
@@ -2679,6 +2703,8 @@ impl Conversation {
         self.lose_session(&info.describe()).await;
         if !expected && !had_turn && was_live {
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
                 reason: format!("the harness process ended: {}", info.describe()),
             }))
             .await;
@@ -2715,6 +2741,8 @@ impl Conversation {
             let events = self.mapper.abandon_turn();
             self.emit_all(events).await;
             self.emit(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: self.physical_opening,
                 reason: format!("the harness process ended: {why}"),
             }))
             .await;
@@ -2749,7 +2777,14 @@ mod outbox_tests {
     use super::*;
 
     fn request() -> Out {
-        Out::Request(orch_types::new_id(), orch_types::new_id(), Box::default())
+        Out::Request(
+            Source {
+                opening_id: orch_types::new_id(),
+                segment_id: orch_types::new_id(),
+            },
+            orch_types::new_id(),
+            Box::default(),
+        )
     }
 
     fn kinds(outbox: &mut Outbox) -> Vec<&'static str> {
@@ -2804,7 +2839,13 @@ mod outbox_tests {
     }
 
     fn event(event: SessionEvent) -> Out {
-        Out::Event(orch_types::new_id(), Box::new(event))
+        Out::Event(
+            Source {
+                opening_id: orch_types::new_id(),
+                segment_id: orch_types::new_id(),
+            },
+            Box::new(event),
+        )
     }
 
     fn closed(request_ref: &str) -> SessionEvent {
@@ -2891,6 +2932,8 @@ mod outbox_tests {
     fn what_asks_or_takes_an_ask_back_passes_a_shut_gate_in_its_order_and_the_rest_waits() {
         let lost = || {
             event(SessionEvent::SessionLost(SessionLost {
+                expected: false,
+                opening_id: orch_types::new_id(),
                 reason: "gone".to_owned(),
             }))
         };

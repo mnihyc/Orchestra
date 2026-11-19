@@ -172,9 +172,15 @@ async fn reset_link(
             user.username, user.username
         ));
     }
-    if deployment.config.system.public_url == ServerConfig::default().system.public_url {
+    if made.url.starts_with(&format!(
+        "{}/",
+        ServerConfig::default()
+            .system
+            .public_url
+            .trim_end_matches('/')
+    )) {
         note(
-            "system.public_url is still the example address of the configuration: set it to the address people open, or this link leads nowhere",
+            "the effective public address is still the shipped example: set the address people open in Management, or restore the file seed with orchctl public-address reset --config <file>",
         );
     }
     Ok(())

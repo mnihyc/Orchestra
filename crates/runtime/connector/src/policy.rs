@@ -173,12 +173,22 @@ pub fn inspect_environment_path(
             return Ok(orch_driver_contract::runtime::DirectoryBinding {
                 path: real.to_string_lossy().into_owned(),
                 device: Some(stat.st_dev),
-                inode: Some(stat.st_ino),
+                inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    stat.st_ino,
+                )),
             });
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = real;
+    if directory || real.is_dir() {
+        let roots: Vec<_> = policy.environment_roots.iter().map(PathBuf::from).collect();
+        return orch_envhost::paths::Workspace::directory_binding(&real, &roots).map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("environment.roots: {error}"),
+            )
+        });
+    }
     Err(CommandError::new(
         ErrorCode::Unsupported,
         "this platform cannot verify an existing directory beneath environment.roots",
@@ -194,13 +204,14 @@ pub fn writable_environment_directory(path: &Path) -> Result<(), CommandError> {
             .map_err(|_| CommandError::new(ErrorCode::PolicyRootNotAllowed, format!("this machine's owners must make {} writable and searchable for user id {} (Orch will not change its owner or mode)", path.display(), rustix::process::geteuid().as_raw())))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        Err(CommandError::new(
-            ErrorCode::Unsupported,
-            "directory writability has not been verified on this platform",
-        ))
+        orch_envhost::paths::Workspace::require_directory_write(path).map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("the connector cannot write this directory: {error}"),
+            )
+        })
     }
 }
 
@@ -244,6 +255,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
         ports: config.ports.clone(),
         mcp_import: config.mcp.import,
         mcp_add: config.mcp.add,
+        exec_platform: config.exec.platform.clone(),
         exec_offers: config.exec.offers.clone(),
         environment_deliver_files: config.environment.deliver_files,
         agent_max_sandbox,
@@ -257,6 +269,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
             .map(|harness| PolicyHarness {
                 kind: harness.kind.clone(),
                 path: harness.path.clone(),
+                confirmation: None,
             })
             .collect(),
         tools_fetch: config.tools.fetch,
@@ -293,6 +306,7 @@ pub fn put_policy(config: &mut ConnectorConfig, policy: &LocalPolicy) {
     config.mcp.import = policy.mcp_import;
     config.mcp.add = policy.mcp_add;
     config.exec.offers.clone_from(&policy.exec_offers);
+    config.exec.platform.clone_from(&policy.exec_platform);
     config.agent.max_sandbox = policy.agent_max_sandbox.as_str().to_owned();
     config.agent.programs = policy.agent_programs;
     config.provider.programs = policy.provider_programs;
@@ -854,6 +868,7 @@ struct State {
 /// The local policy of this connector: read from its file, kept in it, changed by its owner, and by the
 /// system for the keys that were handed over.
 pub struct PolicyStore {
+    platform_revision: std::sync::atomic::AtomicU64,
     state: Mutex<State>,
     path: Option<PathBuf>,
     changed: watch::Sender<u64>,
@@ -946,6 +961,7 @@ impl PolicyStore {
 
     fn build(config: ConnectorConfig, policy: Option<LocalPolicy>, path: Option<PathBuf>) -> Self {
         Self {
+            platform_revision: std::sync::atomic::AtomicU64::new(1),
             state: Mutex::new(State {
                 config,
                 policy,
@@ -958,6 +974,33 @@ impl PolicyStore {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn platform_review(&self) -> Option<u64> {
+        if orch_envhost::RUNTIME_VERIFIED {
+            return None;
+        }
+        let state = self.state();
+        if !state
+            .policy
+            .as_ref()
+            .is_some_and(crate::installation::runtime_reviewed)
+        {
+            return None;
+        }
+        Some(
+            self.platform_revision
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn changed_platform(&self, previous: Option<&LocalPolicy>, next: Option<&LocalPolicy>) {
+        if previous.and_then(|p| p.exec_platform.build())
+            != next.and_then(|p| p.exec_platform.build())
+        {
+            self.platform_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Whether the system made this machine, so that it has no local policy.
@@ -997,6 +1040,30 @@ impl PolicyStore {
     #[must_use]
     pub fn config(&self) -> ConnectorConfig {
         self.state().config.clone()
+    }
+
+    /// Keep gateway selection in the same locked configuration as policy, roles and programs.
+    pub fn change_gateway(
+        &self,
+        choice: &orch_link_contract::gateways::GatewayChoice,
+    ) -> Result<bool, PolicyFault> {
+        let mut state = self.state();
+        if state.config.connector.gateway == *choice {
+            return Ok(false);
+        }
+        let mut config = state.config.clone();
+        config.connector.gateway = choice.clone();
+        orch_config::loader::Validate::validate(&config)
+            .map_err(|error| PolicyFault::Config(error.to_string()))?;
+        let next = State {
+            config,
+            policy: state.policy.clone(),
+            active_roles: state.active_roles.clone(),
+        };
+        self.persist(&next)?;
+        *state = next;
+        self.changed.send_modify(|count| *count += 1);
+        Ok(true)
     }
 
     /// The one file owns both policy provenance and runtime program registrations; a policy save
@@ -1090,9 +1157,18 @@ impl PolicyStore {
         kind: &str,
         expected: Option<&str>,
         replacement: Option<&str>,
+        confirmation: Option<orch_agent_programs::confirmation::Confirmation>,
     ) -> Result<(), CommandError> {
         let mut state = self.state();
         let mut policy = harness_change_policy(state.policy.as_ref())?.clone();
+        if replacement.is_some() != confirmation.is_some()
+            || confirmation.is_some_and(|decision| decision.by.is_nil())
+        {
+            return Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "a remote program confirmation needs its original manager and recorded time",
+            ));
+        }
         if kind.is_empty() || replacement.is_some_and(str::is_empty) {
             return Err(CommandError::new(
                 ErrorCode::Unsupported,
@@ -1110,6 +1186,7 @@ impl PolicyStore {
             policy.agent_harnesses.push(PolicyHarness {
                 kind: kind.to_owned(),
                 path: path.to_owned(),
+                confirmation,
             });
         }
         let before = state.config.policy.values.clone();
@@ -1230,6 +1307,7 @@ impl PolicyStore {
             active_roles: state.active_roles.clone(),
         };
         self.persist(&next)?;
+        self.changed_platform(state.policy.as_ref(), next.policy.as_ref());
         *state = next;
         self.changed.send_modify(|count| *count += 1);
         Ok(())
@@ -1314,6 +1392,7 @@ impl PolicyStore {
         {
             return Ok(false);
         }
+        self.changed_platform(state.policy.as_ref(), Some(&found));
         state.config = read;
         state.policy = Some(found);
         self.changed.send_modify(|count| *count += 1);
@@ -1337,7 +1416,20 @@ impl PolicyStore {
                 None,
             ));
         };
-        let change = policy.apply(values);
+        let previous_system = policy.exec_platform.clone();
+        let mut change = policy.apply(values);
+        let key = PolicyKey::ExecPlatform.as_str();
+        if change.applied.iter().any(|applied| applied == key)
+            && let orch_agent_programs::confirmation::PlatformConsent::Approved {
+                build,
+                confirmation,
+            } = &policy.exec_platform
+            && (confirmation.is_none() || Some(build) != crate::installation::reviewable_platform())
+        {
+            policy.exec_platform = previous_system;
+            change.applied.retain(|applied| applied != key);
+            change.refused.push(key.into());
+        }
         if !change.applied.is_empty() {
             let before = state.config.policy.values.clone();
             for key in &change.applied {
@@ -1474,32 +1566,107 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn program_confirmation() -> orch_agent_programs::confirmation::Confirmation {
+        orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        }
+    }
+
     #[test]
     fn individual_harness_changes_replace_one_kind_and_refuse_stale_captures() {
         let store = PolicyStore::connected(ConnectorConfig::default(), None).unwrap();
         store.offered_roles(&[orch_link_contract::session::Role::Environment]);
         assert!(store.harness_selection("codex").is_err());
-        assert!(store.change_harness("codex", None, Some("/one")).is_err());
+        assert!(
+            store
+                .change_harness("codex", None, Some("/one"), Some(program_confirmation()))
+                .is_err()
+        );
         store.delegate(&["agent.harnesses".into()]).unwrap();
-        store.change_harness("codex", None, Some("/one")).unwrap();
         store
-            .change_harness("claude-code", None, Some("/two"))
+            .change_harness("codex", None, Some("/one"), Some(program_confirmation()))
+            .unwrap();
+        store
+            .change_harness(
+                "claude-code",
+                None,
+                Some("/two"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         let captured = store.harness_selection("codex").unwrap();
         store
-            .change_harness("codex", captured.as_deref(), Some("/replacement"))
+            .change_harness(
+                "codex",
+                captured.as_deref(),
+                Some("/replacement"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         assert!(
             store
-                .change_harness("codex", captured.as_deref(), None)
+                .change_harness("codex", captured.as_deref(), None, None)
                 .is_err()
         );
         assert_eq!(store.harness("codex").unwrap().path, "/replacement");
         store
-            .change_harness("codex", Some("/replacement"), None)
+            .change_harness("codex", Some("/replacement"), None, None)
             .unwrap();
         assert!(store.harness("codex").is_none());
         assert_eq!(store.harness("claude-code").unwrap().path, "/two");
+    }
+
+    #[test]
+    fn a_remote_program_confirmation_keeps_its_manager_after_restart_and_revocation_removes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let store = PolicyStore::connected(ConnectorConfig::default(), Some(path.clone())).unwrap();
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        let confirmation = orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        };
+        assert!(
+            store
+                .change_harness("codex", None, Some("/codex"), None)
+                .is_err()
+        );
+        assert!(store.harness("codex").is_none());
+        store
+            .change_harness("codex", None, Some("/codex"), Some(confirmation))
+            .unwrap();
+        assert_eq!(
+            store.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        let config: ConnectorConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let restarted = PolicyStore::connected(config, Some(path.clone())).unwrap();
+        assert_eq!(
+            restarted.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        restarted
+            .change_harness("codex", Some("/codex"), None, None)
+            .unwrap();
+        let config: ConnectorConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let revoked = PolicyStore::connected(config, Some(path)).unwrap();
+        assert!(revoked.harness("codex").is_none());
+    }
+
+    #[test]
+    fn a_local_program_selection_has_no_invented_human_approver() {
+        let text = "[[agent.harnesses]]\nkind = 'codex'\npath = '/operator/codex'\n";
+        let mut config: ConnectorConfig =
+            orch_config::load_text(text, "connector.toml", |_| None).unwrap();
+        config.policy.local_keys = Some(explicit_local_keys(text).unwrap());
+        let store = PolicyStore::connected(config, None).unwrap();
+        let selected = store.harness("codex").unwrap();
+        assert_eq!(selected.path, "/operator/codex");
+        assert!(selected.confirmation.is_none());
     }
 
     #[test]
@@ -1514,7 +1681,9 @@ mod tests {
                 let ready = Arc::clone(&ready);
                 scope.spawn(move || {
                     ready.wait();
-                    store.change_harness(kind, None, Some(path)).unwrap();
+                    store
+                        .change_harness(kind, None, Some(path), Some(program_confirmation()))
+                        .unwrap();
                 });
             }
         });

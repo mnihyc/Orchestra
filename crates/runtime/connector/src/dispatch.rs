@@ -76,6 +76,7 @@ pub struct DuplicateKind(pub CommandKind);
 /// Carries the commands of the system out.
 pub struct Dispatcher {
     roles: HashMap<CommandKind, Vec<Arc<dyn RoleHandler>>>,
+    answer_roles: Vec<Arc<dyn RoleHandler>>,
     policy: Arc<PolicyStore>,
     facts: Arc<FactsNow>,
     local_harnesses: Option<(
@@ -92,6 +93,7 @@ pub struct Dispatcher {
         Arc<crate::role_changes::Requests>,
         Arc<crate::roles::Services>,
     )>,
+    gateway_control: Option<Arc<crate::gateway_control::Requests>>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -189,6 +191,7 @@ impl Dispatcher {
     pub fn new(policy: Arc<PolicyStore>, facts: Arc<FactsNow>) -> Self {
         Self {
             roles: HashMap::new(),
+            answer_roles: Vec::new(),
             policy,
             facts,
             local_harnesses: None,
@@ -200,6 +203,7 @@ impl Dispatcher {
             )),
             programs: None,
             role_changes: None,
+            gateway_control: None,
         }
     }
 
@@ -251,6 +255,10 @@ impl Dispatcher {
         self.role_changes = Some((requests, services));
     }
 
+    pub fn gateway_control(&mut self, requests: Arc<crate::gateway_control::Requests>) {
+        self.gateway_control = Some(requests);
+    }
+
     /// Hands the commands a role takes to it. A kind that another role takes already is refused, unless the
     /// catalogue addresses it to either of two roles.
     pub fn add(&mut self, role: &Arc<dyn RoleHandler>) -> Result<(), DuplicateKind> {
@@ -271,6 +279,7 @@ impl Dispatcher {
         for kind in role.takes() {
             self.roles.entry(*kind).or_default().push(Arc::clone(role));
         }
+        self.answer_roles.push(Arc::clone(role));
         Ok(())
     }
 
@@ -342,6 +351,26 @@ impl Dispatcher {
 
 #[async_trait]
 impl CommandHandler for Dispatcher {
+    fn tool_session_restrict(&self, update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {
+        for role in &self.answer_roles {
+            role.tool_session_restrict(update);
+        }
+    }
+    fn tool_session_refresh(&self) {
+        for role in &self.answer_roles {
+            role.tool_session_refresh();
+        }
+    }
+    fn tool_session_update(&self, update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {
+        for role in &self.answer_roles {
+            role.tool_session_update(update);
+        }
+    }
+    fn tool_session_control(&self, available: bool) {
+        for role in &self.answer_roles {
+            role.tool_session_control(available);
+        }
+    }
     async fn interrupted(&self, id: orch_types::Id, command: &Command) -> Result<(), CommandError> {
         self.role_for(command)?.interrupted(id, command).await
     }
@@ -353,6 +382,12 @@ impl CommandHandler for Dispatcher {
         }
     }
     fn answered(&self, id: orch_types::Id) {
+        for role in &self.answer_roles {
+            role.answered(id);
+        }
+        if let Some(requests) = &self.gateway_control {
+            requests.answered(id);
+        }
         if let Some((requests, _)) = &self.role_changes {
             requests.answered(id);
         }
@@ -380,8 +415,37 @@ impl CommandHandler for Dispatcher {
                 return Ok(CommandResult::MachineProbe((self.facts)()));
             }
             Command::MachineRolesSet(body) => return self.machine_roles_set(&context, body),
-            Command::MachinePrograms(request) => {
+            Command::MachineGatewaySet(body) => {
+                if context.cancel.is_cancelled() {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "The gateway change was cancelled.",
+                    ));
+                }
+                let requests = self.gateway_control.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::Unsupported,
+                        "This composition has no persisted gateway control.",
+                    )
+                })?;
+                let saved = requests.request(context.id, &body.choice)?;
+                return Ok(CommandResult::MachineGatewaySet(
+                    orch_link_contract::commands::MachineGatewaySetResult {
+                        choice: saved.choice,
+                        changed: saved.changed,
+                    },
+                ));
+            }
+            Command::MachinePrograms(native) => {
                 use orch_api_contract::machine_programs::MachineProgramsCommand;
+                if !native.coherent() {
+                    return Err(CommandError::new(
+                        ErrorCode::Unsupported,
+                        "the native program decision has no valid original manager attribution",
+                    ));
+                }
+                let confirmation = native.confirmation;
+                let request = native.request;
                 let harness = match &request {
                     MachineProgramsCommand::ConfirmHarness { kind, path } => {
                         Some((kind.as_str(), path.as_str(), true))
@@ -427,6 +491,7 @@ impl CommandHandler for Dispatcher {
                         kind,
                         selected.as_deref(),
                         confirm.then_some(path),
+                        confirmation,
                     )?;
                     discovery.refresh(&self.policy).await;
                     let facts = self.report_local_programs(publisher.as_ref()).await;
@@ -484,7 +549,18 @@ impl CommandHandler for Dispatcher {
                 }
                 return Ok(CommandResult::MachinePrograms(facts));
             }
-            Command::MachinePolicySet(body) => return self.machine_policy_set(&body.values),
+            Command::MachinePolicySet(body) => {
+                let reply = self.machine_policy_set(&body.values)?;
+                if body
+                    .values
+                    .contains_key(orch_link_contract::policy::PolicyKey::ExecPlatform.as_str())
+                {
+                    for role in &self.answer_roles {
+                        role.review_system().await?;
+                    }
+                }
+                return Ok(reply);
+            }
             Command::MachineUpdateNow(body) => {
                 let _ = self.policy.reload_from_file();
                 return self
@@ -503,9 +579,13 @@ impl CommandHandler for Dispatcher {
         let role = self.role_for(&gated.command)?;
         let body = gated.command.body().unwrap_or(serde_json::Value::Null);
         let reported = body.get("work").filter(|work| !work.is_null());
+        let allowance = match &gated.command {
+            Command::NodeServerUpdate(body) => Some(body.timeout_secs),
+            _ => None,
+        };
         let budget = Duration::from_secs(
-            reported
-                .and_then(|work| work["timeout_secs"].as_u64())
+            allowance
+                .or_else(|| reported.and_then(|work| work["timeout_secs"].as_u64()))
                 .unwrap_or(u64::from(kind.deadline_secs())),
         );
         let cooperative = reported.is_some()
@@ -598,6 +678,12 @@ mod tests {
 
     fn context() -> CommandContext {
         CommandContext {
+            authority_deadline: None,
+            native_members: None,
+            native_revision: None,
+
+            native_fences: None,
+            native_target: None,
             id: new_id(),
             key: None,
             deadline: Time::new(chrono::Utc::now() + chrono::Duration::minutes(5)),
@@ -629,11 +715,16 @@ mod tests {
     #[cfg(unix)]
     #[async_trait]
     impl crate::events::Publisher for LocalProgramReports {
-        async fn publish(
+        async fn publish_from(
             &self,
+            native_opening_id: Option<orch_types::Id>,
             stream: orch_link_contract::streams::Stream,
             event: orch_link_contract::events::Event,
         ) -> Result<(), orch_link::streams::PublishError> {
+            assert!(
+                native_opening_id.is_none(),
+                "machine facts have no physical session"
+            );
             assert_eq!(stream, orch_link_contract::streams::Stream::Machine);
             let orch_link_contract::events::Event::MachineFacts(facts) = event else {
                 panic!("only local program facts are published")
@@ -684,13 +775,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn program_confirmation() -> orch_agent_programs::confirmation::Confirmation {
+        orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        }
+    }
+
+    #[cfg(unix)]
     fn harness_action(action: &str, kind: &str, path: &std::path::Path) -> Command {
-        Command::MachinePrograms(
-            serde_json::from_value(serde_json::json!({
+        Command::MachinePrograms(orch_link_contract::commands::MachineProgramsRequest {
+            request: serde_json::from_value(serde_json::json!({
                 "action":action,"kind":kind,"path":path.to_string_lossy()
             }))
             .unwrap(),
-        )
+            confirmation: (action == "confirm_harness").then(program_confirmation),
+        })
     }
 
     #[cfg(unix)]
@@ -755,7 +855,12 @@ mod tests {
             .unwrap();
         dispatcher
             .policy
-            .change_harness("claude-code", None, Some("/kept/claude"))
+            .change_harness(
+                "claude-code",
+                None,
+                Some("/kept/claude"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         // Reuse the existing dispatch tests' observation headroom, while the real admission writer stays held.
         let admission = Arc::clone(&dispatcher.turn_admission).write_owned().await;
@@ -805,9 +910,10 @@ mod tests {
             Duration::from_secs(30),
             dispatcher.handle(
                 context(),
-                Command::MachinePrograms(
-                    orch_api_contract::machine_programs::MachineProgramsCommand::Reload,
-                ),
+                Command::MachinePrograms(orch_link_contract::commands::MachineProgramsRequest {
+                    request: orch_api_contract::machine_programs::MachineProgramsCommand::Reload,
+                    confirmation: None,
+                }),
             ),
         )
         .await
@@ -819,7 +925,12 @@ mod tests {
         assert_eq!(facts.harnesses[0].version, "0.167.0");
         dispatcher
             .policy
-            .change_harness("codex", replacement.to_str(), Some("codex"))
+            .change_harness(
+                "codex",
+                replacement.to_str(),
+                Some("codex"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(30),
@@ -1284,5 +1395,56 @@ mod tests {
         assert_eq!(result.applied, ["environment.roots"]);
         assert_eq!(result.refused, ["environment.terminal"]);
         assert_eq!(result.policy.environment_roots, ["/srv"]);
+    }
+
+    struct ServerPreparation {
+        wait: Duration,
+    }
+    #[async_trait]
+    impl RoleHandler for ServerPreparation {
+        fn role(&self) -> Role {
+            Role::Node
+        }
+        fn takes(&self) -> &'static [CommandKind] {
+            &[CommandKind::NodeServerUpdate]
+        }
+        async fn handle(&self, _: Call, command: Command) -> Result<CommandResult, CommandError> {
+            let Command::NodeServerUpdate(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "this fixture prepares only the server updater",
+                ));
+            };
+            tokio::time::sleep(self.wait).await;
+            Ok(CommandResult::NodeServerUpdate(
+                orch_api_contract::admin::ServerUpdateObservation {
+                    stage: orch_api_contract::admin::ServerUpdateStage::Queued,
+                    reason: None,
+                    from_version: None,
+                    to_version: body.release,
+                },
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn a_server_update_uses_its_accepted_allowance_after_the_command_default_has_elapsed() {
+        let nominal = u64::from(CommandKind::NodeServerUpdate.deadline_secs());
+        let mut dispatcher = dispatcher(ConnectorConfig::default());
+        let role: Arc<dyn RoleHandler> = Arc::new(ServerPreparation {
+            wait: Duration::from_secs(nominal + 1),
+        });
+        dispatcher.add(&role).unwrap();
+        let result = dispatcher
+            .handle(
+                context(),
+                Command::NodeServerUpdate(orch_link_contract::commands::NodeServerUpdate {
+                    job_id: new_id(),
+                    release: "1.2.3".into(),
+                    timeout_secs: nominal * 2,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, CommandResult::NodeServerUpdate(_)));
     }
 }

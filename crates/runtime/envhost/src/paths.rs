@@ -413,6 +413,167 @@ struct Frame {
 }
 
 impl Workspace {
+    pub(crate) fn open_root_without_links(path: &Path) -> Result<Dir> {
+        #[cfg(unix)]
+        {
+            Dir::open_policy_root(path)
+                .map_err(|error| HostError::io("holding the allowed workspace root", error))
+        }
+        #[cfg(windows)]
+        {
+            let refused =
+                || HostError::RootNotAllowed("the allowed workspace root is not absolute".into());
+            let mut parts = path.components();
+            let first = parts.next().ok_or_else(refused)?;
+            let mut anchor = PathBuf::new();
+            let root = if let Component::Prefix(prefix) = first {
+                anchor.push(prefix.as_os_str());
+                parts.next().ok_or_else(refused)?
+            } else {
+                first
+            };
+            if root != Component::RootDir {
+                return Err(refused());
+            }
+            anchor.push(root.as_os_str());
+            let mut directory = Dir::open_path(&anchor)
+                .map_err(|error| HostError::io("holding the workspace volume root", error))?;
+            for part in parts {
+                let Component::Normal(name) = part else {
+                    return Err(refused());
+                };
+                directory = directory.open_child(name).map_err(|error| {
+                    HostError::io("holding the allowed workspace directory", error)
+                })?;
+            }
+            Ok(directory)
+        }
+    }
+
+    /// Retains an already checked root instead of reopening a mutable absolute path.
+    pub(crate) fn open_beneath(
+        root: Dir,
+        relative: &Path,
+        aliases: &[PathBuf],
+        style: PathStyle,
+        case_sensitive: bool,
+    ) -> Result<Self> {
+        if relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(HostError::RootNotAllowed(
+                "the workspace leaves its allowed root".into(),
+            ));
+        }
+        let root_path = root.path().join(relative);
+        #[cfg(target_os = "linux")]
+        let directory = root.open_beneath(relative).map_err(|error| {
+            HostError::io("opening the workspace beneath its allowed root", error)
+        })?;
+        #[cfg(not(target_os = "linux"))]
+        let directory = {
+            let mut directory = root;
+            for part in relative.components() {
+                if let Component::Normal(name) = part {
+                    directory = directory.open_child(name).map_err(|error| {
+                        HostError::io("opening the workspace beneath its allowed root", error)
+                    })?;
+                }
+            }
+            directory
+        };
+        Ok(Self {
+            root: directory,
+            aliases: aliases
+                .iter()
+                .filter(|path| **path != root_path)
+                .cloned()
+                .collect(),
+            root_path,
+            style,
+            case_sensitive,
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn require_directory_write(path: &Path) -> Result<()> {
+        Self::open_root_without_links(path)?
+            .require_write()
+            .map_err(|error| HostError::io("checking the shared directory's write rights", error))
+    }
+
+    /// Identifies an existing directory through the same held root used to open its workspace.
+    pub fn directory_binding(
+        configured: &Path,
+        roots: &[PathBuf],
+    ) -> Result<orch_driver_contract::runtime::DirectoryBinding> {
+        let style = if cfg!(windows) {
+            PathStyle::Windows
+        } else {
+            PathStyle::Posix
+        };
+        let workspace = Self::open_under_roots(
+            configured,
+            roots,
+            style,
+            crate::platform::DEFAULT_CASE_SENSITIVE,
+        )?;
+        let meta = workspace
+            .root
+            .stat_self()
+            .map_err(|error| HostError::io("identifying the shared directory", error))?;
+        Ok(orch_driver_contract::runtime::DirectoryBinding {
+            path: workspace.root_path.to_string_lossy().into_owned(),
+            device: Some(meta.dev),
+            inode: Some(meta.ino),
+        })
+    }
+
+    /// Resolves an allowed spelling once, then walks only from its held policy root.
+    pub(crate) fn open_under_roots(
+        configured: &Path,
+        roots: &[PathBuf],
+        style: PathStyle,
+        case_sensitive: bool,
+    ) -> Result<Self> {
+        let real = std::fs::canonicalize(configured)
+            .map_err(|error| HostError::io("resolving the workspace root", error))?;
+        let mut failure = None;
+        for root in roots {
+            let Ok(root) = std::fs::canonicalize(root) else {
+                continue;
+            };
+            let Ok(relative) = real.strip_prefix(&root) else {
+                continue;
+            };
+            let selected = Self::open_root_without_links(&root).and_then(|root| {
+                Self::open_beneath(
+                    root,
+                    relative,
+                    &[configured.to_path_buf()],
+                    style,
+                    case_sensitive,
+                )
+            });
+            match selected {
+                Ok(workspace) => return Ok(workspace),
+                Err(error) => failure = Some(error),
+            }
+        }
+        Err(failure.unwrap_or_else(|| {
+            HostError::RootNotAllowed(format!(
+                "this machine's owner does not offer {}",
+                configured.display()
+            ))
+        }))
+    }
+
+    pub(crate) fn with_case_sensitivity(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
     /// Opens the directory at `root`. Its real path is read once; other spellings of the root
     /// that `aliases` lists are the ones an absolute link inside the workspace may use.
     pub fn open(
@@ -751,6 +912,93 @@ mod tests {
         Workspace::open(dir, &[], PathStyle::Posix, true).unwrap()
     }
 
+    #[test]
+    fn selecting_a_workspace_beneath_a_held_allowed_root_never_reopens_a_replacement_path() {
+        use std::io::Read;
+        let scratch = tempfile::tempdir().unwrap();
+        let allowed = scratch.path().join("allowed");
+        let moved = scratch.path().join("original");
+        let outside = scratch.path().join("outside");
+        for root in [&allowed, &outside] {
+            std::fs::create_dir_all(root.join("project")).unwrap();
+        }
+        std::fs::write(allowed.join("project/file"), b"original").unwrap();
+        std::fs::write(outside.join("project/file"), b"outside").unwrap();
+        let held = Dir::open_path(&allowed).unwrap();
+        std::fs::rename(&allowed, &moved).unwrap();
+        symlink(&outside, &allowed).unwrap();
+        let workspace =
+            Workspace::open_beneath(held, Path::new("project"), &[], PathStyle::Posix, true)
+                .unwrap();
+        let located = workspace.locate(&path("file"), Locate::THROUGH).unwrap();
+        let mut bytes = Vec::new();
+        located
+            .parent
+            .open_read(located.name().unwrap())
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"original");
+    }
+
+    #[test]
+    fn an_allowed_root_replaced_with_a_link_after_resolution_is_refused_before_any_child_is_opened()
+    {
+        let scratch = tempfile::tempdir().unwrap();
+        let allowed = scratch.path().join("allowed");
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let resolved = std::fs::canonicalize(&allowed).unwrap();
+        std::fs::rename(&allowed, scratch.path().join("original")).unwrap();
+        symlink(&outside, &allowed).unwrap();
+        assert!(Workspace::open_root_without_links(&resolved).is_err());
+    }
+
+    #[test]
+    fn workspace_root_selection_keeps_allowed_inward_links_and_refuses_outward_links() {
+        let scratch = tempfile::tempdir().unwrap();
+        let allowed = scratch.path().join("allowed");
+        let outside = scratch.path().join("outside");
+        std::fs::create_dir_all(allowed.join("project")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        symlink("project", allowed.join("inside")).unwrap();
+        symlink(&outside, allowed.join("outside")).unwrap();
+        let roots = vec![allowed.clone()];
+        let selected =
+            Workspace::open_under_roots(&allowed.join("inside"), &roots, PathStyle::Posix, true)
+                .unwrap();
+        let actual = workspace(&allowed.join("project")).root_meta().unwrap();
+        let opened = selected.root_meta().unwrap();
+        assert_eq!((opened.dev, opened.ino), (actual.dev, actual.ino));
+        assert!(
+            Workspace::open_under_roots(&allowed.join("outside"), &roots, PathStyle::Posix, true)
+                .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_readable_workspace_beneath_search_only_policy_directories_remains_available() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let allowed = scratch.path().join("allowed");
+        let parent = allowed.join("search-only");
+        let project = parent.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o111)).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o111)).unwrap();
+        let selected = Workspace::open_under_roots(
+            &project,
+            std::slice::from_ref(&allowed),
+            PathStyle::Posix,
+            true,
+        );
+        std::fs::set_permissions(&allowed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(selected.unwrap().root_meta().unwrap().is_dir());
+    }
+
     fn path(text: &str) -> RelPath {
         RelPath::parse(text, PathStyle::Posix).unwrap()
     }
@@ -1026,5 +1274,34 @@ mod tests {
             "nothing was made or removed there"
         );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn inspecting_a_shared_directory_returns_the_current_native_identity_on_this_platform() {
+        let scratch = tempfile::tempdir().unwrap();
+        let offered = scratch.path().join("shared");
+        let directory = offered.join("project");
+        std::fs::create_dir_all(&directory).unwrap();
+        let roots = [offered.clone()];
+        let first = Workspace::directory_binding(&directory, &roots).unwrap();
+        let meta = Dir::open_path(&directory).unwrap().stat_self().unwrap();
+        assert_eq!(
+            (first.device, first.inode),
+            (Some(meta.dev), Some(meta.ino))
+        );
+        assert_eq!(
+            Path::new(&first.path),
+            std::fs::canonicalize(&directory).unwrap()
+        );
+        assert!(Workspace::directory_binding(scratch.path(), &roots).is_err());
+        std::fs::rename(&directory, offered.join("retained")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        let replacement = Workspace::directory_binding(&directory, &roots).unwrap();
+        assert_ne!(first, replacement);
     }
 }

@@ -87,6 +87,23 @@ The job keeps running after you close the dialog. **Cancel remaining** waits for
 
 A kept environment's row keeps the accepted job's progress after **Hide**. Kept-data views refresh from the server's confirmed result.
 
+
+## Copy mount data
+
+Choose **Copy data** from a mount's menu, one of its **Locations**, or its row in a machine's **Mounts here** list. The mount's Delete plan opens the same copy act and keeps its own draft when you return. Choose the source and destination machines. You need use of the mount and management of both machines; paths and volume names come from their recorded locations.
+
+The plan counts the source and any destination data. Where data already exists, **Replace** keeps it separately before copying, and **Keep both** creates a new location and keeps the previous one. A borrowed or busy location cannot be replaced. Neither choice removes the source. Changed locations or data-making capabilities require a new review.
+
+**Notify** is explicit and groups each recipient's notice once. **Copy data** accepts a durable job with the usual progress and outcome. Close it while it runs; reopen Copy data to see your latest copy. Cancellation waits for the native work to stop, then restores what it can and reports any data kept. The destination becomes the mount's current location only after copying succeeds.
+
+## Delete a mount
+
+**Delete** lists the places that enable the mount. You see the names you may read and a count of the others. **Switch off and delete** removes those settings and the mount together. You need permission to change each place. The plan identifies any visible place that prevents deletion. A running environment keeps its existing attachment until its next start.
+
+Owned data starts at **Keep**. **Mount data on deletion** changes the proposed default. **Purge now** appears only where you may manage the data and it is not held by an environment; type the mount's exact name. Existing folders stay. Missing access or a lost machine never prevents deleting the definition and keeping its data.
+
+**Notify** starts unchecked for mount deletion. Each eligible person receives at most one item, however many environments they have. After confirming, the shared job retains progress and each data outcome. Kept volumes remain in **Storage** under their original mount and machine permissions. Close the result to return to Mounts. If the data location changed after the preview, read the plan again before confirming.
+
 ## Server files
 
 System Storage also lists the updater's releases and dump pairs. Their size and

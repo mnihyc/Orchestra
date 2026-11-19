@@ -76,6 +76,52 @@ async fn online(world: &World, machine: Id) {
 }
 
 #[tokio::test]
+async fn a_connected_machine_manager_changes_its_gateway_without_another_enrollment_token() {
+    use orch_api_contract::gateways::MachineGatewaySet;
+    let world = World::new().await;
+    let owner = person(&world, "gateway-owner").await;
+    let stranger = person(&world, "gateway-stranger").await;
+    let machine = machine_with_policy(&world, &owner, &[]).await;
+    online(&world, machine).await;
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let denied = world
+        .app
+        .call(MachineGatewaySet, &[&machine])
+        .token(&stranger.token)
+        .raw_body(&json!({"selection":"automatic"}))
+        .send()
+        .await;
+    assert!(!denied.status.is_success());
+    let native = answer(
+        &world,
+        machine,
+        json!({"choice":{"selection":"automatic"},"changed":true}),
+    );
+    let receipt = world
+        .app
+        .call(MachineGatewaySet, &[&machine])
+        .token(&owner.token)
+        .raw_body(&json!({"selection":"automatic"}))
+        .send()
+        .await;
+    assert_eq!(receipt.status, 200, "{:?}", receipt.body);
+    native.await.unwrap();
+    let value: Json = serde_json::from_slice(&receipt.raw).unwrap();
+    assert_eq!(value["projection"], "receipt");
+    assert_eq!(value["machine_id"], json!(machine));
+    assert_eq!(value["selection"], "automatic");
+    assert!(value.get("facts").is_none());
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens")
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn a_person_lists_the_machines_they_own_and_nobody_elses() {
     let world = World::new().await;
     let ada = person(&world, "ada").await;
@@ -391,7 +437,7 @@ async fn enrollment_roles_sections_and_dedication_are_bound_to_the_token_and_eac
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![2],
         roles: vec![Role::Agent],
     };
     assert_eq!(
@@ -2134,6 +2180,10 @@ async fn a_machine_manager_confirms_and_removes_a_harness_with_its_acknowledged_
         .push(orch_link_contract::policy::PolicyHarness {
             kind: "codex".into(),
             path: "/controlled/bin/codex".into(),
+            confirmation: Some(orch_agent_programs::confirmation::Confirmation {
+                by: owner.id(),
+                at: orch_types::Time::new(world.now()),
+            }),
         });
     let facts = |policy: &LocalPolicy, installed: Json, found: Json| {
         json!({
@@ -2195,6 +2245,172 @@ async fn a_machine_manager_confirms_and_removes_a_harness_with_its_acknowledged_
         assert_eq!(entry["path"], "/controlled/bin/codex");
         assert_eq!(entry["version"], "0.165.0");
     }
+}
+
+#[tokio::test]
+async fn a_program_confirmation_keeps_its_actual_manager_after_the_native_command_is_archived() {
+    use orch_api_contract::{
+        machine_programs::MachineProgramsCommand,
+        resources::{MachineProgramsChange, MachineProgramsGet},
+    };
+    let world = World::new().await;
+    let owner = person(&world, "program-manager").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    online(&world, machine).await;
+    let stamp = json!({"by":owner.id(),"at":orch_types::Time::new(world.now())});
+    let selection = json!({"kind":"codex","path":"/controlled/codex","confirmation":stamp});
+    let facts = json!({
+        "hostname":"controlled","os_version":"controlled","cpus":1,"memory_bytes":1024,
+        "harnesses":[{"kind":"codex","path":"/controlled/codex","version":"1.0.0","daemon":false}],
+        "discovered_harnesses":[],"searched_harness_kinds":["codex"],"adapters":[],"plugins":[],
+        "policy":{"agent.harnesses":[selection],"policy.delegated":["agent.harnesses"]},
+        "rates":{"up_bps":0,"down_bps":0,"round_trip_ms":0},"clock_offset_ms":0
+    });
+    let native = answer(&world, machine, facts);
+    let request = MachineProgramsCommand::ConfirmHarness {
+        kind: "codex".into(),
+        path: "/controlled/codex".into(),
+    };
+    let result = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&request)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    native.await.unwrap();
+    let body: Json = sqlx::query_scalar(
+        "SELECT body FROM commands WHERE machine_id=$1 AND kind='machine.programs'",
+    )
+    .bind(machine)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(body["request"], json!(request));
+    assert_eq!(
+        body["confirmation"], stamp,
+        "only the actual admitted manager and server moment are sent to the native policy writer"
+    );
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        result["approvals"][0]["subject"],
+        json!({"kind":"program","harness_kind":"codex","path":"/controlled/codex"})
+    );
+    assert_eq!(result["approvals"][0]["by"]["id"], json!(owner.id()));
+    assert_eq!(result["approvals"][0]["at"], stamp["at"]);
+    let current = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let current = serde_json::to_value(current).unwrap();
+    assert_eq!(
+        current["execution_approvals"], result["approvals"],
+        "the Machine cache and Programs reader share server-verified attribution"
+    );
+    sqlx::query("DELETE FROM commands WHERE machine_id=$1 AND kind='machine.programs'")
+        .bind(machine)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = world
+        .app
+        .call(MachineProgramsGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let shown = serde_json::to_value(shown).unwrap();
+    assert_eq!(
+        shown["approvals"], result["approvals"],
+        "an active decision does not depend on retaining a completed command"
+    );
+}
+
+#[tokio::test]
+async fn a_machine_report_cannot_invent_a_human_program_confirmation() {
+    use orch_api_contract::resources::MachineProgramsGet;
+    let world = World::new().await;
+    let owner = person(&world, "program-owner").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    let facts = json!({
+        "policy":{"agent.harnesses":[{"kind":"codex","path":"/controlled/codex",
+            "confirmation":{"by":owner.id(),"at":orch_types::Time::new(world.now())}}],
+            "policy.delegated":["agent.harnesses"]},
+        "harnesses":[{"kind":"codex","path":"/controlled/codex","version":"1.0.0","daemon":false}]
+    });
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(facts)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = world
+        .app
+        .call(MachineProgramsGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let shown = serde_json::to_value(shown).unwrap();
+    assert!(
+        shown["approvals"].as_array().unwrap().is_empty(),
+        "reported policy is not evidence that this person made a decision"
+    );
+}
+
+#[tokio::test]
+async fn the_policy_editor_cannot_attribute_a_new_program_choice_to_another_manager() {
+    let world = World::new().await;
+    let owner = person(&world, "policy-manager").await;
+    let other = person(&world, "other-manager").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    online(&world, machine).await;
+    let stamp = json!({"by":owner.id(),"at":orch_types::Time::new(world.now())});
+    let mut policy = serde_json::to_value(LocalPolicy {
+        policy_delegated: vec!["agent.harnesses".into()],
+        ..LocalPolicy::default()
+    })
+    .unwrap();
+    policy["agent.harnesses"] =
+        json!([{"kind":"codex","path":"/controlled/codex","confirmation":stamp}]);
+    let native = answer(
+        &world,
+        machine,
+        json!({"applied":["agent.harnesses"],"refused":[],"policy":policy}),
+    );
+    let request = std::collections::BTreeMap::from([(
+        "agent.harnesses".to_owned(),
+        json!([{
+            "kind":"codex","path":"/controlled/codex",
+            "confirmation":{"by":other.id(),"at":"2000-01-01T00:00:00Z"}
+        }]),
+    )]);
+    world
+        .app
+        .call(MachinePolicyUpdate, &[&machine])
+        .token(&owner.token)
+        .body(&request)
+        .send()
+        .await
+        .ok();
+    native.await.unwrap();
+    let body: Json = sqlx::query_scalar(
+        "SELECT body FROM commands WHERE machine_id=$1 AND kind='machine.policy.set'",
+    )
+    .bind(machine)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        body["values"]["agent.harnesses"][0]["confirmation"], stamp,
+        "both ways of selecting a program stamp the actual manager"
+    );
 }
 
 #[tokio::test]
@@ -2448,4 +2664,188 @@ async fn executor_projection_preserves_native_builtin_plugin_preference_and_mach
             .unwrap(),
         before
     );
+}
+
+#[tokio::test]
+async fn enrollment_commands_and_readiness_follow_the_same_committed_public_address() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_api_contract::resources::MachineEnrollmentInfoGet;
+    use orch_db::queries::public_addresses::{self, Write};
+    let world = World::new().await;
+    let ada = person(&world, "ada").await;
+    let seed = world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *world.conn().await,
+            &candidate,
+            before.revision,
+            None,
+            world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let info = world
+        .app
+        .call(MachineEnrollmentInfoGet, &[])
+        .token(&ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(info.public_url, "https://changed.example.test");
+    assert!(info.secure);
+    let token = world
+        .app
+        .call(MachineEnrollmentTokenCreate, &[])
+        .token(&ada.token)
+        .body(&MachineEnrollmentTokenCreateBody::default())
+        .send()
+        .await
+        .ok();
+    assert!(
+        token
+            .commands
+            .linux
+            .contains("https://changed.example.test/api/v1/downloads/install.sh")
+    );
+    assert!(!token.commands.linux.contains("https://orch.test"));
+    assert!(
+        token
+            .commands
+            .windows
+            .contains("https://changed.example.test/api/v1/downloads/install.ps1")
+    );
+}
+
+#[tokio::test]
+async fn a_windows_program_approval_follows_the_selected_executable_on_a_linux_controller() {
+    use orch_agent_programs::confirmation::Confirmation;
+    use orch_api_contract::machine_programs::MachineExecutionSubject;
+    use orch_db::queries::execution_confirmations::{self, Decision};
+    let world = World::new().await;
+    let owner = person(&world, "windows-program-manager").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    let chosen = r"C:\Orch Tools\codex.exe";
+    let decision = Decision {
+        subject: MachineExecutionSubject::Program {
+            harness_kind: "codex".into(),
+            path: chosen.into(),
+        },
+        confirmation: Confirmation {
+            by: owner.id(),
+            at: orch_types::Time::new(world.now()),
+        },
+    };
+    let mut tx = world.db.pool.begin().await.unwrap();
+    execution_confirmations::put(&mut tx, machine, &decision)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for (path, expected) in [(chosen, 1), (r"D:\Other Tools\codex.exe", 0)] {
+        let facts = json!({
+            "policy":{"agent.harnesses":[{"kind":"codex","path":chosen,"confirmation":decision.confirmation}]},
+            "harnesses":[{"kind":"codex","path":path,"version":"1.0.0","daemon":false}]
+        });
+        sqlx::query("UPDATE machines SET platform_os='windows', facts=$2 WHERE id=$1")
+            .bind(machine)
+            .bind(facts)
+            .execute(&world.db.pool)
+            .await
+            .unwrap();
+        let result = world
+            .app
+            .call(MachineGet, &[&machine])
+            .token(&owner.token)
+            .send()
+            .await
+            .ok();
+        assert_eq!(result.execution_approvals.len(), expected);
+    }
+}
+
+#[tokio::test]
+async fn a_machine_manager_reviews_the_reported_system_build_and_keeps_the_decision_after_command_cleanup()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "platform-manager").await;
+    let other = person(&world, "platform-reader").await;
+    let machine = machine_with_policy(&world, &owner, &["exec.platform"]).await;
+    online(&world, machine).await;
+    let build = json!({"os":"windows","arch":"x86_64","executable":orch_types::Hash::of(b"this native connector")});
+    sqlx::query("UPDATE machines SET platform_os='windows',facts=facts || jsonb_build_object('runtime_platform',$2::jsonb) WHERE id=$1")
+        .bind(machine).bind(&build).execute(&world.db.pool).await.unwrap();
+    let stamp = json!({"by":owner.id(),"at":orch_types::Time::new(world.now())});
+    let chosen = json!({"state":"approved","build":build,"confirmation":stamp});
+    let forged = json!({"state":"approved","build":build, "confirmation":{"by":other.id(),"at":"2000-01-01T00:00:00Z"}});
+    let request = std::collections::BTreeMap::from([("exec.platform".to_owned(), forged)]);
+    let denied = world
+        .app
+        .call(MachinePolicyUpdate, &[&machine])
+        .token(&other.token)
+        .body(&request)
+        .send()
+        .await;
+    assert!(!denied.status.is_success());
+    let mut policy = json!(LocalPolicy {
+        policy_delegated: vec!["exec.platform".into()],
+        ..LocalPolicy::default()
+    });
+    policy["exec.platform"] = chosen.clone();
+    let native = answer(
+        &world,
+        machine,
+        json!({"applied":["exec.platform"],"refused":[],"policy":policy}),
+    );
+    world
+        .app
+        .call(MachinePolicyUpdate, &[&machine])
+        .token(&owner.token)
+        .body(&request)
+        .send()
+        .await
+        .ok();
+    native.await.unwrap();
+    let sent: Json = sqlx::query_scalar(
+        "SELECT body FROM commands WHERE machine_id=$1 AND kind='machine.policy.set'",
+    )
+    .bind(machine)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(sent["values"]["exec.platform"], chosen);
+    sqlx::query("DELETE FROM commands WHERE machine_id=$1")
+        .bind(machine)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert!(shown.execution_approvals.iter().any(
+        |item| serde_json::to_value(&item.subject).unwrap()
+            == json!({"kind":"system","build":build})
+            && item.approval.by.id == owner.id()
+    ));
+    sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{runtime_platform,executable}',to_jsonb($2::text)) WHERE id=$1")
+        .bind(machine).bind(orch_types::Hash::of(b"new binary").to_string()).execute(&world.db.pool).await.unwrap();
+    let changed = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert!(changed.execution_approvals.is_empty());
 }

@@ -1,6 +1,6 @@
 /** Only shown native resource projections own their object streams. */
 import type { QueryClient } from '@tanstack/react-query';
-import { record } from '@/api/cache';
+import { measuredPlaces, record } from '@/api/cache';
 import { ENROLLMENT_PROGRESS } from '@/api/enrollment';
 
 const RESOURCE_FEEDS: Readonly<Record<string, string>> = {
@@ -19,6 +19,12 @@ export function wantedResourceFeeds(cache: QueryClient): Set<string> {
       const provider = data.provider;
       if (typeof provider.id === 'string' && record(provider.access) && Array.isArray(provider.access.permissions)
         && provider.access.permissions.includes('provider.view')) wanted.add(`provider:${provider.id}`);
+    }
+    for (const place of measuredPlaces(head, data)) {
+      if (record(place.machine) && typeof place.machine.id === 'string') wanted.add(`machine:${place.machine.id}`);
+    }
+    if (head === 'machine-policy' && typeof id === 'string' && record(data) && record(data.platform_review)) {
+      wanted.add(`machine:${id}`);
     }
     if (head === ENROLLMENT_PROGRESS && record(data)) {
       for (const kind of ['machine', 'host'] as const) {
