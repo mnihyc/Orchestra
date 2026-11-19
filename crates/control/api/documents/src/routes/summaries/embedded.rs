@@ -165,7 +165,10 @@ pub(crate) fn retain(ctx: &Ctx, principal: &Principal, selected: &Arc<Embedded>)
                     )
                     .await?
                     .ok_or_else(ApiError::not_found)?;
-                    if !same_view(view, &fresh) {
+                    // What the opening carries is the paragraph as it was read. Whether the request that
+                    // writes it has moved since changes nothing about who may read it; whether what it was
+                    // made from may still be read by this reader does.
+                    if !same_sources(view, &fresh) {
                         return Err(ApiError::not_found());
                     }
                 }

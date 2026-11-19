@@ -8,7 +8,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
-import { type ReactNode, useMemo, useState } from 'react';
+import { Activity, type ReactNode, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
@@ -37,9 +37,12 @@ import { SettingEditor } from '@/ui/SettingEditor';
 import { HelpHint } from '@/ui/HelpHint';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
+import { FactDisclosureBody } from '@/ui/FactDisclosure';
+import { Input } from '@/ui/Input';
+import { useFormatContext } from '@/lib/appearance';
 
 /** How a key's value is changed: a switch, a choice, a set of known words, or lines of text. */
-type PolicyChoice = 'read_only' | 'workspace' | 'open' | 'separated' | 'key_separated' | 'credential_shared' | 'handed_over';
+type PolicyChoice = 'roots' | 'machine' | 'read_only' | 'workspace' | 'open' | 'separated' | 'key_separated' | 'credential_shared' | 'handed_over';
 type Control =
   | { kind: 'switch' }
   | { kind: 'choice'; options: readonly PolicyChoice[] }
@@ -57,6 +60,7 @@ const KEYS = {
   'resources.max': { id: 'resources_max', control: { kind: 'json' } },
   hooks: { id: 'hooks', control: { kind: 'json' } },
   ports: { id: 'ports', control: { kind: 'json' } },
+  'environment.files_reach': { id: 'environment_files_reach', control: { kind: 'choice', options: ['roots', 'machine'] } },
   'environment.roots': { id: 'environment_roots', control: { kind: 'lines' } },
   'environment.remote_write': { id: 'environment_remote_write', control: { kind: 'switch' } },
   'environment.terminal': { id: 'environment_terminal', control: { kind: 'switch' } },
@@ -132,23 +136,32 @@ function keyWords(entry: MachinePolicyKey, t: TFunction) {
     : { name: t(`machines.policy.keys.${spec.id}.title`), description: t(`machines.policy.keys.${spec.id}.meaning`) };
 }
 
+function PolicyValues({ values }: { values: readonly string[] }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const [query, setQuery] = useState('');
+  const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase(locale);
+  const wanted = normalize(query.trim());
+  const filtered = wanted === '' ? values : values.filter((value) => normalize(value).includes(wanted));
+  return <div className="flex min-w-0 flex-col gap-2">
+    {values.length > 10 && <Input type="search" label={t('machines.policy.findValue')} hideLabel placeholder={t('machines.policy.findValue')} value={query} onChange={(event) => setQuery(event.currentTarget.value)} />}
+    {filtered.length === 0 ? <StateLine compact message={t('machines.policy.noMatchingValues')} />
+      : <DetailPages key={wanted} items={filtered}>{(page) => <ul className="flex max-h-(--list-max-height) flex-col gap-1 overflow-y-auto">
+        {page.map((line, index) => <li key={`${index}:${line}`}><code className="wrap-anywhere">{line}</code></li>)}
+      </ul>}</DetailPages>}
+  </div>;
+}
+
 function ValueText({ policyKey, value }: { policyKey: string; value: unknown }) {
   const { t } = useTranslation();
+  if (policyKey === 'environment.files_reach' && (value === 'roots' || value === 'machine')) return <>{t(`fileReach.${value}`)}</>;
   if (policyKey === 'ports') return <PortPolicyValue value={value} />;
   if (typeof value === 'boolean') return <>{value ? t('machines.policy.on') : t('machines.policy.off')}</>;
   if (policyKey === 'agent.max_sandbox' && (value === 'read_only' || value === 'workspace' || value === 'open')) return <>{t(`machines.policy.sandbox.${value}`)}</>;
   const lines = policyKey === 'agent.harnesses' ? harnessLines(value) : Array.isArray(value) && value.every((entry: unknown) => typeof entry === 'string') ? asLines(value) : null;
   if (lines !== null) {
     if (lines.length === 0) return <span className="text-text-muted">{t('machines.policy.none')}</span>;
-    return (
-      <ul className="flex flex-col gap-1">
-        {lines.map((line) => (
-          <li key={line}>
-            <code className="wrap-anywhere">{line}</code>
-          </li>
-        ))}
-      </ul>
-    );
+    return <PolicyValues values={lines} />;
   }
   if (typeof value === 'string') return <code className="wrap-anywhere">{value}</code>;
   return <ResourceDetails><code className="wrap-anywhere">{JSON.stringify(value)}</code></ResourceDetails>;
@@ -246,7 +259,7 @@ function EditKey({ machineId, entry, onClose }: { machineId: string; entry: Mach
             value={choice}
             onValueChange={setChoice}
             disabled={save.isPending}
-            options={control.options.map((option) => ({ value: option, name: t(`machines.policy.choices.${option}.name`, { defaultValue: option }), description: t(`machines.policy.choices.${option}.description`, { defaultValue: words.description }) }))}
+            options={control.options.map((option) => entry.key === 'environment.files_reach' ? { value: option, name: t(`fileReach.${option}`) } : ({ value: option, name: t(`machines.policy.choices.${option}.name`, { defaultValue: option }), description: t(`machines.policy.choices.${option}.description`, { defaultValue: words.description }) }))}
           />
         )}
         {control.kind === 'set' && (
@@ -302,13 +315,21 @@ function DriverPolicyHelp({ term, what }: { term: string; what: ReactNode }) {
     more={{label:t('help.hint.more'),onOpen:()=>open('connect-a-machine','change-driver-settings')}} />;
 }
 
-function PolicyRow({ machineId, entry, program,windows=false }: { machineId: string; entry: MachinePolicyKey; program:string;windows?:boolean }) {
+function PolicyRow({ machineId, entry, program,windows=false, limits }: { machineId: string; entry: MachinePolicyKey; program:string;windows?:boolean; limits: MachinePolicy['limits'] }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const words = keyWords(entry, t);
   const fixed = entry.key === 'policy.delegated';
   const nextPolicyValue = entry.key === 'mcp.import' && typeof entry.value === 'boolean' ? !entry.value : entry.value;
+  const applicable = limits?.applicable_keys.find((candidate) => candidate.key === entry.key);
+  const governing = applicable?.governing_resource;
+  const authority = applicable?.authority_source;
   const helpContent=<div className="flex flex-col gap-2"><p>{words.description}</p>
+      <FactDisclosureBody groups={[{ key: 'applicability', kind: 'current_setting', facts: [
+        { key: 'scope', label: t('placeFacts.scope'), value: limits === null || limits === undefined ? null : t(limits.unit_context ? 'placeFacts.appliesUnit' : 'placeFacts.thisMachine') },
+        { key: 'resource', label: t('placeFacts.governingResource'), value: governing === 'environment' ? t('placeFacts.resourceEnvironment') : governing === 'provider' ? t('placeFacts.resourceProvider') : governing === 'machine' ? t('placeFacts.resourceMachine') : null },
+        { key: 'authority', label: t('placeFacts.authority'), value: authority === 'physical_operator' ? t('machines.policy.source.local') : authority === 'delegated' ? t('machines.policy.source.orch') : null },
+      ] }]} />
       {entry.key === 'exec.offers' && <ArticleGuideLink article="resources" heading="profiles-hosts-and-computers" title={t('help.hint.more')} />}
       <dl className="grid grid-cols-2 gap-2 text-sm">
         <div><dt>{t('machines.policy.defaults.managed')}</dt><dd><ValueText policyKey={entry.key} value={entry.definition.managed} /></dd></div>
@@ -326,6 +347,27 @@ function PolicyRow({ machineId, entry, program,windows=false }: { machineId: str
     open={editing} onOpenChange={setEditing}>
     {entry.writable?<EditKey machineId={machineId} entry={entry} onClose={()=>setEditing(false)}/>:<ValueText policyKey={entry.key} value={entry.value}/>}
   </SettingEditor>;
+}
+
+/** Native keys are a finite policy vocabulary; filtering retains their editors and pauses hidden effects. */
+function PolicyKeys({ machineId, entries, policy, label }: { machineId: string; entries: readonly MachinePolicyKey[]; policy: MachinePolicy; label: string }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const [query, setQuery] = useState('');
+  const normalize = (value: string) => value.normalize('NFKC').toLocaleLowerCase(locale);
+  const wanted = normalize(query.trim());
+  const matches = (entry: MachinePolicyKey) => wanted === '' || normalize(`${entry.key} ${keyWords(entry, t).name}`).includes(wanted);
+  return <div className="flex min-w-0 flex-col gap-2">
+    {entries.length > 10 && <Input type="search" label={t('machines.policy.find')} hideLabel placeholder={t('machines.policy.find')} value={query} onChange={(event) => setQuery(event.currentTarget.value)} />}
+    {!entries.some(matches) && <StateLine compact message={t('machines.policy.noMatches')} />}
+    <div data-policy-keys className="max-h-(--list-max-height) overflow-y-auto">
+      <ul aria-label={label} className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
+        {entries.map((entry) => <Activity key={entry.key} mode={matches(entry) ? 'visible' : 'hidden'}>
+          <PolicyRow machineId={machineId} entry={entry} program={policyProgram(policy)} windows={policy.machine.platform_os === 'windows'} limits={policy.limits} />
+        </Activity>)}
+      </ul>
+    </div>
+  </div>;
 }
 
 export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) {
@@ -349,21 +391,19 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
       {keys.length === 0 ? (
         <EmptyState compact title={t('machines.policy.noKeys')} />
       ) : (
-        <DetailSections label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
+        <DetailSections stacked label={t('resourceDetails.layout.sections')} sections={SECTIONS.flatMap((section) => {
           // Shared keys (for example directory roots) keep one row and one editor on this page.
           const rows = keys.filter((entry) => SECTIONS.find((candidate)=>entry.definition.sections.includes(candidate))===section);
           if (rows.length === 0) return [];
           const full = rows.filter((entry) => entry.definition.delegable).every((entry) => entry.delegated);
-          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <section aria-label={t(`machines.policy.sections.${section}.name`)} className="flex min-w-0 flex-col gap-2">
+          return [{ value: section, label: t(`machines.policy.sections.${section}.name`), panel: <div className="flex min-w-0 flex-col gap-2">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <HelpHint term={t(`machines.policy.sections.${section}.name`)} what={t(`machines.policy.sections.${section}.description`)}/>
               <Button size="sm" onClick={() => setHandover(section)}>{t('machines.policy.fullAccessAction')}</Button>
             </div>
             {full && !fullAccess && <p className="text-sm text-text-muted">{t('machines.policy.roleFullAccess')}</p>}
-            <DetailPages items={rows}>{(page) => <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-              {page.map((entry) => <PolicyRow key={entry.key} machineId={machine.id} entry={entry} program={program} windows={policy.data.machine.platform_os==='windows'} />)}
-            </ul>}</DetailPages>
-          </section> }];
+            <PolicyKeys key={`${machine.id}:${section}`} machineId={machine.id} entries={rows} policy={policy.data} label={t(`machines.policy.sections.${section}.name`)} />
+          </div> }];
         })} />
       )}
       {handover !== null && <Dialog open onOpenChange={(open) => !open && setHandover(null)} title={t('machines.policy.fullAccessFor', { role: t(`machines.policy.sections.${handover}.name`) })}
@@ -382,19 +422,17 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
  * environments or its providers, which is what whoever manages one of those reads and, where the owner
  * handed a key over, changes. Whoever may not read the machine's policy is shown nothing of it.
  */
-export function MachineLimits({ machineId, bounds, id, title, lead, compact = false }: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string; compact?: boolean }) {
+export function MachineLimits({ machineId, bounds, id, title, lead }: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string }) {
   const policy = useQuery({ ...machinePolicyQuery(machineId), retry: false });
   if (policy.isPending) return <SkeletonRows read={policy} rows={3}/>;
   if (policy.isError) return <ErrorState compact error={policy.error} retrying={policy.isRefetching} onRetry={()=>void policy.refetch()}/>;
   const sections:readonly MachinePolicySection[]=bounds==='environment'?['environment','node']:['environment','node','provider'];
-  const keys = policy.data.keys.filter((entry) => entry.definition.sections.some((section)=>sections.includes(section)));
+  const applicable = policy.data.limits === null || policy.data.limits === undefined ? null : new Set(policy.data.limits.applicable_keys.map((entry) => entry.key));
+  const keys = policy.data.keys.filter((entry) => (applicable === null || applicable.has(entry.key)) && entry.definition.sections.some((section)=>sections.includes(section)));
   if (keys.length === 0) return null;
-  const rows = (entries: readonly MachinePolicyKey[]) => <ul aria-label={title} className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">
-    {entries.map((entry) => <PolicyRow key={entry.key} machineId={machineId} entry={entry} program={policyProgram(policy.data)} windows={policy.data.machine.platform_os==='windows'} />)}
-  </ul>;
   return (
     <Section id={id} title={title} lead={lead}>
-      {compact ? <DetailPages items={keys}>{rows}</DetailPages> : rows(keys)}
+      <PolicyKeys key={`${machineId}:${bounds}`} machineId={machineId} entries={keys} policy={policy.data} label={title} />
     </Section>
   );
 }
