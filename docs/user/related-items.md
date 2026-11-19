@@ -8,6 +8,8 @@ summary: Find readable documents, chats and threads connected by meaning, place 
 
 # Related items
 
+Related items are documents, chats and threads that belong with the one you are reading, found by meaning, by place and by the references between them.
+
 ## Open related items
 
 Open **Related** in a document's inspector. It lists documents, chats and threads you can read.
@@ -39,11 +41,11 @@ It never compares vectors from different generations or models.
 The document's place inherits **Related weights**, **Related places**, **Related items** and **Related candidates**.
 Managers can change these in the place's settings; a lock from above still applies.
 
-The shipped weights are meaning `0.6`, place `0.25` and references `0.15`.
+The default weights are meaning `0.6`, place `0.25` and references `0.15`.
 They are decimal fields from zero to one. A zero weight leaves that signal out.
 Available weights are normalized, so turning meaning off keeps the other signals useful.
 
-The shipped place scores are the same folder `1.0`, topic `0.7`, project `0.4` and org `0.1`.
+The default place scores are the same folder `1.0`, topic `0.7`, project `0.4` and organization `0.1`.
 A folder can be a document folder or a project inside another project.
 Direct references score one; shared references use the overlap of a bounded window of distinct referenced things.
 Repeating a link does not increase its score.
