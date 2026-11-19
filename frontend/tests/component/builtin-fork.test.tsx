@@ -1,15 +1,17 @@
 /** Built-in forks retain their real source identity, selected history and one creation intent. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as AskApi from '@/api/ask';
 import { client } from '@/api/client';
+import * as threadsApi from '@/api/threads';
 import { useImmediateFork } from '@/features/thread/ImmediateFork';
 import { ItemFrame } from '@/features/timeline/ItemActions';
+import * as availability from '@/features/side-threads/availability';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
-import type { AskKeepReply, Thread } from '@/generated/api-types';
+import type { AskKeepReply, Item, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
-import { threadWriter } from '@/realtime/stores/thread';
+import { threadViewOf, threadWriter, useItem } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { agentMessage, turn } from '../doubles/thread-rows';
 import { World } from '../doubles/world';
@@ -44,10 +46,15 @@ for (const locale of ['en', 'zh-CN'] as const) it(`opens the Private selected-hi
   const completed = turn('message-fork-turn', { ordinal: 1, inputId: 'message-fork-input', state: 'completed' });
   const item = { ...agentMessage('message-fork-answer', 'Fork this answer.', { turn: completed.id }), thread_id: thread.id, seq_created: 1, seq_updated: 1 };
   threadWriter.reset(thread.id, { thread, turns: [completed], items: [item] }, false);
-  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'steps', recent: new Set(),
+  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'normal',
     layout: 'one', setLayout: () => undefined, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
-  show(<TimelineContextValue.Provider value={context}><ItemFrame item={item} label={i18n.t('timeline.agent.menu')}><p>Fork this answer.</p></ItemFrame></TimelineContextValue.Provider>);
-  await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.actions.more') }));
+  const menuChoices = vi.spyOn(availability, 'sideRefusal');
+  try {
+    show(<TimelineContextValue.Provider value={context}><ItemFrame item={item} label={i18n.t('timeline.agent.menu')}><p>Fork this answer.</p></ItemFrame></TimelineContextValue.Provider>);
+    expect(menuChoices).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.actions.more') }));
+    expect(menuChoices).toHaveBeenCalled();
+  } finally { menuChoices.mockRestore(); }
   await userEvent.click(screen.getByRole('menuitem', { name: i18n.t('change.item.fork') }));
   expect(await screen.findByText(i18n.t('ask.privateThread'))).toBeVisible();
   expect(screen.getByText(i18n.t('agentAccess.forkThrough', { turn: 1 }))).toBeVisible();
@@ -57,6 +64,30 @@ for (const locale of ['en', 'zh-CN'] as const) it(`opens the Private selected-hi
   expect(calls.keep.mock.calls[0]?.[2]?.toTurn).toBe(1);
   expect(calls.keep.mock.calls[0]?.[2]?.key).toEqual(expect.any(String));
   expect(calls.plan).not.toHaveBeenCalled(); expect(calls.native).not.toHaveBeenCalled();
+});
+
+it('keeps a pin from the context menu when its answer arrives after the menu closes', async () => {
+  const item = { ...agentMessage('pinned-answer', 'This answer'), thread_id: thread.id, seq_created: 1, seq_updated: 1 };
+  threadWriter.reset(thread.id, { thread, items: [item] }, false);
+  const context: TimelineContext = { threadId: thread.id, threadName: thread.name, meId: thread.owner.id, detail: 'normal',
+    layout: 'one', setLayout: () => undefined, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
+  let finish!: (value: Item) => void;
+  const pin = vi.spyOn(threadsApi, 'pinItem').mockImplementation(() => new Promise<Item>((resolve) => { finish = resolve; }));
+  function Message() {
+    const current = useItem(thread.id, item.id);
+    return current === undefined ? null : <ItemFrame item={current} label="Message actions"><p>This answer</p></ItemFrame>;
+  }
+  try {
+    show(<TimelineContextValue.Provider value={context}><Message /></TimelineContextValue.Provider>);
+    fireEvent.contextMenu(screen.getByText('This answer'));
+    await userEvent.click(await screen.findByRole('menuitem', { name: i18n.t('timeline.actions.pin') }));
+    expect(pin).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId: thread.id }), item.id, true);
+    await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+    act(() => { finish({ ...item, seq_updated: 2, pinned: { at: '2026-11-19T00:00:00Z', by: thread.owner } }); });
+    await waitFor(() => expect(threadViewOf(thread.id).items.get(item.id)?.pinned?.by.id).toBe(thread.owner.id));
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('timeline.actions.more') }));
+    expect(await screen.findByRole('menuitem', { name: i18n.t('timeline.actions.unpin') })).toBeVisible();
+  } finally { pin.mockRestore(); }
 });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`retries a Private selected-history fork with the same creation key (${locale})`, async () => {

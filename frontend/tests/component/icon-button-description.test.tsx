@@ -1,12 +1,32 @@
 /** A value/state description stays exact when the icon's name tooltip opens and closes. */
 import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import * as tooltips from '@/ui/Tooltip';
 import { i18n, setLocale } from '@/i18n';
 import { IconButton } from '@/ui/IconButton';
 import { show } from './support';
 
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it('keeps the twenty unchanged action controls when the thread supplies new click handlers', async () => {
+  const invoke = vi.fn<(thread: string, index: number) => void>();
+  function Controls({ thread }: { thread: string }) {
+    return Array.from({ length: 20 }, (_, i) => <IconButton key={i} label={`Edit ${i}`} action="edit" icon={<span>edit</span>}
+      onClick={() => invoke(thread, i)} />);
+  }
+  const tooltip = vi.spyOn(tooltips, 'Tooltip');
+  const view = show(<Controls thread="first" />);
+  try {
+    const button = screen.getByRole('button', { name: 'Edit 7' });
+    tooltip.mockClear();
+    view.rerender(<Controls thread="second" />);
+    expect(tooltip.mock.calls.length).toBe(0);
+    expect(screen.getByRole('button', { name: 'Edit 7' })).toBe(button);
+    await userEvent.click(button);
+    expect(invoke).toHaveBeenCalledExactlyOnceWith('second', 7);
+  } finally { view.unmount(); tooltip.mockRestore(); }
+});
 
 for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps a distinct refusal reason alongside the caller's value in ${locale}`, async () => {

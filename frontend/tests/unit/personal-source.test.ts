@@ -3,6 +3,8 @@ import { expect, it, vi } from 'vitest';
 import { admittedOrOffline, dispatchPersonalEvent, followPersonalSource, holdPersonalEvents, retirePersonalEvents } from '@/realtime/personalSource';
 import type { FeedListener, RealtimeSocket, SocketStatus } from '@/realtime/socket';
 import { createStore } from 'zustand/vanilla';
+import { supersededRead } from '@/api/reads';
+import { READ_RETRY_PAUSES_MS } from '@/lib/requests';
 
 function setup() {
   const listeners: FeedListener[] = [];
@@ -13,6 +15,21 @@ function setup() {
   const accept = (listener = listeners.at(-1)!) => listener.onFrame({ op: 'subscribed', feed: 'user', id: 1, seq: 9, mode: 'delta' });
   return { source, listeners, load, apply, admitted, accept };
 }
+
+it('retries a superseded personal baseline without failing its still-current source admission', async () => {
+  vi.useFakeTimers(); const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+  let listener: FeedListener | undefined;
+  const failed = vi.fn(), reset = vi.fn();
+  const load = vi.fn().mockRejectedValueOnce(supersededRead()).mockResolvedValue({ seq: 9, complete: true, data: 'Current baseline' });
+  const source = followPersonalSource({ subscribe: (_feed: string, next: FeedListener) => { listener = next; return { unsubscribe: () => undefined }; } } as unknown as RealtimeSocket,
+    { feed: 'user', load, failed, reset, apply: vi.fn(), read: () => '' }, vi.fn());
+  try {
+    listener?.onFrame({ op: 'subscribed', id: 1, feed: 'user', mode: 'reload', seq: 0 });
+    await vi.advanceTimersByTimeAsync(0); expect(failed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(READ_RETRY_PAUSES_MS[0]);
+    expect(load).toHaveBeenCalledTimes(2); expect(reset).toHaveBeenCalledWith('Current baseline', 9); expect(failed).not.toHaveBeenCalled();
+  } finally { source.stop(); random.mockRestore(); vi.useRealTimers(); }
+});
 
 it('joins without an HTTP pre-read and opens one baseline only after the accepted cut', async () => {
   const { source, load, accept, admitted } = setup();
@@ -41,7 +58,7 @@ it('a new wire attempt waits for its own admission and does not share the former
 });
 
 it('preserves HTTP access when the live connection fails without pretending a source was admitted', async () => {
-  const status = createStore<SocketStatus>(() => ({ phase: 'connecting', lostAt: null, roundTripMs: null, build: null, outdated: false }));
+  const status = createStore<SocketStatus>(() => ({ phase: 'connecting', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null, outdated: false }));
   let accept!: () => void;
   const source = new Promise<void>((resolve) => { accept = resolve; });
   const waiting = admittedOrOffline(source, status);

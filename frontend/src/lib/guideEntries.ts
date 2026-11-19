@@ -9,6 +9,7 @@ const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 let suppressed: ReadonlySet<string> = new Set<string>();
 let observer: MutationObserver | null = null;
+let pending = false;
 
 /** Tabs, inactive views and the page behind a modal must not take another view's guide entry. */
 function surface(element: HTMLElement, visibleStyles: Map<HTMLElement, boolean>): Element | null {
@@ -48,6 +49,32 @@ function refresh(): void {
   for (const listener of listeners) listener();
 }
 
+/** All the refs returning with one tab settle before the browser draws their guide buttons. */
+function scheduleRefresh(): void {
+  if (pending) return;
+  pending = true;
+  queueMicrotask(() => {
+    pending = false;
+    refresh();
+  });
+}
+
+function containsEntry(node: Node): boolean {
+  if (!(node instanceof Element)) return false;
+  for (const entry of entries.values()) if (node.contains(entry.element)) return true;
+  return false;
+}
+
+function changesSurface(change: MutationRecord): boolean {
+  if (change.type === 'attributes') return containsEntry(change.target);
+  // Moving a holder can change its owner, visibility or order. Its own button and text
+  // updates elsewhere in the page do not. A closed details element exposes its first summary.
+  if (change.target instanceof HTMLDetailsElement && containsEntry(change.target)) return true;
+  for (const node of change.addedNodes) if (containsEntry(node)) return true;
+  for (const node of change.removedNodes) if (containsEntry(node)) return true;
+  return false;
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
@@ -62,19 +89,15 @@ export function useGuideEntry(article: string | null, heading: string | null, ki
     } else entries.set(id, { element, destination: `${article}#${heading ?? ''}`, kind });
     if (entries.size > 0 && observer === null) {
       observer = new MutationObserver((changes) => {
-        // Floating placement and hover styles do not change an unrelated guide's visibility.
-        const affected = changes.some((change) => change.type !== 'attributes'
-          || change.attributeName !== 'class' && change.attributeName !== 'style'
-          || [...entries.values()].some((entry) => change.target.contains(entry.element)));
-        if (affected) refresh();
+        if (changes.some(changesSurface)) scheduleRefresh();
       });
       observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'inert', 'aria-hidden', 'aria-modal', 'data-prompt-current', 'class', 'style', 'open', 'role'] });
-      window.addEventListener('resize', refresh);
+      window.addEventListener('resize', scheduleRefresh);
     } else if (entries.size === 0) {
       observer?.disconnect(); observer = null;
-      window.removeEventListener('resize', refresh);
+      window.removeEventListener('resize', scheduleRefresh);
     }
-    refresh();
+    scheduleRefresh();
   }, [id, article, heading, kind]);
   const subscribeEntry = useCallback((listener: () => void) => article === null ? () => undefined : subscribe(listener), [article]);
   const hidden = useSyncExternalStore(subscribeEntry, () => article !== null && suppressed.has(id), () => false);

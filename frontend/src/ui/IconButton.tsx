@@ -4,11 +4,12 @@
  * what the pointer reads when it rests on the button, with the shortcut beside it when there is one.
  */
 import { LoaderCircle } from 'lucide-react';
-import type { ButtonHTMLAttributes, MouseEvent, ReactNode, Ref } from 'react';
+import { memo, useCallback, useLayoutEffect, useRef, type ButtonHTMLAttributes, type MouseEvent, type ReactNode, type Ref } from 'react';
 
 import { ActionIcon, actionForLabel, type ActionId } from '@/ui/actions';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
+import { useReadProgress } from '@/lib/useReadProgress';
 
 export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'children'> {
   /** What the button does, in words. */
@@ -47,7 +48,7 @@ function IconButtonFace({ ownerDescription, children, ref, ...props }: ButtonHTM
   return <button {...props} ref={ref} aria-describedby={ownerDescription ?? props['aria-describedby']}>{children}</button>;
 }
 
-export function IconButton({
+const IconButtonControl = memo(function IconButtonControl({
   label,
   action,
   icon,
@@ -65,7 +66,8 @@ export function IconButton({
   ref,
   ...rest
 }: IconButtonProps) {
-  const act = action ?? actionForLabel(label);
+  const slow = useReadProgress(pending);
+  const act = action;
   const look = LOOKS[variant];
   const press = (event: MouseEvent<HTMLButtonElement>) => {
     if (pending || blocked) {
@@ -97,10 +99,19 @@ export function IconButton({
         onClick={press}
         {...rest}
       >
-        {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : act === undefined ? icon : <ActionIcon action={act} />}
+        {slow ? <LoaderCircle className="animate-spin" aria-hidden /> : act === undefined ? icon : <ActionIcon action={act} />}
       </IconButtonFace>
   );
   return <Tooltip content={reason ?? label} shortcut={shortcut} side={side}>
     {disabled ? <span className="inline-flex" tabIndex={0}>{face}</span> : face}
   </Tooltip>;
+});
+
+export function IconButton({ label, action, icon, onClick, ...props }: IconButtonProps) {
+  const act = action ?? actionForLabel(label);
+  const latest = useRef(onClick);
+  useLayoutEffect(() => { latest.current = onClick; }, [onClick]);
+  const press = useCallback((event: MouseEvent<HTMLButtonElement>) => latest.current?.(event), []);
+  // Choosing another tab can supply a new callback while the button, its icon and its tooltip stay the same.
+  return <IconButtonControl {...props} label={label} {...(act === undefined ? { icon } : { action: act })} onClick={press} />;
 }

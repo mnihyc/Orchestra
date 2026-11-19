@@ -394,7 +394,6 @@ What the finder, the search and the help do, and what they leave to others:
 | [settings](src/features/settings/README.md) | Personal and hierarchical configuration |
 | [admin](src/features/admin/README.md) | System management |
 | [start](src/features/start/README.md) | Type-and-go and explicit binding |
-| [fork](src/features/fork/README.md) | Fork, switch, move and update: built in change and side-threads |
 | [change](src/features/change/README.md) | Changing where and on what work runs: fork, switch, environment update, move and recycle, several at once |
 | [side-threads](src/features/side-threads/README.md) | Side threads: asked on the side, shown beside the conversation, kept or closed |
 | [inbox](src/features/inbox/README.md) | Notification inbox |

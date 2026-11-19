@@ -13,7 +13,7 @@
  */
 import { currentThreadDisplay } from '@/lib/threadDisplay';
 import type { ThreadDisplay } from '@/generated/api-types';
-import { useStore } from 'zustand';
+import { useCallback, useSyncExternalStore } from 'react';
 import { create } from 'zustand';
 
 import type { Item, PresenceUser, Segment, Thread, ThreadContinuationProjection, ThreadInput, ThreadInputPage, ThreadPromptSummary, ThreadPromptVersion, Turn } from '@/generated/api-types';
@@ -81,6 +81,8 @@ export interface ThreadView {
   thread: Thread | null;
   /** How much of the conversation is held: nothing, its newest part, or a window somewhere in it. */
   loaded: Loaded;
+  /** Last admitted feed cut; metadata rows alone never advance this cursor. */
+  lastSeq: number | null;
   /** Whether older items exist than the oldest held. */
   hasOlder: boolean;
   /** Whether newer items exist than the newest held; true only for a window that was read around an item. */
@@ -121,6 +123,7 @@ export const EMPTY_VIEW: ThreadView = {
   queuePage: EMPTY_QUEUE,
   thread: null,
   loaded: 'none',
+  lastSeq: null,
   hasOlder: false,
   hasNewer: false,
   items: new Map(),
@@ -144,8 +147,18 @@ export const EMPTY_VIEW: ThreadView = {
 
 const MAIN_STREAM = 'main';
 
-/** Orders two queue positions, which are decimal strings of any length. */
+/** Orders two queue positions, which are decimal strings of any length. A message put first takes the place one below the first that waits,
+ * so a position can be zero or negative: the sign is read before the length is, or the second message put first would stand last. */
 export function comparePositions(one: string, other: string): number {
+  const below = one.startsWith('-');
+  const otherBelow = other.startsWith('-');
+  if (below !== otherBelow) return below ? -1 : 1;
+  const order = comparePlaces(below ? one.slice(1) : one, otherBelow ? other.slice(1) : other);
+  return order === 0 || !below ? order : -order;
+}
+
+/** Orders two unsigned decimal strings. */
+function comparePlaces(one: string, other: string): number {
   const [wholeOne = '0', fractionOne = ''] = one.split('.');
   const [wholeOther = '0', fractionOther = ''] = other.split('.');
   const left = wholeOne.replace(/^0+(?=\d)/, '');
@@ -184,6 +197,9 @@ export function applyRows(view: ThreadView, rows: ThreadRows): ThreadView {
       update({ read: { ...next.read, projection: rows.projection } });
     }
   }
+
+  if (typeof rows.seq === 'number' && Number.isSafeInteger(rows.seq) && rows.seq >= 0
+    && (next.lastSeq === null || rows.seq > next.lastSeq)) update({ lastSeq: rows.seq });
 
   if (rows.viewed_prompt !== undefined && (rows.seq === undefined || next.viewedPromptSeq === null || rows.seq >= next.viewedPromptSeq)) {
     update({ viewedPrompt: rows.viewed_prompt, viewedPromptSeq: rows.seq ?? null });
@@ -477,7 +493,24 @@ interface ThreadStore {
 
 export const useThreadStore = create<ThreadStore>(() => ({ byThread: new Map() }));
 
-function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView): void {
+// A text, reasoning or output delta changes a growing body. Controls that read metadata
+// can retain the same row frame until a non-delta publication, including a refusal or reset.
+const beforeStream = new WeakMap<ThreadView, { controls: ThreadView; timeline: ThreadView; agentItems: ThreadView['items'] }>();
+export function threadRowFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.controls ?? view;
+}
+
+/** The list groups by row metadata, the first nonblank agent text and exact completed echoes. */
+export function threadTimelineFrame(view: ThreadView): ThreadView {
+  return beforeStream.get(view)?.timeline ?? view;
+}
+
+/** The Agents list shows live text from child streams. The main reply cannot change that list. */
+export function agentCatalogItems(view: ThreadView): ThreadView['items'] {
+  return beforeStream.get(view)?.agentItems ?? view.items;
+}
+
+function update(threadId: ThreadReadTarget, change: (view: ThreadView) => ThreadView, pieces?: readonly Delta[]): void {
   const ref = threadReadTarget(threadId);
   const key = threadReadCacheKey(ref);
   useThreadStore.setState((state) => {
@@ -485,7 +518,25 @@ function update(threadId: ThreadReadTarget, change: (view: ThreadView) => Thread
     const after = change(before);
     if (after === before) return state;
     const byThread = new Map(state.byThread);
-    byThread.set(key, { ...after,ref });
+    const published = { ...after, ref };
+    if (pieces !== undefined) {
+      const timeline = threadTimelineFrame(before);
+      const regroup = pieces.some((piece) => {
+        if (piece.field !== 'text') return false;
+        const item = after.items.get(piece.item_id);
+        if (item?.kind !== 'agent_message' || item === before.items.get(piece.item_id)) return false;
+        if (item.status === 'completed') return true;
+        const previous = timeline.items.get(item.id);
+        return previous?.kind !== 'agent_message' || !/\S/.test(previous.payload.text) && /\S/.test(item.payload.text);
+      });
+      const childUpdate = after.streams.size > 0 && pieces.some((piece) => {
+        const item = after.items.get(piece.item_id);
+        return item !== undefined && item.stream !== 'main' && item !== before.items.get(piece.item_id);
+      });
+      beforeStream.set(published, { controls: threadRowFrame(before), timeline: regroup ? published : timeline,
+        agentItems: childUpdate ? after.items : agentCatalogItems(before) });
+    }
+    byThread.set(key, published);
     return { byThread };
   });
 }
@@ -541,6 +592,12 @@ export function threadReadOnly(view: ThreadView): boolean {
     || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
 }
 
+/** Stop names current work and needs no history revision, even while that history reloads. */
+export function threadStopReadOnly(view: ThreadView): boolean {
+  return view.closed !== null || view.read !== null && (view.read.selection !== null
+    || view.read.projection !== null && view.read.projection.viewed_continuation_id !== view.read.projection.active_continuation_id);
+}
+
 /** Read readiness is not native preparation status; viewedPrompt supplies that independent fact. */
 export function threadReadState(view: ThreadView): {
   selection: string | null;
@@ -586,7 +643,7 @@ export function flushDeltas(): void {
       const result = applyDeltas(view, batch.pieces);
       gaps.push(...result.gaps);
       return result.view;
-    });
+    }, batch.pieces);
     for (const itemId of gaps) onGap(batch.ref.threadId, itemId, batch.captured);
   }
 }
@@ -936,18 +993,41 @@ export const threadWriter = {
 
 // ---------------------------------------------------------------- reading
 
+/** A frame wakes readers of its own native window. Currently mounted windows share one subscription each. */
+const windowReaders = new Map<string, { listeners: Set<() => void>; stop: () => void }>();
+function subscribeWindow(key: string, notify: () => void): () => void {
+  let group = windowReaders.get(key);
+  if (group === undefined) {
+    const listeners = new Set<() => void>();
+    const stop = useThreadStore.subscribe((next, previous) => {
+      if (next.byThread.get(key) !== previous.byThread.get(key)) listeners.forEach((listener) => listener());
+    });
+    group = { listeners, stop };
+    windowReaders.set(key, group);
+  }
+  const { listeners, stop } = group;
+  listeners.add(notify);
+  return () => {
+    if (!listeners.delete(notify)) return;
+    if (listeners.size === 0) { stop(); windowReaders.delete(key); }
+  };
+}
+
+const wholeView = (view: ThreadView): ThreadView => view;
+
 /** A thread as far as it has arrived. */
 export function useThreadView(threadId: ThreadReadTarget): ThreadView {
-  const ref = useThreadReadRef(threadId);
-  const key = threadReadCacheKey(ref);
-  return useStore(useThreadStore, (state) => state.byThread.get(key) ?? EMPTY_VIEW);
+  return useThreadPart(threadId, wholeView);
 }
 
 /** One piece of a thread, by a selector; the component draws again only when that piece changes. */
 export function useThreadPart<Part>(threadId: ThreadReadTarget, select: (view: ThreadView) => Part): Part {
   const ref = useThreadReadRef(threadId);
   const key = threadReadCacheKey(ref);
-  return useStore(useThreadStore, (state) => select(state.byThread.get(key) ?? EMPTY_VIEW));
+  const subscribe = useCallback((notify: () => void) => subscribeWindow(key, notify), [key]);
+  const snapshot = useCallback(() => select(useThreadStore.getState().byThread.get(key) ?? EMPTY_VIEW), [key, select]);
+  const initial = useCallback(() => select(useThreadStore.getInitialState().byThread.get(key) ?? EMPTY_VIEW), [key, select]);
+  return useSyncExternalStore(subscribe, snapshot, initial);
 }
 
 /** The thread row itself. */
