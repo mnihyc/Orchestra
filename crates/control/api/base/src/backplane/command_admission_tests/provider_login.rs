@@ -12,9 +12,7 @@ use orch_access_contract::key_scope::KeyScope;
 
 use orch_access_contract::permissions::ObjectKind;
 
-use orch_api_core::middleware::authentication::API_TOKEN_PREFIX;
-
-use orch_api_core::middleware::authentication::new_token;
+use orch_api_core::middleware::authentication::new_api_token;
 
 use orch_api_core::middleware::authentication::token_hash;
 
@@ -164,8 +162,8 @@ impl LoginFixture {
             "target":{"kind":"provider","id":self.provider,"reach":"self"},
             "allow":[{"operation":operation,"actions":["manage"]}]
         }]}))?;
-        let token = new_token(API_TOKEN_PREFIX);
         let id = new_id();
+        let token = new_api_token(id);
         let mut conn = self.transport.test.pool.acquire().await?;
         identity::create_api_token_scoped(
             &mut conn,
