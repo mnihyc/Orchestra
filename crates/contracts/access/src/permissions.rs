@@ -43,6 +43,8 @@ words! {
         Mount = "mount",
         /// A skill: a directory of instructions, scripts and assets that agents are given.
         Skill = "skill",
+        /// A configured group chosen as one resource.
+        Pool = "pool",
     }
 }
 
@@ -60,6 +62,7 @@ impl ResourceKind {
             Self::McpServer => Area::Mcp,
             Self::Mount => Area::Mount,
             Self::Skill => Area::Skill,
+            Self::Pool => Area::Pool,
         }
     }
 
@@ -78,7 +81,10 @@ impl ResourceKind {
     /// it belongs to.
     #[must_use]
     pub const fn can_be_the_systems(self) -> bool {
-        !matches!(self, Self::Provider | Self::Environment | Self::Skill)
+        !matches!(
+            self,
+            Self::Provider | Self::Environment | Self::Skill | Self::Pool
+        )
     }
 }
 
@@ -117,6 +123,8 @@ words! {
         Mount = "mount",
         /// A skill.
         Skill = "skill",
+        /// A configured group chosen as one resource.
+        Pool = "pool",
     }
 }
 
@@ -151,6 +159,7 @@ impl ObjectKind {
             Self::McpServer => Some(ResourceKind::McpServer),
             Self::Mount => Some(ResourceKind::Mount),
             Self::Skill => Some(ResourceKind::Skill),
+            Self::Pool => Some(ResourceKind::Pool),
             _ => None,
         }
     }
@@ -174,7 +183,7 @@ impl ObjectKind {
     pub const fn made_in(self, place: PlaceKind) -> bool {
         match (place, self) {
             (PlaceKind::System | PlaceKind::Org, _) => true,
-            (PlaceKind::Project, Self::Topic | Self::Skill)
+            (PlaceKind::Project, Self::Topic | Self::Skill | Self::Pool)
             | (
                 PlaceKind::Project | PlaceKind::Topic,
                 Self::Thread | Self::Document | Self::DocumentContainer | Self::Environment,
@@ -207,6 +216,7 @@ impl From<ResourceKind> for ObjectKind {
             ResourceKind::McpServer => Self::McpServer,
             ResourceKind::Mount => Self::Mount,
             ResourceKind::Skill => Self::Skill,
+            ResourceKind::Pool => Self::Pool,
         }
     }
 }
@@ -268,6 +278,8 @@ words! {
         Mount = "mount",
         /// A skill.
         Skill = "skill",
+        /// A configured group chosen as one resource.
+        Pool = "pool",
     }
 }
 
@@ -313,6 +325,7 @@ impl Area {
             Self::Mcp => "MCP server",
             Self::Mount => "Mount",
             Self::Skill => "Skill",
+            Self::Pool => "Pool",
         }
     }
 }
@@ -502,6 +515,7 @@ const TEMPLATE: &[ObjectKind] = &[ObjectKind::Template];
 const MCP_SERVER: &[ObjectKind] = &[ObjectKind::McpServer];
 const MOUNT: &[ObjectKind] = &[ObjectKind::Mount];
 const SKILL: &[ObjectKind] = &[ObjectKind::Skill];
+const POOL: &[ObjectKind] = &[ObjectKind::Pool];
 
 /// Whom a new installation names in a row: for a managed environment, and
 /// for a person's machine. `None` is nobody, which leaves the row to the
@@ -743,6 +757,12 @@ permissions! {
         "Use Mount", "Attach the mount to an environment, or to the environments made for a scope.";
     MountManage = "mount.manage", Mount, Manage, MOUNT, NOBODY,
         "Manage Mount", "Change, enable, disable and delete the mount, and say where its data may be.";
+    PoolView = "pool.view", Pool, View, POOL, NOBODY,
+        "View Pool", "See the pool and the members whose names you may read.";
+    PoolUse = "pool.use", Pool, Use, POOL, NOBODY,
+        "Use Pool", "Choose the pool; each member still needs direct Use or both lending consents.";
+    PoolManage = "pool.manage", Pool, Manage, POOL, NOBODY,
+        "Manage Pool", "Edit the pool, its policy and members without gaining access to its members.";
     SkillView = "skill.view", Skill, View, SKILL, NOBODY,
         "View Skill", "See the skill in lists, with its versions, their files and where each came from.";
     SkillUse = "skill.use", Skill, Use, SKILL, NOBODY,
@@ -975,13 +995,18 @@ impl Permission {
         )
     }
 
-    /// Whether an entry in its rows may carry options. Three do: the use of
-    /// a provider, of a host and of a template.
+    /// Whether an entry in its rows may carry its own usage or path limits.
     #[must_use]
     pub const fn takes_options(self) -> bool {
         matches!(
             self,
-            Self::ProviderUse | Self::HostUse | Self::MachineUse | Self::TemplateUse
+            Self::ProviderUse
+                | Self::HostUse
+                | Self::MachineUse
+                | Self::TemplateUse
+                | Self::PoolUse
+                | Self::FilesView
+                | Self::FilesManage
         )
     }
 
@@ -991,8 +1016,10 @@ impl Permission {
     pub fn options_schema(self) -> Option<Json> {
         let schema = match self {
             Self::ProviderUse => schemars::schema_for!(ProviderUse),
+            Self::PoolUse => schemars::schema_for!(crate::pools::PoolUse),
             Self::HostUse | Self::MachineUse => schemars::schema_for!(HostUse),
             Self::TemplateUse => schemars::schema_for!(TemplateUse),
+            Self::FilesView | Self::FilesManage => schemars::schema_for!(FileAccess),
             _ => return None,
         };
         Some(schema.to_value())
@@ -1307,6 +1334,9 @@ impl Choice {
             (Self::FullView, ObjectKind::Mount) => &[P::MountView],
             (Self::FullInteract, ObjectKind::Mount) => &[P::MountUse],
             (Self::FullManage, ObjectKind::Mount) => &[P::MountManage],
+            (Self::FullView, ObjectKind::Pool) => &[P::PoolView],
+            (Self::FullInteract, ObjectKind::Pool) => &[P::PoolUse],
+            (Self::FullManage, ObjectKind::Pool) => &[P::PoolManage],
             (Self::FullView, ObjectKind::Skill) => &[P::SkillView],
             (Self::FullInteract, ObjectKind::Skill) => &[P::SkillUse],
             (Self::FullManage, ObjectKind::Skill) => &[P::SkillManage],
@@ -1490,9 +1520,80 @@ impl Arrangement {
     }
 }
 
+words! {
+    /// The work a provider entry may pay for, independent of its models and services.
+    #[derive(Default)]
+    pub enum UsagePurpose ("provider purpose") {
+        /// Ordinary agent turns.
+        #[default]
+        Turn = "turn",
+        /// Personal Ask questions.
+        Ask = "ask",
+        /// Summaries, including handoffs.
+        Summary = "summary",
+        /// Semantic indexing and search embeddings.
+        Embeddings = "embeddings",
+        /// Native permission reviews.
+        Review = "review",
+        /// Web search calls.
+        WebSearch = "web_search",
+        /// Page fetch calls.
+        PageFetch = "page_fetch",
+        /// Image generation calls.
+        ImageGeneration = "image_generation",
+    }
+}
+
+impl UsagePurpose {
+    /// The public grant distinguishes Ask from other paid work.
+    #[must_use]
+    pub const fn grant(self) -> ProviderUsePurpose {
+        match self {
+            Self::Ask => ProviderUsePurpose::Ask,
+            Self::Turn
+            | Self::Summary
+            | Self::Embeddings
+            | Self::Review
+            | Self::WebSearch
+            | Self::PageFetch
+            | Self::ImageGeneration => ProviderUsePurpose::Work,
+        }
+    }
+
+    /// Native work keeps its declared purpose; other declared agent tools remain turns.
+    #[must_use]
+    pub fn for_capability(capability: &str) -> Self {
+        match capability {
+            "turn" => Self::Turn,
+            "ask" => Self::Ask,
+            "summary" => Self::Summary,
+            "embeddings" => Self::Embeddings,
+            "review" => Self::Review,
+            "web_search" => Self::WebSearch,
+            "page_fetch" => Self::PageFetch,
+            "image_generation" => Self::ImageGeneration,
+            _ => Self::Turn,
+        }
+    }
+}
+
+words! {
+    /// The use an entry allows through a provider.
+    pub enum ProviderUsePurpose ("provider use purpose") {
+        /// Read-only Ask conversations.
+        #[schemars(extend("x-default-selected" = true))]
+        Ask = "ask",
+        /// Threads, summaries and other work.
+        #[schemars(extend("x-default-selected" = true))]
+        Work = "work",
+    }
+}
+
 /// A member of the options of an entry in the Use row of a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryMember {
+    /// Which uses are allowed.
+    Purposes,
     /// The models.
     Models,
     /// The service offerings.
@@ -1512,6 +1613,9 @@ pub enum EntryMember {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
+    /// Which uses this entry allows. Left out, Ask and other work are both allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<ProviderUsePurpose>>,
     /// The models the holder may run, by name; left out, every enabled model
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1541,6 +1645,66 @@ pub struct ProviderUse {
     pub r#where: Option<Vec<WhereName>>,
 }
 
+words! {
+    /// The paths a human file entry may reach, within the environment user's native access.
+    #[derive(Default, PartialOrd, Ord)]
+    pub enum FileReach ("file reach") {
+        /// The workspace and its attached mounts.
+        #[default]
+        Roots = "roots",
+        /// Every path the environment's own user may open.
+        Machine = "machine",
+    }
+}
+
+impl FileReach {
+    /// The safe default of an entry that names no wider path reach.
+    #[must_use]
+    pub const fn is_roots(&self) -> bool {
+        matches!(self, Self::Roots)
+    }
+}
+
+/// Current file geometry and its source; absent acts remain absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileReachFacts {
+    /// The current read reach after the machine ceiling.
+    pub view: Option<FileReach>,
+    /// The independently current mutation reach after the machine ceiling.
+    pub manage: Option<FileReach>,
+    /// Usable Terminal widened an existing read entry.
+    pub view_from_terminal: bool,
+    /// Usable Terminal widened an existing mutation entry.
+    pub manage_from_terminal: bool,
+    /// The native machine's current bound, regardless of the named entry.
+    pub machine_bound: FileReach,
+}
+
+/// A path bound carried by one Files View or Manage entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileAccess {
+    /// Roots unless machine reach is explicitly named; this never elevates the OS user.
+    #[serde(default)]
+    pub reach: FileReach,
+}
+
+impl FileAccess {
+    /// Narrowing may keep or reduce a giver's reachable paths, never widen them.
+    #[must_use]
+    pub fn within(&self, other: &Self) -> bool {
+        self.reach <= other.reach
+    }
+
+    /// Entries of one file permission grant the union of their reachable paths.
+    #[must_use]
+    pub fn or(&self, other: &Self) -> Self {
+        Self {
+            reach: self.reach.max(other.reach),
+        }
+    }
+}
+
 /// The most that an environment may be given. A member that is left out is
 /// no cap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1565,15 +1729,15 @@ pub struct ResourceLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostUse {
-    /// How many environments created through this entry may exist on the
-    /// host at one time; left out, as many as the host has room for.
+    /// How many environment or provider registrations created through this entry may
+    /// retain a place on the host at one time; left out, as many as the host has room for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_environments: Option<u32>,
     /// The host's storages their volumes may be created on; left out, all of
     /// them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storages: Option<Vec<String>>,
-    /// The most one environment created through this entry may be given on
+    /// The most one environment or provider unit created through this entry may be given on
     /// this host, whatever its template allows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources_max: Option<ResourceLimits>,
@@ -1612,10 +1776,14 @@ pub enum Options {
     None,
     /// Of the use of a provider.
     ProviderUse(ProviderUse),
+    /// One complete typed entry of a pool.
+    PoolUse(Box<crate::pools::PoolUse>),
     /// Of the use of a host.
     HostUse(HostUse),
     /// Of the use of a template.
     TemplateUse(TemplateUse),
+    /// The reachable paths of a file entry.
+    Files(FileAccess),
 }
 
 impl Options {
@@ -1631,6 +1799,40 @@ impl Options {
             Json::Object(members) => members,
             _ => return Err(vec![fault("", "must be an object")]),
         };
+        if permission == Permission::PoolUse {
+            let mut value = crate::pools::PoolUse::default();
+            let mut faults = Vec::new();
+            for (name, content) in members {
+                let permission = match name.as_str() {
+                    "provider" => Permission::ProviderUse,
+                    "host" => Permission::HostUse,
+                    "template" => Permission::TemplateUse,
+                    _ => {
+                        faults.push(fault(name, "is no option of this permission"));
+                        continue;
+                    }
+                };
+                match Self::parse(permission, content) {
+                    Ok(Self::ProviderUse(options)) => value.provider = options,
+                    Ok(Self::HostUse(options)) => value.host = options,
+                    Ok(Self::TemplateUse(options)) => value.template = options,
+                    Ok(_) => faults.push(fault(name, "has no typed resource allowance")),
+                    Err(inner) => faults.extend(inner.into_iter().map(|mut error| {
+                        error.path = if error.path.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{name}.{}", error.path)
+                        };
+                        error
+                    })),
+                }
+            }
+            return if faults.is_empty() {
+                Ok(Self::PoolUse(Box::new(value)))
+            } else {
+                Err(faults)
+            };
+        }
         let mut reader = Reader {
             members,
             faults: Vec::new(),
@@ -1638,6 +1840,7 @@ impl Options {
         };
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
+                purposes: reader.words::<ProviderUsePurpose>("purposes"),
                 models: reader.texts("models"),
                 services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
@@ -1654,6 +1857,9 @@ impl Options {
             Permission::TemplateUse => Self::TemplateUse(TemplateUse {
                 resources_max: reader.limits("resources_max"),
                 capabilities: reader.texts("capabilities"),
+            }),
+            Permission::FilesView | Permission::FilesManage => Self::Files(FileAccess {
+                reach: reader.word::<FileReach>("reach").unwrap_or_default(),
             }),
             _ => Self::None,
         };
@@ -1672,8 +1878,10 @@ impl Options {
         let written = match self {
             Self::None => return Json::Object(serde_json::Map::new()),
             Self::ProviderUse(options) => serde_json::to_value(options),
+            Self::PoolUse(options) => serde_json::to_value(options),
             Self::HostUse(options) => serde_json::to_value(options),
             Self::TemplateUse(options) => serde_json::to_value(options),
+            Self::Files(options) => serde_json::to_value(options),
         };
         written.unwrap_or_else(|_| Json::Object(serde_json::Map::new()))
     }
@@ -1737,6 +1945,16 @@ impl<'a> Reader<'a> {
         self.list(name, "is not one of the values it takes", |item| {
             item.as_str().and_then(|text| text.parse().ok())
         })
+    }
+
+    fn word<T: std::str::FromStr>(&mut self, name: &'static str) -> Option<T> {
+        let value = self.member(name)?;
+        let parsed = value.as_str().and_then(|value| value.parse().ok());
+        if parsed.is_none() {
+            self.faults
+                .push(fault(name, "is not one of the values it takes"));
+        }
+        parsed
     }
 
     fn places(&mut self, name: &'static str) -> Option<Vec<WhereName>> {
@@ -1863,6 +2081,7 @@ impl ProviderUse {
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
+            purposes: either(self.purposes.as_ref(), other.purposes.as_ref()),
             models: either(self.models.as_ref(), other.models.as_ref()),
             services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
@@ -1878,6 +2097,12 @@ impl ProviderUse {
     #[must_use]
     pub fn allows_model(&self, model: &str) -> bool {
         allowed(self.models.as_ref(), model)
+    }
+
+    /// Whether this entry permits Ask or other work, before applying its remaining limits.
+    #[must_use]
+    pub fn allows_purpose(&self, purpose: ProviderUsePurpose) -> bool {
+        allowed(self.purposes.as_ref(), &purpose)
     }
 
     /// Whether the entry lets its holder run at `effort`.
@@ -1944,6 +2169,12 @@ impl ProviderUse {
             }
         }
         let mut beyond = Vec::new();
+        if ProviderUsePurpose::ALL
+            .iter()
+            .any(|purpose| self.allows_purpose(*purpose) && !other.allows_purpose(*purpose))
+        {
+            beyond.push(EntryMember::Purposes);
+        }
         if !names_within(self.models.as_ref(), other.models.as_ref()) {
             beyond.push(EntryMember::Models);
         }
@@ -2072,6 +2303,22 @@ mod tests {
 
     fn through(permission: Permission) -> Vec<Permission> {
         permission.held_through().collect()
+    }
+
+    #[test]
+    fn accounting_categories_keep_ask_separate_from_every_kind_of_other_work() {
+        assert_eq!(UsagePurpose::Ask.grant(), ProviderUsePurpose::Ask);
+        for purpose in [
+            UsagePurpose::Turn,
+            UsagePurpose::Summary,
+            UsagePurpose::Embeddings,
+            UsagePurpose::Review,
+            UsagePurpose::WebSearch,
+            UsagePurpose::PageFetch,
+            UsagePurpose::ImageGeneration,
+        ] {
+            assert_eq!(purpose.grant(), ProviderUsePurpose::Work);
+        }
     }
 
     #[test]
@@ -2890,6 +3137,40 @@ mod tests {
     }
 
     #[test]
+    fn a_file_entry_stays_in_roots_unless_it_names_machine_reach() {
+        for permission in [P::FilesView, P::FilesManage] {
+            assert!(permission.takes_options());
+            let Options::Files(roots) = Options::parse(permission, &json!({})).unwrap() else {
+                panic!("file entries carry their own reach");
+            };
+            assert_eq!(roots.reach, FileReach::Roots);
+            assert_eq!(Options::Files(roots).to_json(), json!({"reach":"roots"}));
+            let named = json!({"reach":"machine"});
+            let Options::Files(machine) = Options::parse(permission, &named).unwrap() else {
+                panic!("machine reach is part of that same entry");
+            };
+            assert_eq!(machine.reach, FileReach::Machine);
+            assert_eq!(Options::Files(machine).to_json(), named);
+            let faults = Options::parse(permission, &json!({"reach":"somewhere"})).unwrap_err();
+            assert_eq!(faults[0].path, "reach");
+        }
+    }
+
+    #[test]
+    fn a_file_reach_can_be_narrowed_without_borrowing_broader_authority() {
+        let roots = FileAccess {
+            reach: FileReach::Roots,
+        };
+        let machine = FileAccess {
+            reach: FileReach::Machine,
+        };
+        assert!(roots.within(&machine));
+        assert!(!machine.within(&roots));
+        assert!(roots.within(&roots));
+        assert!(machine.within(&machine));
+    }
+
+    #[test]
     fn an_option_that_is_left_out_does_not_narrow() {
         let Options::ProviderUse(options) = Options::parse(P::ProviderUse, &json!({})).unwrap()
         else {
@@ -3000,6 +3281,7 @@ mod tests {
     #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
+            purposes: None,
             models: Some(vec!["a".into()]),
             services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
@@ -3007,6 +3289,7 @@ mod tests {
             r#where: None,
         };
         let other = ProviderUse {
+            purposes: None,
             models: Some(vec!["b".into(), "a".into()]),
             services: Some(vec!["fetch".into()]),
             efforts: None,
@@ -3046,6 +3329,59 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_only_entry_is_read_back_and_cannot_be_given_as_permission_for_other_work() {
+        let written = json!({"purposes":["ask"]});
+        let ask = provider_use(&written);
+        let work = provider_use(&json!({"purposes":["work"]}));
+        let all = provider_use(&json!({}));
+        let none = provider_use(&json!({"purposes":[]}));
+        assert_eq!(Options::ProviderUse(ask.clone()).to_json(), written);
+        assert!(ask.allows_purpose(ProviderUsePurpose::Ask));
+        assert!(!ask.allows_purpose(ProviderUsePurpose::Work));
+        assert!(ask.within(&all));
+        assert!(none.within(&ask));
+        assert_eq!(all.members_beyond(&ask), [EntryMember::Purposes]);
+        assert!(!work.within(&ask));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(all.allows_purpose(*purpose));
+            assert!(ask.or(&work).allows_purpose(*purpose));
+            assert!(!none.allows_purpose(*purpose));
+        }
+        assert!(Options::parse(P::ProviderUse, &json!({"purposes":["unknown"]})).is_err());
+    }
+
+    #[test]
+    fn the_provider_use_form_starts_with_both_uses_selected() {
+        let schema = P::ProviderUse.options_schema().unwrap();
+        let variants = schema["$defs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find_map(|def| {
+                def["oneOf"]
+                    .as_array()
+                    .filter(|variants| variants.iter().any(|variant| variant["const"] == "ask"))
+            })
+            .unwrap_or_else(|| panic!("the provider uses are in the schema: {schema}"));
+        for purpose in ProviderUsePurpose::ALL {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant["const"] == purpose.as_str()
+                        && variant["x-default-selected"] == true)
+            );
+        }
+    }
+
+    #[test]
+    fn naming_every_provider_use_allows_the_same_grant_as_leaving_the_list_out() {
+        let omitted = provider_use(&json!({}));
+        let named = provider_use(&json!({"purposes":["ask","work"]}));
+        assert!(omitted.within(&named));
+        assert!(named.within(&omitted));
+    }
+
+    #[test]
     fn where_is_read_and_written_back_as_typed_names() {
         let (environment, host, machine) = (new_id(), new_id(), new_id());
         let written = json!({
@@ -3067,6 +3403,7 @@ mod tests {
         assert_eq!(options.r#where, None);
         assert!(options.allows_where(&Whereabouts::default()));
         assert!(options.allows_where(&Whereabouts {
+            pools: Vec::new(),
             environment: Some(new_id()),
             host: Some(new_id()),
             machine: Some(new_id()),
@@ -3107,6 +3444,7 @@ mod tests {
     fn where_names_an_environment_a_host_covering_its_environments_and_narrows_only() {
         let (environment, host, machine) = (new_id(), new_id(), new_id());
         let on_host = Whereabouts {
+            pools: Vec::new(),
             environment: Some(new_id()),
             host: Some(host),
             machine: Some(machine),
@@ -3127,6 +3465,7 @@ mod tests {
             "an environment made on the host afterwards is covered"
         );
         assert!(!covering.allows_where(&Whereabouts {
+            pools: Vec::new(),
             environment: Some(new_id()),
             host: Some(new_id()),
             machine: Some(new_id()),
@@ -3390,6 +3729,33 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Catalogue>(written).unwrap(),
             catalogue
+        );
+    }
+}
+
+#[cfg(test)]
+mod pool_option_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn a_pool_use_entry_retains_complete_provider_and_host_limits() {
+        let parsed = Options::parse(
+            Permission::PoolUse,
+            &json!({"provider":{"purposes":["ask"],"models":["small"],"efforts":["low"]},"host":{"max_environments":2}}),
+        );
+        let Ok(Options::PoolUse(options)) = parsed else {
+            panic!("the typed pool entry was refused")
+        };
+        assert!(options.provider.allows_purpose(ProviderUsePurpose::Ask));
+        assert!(!options.provider.allows_purpose(ProviderUsePurpose::Work));
+        assert_eq!(options.provider.models, Some(vec!["small".into()]));
+        assert_eq!(options.host.max_environments, Some(2));
+        assert!(
+            Options::parse(
+                Permission::PoolUse,
+                &json!({"provider":{"future_authority":true}})
+            )
+            .is_err()
         );
     }
 }

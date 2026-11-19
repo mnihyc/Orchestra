@@ -546,6 +546,49 @@ async fn a_job_in_the_middle_of_its_work_when_the_api_restarts_is_finished_by_th
 }
 
 #[tokio::test]
+async fn taking_over_a_lease_keeps_the_retry_boundary_before_any_native_work_begins() {
+    use chrono::Utc;
+    use orch_types::{ManualClock, Time};
+    use std::sync::Arc;
+    let start = Time::new(Utc::now()).get();
+    let clock = Arc::new(ManualClock::new(start));
+    let world = World::with_clock(clock.clone()).await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-1", 16_384).await;
+    let template = template(&world).await;
+    let lease = start + chrono::Duration::seconds(1);
+    let retry = start + chrono::Duration::seconds(2);
+    let statement = format!("UPDATE jobs SET plan=plan || jsonb_build_object(
+        'runner',jsonb_build_object('id',gen_random_uuid()::text,'until','{lease}'::timestamptz),
+        'lifecycle_wait',jsonb_build_object('retry_eligible_at','{retry}'::timestamptz,
+            'last_attempt_at','{start}'::timestamptz,'reason_code','internal','observed_at','{start}'::timestamptz))
+        WHERE environment_id=(SELECT id FROM environments ORDER BY created_at DESC LIMIT 1)");
+    let made = hosting::make_after(&world, template, "Retained retry", &statement).await;
+    clock.advance(chrono::Duration::seconds(1));
+    eventually(
+        "the inherited retry wait or an early native command",
+        || async {
+            let plan: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
+                .bind(made.job.id)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+            plan.pointer("/lifecycle_wait/waiting")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || !host.kinds().is_empty()
+        },
+    )
+    .await;
+    assert!(
+        host.kinds().is_empty(),
+        "a reclaimed lease cannot advance the captured retry time"
+    );
+    clock.advance(chrono::Duration::seconds(1));
+    host.wait_for(K::NodeImageEnsure, 1).await;
+}
+
+#[tokio::test]
 async fn a_job_whose_runner_died_is_taken_over_when_its_lease_has_run_out_and_not_before() {
     let world = World::new().await;
     serve(&world);
@@ -1239,11 +1282,12 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
             world.clock.now(),
             &principal,
             &Request {
+                identity: None,
                 owner: world.ada,
                 name: Some("Prepared creation"),
                 home: world.root,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &config,
             },
         )
@@ -1290,4 +1334,90 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
         tx.rollback().await.unwrap();
     }
     assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn one_native_request_can_create_distinct_environment_slots_and_repreparing_a_slot_keeps_one_pool_choice()
+ {
+    use orch_authz::{Caller, Principal};
+    use orch_engine::environments;
+    use orch_provider_contract::pools::{Kind, Target};
+    use serde_json::json;
+    let world = common::World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "Multiple creation slots", 32768).await;
+    let template = hosting::template(&world).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut tx,
+        "pool",
+        Some(world.ada),
+        Some(world.root),
+        "Creation slots",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut tx,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Pool,
+            id: pool,
+        },
+        world.ada,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        world.clock.time(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool).bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}})).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(orch_types::new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":host.id}}))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let actor = Principal::load(&mut tx, Caller::session(world.ada), world.clock.time())
+        .await
+        .unwrap();
+    let input = orch_types::new_id();
+    let config = json!({});
+    let mut made = Vec::new();
+    for name in ["First creation slot", "Second creation slot"] {
+        let request = environments::Request {
+            identity: Some(input),
+            owner: world.ada,
+            name: Some(name),
+            home: world.root,
+            template: Some(template),
+            host: Some(Some(Target::Pool {
+                kind: Kind::Host,
+                id: pool,
+            })),
+            config: &config,
+        };
+        let _first = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        let prepared = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        made.push(
+            environments::apply_creation(&mut tx, world.clock.now(), &prepared, || Ok(()))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    assert_ne!(made[0], made[1]);
+    let choices:i64=sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE source->>'kind'='environment_creation' AND source->>'node'=$1::uuid::text")
+        .bind(world.root).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(
+        choices, 2,
+        "each accepted slot owns one choice across repeated preparation"
+    );
+    tx.commit().await.unwrap();
+    world.shutdown().await;
 }

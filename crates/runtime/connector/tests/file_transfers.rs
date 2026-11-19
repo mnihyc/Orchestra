@@ -44,6 +44,7 @@ async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_wr
     rig.attach(&directory).await;
     let answer: FsFetchResult = serde_json::from_value(
         rig.succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "result.bin".into(),
@@ -72,6 +73,7 @@ async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_wr
     );
     let empty = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "empty.txt".into(),
@@ -93,6 +95,7 @@ async fn a_workspace_file_above_the_callers_limit_is_refused_in_words_without_a_
     rig.start().await;
     rig.attach(&directory).await;
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.environment,
         mount: None,
         path: "result.txt".into(),
@@ -136,6 +139,7 @@ async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environ
     rig.start().await;
     rig.attach(&directory).await;
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.environment,
         mount: None,
         path: "result.txt".into(),
@@ -232,6 +236,7 @@ async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues
     );
     let result = rig
         .succeed(&FsArchiveRead {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             path: "bundle.tar".into(),
             entry: "data.txt".into(),
@@ -245,6 +250,7 @@ async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues
     );
     let stat: orch_link_contract::foreign::FileStat = serde_json::from_value(
         rig.succeed(&FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "bundle.tar".into(),
@@ -276,6 +282,7 @@ async fn a_changed_file_is_not_overwritten_and_its_captured_stat_survives_the_co
     let sent = rig.stored(b"replacement");
     let error = match rig
         .send(&FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "notes.txt".into(),

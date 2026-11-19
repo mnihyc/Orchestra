@@ -1,0 +1,5 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test resource_groups --test call_recovery
+test -p orch-api-core --test hosted_environments -- ten_creations_by_several_people
+test -p orch-api-core --test runtime_updates -- recovery_source::
+test -p orch-authz --test resources --test environments --test giving --test use_where
