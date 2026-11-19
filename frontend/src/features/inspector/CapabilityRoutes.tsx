@@ -67,6 +67,8 @@ export function CapabilityRoutes({ value }: { value: unknown }) {
     "delegation": t('capabilityRoutes.routes.delegation'),
   };
   const reasons: Record<string, string> = {
+    "program_unit_unavailable": t('capabilityRoutes.reasons.program_unit_unavailable'),
+    "program_unit_network_unavailable": t('capabilityRoutes.reasons.program_unit_network_unavailable'),
     "native_image_sign_in_required": t('capabilityRoutes.reasons.native_image_sign_in_required'),
     "route_not_declared": t('capabilityRoutes.reasons.route_not_declared'),
     "route_does_not_carry_capability": t('capabilityRoutes.reasons.route_does_not_carry_capability'),

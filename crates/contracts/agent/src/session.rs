@@ -249,7 +249,53 @@ pub struct NativeModelContext {
     pub extensions: BTreeMap<String, Json>,
 }
 
+/// Output constraints of an admitted program model turn, independent of public model options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramOutput {
+    /// The requested output allowance in tokens.
+    pub max_output_tokens: i64,
+    /// Adapter-enforced structured output where the program declares that facility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Json>,
+}
+
+impl ProgramOutput {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_output_tokens <= 0 {
+            return Err("The program output allowance must be positive.");
+        }
+        if self
+            .schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object())
+        {
+            return Err("The program output schema must be an object.");
+        }
+        Ok(())
+    }
+}
+
 impl NativeModelContext {
+    /// Only the source producer supplies these constraints; this metadata grants no tools or Read.
+    pub fn set_program_output(&mut self, output: ProgramOutput) -> Result<(), &'static str> {
+        output.validate()?;
+        let value =
+            serde_json::to_value(output).map_err(|_| "The program output request is invalid.")?;
+        self.extensions.insert("program_output".into(), value);
+        Ok(())
+    }
+
+    pub fn program_output(&self) -> Result<Option<ProgramOutput>, &'static str> {
+        let Some(value) = self.extensions.get("program_output") else {
+            return Ok(None);
+        };
+        let output: ProgramOutput = serde_json::from_value(value.clone())
+            .map_err(|_| "The program output request is invalid.")?;
+        output.validate()?;
+        Ok(Some(output))
+    }
+
     /// Copies only the core's public native instructions for session-configuration comparison.
     /// Route selection and private backend metadata remain with their original producer.
     #[must_use]
@@ -285,6 +331,8 @@ impl NativeModelContext {
 /// The members of a session that are the same on the link and for the adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSettings {
+    /// Bytes retained for one native text output; resolved from the thread setting.
+    pub output_capture_bytes: u64,
     /// Captured model metadata and the core route result; absent on older callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model: Option<Box<NativeModelContext>>,
@@ -336,6 +384,8 @@ pub struct SessionSettings {
     /// Whether completion of owned background work may continue the conversation.
     #[serde(default = "background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the program's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -1051,6 +1101,32 @@ mod tests {
     }
 
     #[test]
+    fn a_program_output_request_keeps_its_allowance_and_schema_out_of_public_parameters() {
+        let output = ProgramOutput {
+            max_output_tokens: 120,
+            schema: Some(
+                json!({"type":"object","required":["text"],"properties":{"text":{"type":"string"}},"additionalProperties":false}),
+            ),
+        };
+        let mut native =
+            NativeModelContext::captured("selected-model".into(), Default::default(), &[]).unwrap();
+        native.set_program_output(output.clone()).unwrap();
+        assert_eq!(native.program_output().unwrap(), Some(output));
+        let encoded = serde_json::to_value(&native).unwrap();
+        let decoded: NativeModelContext = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, native);
+        native
+            .extensions
+            .insert("program_output".into(), json!({"max_output_tokens":0}));
+        assert!(native.program_output().is_err());
+        native.extensions.insert(
+            "program_output".into(),
+            json!({"max_output_tokens":120,"schema":false}),
+        );
+        assert!(native.program_output().is_err());
+    }
+
+    #[test]
     fn native_configuration_comparison_copies_only_the_core_projection_and_ignores_row_order() {
         let mut native = NativeModelContext {
             model: "opaque-offering".into(),
@@ -1126,7 +1202,7 @@ mod tests {
           "directory": "/workspace/web", "cwd": "/workspace/web/api",
           "mounts": [ { "name": "src", "path": "/data/src", "read_only": true } ],
           "model": "gpt-6-sol", "effort": "high", "params": {}, "approval_mode": "on_request", "sandbox_mode": "workspace",
-          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "background_wake": true, "side_reading": null, "workspace_configuration": null,
+          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "web_action_wait_secs": 120, "background_wake": true, "side_reading": null, "workspace_configuration": null,
           "instructions": "You are working inside Orch.",
           "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "harness" },
           "arrangement": "separated",
@@ -1137,7 +1213,7 @@ mod tests {
           "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
           "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                          "send_message", "announce", "request_capability"],
-          "raw_events": true
+          "output_capture_bytes":67108864, "raw_events": true
         })
     }
 

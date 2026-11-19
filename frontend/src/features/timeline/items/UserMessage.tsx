@@ -1,9 +1,10 @@
 /** Human, system, forwarded and delivered announcement inputs.
  *
- * What a person said to the agent: their picture, name and time, and what they said in a bubble.
- * Text is Markdown; an image or a file they attached is a chip with its name; what they forwarded
- * stands in the bubble as a block for each source. A line the system or an announcement put in is a
- * quiet row across the column with its icon, and has no bubble.
+ * What a person said to the agent, as a tinted rounded block at the right, at most four fifths of the column wide; the
+ * sender's picture and name stand above it only where more than one person wrote in the thread, and the time is in
+ * the toolbar that shows on hover. Text is Markdown; an image or a file they attached is a chip with its name; what they
+ * forwarded stands in the block as a block for each source. A line the system or an announcement put in is a
+ * quiet row across the column with its icon, and has no block.
  */
 import { useMutation } from '@tanstack/react-query';
 import { Megaphone, Pencil, Settings2, Share, Target } from 'lucide-react';
@@ -12,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 
 import { continuationOutcomeUnknown, createPromptVersion } from '@/api/continuations';
 import { selectThreadContinuation } from '@/api/threadRead';
-import type { Author, ContentPart, Item, ThreadPromptVersionCreateBody } from '@/generated/api-types';
+import type { Author, ContentPart, Item, ThreadPromptVersionCreateBody, NativeImageReceipt } from '@/generated/api-types';
 import { newActKey } from '@/lib/requests';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
@@ -24,6 +25,7 @@ import { AttachmentChips } from '@/features/composer/Attachments';
 import { PersonThingProvider } from '@/features/people/personContext';
 import { readPastedText } from '@/lib/pastedText';
 import { ItemFrame, itemText } from '@/features/timeline/ItemActions';
+import { RecordingNotice } from '@/features/source/RecordingNotice';
 import { RestoreFromTurn } from '@/features/source/Restore';
 import { useTurnChanges } from '@/features/timeline/TurnFiles';
 import { useTimelineContext } from '@/features/timeline/context';
@@ -46,8 +48,11 @@ import { useViewShown } from '@/features/workbench/viewOpening';
 
 type UserItem = Extract<Item, { kind: 'user_message' }>;
 
+/** The block a person's words stand in: tinted, rounded, at the right and at most four fifths of the column; a message on its way to the agent is drawn in it too. */
+export const PERSON_BLOCK = 'flex max-w-[80%] min-w-0 flex-col gap-2 rounded-xl bg-bg-muted px-3 py-2';
+
 /** One part of what was said. */
-export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: ContentPart; owner?: Author | undefined; updatedAt?: string | undefined; thread?: string }) {
+export function Part({ part, owner, updatedAt, thread: sourceThread, imageDeliveries }: { imageDeliveries?: readonly NativeImageReceipt[] | undefined; part: ContentPart; owner?: Author | undefined; updatedAt?: string | undefined; thread?: string }) {
   const { t } = useTranslation();
   const context = useTimelineContext();
   const threadId = sourceThread ?? context.threadId;
@@ -64,8 +69,8 @@ export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: C
         </p>
         <Markdown text={part.text} compact />
         <div className="flex flex-wrap gap-1">
-          {part.images.map((image) => (
-            <FileAttachment key={image.blob} source={{ ...blobSource('thread', threadId, image.blob, image.name, undefined, image.media_type), owner: part.author !== null && 'id' in part.author ? part.author : undefined, updatedAt: part.at }} />
+          {part.images.map((image, index) => (
+            <FileAttachment key={image.blob} source={{ ...blobSource('thread', threadId, image.blob, image.name, undefined, image.media_type), imageDelivery: imageDeliveries?.find((receipt) => receipt.forwarded_image === index) ?? null, owner: part.author !== null && 'id' in part.author ? part.author : undefined, updatedAt: part.at }} />
           ))}
           {part.attachments.map((file) => (
             <FileAttachment key={file.blob} source={{ ...blobSource('thread', threadId, file.blob, file.name, file.size, file.media_type), owner: part.author !== null && 'id' in part.author ? part.author : undefined, updatedAt: part.at }} />
@@ -80,20 +85,29 @@ export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: C
     case 'text':
       return part.text.trim() === '' ? null : <Markdown text={part.text} breaks />;
     case 'image':
-      return <FileAttachment source={{ ...blobSource('thread', threadId, part.blob, part.name, undefined, part.media_type), owner, updatedAt }} />;
+      return <FileAttachment source={{ ...blobSource('thread', threadId, part.blob, part.name, undefined, part.media_type), imageDelivery: imageDeliveries?.find((receipt) => receipt.forwarded_image === null) ?? null, owner, updatedAt }} />;
     case 'file':
       return part.blob === null ? <FilePathAttachment path={part.path} name={part.name} size={part.size} /> : <FileAttachment source={{ ...blobSource('thread', threadId, part.blob, part.name, part.size), deliveredPath: part.path, owner, updatedAt }} />;
   }
 }
 
-export function UserMessage({ item }: { item: UserItem }) {
+function useInputRecording(item: UserItem) {
+  const { threadId } = useTimelineContext();
+  const turn = useThreadPart(threadId, (view) => item.turn_id === null ? undefined : view.turns.get(item.turn_id));
+  const environmentId = useThreadPart(threadId, (view) => turn === undefined ? undefined : view.segments.find((segment) => segment.id === turn.segment_id)?.environment?.id);
+  return turn?.input_id === item.payload.input_id ? { environmentId, reason: turn.recording_notice, indexing: turn.recording_indexing } : null;
+}
+
+export function UserMessage({ item, named = false }: { item: UserItem; named?: boolean }) {
   const { t } = useTranslation();
+  const recording = useInputRecording(item);
   const { source, parts } = item.payload;
 
   if (source !== 'user' || item.author === null) {
     const Icon = source === 'announcement' ? Megaphone : source === 'goal' ? Target : Settings2;
     return (
-      <ItemFrame item={item} label={t('timeline.user.menu')}>
+      <ItemFrame item={item} label={t('timeline.user.menu')}
+        messageActions={recording?.reason === 'indexing' ? <RecordingNotice {...recording} placement="actions" /> : undefined}>
         <div className="flex items-start gap-2 rounded-md px-3 py-2 text-sm text-text-muted">
           <Icon className="mt-0.5" aria-hidden />
           <div className="min-w-0 flex-1">
@@ -101,18 +115,19 @@ export function UserMessage({ item }: { item: UserItem }) {
             {source === 'goal' && item.payload.goal !== null && item.payload.goal !== undefined
               ? <GoalTurnBlock facts={item.payload.goal} />
               : parts.map((part, index) => (
-                <Part key={index} part={part} owner={item.author ?? undefined} updatedAt={item.created_at} />
+                <Part key={index} part={part} imageDeliveries={item.payload.native_image_delivery?.filter((receipt) => receipt.part === index)} owner={item.author ?? undefined} updatedAt={item.created_at} />
               ))}
+            {recording !== null && <RecordingNotice {...recording} />}
           </div>
         </div>
       </ItemFrame>
     );
   }
 
-  return <HumanMessage item={item} />;
+  return <HumanMessage item={item} named={named} recording={recording} />;
 }
 
-function HumanMessage({ item }: { item: UserItem }) {
+function HumanMessage({ item, named, recording }: { item: UserItem; named: boolean; recording: ReturnType<typeof useInputRecording> }) {
   const { t } = useTranslation();
   const format=useFormatContext();
   const context = useTimelineContext();
@@ -150,23 +165,17 @@ function HumanMessage({ item }: { item: UserItem }) {
   const author = item.author;
   if (author === null) return null;
   return (
-    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
+    <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} actionsEnd restoreChanges={fileChanges.files.length > 0 || fileChanges.reported > 0} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
       icon: <Pencil aria-hidden />, disabled: unavailable ?? false, onSelect: begin }] : []} messageActions={editing ? undefined : <>
         {mine && <IconButton size="sm" label={t('messageVersions.edit')} icon={<Pencil aria-hidden />} blocked={unavailable !== null} reason={unavailable ?? undefined} onClick={begin} />}
         <CopyButton value={itemText(item)} label={t('timeline.actions.copy')} />
-        {ownTurn !== undefined && <RestoreFromTurn threadId={threadId} turn={ownTurn} compact fallback hasChanges={fileChanges.files.length > 0} readOnly={context.readOnly === true} label={t('thread.turnActions.restoreBefore')} />}
+        {ownTurn !== undefined && <RestoreFromTurn threadId={threadId} turn={ownTurn} compact fallback hasChanges={fileChanges.files.length > 0 || fileChanges.reported > 0} readOnly={context.readOnly === true} label={t('thread.turnActions.restoreBefore')} />}
+        {recording?.reason === 'indexing' && <RecordingNotice {...recording} placement="actions" />}
+        <TimeOfDay at={item.created_at} className="px-1 text-xs text-text-subtle" />
       </>}>
-      <div className="flex items-start gap-3">
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-            <UserChip user={author} size={28} />
-            <TimeOfDay at={item.created_at} className="text-xs text-text-subtle" />
-            <ScheduleWakeMarker thread={threadId} input={item.payload.input_id} turn={item.turn_id} clientId={inputClient} enabled={shown && context.inspection === undefined && context.readOnly !== true} />
-            {delivery !== 'queue' && <span className="text-xs text-text-subtle">· {delivery === 'steer' ? t(item.status === 'in_progress' ? 'composer.queue.steering' : 'composer.queue.steered') : t(`timeline.user.delivery.${delivery}`)}</span>}
-            {item.payload.automatic !== null && item.payload.automatic !== undefined && <span className="inline-flex min-w-0 max-w-full items-baseline gap-1"><Tooltip content={t('calls.automaticDetail', { rule: item.payload.automatic.rule_id, attempt: formatNumber(item.payload.automatic.attempt, format.locale) })}><span tabIndex={0} className="focus-inset min-w-0 rounded-sm wrap-anywhere text-sm text-text-muted" data-automatic-input>{t('calls.automatic')}</span></Tooltip><CallHelp section="automatic" /></span>}
-          </p>
-          <div className="ml-10 flex min-w-0 flex-col gap-1">
-          {editing ? <PromptEditForm parts={parts} activeTurnId={currentTurn} pending={edit.isPending}
+      <div className="mt-(--message-gap) flex min-w-0 flex-col items-end gap-1" data-user-message>
+        {named && <p className="flex flex-wrap items-center justify-end gap-x-2 text-sm"><UserChip user={author} size={28} /></p>}
+        {editing ? <div className="w-full"><PromptEditForm parts={parts} activeTurnId={currentTurn} pending={edit.isPending}
             retryOnly={retryOnly} unavailable={retryOnly ? null : unavailable} error={preparationError ?? edit.error}
             onCancel={() => setEditing(false)} onSubmit={(content, activeTurn) => {
               if (retryOnly) { edit.mutate(edit.variables); return; }
@@ -181,16 +190,20 @@ function HumanMessage({ item }: { item: UserItem }) {
                 ...(activeTurn === undefined ? {} : { active_turn: activeTurn }) };
               edit.mutate(body);
             }}>
-          </PromptEditForm> : <div className="flex max-w-full flex-col gap-2 self-start rounded-lg bg-bg-muted px-3 py-2">
+          </PromptEditForm></div> : <div className={PERSON_BLOCK}>
             {parts.map((part, index) => (
-              <Part key={index} part={part} owner={author} updatedAt={item.created_at} />
+              <Part key={index} part={part} imageDeliveries={item.payload.native_image_delivery?.filter((receipt) => receipt.part === index)} owner={author} updatedAt={item.created_at} />
             ))}
           </div>}
-          {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
-            {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
-          </div>}
-          </div>
-        </div>
+        {recording !== null && <RecordingNotice {...recording} />}
+        <p className="flex flex-wrap items-baseline justify-end gap-x-2 gap-y-1 text-xs text-text-subtle empty:hidden">
+          <ScheduleWakeMarker thread={threadId} input={item.payload.input_id} turn={item.turn_id} clientId={inputClient} enabled={shown && context.inspection === undefined && context.readOnly !== true} />
+          {delivery !== 'queue' && <span>{delivery === 'steer' ? t(item.status === 'in_progress' ? 'composer.queue.steering' : 'composer.queue.steered') : t(`timeline.user.delivery.${delivery}`)}</span>}
+          {item.payload.automatic !== null && item.payload.automatic !== undefined && <span className="inline-flex min-w-0 max-w-full items-baseline gap-1"><Tooltip content={t('calls.automaticDetail', { rule: item.payload.automatic.rule_id, attempt: formatNumber(item.payload.automatic.attempt, format.locale) })}><span tabIndex={0} className="focus-inset min-w-0 rounded-sm wrap-anywhere text-sm text-text-muted" data-automatic-input>{t('calls.automatic')}</span></Tooltip><CallHelp section="automatic" /></span>}
+        </p>
+        {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
+          {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
+        </div>}
       </div>
     </ItemFrame></PersonThingProvider>
   );

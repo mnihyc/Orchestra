@@ -114,6 +114,22 @@ it('puts a list control into the address while it is on screen, and never the de
   if (typeof search !== 'function') throw new Error('An open drawer publishes its list state');
   expect(search(target.search)).toEqual({ block: 'found', _list: true, list: { 'document-history.author': 'all' } });
 });
+
+it('puts a visible fallback in the address without replacing the unavailable saved choice until the person chooses', () => {
+  const key = 'orch.list-reader.choices.page./everything.filters.view', saved = JSON.stringify(JSON.stringify({ unavailable: true }));
+  localStorage.setItem(key, saved);
+  const navigate = vi.fn<PageContextValue['navigate']>().mockResolvedValue(undefined);
+  const target: PageContextValue['target'] = { route: '/everything/', pathname: '/everything', params: {}, search: {}, hash: '' };
+  const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: 'unavailable-saved-list', target, navigate }}>{children}</PageContext>;
+  const choice = renderHook(() => useListChoice('filters', 'view', 'overview'), { wrapper });
+  expect(choice.result.current[0]).toBe('overview');
+  expect(localStorage.getItem(key)).toBe(saved);
+  const search = navigate.mock.calls[0]?.[0].search;
+  if (typeof search !== 'function') throw new Error('The visible fallback belongs in this address');
+  expect(search({})).toEqual({ _list: true, list: { 'filters.view': 'overview' } });
+  act(() => choice.result.current[1]('threads'));
+  expect(localStorage.getItem(key)).toBe(JSON.stringify(JSON.stringify('threads')));
+});
 // The rule of the address: the choices of the controls on the screen it names, each when chosen or shown, always with the marker; no other screen's.
 const topicSettings = (section: string): PageContextValue['target'] => ({ route: '/topic/$topicId/', pathname: '/topic/one', params: { topicId: 'one' }, search: { tab: 'settings', section }, hash: '' });
 function addressOf(navigate: ReturnType<typeof vi.fn<PageContextValue['navigate']>>, target: PageContextValue['target']): Record<string, unknown> {

@@ -254,6 +254,14 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread_id: Id,
     ) -> Result<Outcome, EngineError> {
+        crate::summaries::with_program_source_checks(self.preflight_in_scope(unit, thread_id)).await
+    }
+
+    async fn preflight_in_scope(
+        &self,
+        unit: &mut Unit<'_>,
+        thread_id: Id,
+    ) -> Result<Outcome, EngineError> {
         let outcome = Box::pin(self.preflight_inner(unit, thread_id)).await?;
         // Preparation has not refused the parked native continuation. Its decision follows
         // when the retained input material is ready, before the adapter releases output.
@@ -280,6 +288,18 @@ impl Engine {
             Self::preflight_phase(|| threads::lock(&mut *unit.conn, thread_id)).await?
         else {
             return Ok(Outcome::Gone);
+        };
+        // A Stop that is open is carried out before anything else: no turn is made behind its back.
+        let thread = if Self::preflight_phase(|| self.apply_open_stops_in(unit, thread_id))
+            .await?
+            .carried_out
+        {
+            match threads::thread(unit.conn, thread_id).await? {
+                Some(thread) => thread,
+                None => return Ok(Outcome::Gone),
+            }
+        } else {
+            thread
         };
         if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
             .await?
@@ -480,10 +500,9 @@ impl Engine {
         for input in
             Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id)).await?
         {
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             let background = crate::background_wake::is_wake(&input);
             if background && !settings.background_wake {
@@ -748,10 +767,9 @@ impl Engine {
                 return Ok(Outcome::Blocked(blocked));
             };
 
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                Self::preflight_phase(|| crate::inputs::settings_for(unit.conn, &input, &settings))
+                    .await?;
             let settings = &actual_settings;
             if Self::preflight_phase(|| {
                 crate::native_actions::hold_invalid(
@@ -810,7 +828,8 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked =
+                    Blocked::new("source_failed", crate::preparation::SOURCE_FAILED_DETAIL);
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -1041,8 +1060,17 @@ impl Engine {
         {
             return Ok(Person::Lost);
         }
+        let purpose = match authority {
+            Some(authority) => {
+                authority
+                    .provider_purpose(unit.conn, thread.node_id)
+                    .await?
+            }
+            None => orch_access_contract::permissions::ProviderPurpose::Turn,
+        };
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
+            purpose,
             person,
             node: thread.node_id,
             provider: thread.provider_id.unwrap_or_else(Id::nil),
@@ -1590,13 +1618,7 @@ impl Engine {
             offers,
             settings,
             entry: self
-                .entry_arrangements(
-                    unit,
-                    thread,
-                    input.and_then(InputRow::answers),
-                    &provider,
-                    settings,
-                )
+                .entry_arrangements(unit, thread, input, &provider, settings)
                 .await?,
             colocated,
             runtime,
@@ -1607,7 +1629,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.
@@ -1753,6 +1778,20 @@ impl Engine {
             // Options the agent's setup gives that the model's admitted constraints refuse: the setup needs attention.
             Err(reason) => return Ok(Err(Blocked::new("binding_invalid", reason))),
         };
+        if let Some(input) = input
+            && let Some(parent) =
+                crate::inputs::saved_authority(input.submission_authority.as_ref())?
+                    .as_ref()
+                    .and_then(crate::inputs::InputAuthority::capability_parent)
+            && !parent
+                .input_options_match(conn, input, &params, effort.as_deref())
+                .await?
+        {
+            return Ok(Err(Blocked::new(
+                "binding_invalid",
+                "The selected program cannot apply the requested model options.",
+            )));
+        }
         let metering = metering(path, descriptor.capabilities.usage_tokens);
         let tier = crate::providers::service_tier(&descriptor.parameters, &params);
         Ok(Ok(Plan {
@@ -1779,17 +1818,28 @@ impl Engine {
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
-        author: Option<Id>,
+        input: Option<&InputRow>,
         provider: &ProviderRow,
         settings: &Resolved,
     ) -> Result<Option<Vec<ArrangementType>>, EngineError> {
-        let person = author.unwrap_or(thread.owner_id);
+        let person = input.and_then(InputRow::answers).unwrap_or(thread.owner_id);
+        let purpose = match crate::inputs::saved_authority(
+            input.and_then(|row| row.submission_authority.as_ref()),
+        )? {
+            Some(authority) => {
+                authority
+                    .provider_purpose(unit.conn, thread.node_id)
+                    .await?
+            }
+            None => orch_access_contract::permissions::ProviderPurpose::Turn,
+        };
         let answer = self
             .inner
             .access
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose,
                     person,
                     node: thread.node_id,
                     provider: provider.id,
@@ -2201,6 +2251,7 @@ pub(crate) fn sessions_params(
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
+    let features = descriptor.feature_values(&settings.features);
     // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
     // given: the program declares which they are, and the engine knows the time.
     if let Some(delays) = declared_turn_end_delays(descriptor) {
@@ -2228,7 +2279,7 @@ pub(crate) fn sessions_params(
     let sent = sendable(
         &descriptor.parameters,
         &context,
-        &settings.features,
+        &features,
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
@@ -2242,7 +2293,7 @@ pub(crate) fn sessions_params(
         bindings.validate(
             agent.profile.get("config").unwrap_or(&Json::Null),
             parameters,
-            &settings.features,
+            &features,
         )?
     } else {
         std::collections::BTreeMap::new()
@@ -2259,7 +2310,7 @@ pub(crate) fn sessions_params(
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
-                && def.is_shown(&context, &settings.features)
+                && def.is_shown(&context, &features)
                 && !object.contains_key(&def.key)
             {
                 object.insert(def.key.clone(), Json::Null);
@@ -2410,6 +2461,7 @@ mod tests {
             sources: serde_json::json!({}),
             facts: Json::Null,
             revision: 1,
+            observation_revision: 0,
             deleted_at: None,
         }
     }
