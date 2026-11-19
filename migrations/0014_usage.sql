@@ -181,17 +181,100 @@ $$;
 
 -- Native work keeps its real helper membership and a separate requesting cap scope.
 -- This is a factual journal association, never current authority or permission.
-CREATE FUNCTION usage_work_scope(input uuid) RETURNS TABLE(node_id uuid,purpose text)
+CREATE TABLE delegated_program_work (
+    id uuid PRIMARY KEY,
+    request_id uuid NOT NULL,
+    source_answer_id uuid REFERENCES thread_tool_calls(answer_id) ON DELETE SET NULL,
+    source_summary_call_id uuid REFERENCES summary_calls(id) ON DELETE SET NULL,
+    source_ask_call_id uuid REFERENCES ask_calls(id) ON DELETE SET NULL,
+    attempt_id uuid NOT NULL,
+    helper_id uuid NOT NULL UNIQUE,
+    actor_id uuid NOT NULL,
+    person_id uuid,
+    request_node_id uuid NOT NULL,
+    purpose text NOT NULL CHECK (length(purpose)>0),
+    backend jsonb NOT NULL CHECK (jsonb_typeof(backend)='object'),
+    record jsonb NOT NULL CHECK (jsonb_typeof(record)='object'),
+    initial_input_id uuid UNIQUE,
+    session_login_hash bytea CHECK (session_login_hash IS NULL OR octet_length(session_login_hash)=32),
+    unit_admission jsonb CHECK (unit_admission IS NULL OR jsonb_typeof(unit_admission)='object'),
+    idle_close_command_id uuid,
+    context_closed_at timestamptz,
+    created_at timestamptz NOT NULL,
+    deadline_at timestamptz NOT NULL,
+    UNIQUE(request_id,attempt_id),
+    CHECK (source_answer_id IS NULL OR source_answer_id=request_id),
+    CHECK (num_nonnulls(source_answer_id,source_summary_call_id,source_ask_call_id)<=1),
+    CHECK (source_ask_call_id IS NULL OR (source_ask_call_id=request_id AND attempt_id=request_id AND purpose='ask')),
+    CHECK (helper_id<>request_node_id),
+    CHECK (deadline_at>created_at)
+);
+-- Native receipts can expire while the private helper history still exists.
+CREATE UNIQUE INDEX delegated_program_pending_close ON delegated_program_work(idle_close_command_id)
+    WHERE idle_close_command_id IS NOT NULL AND context_closed_at IS NULL;
+CREATE FUNCTION settle_program_context_close() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE delegated_program_work SET context_closed_at=NEW.updated_at
+     WHERE idle_close_command_id=NEW.id AND context_closed_at IS NULL;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER program_context_closed AFTER UPDATE OF state ON commands
+    FOR EACH ROW WHEN (NEW.state='succeeded' AND OLD.state<>'succeeded' AND NEW.kind IN ('session.close','session.close.fenced'))
+    EXECUTE FUNCTION settle_program_context_close();
+
+CREATE INDEX delegated_model_command_retention ON commands(serial_key)
+    WHERE kind IN ('turn.start','turn.start.fenced','session.open','session.open.fenced');
+CREATE INDEX delegated_ask_call ON delegated_program_work(source_ask_call_id) WHERE source_ask_call_id IS NOT NULL;
+CREATE INDEX delegated_ask_retirement ON delegated_program_work(id) WHERE purpose='ask' AND source_ask_call_id IS NULL;
+CREATE INDEX delegated_program_work_source ON delegated_program_work(source_answer_id)
+    WHERE source_answer_id IS NOT NULL;
+CREATE INDEX delegated_program_work_summary ON delegated_program_work(source_summary_call_id)
+    WHERE source_summary_call_id IS NOT NULL;
+
+-- A model helper can never gain an audience by outliving its source or changing its own page.
+CREATE VIEW ask_governance AS
+    SELECT t.node_id AS thread_id,t.ask_root_org_id AS root_org_id,n.owner_id AS person_id,
+           t.ask_retention_days AS retention_days,t.ask_last_message_at AS last_message_at,
+           (r.deleted_at IS NULL AND r.kind='org') AS root_live,true AS inspectable
+      FROM threads t JOIN nodes n ON n.id=t.node_id JOIN nodes r ON r.id=t.ask_root_org_id
+     WHERE t.ask_root_org_id IS NOT NULL
+    UNION ALL
+    SELECT w.helper_id,w.request_node_id,w.actor_id,COALESCE(t.ask_retention_days,1),
+           COALESCE(t.ask_last_message_at,w.created_at),
+           (t.node_id IS NOT NULL AND n.deleted_at IS NULL AND r.id IS NOT NULL AND r.deleted_at IS NULL),false
+      FROM delegated_program_work w LEFT JOIN ask_calls c ON c.id=w.source_ask_call_id
+      LEFT JOIN threads t ON t.node_id=c.thread_id LEFT JOIN nodes n ON n.id=t.node_id
+      LEFT JOIN nodes r ON r.id=w.request_node_id
+     WHERE w.purpose='ask';
+
+-- A copied native prompt keeps its source governors after the execution journal is removed.
+CREATE TABLE delegated_program_model_inputs (
+    model_input_id uuid PRIMARY KEY REFERENCES model_inputs(id) ON DELETE CASCADE,
+    work_id uuid REFERENCES delegated_program_work(id) ON DELETE SET NULL,
+    viewer_id uuid,
+    source_refs jsonb NOT NULL CHECK (jsonb_typeof(source_refs)='array' AND source_refs <> '[]'::jsonb)
+);
+
+-- A generated initial conversation is factual execution activity, not another automatic target.
+-- Any later independent input makes this an ordinary conversation again.
+CREATE FUNCTION delegated_execution_only(thread uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS(SELECT 1 FROM delegated_program_work w
+        WHERE w.helper_id=thread
+          AND NOT EXISTS(SELECT 1 FROM thread_inputs i WHERE i.thread_id=thread
+              AND (w.initial_input_id IS NULL OR i.id<>w.initial_input_id)))
+$$;
+
+CREATE FUNCTION usage_work_scope(input uuid) RETURNS TABLE(node_id uuid,purpose text,person_id uuid,ask_turn uuid)
     LANGUAGE sql STABLE AS $$
-    SELECT p.thread_id,p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'capability'
-      FROM thread_inputs i JOIN thread_tool_calls p
-        ON p.answer_id=(i.submission_authority#>>'{capability_parent,answer}')::uuid
+    SELECT w.request_node_id,w.purpose,w.person_id,c.turn_id
+      FROM thread_inputs i JOIN delegated_program_work w
+        ON w.id=(i.submission_authority#>>'{capability_parent,work}')::uuid
+      LEFT JOIN ask_calls c ON c.id=w.source_ask_call_id AND c.person_id=w.actor_id
      WHERE i.id=input
        AND i.submission_authority#>>'{capability_parent,helper}'=i.thread_id::text
-       AND p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'helper'=i.thread_id::text
-       AND p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'actor'=i.author_id::text
-       AND p.thread_id<>i.thread_id
-       AND COALESCE(p.plan->COALESCE(i.submission_authority#>>'{capability_parent,slot}','delegated_capability')->>'capability','')<>''
+       AND w.initial_input_id=i.id AND w.helper_id=i.thread_id AND w.actor_id=i.author_id
+       AND w.request_node_id<>i.thread_id
 $$;
 
 CREATE FUNCTION usage_turn_purpose(turn uuid) RETURNS text LANGUAGE sql STABLE AS $$

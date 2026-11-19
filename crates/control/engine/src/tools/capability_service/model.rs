@@ -155,6 +155,7 @@ pub(super) fn projection(
 
 /// Current model Use operands shared by wire-backed and native program helpers.
 pub(super) struct ModelUse<'a> {
+    pub purpose: orch_access_contract::permissions::ProviderUsePurpose,
     pub place: Id,
     pub provider: Id,
     pub offering: &'a str,
@@ -185,12 +186,15 @@ pub(super) async fn offering_use(
     // needs one to be asked for.
     let place = crate::access::thread_place(conn, request.place).await?;
     let allowing: Vec<_> = granted
-        .allowing(&orch_authz::options::Wanted {
-            model: Some((request.offering, request.groups)),
-            effort: request.effort,
-            at: place.as_ref(),
-            ..orch_authz::options::Wanted::default()
-        })
+        .allowing_for(
+            &orch_authz::options::Wanted {
+                model: Some((request.offering, request.groups)),
+                effort: request.effort,
+                at: place.as_ref(),
+                ..orch_authz::options::Wanted::default()
+            },
+            request.purpose,
+        )
         .into_iter()
         .filter(|allowance| allowance.provider.efforts.is_none() || request.effort.is_some())
         .collect();
@@ -236,6 +240,7 @@ pub(super) async fn model_use(
         conn,
         caller,
         &ModelUse {
+            purpose: orch_access_contract::permissions::ProviderUsePurpose::Work,
             place: evidence.origin.place()?,
             provider: evidence.provider,
             offering: &evidence.offering,

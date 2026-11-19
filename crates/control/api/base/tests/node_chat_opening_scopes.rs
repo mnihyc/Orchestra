@@ -427,7 +427,7 @@ async fn summary_provider_scope_declines_only_its_metadata_and_never_the_admitte
         .unwrap();
     sqlx::query("UPDATE resource_summaries SET text=$2,producer=$3,source_snapshot='{}',source_refs=$4,completed_request_id=$5,completed_at=$6,completed_dirty_revision=dirty_revision WHERE id=$1")
         .bind(summary.id).bind("The admitted topic paragraph stays readable.")
-        .bind(json!({"provider_id":provider,"model_name":"private-summary-model"}))
+        .bind(json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":"private-summary-model"}}}))
         .bind(json!([target])).bind(new_id()).bind(room.world.now())
         .execute(&mut *conn).await.unwrap();
     drop(conn);

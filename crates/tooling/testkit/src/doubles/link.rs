@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use orch_link::controller::{ControllerLink, ControllerOutputs, Notice};
 use orch_link::framing::{
-    Connection, Message, MessageSink, MessageSource, PeerInfo, TransportError,
+    Connection, Message, MessageSink, MessageSource, PeerInfo, Refused, TransportError,
 };
 use orch_link::reconnect::{DialError, Dialer};
 use orch_link::session::{GatewayConfig, SessionAuthority, SessionEvent, SessionSender, accept};
@@ -38,6 +38,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+pub mod large_messages;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -69,11 +71,13 @@ pub enum Action {
 #[derive(Debug, Clone)]
 struct Rule {
     direction: Direction,
-    /// The `t` of a text frame, or `data` for tunnel data; any frame when
-    /// `None`.
+    /// The `t` of a text frame, `part` for a part of a large message, or `data`
+    /// for tunnel data; any frame when `None`.
     frame: Option<String>,
     /// When set, the frame must carry this event of this durable stream.
     event: Option<(String, Seq)>,
+    /// An exact command reply, without depending on unrelated frame ordering.
+    command: Option<Id>,
     /// How many matching frames pass untouched first.
     skip: usize,
     /// How many matching frames suffer the action after that.
@@ -107,6 +111,7 @@ struct FaultsInner {
     connections: AtomicUsize,
     fired: AtomicUsize,
     lost: Mutex<u64>,
+    buffer_frames: AtomicUsize,
 }
 
 /// Where a test makes things go wrong.
@@ -135,6 +140,7 @@ impl Faults {
                 connections: AtomicUsize::new(0),
                 fired: AtomicUsize::new(0),
                 lost: Mutex::new(0),
+                buffer_frames: AtomicUsize::new(1),
             }),
         }
     }
@@ -151,6 +157,7 @@ impl Faults {
             direction,
             frame: frame.map(str::to_owned),
             event: None,
+            command: None,
             skip,
             times,
             action,
@@ -160,6 +167,22 @@ impl Faults {
     /// Loses `times` frames of kind `frame` after `skip` have passed.
     pub fn drop_frames(&self, direction: Direction, frame: &str, skip: usize, times: usize) {
         self.add(direction, Some(frame), skip, times, Action::Drop);
+    }
+
+    /// Lose one command's acknowledgement and result after its machine journal accepts it.
+    pub fn drop_command_reply(&self, command: Id) {
+        let mut rules = lock(&self.inner.rules);
+        for frame in ["cmd_ack", "cmd_res"] {
+            rules.push(Rule {
+                direction: Direction::Up,
+                frame: Some(frame.into()),
+                event: None,
+                command: Some(command),
+                skip: 0,
+                times: 1,
+                action: Action::Drop,
+            });
+        }
     }
 
     /// Repeats `times` frames of kind `frame` after `skip` have passed.
@@ -186,6 +209,7 @@ impl Faults {
             direction,
             frame: None,
             event: Some((stream.to_string(), seq)),
+            command: None,
             skip: 0,
             times: 1,
             action: Action::Cut,
@@ -205,6 +229,14 @@ impl Faults {
     /// Shapes one direction of the pipe to a thin line.
     pub fn shape(&self, direction: Direction, shape: Option<Shape>) {
         lock(&self.inner.shapes)[Self::slot(direction)] = shape;
+    }
+
+    /// The next connections can accept this many frames before the shaped line drains them.
+    /// One is the normal paced sink; a larger buffer models a socket accepting ahead of delivery.
+    pub fn buffer_frames(&self, count: usize) {
+        self.inner
+            .buffer_frames
+            .store(count.max(1), Ordering::SeqCst);
     }
 
     /// Forgets every rule that has not fired, and the shaping.
@@ -252,6 +284,9 @@ impl Faults {
                     .event
                     .as_ref()
                     .is_some_and(|(stream, seq)| !carries_event(message, stream, *seq))
+                || rule
+                    .command
+                    .is_some_and(|command| !carries_command(message, command))
             {
                 continue;
             }
@@ -267,6 +302,20 @@ impl Faults {
             return Some(rule.action);
         }
         None
+    }
+}
+
+fn carries_command(message: &Message, command: Id) -> bool {
+    let Message::Text(text) = message else {
+        return false;
+    };
+    let Ok(frame) = serde_json::from_str::<Frame>(text) else {
+        return false;
+    };
+    match frame {
+        Frame::CmdAck(reply) => reply.id == command,
+        Frame::CmdRes(reply) => reply.id == command,
+        _ => false,
     }
 }
 
@@ -289,10 +338,17 @@ fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
     }
 }
 
-/// The kind of a message, as rules name it: the `t` of a text frame, `data`
-/// for binary.
+/// The kind of a message, as rules name it: the `t` of a text frame, `part`
+/// for a part of a large message, `data` for other binary.
 fn kind_of(message: &Message) -> String {
     match message {
+        Message::Binary(bytes)
+            if bytes
+                .first()
+                .is_some_and(|kind| orch_link_contract::frames::PartFrame::is_kind(*kind)) =>
+        {
+            "part".to_owned()
+        }
         Message::Binary(_) => "data".to_owned(),
         Message::Text(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -307,6 +363,7 @@ struct PipeSink {
     /// Whether the forwarder has nothing in hand: the pipe can then carry the
     /// next message at once, and nothing is waiting in it.
     idle: Arc<watch::Sender<bool>>,
+    buffered: bool,
 }
 
 #[async_trait]
@@ -314,6 +371,9 @@ impl MessageSink for PipeSink {
     /// Ready when the pipe has no message in it, so that what is sent next is
     /// chosen at the last moment, as it is when a socket's buffer is small.
     async fn ready(&mut self) {
+        if self.buffered {
+            return;
+        }
         let mut idle = self.idle.subscribe();
         tokio::select! {
             () = self.dead.cancelled() => {}
@@ -489,13 +549,12 @@ fn faulty_pair(
     hub_sees: PeerInfo,
     faults: &Faults,
 ) -> (Connection, Connection) {
-    /// Room for one frame in the pipe, as a socket buffer has room for
-    /// little more: a sender that is faster than the pipe is held back.
-    const PIPE_ROOM: usize = 1;
+    // Room normally holds one frame; a buffered fixture can accept more before delivery.
+    let pipe_room = faults.inner.buffer_frames.load(Ordering::SeqCst);
     let born = *faults.inner.epoch.borrow();
     let dead = CancellationToken::new();
-    let (up_tx, up_rx) = mpsc::channel(PIPE_ROOM);
-    let (down_tx, down_rx) = mpsc::channel(PIPE_ROOM);
+    let (up_tx, up_rx) = mpsc::channel(pipe_room);
+    let (down_tx, down_rx) = mpsc::channel(pipe_room);
     let (to_hub, hub_inbox) = mpsc::unbounded_channel();
     let (to_machine, machine_inbox) = mpsc::unbounded_channel();
     let (up_idle, down_idle) = (
@@ -525,6 +584,7 @@ fn faulty_pair(
             tx: up_tx,
             dead: dead.clone(),
             idle: up_idle,
+            buffered: pipe_room > 1,
         }),
         source: Box::new(PipeSource {
             rx: machine_inbox,
@@ -537,6 +597,7 @@ fn faulty_pair(
             tx: down_tx,
             dead: dead.clone(),
             idle: down_idle,
+            buffered: pipe_room > 1,
         }),
         source: Box::new(PipeSource {
             rx: hub_inbox,
@@ -945,37 +1006,35 @@ impl Dialer for HubDialer {
     }
 }
 
-/// Carries what the system sends a machine to the machine's session.
+/// Carries what the system sends a machine to the machine's session. A command that the session cannot
+/// carry is failed at once with the reason, as a gateway tells the system.
 async fn carry_down(
     hub: Arc<HubInner>,
     machine_id: Id,
     mut down: mpsc::UnboundedReceiver<DownFrame>,
 ) {
     while let Some(frame) = down.recv().await {
-        let sender = lock(&hub.machines)
-            .get(&machine_id)
-            .and_then(|slot| slot.session.as_ref().map(|(_, sender)| sender.clone()));
-        if let Some(sender) = sender {
-            let _ = match frame {
-                DownFrame::Cmd(cmd) => sender.send(Frame::Cmd(cmd)),
-                DownFrame::CmdCancel(cancel) => sender.send(Frame::CmdCancel(cancel)),
-                DownFrame::Ack(ack) => sender.send(Frame::Ack(ack)),
-                DownFrame::Nak(nak) => sender.send(Frame::Nak(nak)),
-                DownFrame::McpImportAnswer(answer) => sender.send(Frame::McpImportAnswer(answer)),
-                DownFrame::PortLocalAnswer(answer) => sender.send(Frame::PortLocalAnswer(answer)),
-                DownFrame::PortConnectionsQuery(query) => {
-                    sender.send(Frame::PortConnectionsQuery(query))
-                }
-                DownFrame::Gateways(advertisement) => sender.send(Frame::Gateways(advertisement)),
-                DownFrame::TunnelRouteAnswer(answer) => {
-                    sender.send(Frame::TunnelRouteAnswer(answer))
-                }
-                DownFrame::TunnelAttach(attach) => sender.send(Frame::TunnelAttach(attach)),
-                DownFrame::TunnelPrepareAnswer(answer) => {
-                    sender.send(Frame::TunnelPrepareAnswer(answer))
-                }
-                DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
+        let (session, controller) = {
+            let machines = lock(&hub.machines);
+            let slot = machines.get(&machine_id);
+            (
+                slot.and_then(|slot| slot.session.clone()),
+                slot.map(|slot| slot.controller.clone()),
+            )
+        };
+        if let Some((_, sender)) = session {
+            let command = match &frame {
+                DownFrame::Cmd(cmd) => Some(cmd.id),
+                _ => None,
             };
+            let sent = sender.send(Frame::from(frame));
+            if let (Err(Refused::TooLarge { bytes, limit }), Some(id), Some(controller)) =
+                (sent, command, controller)
+            {
+                controller
+                    .commands()
+                    .refuse_unaccepted(id, &orch_link::commands::command_too_large(bytes, limit));
+            }
         }
     }
 }

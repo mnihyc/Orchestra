@@ -373,7 +373,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         .call(AdminSettingSet, &[&"auto.summarizer"])
         .token(&root.token)
         .body(&AdminSettingSetBody {
-            value: json!({"kind":"model","model_name":"small"}),
+            value: json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"offering":"small"}}}),
             locked: None,
             expected_revision: None,
         })
@@ -386,7 +386,7 @@ async fn node_and_system_summarizer_settings_validate_nested_declared_configurat
         "the built-in model uses its descriptor too"
     );
     let zero_budget = world.app.call(AdminSettingSet, &[&"auto.summarizer"]).token(&root.token)
-        .body(&AdminSettingSetBody { value: json!({"kind":"model","provider_id":Id::nil(),"model_name":"small","max_output_tokens":0}), locked: None, expected_revision: None }).send().await.problem();
+        .body(&AdminSettingSetBody { value: json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}},"answer_max_output_tokens":0}), locked: None, expected_revision: None }).send().await.problem();
     assert_eq!(zero_budget.code, ErrorCode::RequestInvalid);
 }
 
