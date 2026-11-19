@@ -258,6 +258,20 @@ pub async fn queue(
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
         Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
+    crate::environment_preparation::accepted_job(
+        conn,
+        environment.id,
+        environment.generation,
+        if mode == Mode::Start {
+            orch_api_contract::threads::EnvironmentPreparationKind::Start
+        } else {
+            orch_api_contract::threads::EnvironmentPreparationKind::Create
+        },
+        job.id,
+        now,
+    )
+    .await
+    .map_err(MakeError::Internal)?;
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
 }

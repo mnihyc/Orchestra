@@ -1,0 +1,10 @@
+test -p orch-api-core --test component_updates --test machine_policy_scopes --test machine_registration --test search_names --test search_native_scopes --test documents --test document_list_scopes --test private_documents --test search_content --test threads_start_source --test thread_opening_scopes --test accounts --test notifications_routes --test threads_drive --test thread_continuation_queues --test thread_move --test workspace_connector --test resource_summaries --test summaries
+test -p orch-engine --test background --test background_wake --test failures --test foreign_machine_streams --test limits --test provider_sign_in --test shared_write --test updates
+test -p orch-engine --test history_scale
+test -p orch-api-core --test browsers --test hosted_environments --test provider_harness --test thread_continuation_search --test thread_history_scale --test threads_read --test users --test workspace_jobs_scopes
+test -p orch-conformance --test suites
+test -p orch-plugin --test adapter
+test -p orch-api-base -p orch-api-core --lib
+test -p orch-provider-contract --test option_layers
+test -p orch-engine --lib -- source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-api-core --test defaults_opening --test node_chat_opening_scopes

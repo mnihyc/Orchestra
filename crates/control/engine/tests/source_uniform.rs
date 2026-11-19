@@ -200,8 +200,11 @@ async fn a_topics_repository_is_the_default_on_every_machine_and_an_explicit_cho
                 thread,
                 world.environment,
                 "web",
-                choice,
-                None,
+                source::CreationChoice {
+                    prepare: choice,
+                    worktree: None,
+                    workspace_edits: &[],
+                },
             )
             .await
             .unwrap();
@@ -264,6 +267,7 @@ async fn an_existing_directory_is_kept_even_without_write_permission_and_a_missi
                     }
                     Ok(CommandResult::FsStat(
                         orch_api_contract::workspace::FileStat {
+                            facts: None,
                             entry: orch_api_contract::workspace::DirEntry {
                                 name: "web".into(),
                                 path: body.path.clone(),
@@ -343,6 +347,8 @@ async fn an_existing_directory_is_kept_even_without_write_permission_and_a_missi
                     token: None,
                     creator_origin: None,
                     scheduled_input: None,
+                    workspace_edits: Vec::new(),
+                    prepared_source: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: frozen,
@@ -428,8 +434,11 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         thread,
         world.environment,
         "web",
-        None,
-        None,
+        source::CreationChoice {
+            prepare: None,
+            worktree: None,
+            workspace_edits: &[],
+        },
     )
     .await
     .unwrap();
@@ -444,6 +453,7 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         .on(CommandKind::FsStat, move |_| {
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "web".into(),
                         path: "web".into(),
@@ -468,6 +478,8 @@ async fn automatic_preparation_keeps_an_existing_directory_without_requiring_an_
         .on(CommandKind::FsRecord, |_| {
             Ok(CommandResult::FsRecord(
                 orch_link_contract::source::FsRecordResult {
+                    indexing: None,
+
                     state: orch_link_contract::source::RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -663,6 +675,8 @@ async fn a_reported_physical_write_denial_or_missing_policy_stops_before_native_
                     token: None,
                     creator_origin: None,
                     scheduled_input: None,
+                    workspace_edits: Vec::new(),
+                    prepared_source: None,
                     action: Action::Prepare {
                         directory: row.workspace_dir,
                         source: RepositorySource {
@@ -796,6 +810,8 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             .handler
             .on(CommandKind::FsRecord, |_| {
                 Ok(CommandResult::FsRecord(FsRecordResult {
+                    indexing: None,
+
                     state: RecordState::Unavailable,
                     tree_ref: None,
                     repository_head: None,
@@ -814,8 +830,11 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             thread,
             world.environment,
             "web",
-            None,
-            None,
+            source::CreationChoice {
+                prepare: None,
+                worktree: None,
+                workspace_edits: &[],
+            },
         )
         .await
         .unwrap();
@@ -830,16 +849,31 @@ async fn a_terminal_source_failure_blocks_without_retrying_and_explicit_retry_ke
             )
             .await
             .unwrap();
-        world.wait_blocked(thread, "error").await;
+        // Source failure is a structured block; its reason code no longer lives in the sentence.
+        world.wait_blocked(thread, "source_failed").await;
         let shown = world.sync(thread).await.thread.source.unwrap();
         assert_eq!(shown.state, SourceState::Failed);
         assert_eq!(
             shown.reason.as_deref(),
+            // The source keeps the code the machine refused with, for the page to explain in its own words.
             Some(if is_policy {
                 "workspace.remote_write_disabled"
             } else {
-                "workspace.source_failed"
+                "internal"
             })
+        );
+        let blocked = world.sync(thread).await.thread.blocked.unwrap();
+        assert_eq!(
+            blocked.reason,
+            orch_api_contract::threads::BlockedReason::SourceFailed
+        );
+        assert!(
+            !blocked
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains(shown.reason.as_deref().unwrap()),
+            "{blocked:?}"
         );
         let job_id = shown.job.unwrap().id;
         assert_eq!(hosting::wait_over(&world, job_id).await.0, "failed");

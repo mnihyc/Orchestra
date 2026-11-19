@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
+import { readViewChoice } from '@/lib/viewChoices';
 import { ResourceList } from '@/features/resources/ResourceList';
 import type { ResourceKind } from '@/features/resources/trail';
 import type { EverythingFilter } from '@/api/everything';
@@ -13,7 +14,7 @@ const original=client.session.getState();
 const calls:EverythingFilter[]=[];
 let admin=false;
 let orgReady=true;
-vi.mock('@/api/auth',()=>({meQuery:{queryKey:['library-reader'],initialData:{id:'library-reader'},queryFn:()=>Promise.resolve({id:'library-reader'})}}));
+vi.mock('@/api/auth',async (loadOriginal) => ({ ...await loadOriginal<object>(),meQuery:{queryKey:['library-reader'],initialData:{id:'library-reader'},queryFn:()=>Promise.resolve({id:'library-reader'})}}));
 vi.mock('@/api/everything',()=>({everythingQuery:(_reader:string,_parent:string,filter:EverythingFilter)=>({queryKey:['library-inventory',filter],initialPageParam:null,
  queryFn:()=>{calls.push(filter);return Promise.resolve({items:[],next_cursor:null});},getNextPageParam:()=>null})}));
 vi.mock('@/features/resources/HomePicker',()=>({useViewedOrgState:()=>({org:orgReady?{id:'team',name:'Workshop',access:{administers:admin}}:null,load:{isSuccess:orgReady,isPending:!orgReady,isError:false}})}));
@@ -46,12 +47,15 @@ it('offers the nested labels in order, separates the admin view and saves this l
  show(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('I manage');
 });
 
-it('offers Use for environments and replaces an unavailable saved admin view with the default',async()=>{
+it('offers Use for environments and keeps an unavailable saved admin view while showing the default',async()=>{
  const user=userEvent.setup();const environment=show(<Library kind="environments"/>);
  const view=screen.getByRole('combobox',{name:'Show'});expect(view).toHaveTextContent('I can use');await user.click(view);
  expect(screen.getByRole('option',{name:'I can use'})).toBeVisible();await user.keyboard('{Escape}');environment.unmount();
  admin=true;const first=show(<Library/>);await user.click(screen.getByRole('combobox',{name:'Show'}));await user.click(screen.getByRole('option',{name:'All in Workshop'}));first.unmount();
- admin=false;show(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('I can use');
+ admin=false;const fallback=show(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('I can use');
+ expect(readViewChoice('library-reader','page.resources.skills.resources.skills','view','')).toBe(JSON.stringify('all'));
+ expect(screen.getByText('Using default · Saved choice unavailable')).toBeVisible();
+ admin=true;fallback.rerender(<Library/>);expect(screen.getByRole('combobox',{name:'Show'})).toHaveTextContent('All in Workshop');
 });
 
 it('keeps a saved All view while the org’s authority metadata is still loading',async()=>{
