@@ -62,18 +62,33 @@ impl Engine {
         )
         .await?;
         let old = link::command(&mut tx, command.id).await?;
-        let deadline = old.as_ref().map_or_else(
-            || {
-                Time::new(
-                    self.inner.clock.now()
-                        + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-                )
-            },
-            |row| Time::new(row.deadline_at),
-        );
+        let deadline = if matches!(
+            command.kind,
+            orch_link_contract::commands::CommandKind::TurnStart
+                | orch_link_contract::commands::CommandKind::TurnStartFenced
+        ) {
+            self.keep_start_wait_in(
+                &mut tx,
+                side.node_id,
+                snapshot.turn.id,
+                command.id,
+                command.kind,
+            )
+            .await?
+        } else {
+            old.as_ref().map_or_else(
+                || {
+                    Time::new(
+                        self.inner.clock.now()
+                            + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
+                    )
+                },
+                |row| Time::new(row.deadline_at),
+            )
+        };
         command.deadline = Some(deadline);
         let key = command.key.wire();
-        link::insert_command(
+        let inserted = link::insert_command(
             &mut tx,
             &link::NewCommand {
                 id: command.id,
@@ -86,6 +101,16 @@ impl Engine {
             self.inner.clock.now(),
         )
         .await?;
+        if inserted
+            && matches!(
+                command.kind,
+                orch_link_contract::commands::CommandKind::TurnStart
+                    | orch_link_contract::commands::CommandKind::TurnStartFenced
+            )
+        {
+            link::set_side_start_adoption(&mut tx, command.id, snapshot.turn.id).await?;
+        }
+
         let retained = link::command(&mut tx, command.id).await?.ok_or_else(|| {
             EngineError::unreadable("The retained side input command is unavailable.")
         })?;

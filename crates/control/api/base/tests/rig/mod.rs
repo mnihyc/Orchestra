@@ -249,15 +249,19 @@ pub fn engine_config() -> EngineConfig {
 // ---------------------------------------------------------------- the engine's commands
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     authority: Option<orch_engine::commands::CommandAuthority>,
     return_source: Option<orch_engine::credentials::handover_authority::ReturnSource>,
     machine: Id,
     kind: String,
     key: Option<String>,
+    after: Option<Id>,
     body: Json,
     deadline: Time,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    work_started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is issued, and a command asked
@@ -277,7 +281,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -316,6 +320,7 @@ impl ScriptedCommands {
         lock(&self.issued).get(&id).map(|entry| {
             (
                 orch_engine::commands::RetainedCommand {
+                    after: entry.after,
                     machine: entry.machine,
                     kind: entry.kind.clone(),
                     key: entry.key.clone(),
@@ -423,6 +428,14 @@ impl Commands for ScriptedCommands {
     async fn retained_body(&self, id: Id) -> Result<Option<Json>, CommandsError> {
         Ok(lock(&self.issued).get(&id).map(|entry| entry.body.clone()))
     }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
+    }
     async fn retained_command(
         &self,
         id: Id,
@@ -466,15 +479,17 @@ impl Commands for ScriptedCommands {
             .and_then(|authority| authority.handover_source())
             .cloned();
         let cmd = Cmd {
+            after: command.after,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(self.clock.time(), deadline),
             body: command.body,
         };
         let kind = cmd.kind.clone();
         let key = cmd.key.clone();
         let body = cmd.body.clone();
+        let after = cmd.after;
         if let Some(check) = before {
             check().map_err(CommandsError::BeforeEffect)?;
         }
@@ -482,26 +497,53 @@ impl Commands for ScriptedCommands {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 authority,
                 return_source,
                 machine: command.machine,
                 body,
                 kind,
                 key,
+                after,
                 deadline,
                 handle,
                 at: now,
+                work_started_at: None,
+                completed_at: None,
             },
         );
         Ok(())
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
-        Ok(lock(&self.issued).get(&id).map(|entry| {
+        Ok(lock(&self.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if entry.work_started_at.is_none()
+                && matches!(
+                    progress,
+                    Progress::Running
+                        | Progress::Released
+                        | Progress::Succeeded(_)
+                        | Progress::Failed(_)
+                )
+            {
+                entry.work_started_at = Some(self.clock.now());
+            }
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if (entry.after.is_some()
+                    || matches!(entry.kind.as_str(), "turn.start" | "turn.start.fenced"))
+                    && progress == Progress::Accepted
+                {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                work_started_at: entry.work_started_at.or(entry.completed_at),
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -515,6 +557,11 @@ impl Commands for ScriptedCommands {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let progress = handle.wait().await;
+        if let Some(entry) = lock(&self.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.clock.now());
+        }
         let outcome = outcome_of(&progress).ok_or(CommandsError::Stopping)?;
         self.complete_admitted(id, outcome).await
     }
@@ -816,6 +863,7 @@ impl Rig {
                 .expect("a link without gateways can be made");
         let state = Arc::new(AppState {
             builtin_sources: old.builtin_sources.clone(),
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             db: db.clone(),
             config: Arc::clone(&old.config),
@@ -985,6 +1033,7 @@ impl Rig {
                         descriptor: serde_json::from_value(descriptor()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -993,6 +1042,13 @@ impl Rig {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: format!("native-{}", open.session.segment_id),
                             resumed: open.session.mode == SessionMode::Resume,
                             import_report: None,
@@ -1151,6 +1207,21 @@ impl Rig {
             self.turn_state(turn).await == state
         })
         .await;
+    }
+
+    /// Waits until the terminal event and its deferred notice and file work have committed.
+    pub async fn wait_for_terminal_facts(&self, turn: Id, state: &str) {
+        eventually(&format!("the {state} turn has published its final facts"), || async {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT state=$2 AND end_work IS NULL AND NOT files_end_due AND NOT files_work_pending
+                 FROM turns WHERE id=$1",
+            )
+            .bind(turn)
+            .bind(state)
+            .fetch_one(self.db.pool())
+            .await
+            .unwrap()
+        }).await;
     }
 
     /// The state of a thread: (state, blocked reason).

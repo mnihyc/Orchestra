@@ -1,5 +1,5 @@
 //! The page readers and what is written from them: against the whole readings they replace, on small threads, and at the size
-//! of a history of 200,000 turns made by SQL.
+//! of histories spanning multiple turn and item pages. The full-size history runs alone in history_scale.
 
 use super::*;
 use crate::fork_history::{self, cut};
@@ -8,15 +8,17 @@ use crate::written::{self, Detail};
 use orch_authz::Caller;
 use orch_db::queries::{thread_history, thread_history_cuts as cuts, threads};
 use orch_types::{Json, new_id};
+use tracing::instrument::WithSubscriber as _;
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// How many turns the history at size has: the figure the owner's review asked for.
-const SCALE_TURNS: i64 = 200_000;
+/// Two full database pages and one partial page exercise the same page boundaries
+/// without retaining a large SQL-grown world beside the other unit cases.
+const SCALE_TURNS: i64 = 2 * cuts::PAGE + 1;
 
 /// Counts the statements that run in a piece of work: sqlx tells of each one as an event while the task that makes it is polled.
-/// One subscriber is installed for the whole test binary; it counts the events of the task that is counting, so that tests that
-/// run side by side, and the tasks of the world they stand on, do not count in each other's.
+/// The measured future owns its subscriber while it is polled, so concurrent tests and background tasks neither
+/// replace its observer nor count in its budget.
 struct Statements;
 
 tokio::task_local! {
@@ -26,12 +28,13 @@ tokio::task_local! {
 impl Statements {
     /// Runs `work` and tells how many statements it ran.
     async fn of<T>(work: impl std::future::Future<Output = T>) -> (T, usize) {
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            let _ = tracing::subscriber::set_global_default(Statements);
-        });
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let done = COUNTING.scope(std::sync::Arc::clone(&count), work).await;
+        let done = COUNTING
+            .scope(
+                std::sync::Arc::clone(&count),
+                work.with_subscriber(Statements),
+            )
+            .await;
         (done, count.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
@@ -53,6 +56,32 @@ impl tracing::Subscriber for Statements {
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn a_statement_count_follows_the_work_when_another_dispatcher_is_current() {
+    let (_, count) = Statements::of(async {
+        tracing::debug!(target: "sqlx::query", "statement observer control");
+    })
+    .with_subscriber(tracing::Dispatch::none())
+    .await;
+    assert_eq!(
+        count, 1,
+        "an outer dispatcher cannot silence the counted work"
+    );
+}
+
+/// A competing subscriber must not turn a native SQL budget into a measured zero.
+#[tokio::test]
+async fn native_statement_measurements_stay_positive_under_another_task_subscriber() -> Proof {
+    let world = common::World::new().await;
+    let (result, statements) =
+        Statements::of(async { sqlx::query("SELECT 1").execute(world.pool.pool()).await })
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await;
+    result?;
+    assert!(statements > 0, "an executed native query must be observed");
+    Ok(())
 }
 
 /// A thread with `turns` real turns: each is asked a different thing and answered a different thing.
@@ -895,7 +924,7 @@ async fn an_oversized_neutral_turn_stops_after_one_item_page_without_holding_the
 }
 
 #[tokio::test]
-async fn a_history_of_two_hundred_thousand_turns_is_counted_in_sql_and_its_carry_reads_only_what_fits()
+async fn a_history_spanning_many_pages_is_counted_in_sql_and_its_carry_reads_only_what_fits()
 -> Proof {
     let world = common::World::new().await;
     let thread = conversation(&world, 1).await?;
@@ -998,7 +1027,7 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
     let small = captured(&world, thread).await?;
     let (short, small_queries) =
         Statements::of(cut::summary_input(&world.engine(), &small, &budget)).await;
-    let short = short?;
+    let short = short?.text;
     assert!(short.starts_with("# Newest turns, in brief"));
     assert!(short.contains("answer 0"));
     assert!(!short.contains("still older are not listed"));
@@ -1008,7 +1037,7 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
     let large = captured(&world, large).await?;
     let (sent, queries) =
         Statements::of(cut::summary_input(&world.engine(), &large, &budget)).await;
-    let sent = sent?;
+    let sent = sent?.text;
     assert!(sent.len() <= budget.bytes - crate::summaries::HANDOFF_FRAME_BYTES);
     assert!(sent.starts_with("# Newest turns, in brief"));
     assert!(sent.contains("# Older turns, one line each"));
@@ -1041,7 +1070,7 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
 }
 
 #[tokio::test]
-async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
+async fn a_cut_spanning_turn_and_item_pages_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
 -> Proof {
     let began = std::time::Instant::now();
     eprintln!("history scale diagnostic phase=fixture_wait");
@@ -1185,7 +1214,7 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     );
     let (copied, statements) = Statements::of(async {
         let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
-        fork_history::copy_conversation(
+        common::copy_conversation(
             &mut unit,
             thread,
             target,
@@ -1204,10 +1233,14 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     );
     copied?;
     tx.commit().await?;
-    let pages = 2 * SCALE_TURNS / cuts::PAGE;
+    let item_pages = (2 * SCALE_TURNS + cuts::PAGE - 1) / cuts::PAGE;
+    let turn_pages = (SCALE_TURNS + cuts::PAGE - 1) / cuts::PAGE;
+    // Each turn page is captured, copied and released. Each item page supplies
+    // two capture-metadata passes, then its copy read, insert and parent check.
+    // Small fixed metadata is bounded separately.
     assert!(
-        i64::try_from(statements)? <= 4 * pages + 200,
-        "{statements} statements copied {pages} pages of items"
+        i64::try_from(statements)? <= 3 * turn_pages + 5 * item_pages + 200,
+        "{statements} statements copied {turn_pages} turn pages and {item_pages} item pages"
     );
     let copy: (i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1 AND kind<>'marker')",
@@ -1229,10 +1262,11 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     // An identity in the copy is made from the target's and the original's.
     let (made, derived): (Id, Id) = sqlx::query_as(
         "SELECT t.id, md5($1::text||o.id::text)::uuid FROM turns t, turns o
-          WHERE t.thread_id=$1 AND t.ordinal=777 AND o.thread_id=$2 AND o.ordinal=777",
+          WHERE t.thread_id=$1 AND t.ordinal=$3 AND o.thread_id=$2 AND o.ordinal=$3",
     )
     .bind(target)
     .bind(thread)
+    .bind(i32::try_from(SCALE_TURNS / 2 + 1)?)
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(made, derived);
@@ -2041,6 +2075,315 @@ async fn decoded_page_bytes_follow_the_frozen_revision_and_always_make_progress_
     .await?;
     assert_eq!(live.len(), 3);
     drop((live, conn));
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copied_input_metadata_crosses_full_and_partial_pages_with_its_turn_links_intact() -> Proof
+{
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let turns = 2 * cuts::PAGE + 1;
+    world.grow_history(source, turns).await;
+    sqlx::query(
+        "WITH seed AS MATERIALIZED (
+      SELECT to_jsonb(i) AS body FROM thread_inputs i JOIN turns t ON t.input_id=i.id
+        WHERE t.thread_id=$1 AND t.ordinal=1)
+      INSERT INTO thread_inputs SELECT p.* FROM seed,turns t
+      CROSS JOIN LATERAL jsonb_populate_record(NULL::thread_inputs,seed.body||jsonb_build_object(
+        'id',md5('page-input:'||t.id::text)::uuid,'turn_id',t.id,'client_id',NULL)) p
+      WHERE t.thread_id=$1 AND t.ordinal>1",
+    )
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    sqlx::query("UPDATE turns SET input_id=md5('page-input:'||id::text)::uuid WHERE thread_id=$1 AND ordinal>1")
+        .bind(source).execute(world.pool.pool()).await?;
+    sqlx::query("UPDATE items i SET payload=jsonb_set(i.payload,'{input_id}',to_jsonb(t.input_id::text))
+      FROM turns t WHERE t.id=i.turn_id AND t.thread_id=$1 AND t.ordinal>1 AND i.kind='user_message'")
+        .bind(source).execute(world.pool.pool()).await?;
+    let target = world.thread("A copy with paged input metadata").await;
+    let segment = world.segment_of(target).await;
+    let mut tx = world.pool.begin().await?;
+    common::copy_conversation(
+        &mut crate::unit::Unit::new(&mut tx, world.clock.now()),
+        source,
+        target,
+        segment,
+        Some((1, i32::try_from(turns)?)),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    let copied: (i64, i64) = sqlx::query_as(
+        "SELECT
+      (SELECT count(*) FROM thread_inputs WHERE thread_id=$1),
+      (SELECT count(*) FROM turns t JOIN thread_inputs i ON i.id=t.input_id
+        WHERE t.thread_id=$1 AND i.turn_id=t.id)",
+    )
+    .bind(target)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(copied, (turns, turns));
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_streamed_answer_updates_its_words_without_rewriting_history_boundary_keys() -> Proof {
+    let world = common::World::new().await;
+    let source = world.thread("Stable streamed history boundaries").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), source, common::queued("Ask"))
+        .await?;
+    world.run_turn(source, 0, "Answer").await;
+    world.wait_followed_up(source).await;
+    let mut tx = world.pool.begin().await?;
+    let (item, view, ordinal, before): (Id, Id, i32, String) = sqlx::query_as(
+        "SELECT e.item_id,e.continuation_id,e.ordinal,e.ctid::text FROM thread_history_item_edges e
+          JOIN items i ON i.id=e.item_id WHERE e.thread_id=$1 AND i.kind='agent_message'
+          ORDER BY e.seq_created DESC LIMIT 1",
+    )
+    .bind(source)
+    .fetch_one(&mut *tx)
+    .await?;
+    let high = thread_history::turn_high(&mut tx, source, view, i64::from(ordinal)).await?;
+    {
+        let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+        let seq = unit.stamp(source).await?;
+        sqlx::query(
+            "UPDATE items SET payload=jsonb_set(payload,'{parts,0,text}',to_jsonb($3::text)),
+            kind=kind,stream=stream,turn_id=turn_id,seq_updated=$2 WHERE id=$1",
+        )
+        .bind(item)
+        .bind(seq)
+        .bind("An updated streamed answer")
+        .execute(&mut *unit.conn)
+        .await?;
+        unit.finish().await?;
+    }
+    let after: String =
+        sqlx::query_scalar("SELECT ctid::text FROM thread_history_item_edges WHERE item_id=$1")
+            .bind(item)
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(
+        after, before,
+        "streaming-shaped updates do not create new boundary-index versions"
+    );
+    assert_eq!(
+        thread_history::turn_high(&mut tx, source, view, i64::from(ordinal)).await?,
+        high
+    );
+    tx.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recopying_a_side_keeps_its_frozen_file_prefix_without_whole_history_transfers() -> Proof {
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    world.grow_history(source, SCALE_TURNS).await;
+    let side = world.thread("A side with a retained file prefix").await;
+    let target = world.thread("Another copy of the retained prefix").await;
+    let mut tx = world.pool.begin().await?;
+    // Each retained answer names distinct bytes. Physical file IO is irrelevant to
+    // this admission proof; ordinary blob owners and their counters are real.
+    sqlx::query("INSERT INTO blobs(hash,size) SELECT decode(md5('prefix:'||i.id::text)||md5('file:'||i.id::text),'hex'),1
+      FROM items i WHERE i.thread_id=$1 AND i.kind='agent_message'")
+        .bind(source).execute(&mut *tx).await?;
+    let base: i64 = sqlx::query_scalar(
+        "UPDATE threads SET next_seq=next_seq+$2 WHERE node_id=$1 RETURNING next_seq-$2",
+    )
+    .bind(source)
+    .bind(SCALE_TURNS)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE items i SET seq_updated=$2+t.ordinal::bigint-1,
+      payload=i.payload||jsonb_build_object('parts',jsonb_build_array(jsonb_build_object(
+        'type','file','path','kept.txt','name','kept.txt','size',1,
+        'blob',md5('prefix:'||i.id::text)||md5('file:'||i.id::text))))
+      FROM turns t WHERE t.id=i.turn_id AND i.thread_id=$1 AND i.kind='agent_message'",
+    )
+    .bind(source)
+    .bind(base)
+    .execute(&mut *tx)
+    .await?;
+    let row = threads::thread(&mut tx, source)
+        .await?
+        .ok_or("source absent")?;
+    sqlx::query("SELECT node_id FROM threads WHERE node_id=$1 FOR UPDATE")
+        .bind(source)
+        .execute(&mut *tx)
+        .await?;
+    cuts::capture(
+        &mut tx,
+        &cuts::Capture {
+            id: side,
+            thread: source,
+            view: row.active_continuation_id,
+            job: None,
+            owner_thread: Some(side),
+            segment: row.current_segment_id,
+            execution_revision: row.execution_revision,
+            range: Some((1, i32::try_from(SCALE_TURNS)?)),
+            at: world.clock.now(),
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE threads SET side_of=$2,side_from_turn=$3,side_reading='read_only' WHERE node_id=$1",
+    )
+    .bind(side)
+    .bind(source)
+    .bind(i32::try_from(SCALE_TURNS)?)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM items WHERE thread_id=$1 AND kind='agent_message'")
+        .bind(source)
+        .execute(&mut *tx)
+        .await?;
+    let retained: (i64, i64) = sqlx::query_as(
+        "SELECT
+      (SELECT count(*) FROM thread_history_cut_items WHERE cut_id=$1 AND body IS NOT NULL),
+      (SELECT count(*) FROM thread_history_cut_blobs WHERE cut_id=$1)",
+    )
+    .bind(side)
+    .fetch_one(&mut *tx)
+    .await?;
+    assert_eq!(retained, (SCALE_TURNS, SCALE_TURNS));
+    tx.commit().await?;
+
+    let defaults = orch_config::ServerConfig::default().database;
+    let requests = orch_db::Db::connect_with_limits(
+        &world.db.url,
+        1,
+        std::time::Duration::from_millis(defaults.slow_statement_ms),
+        std::time::Duration::from_millis(defaults.slow_acquire_ms),
+        orch_db::pool::Limits::REQUESTS,
+    )
+    .await?;
+    let mut tx = requests.begin().await?;
+    let timeout: String = sqlx::query_scalar("SELECT current_setting('statement_timeout')")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(timeout, "15s");
+    sqlx::query("SELECT set_config('test.prefix_target',$1,true)")
+        .bind(target.to_string())
+        .execute(&mut *tx)
+        .await?;
+    // Transition tables measure a statement's actual transfer, independent of
+    // runner speed. The old two INSERTs each transfer the whole retained prefix.
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION check_prefix_transfer_page() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF (SELECT count(*) FROM inserted WHERE cut_id=nullif(current_setting('test.prefix_target',true),'')::uuid)>{} THEN
+        RAISE EXCEPTION 'a retained prefix was transferred in one unbounded statement'; END IF; RETURN NULL; END $$;
+      CREATE TRIGGER check_prefix_body_page AFTER INSERT ON thread_history_cut_items
+        REFERENCING NEW TABLE AS inserted FOR EACH STATEMENT EXECUTE FUNCTION check_prefix_transfer_page();
+      CREATE TRIGGER check_prefix_pin_page AFTER INSERT ON thread_history_cut_blobs
+        REFERENCING NEW TABLE AS inserted FOR EACH STATEMENT EXECUTE FUNCTION check_prefix_transfer_page();", cuts::PAGE)))
+        .execute(&mut *tx).await?;
+    let row = threads::thread(&mut tx, side).await?.ok_or("side absent")?;
+    sqlx::query("SELECT node_id FROM threads WHERE node_id=$1 FOR UPDATE")
+        .bind(side)
+        .execute(&mut *tx)
+        .await?;
+    let began = std::time::Instant::now();
+    let copied = cuts::capture(
+        &mut tx,
+        &cuts::Capture {
+            id: target,
+            thread: side,
+            view: row.active_continuation_id,
+            job: None,
+            owner_thread: Some(target),
+            segment: row.current_segment_id,
+            execution_revision: row.execution_revision,
+            range: Some((1, 0)),
+            at: world.clock.now(),
+        },
+    )
+    .await?;
+    eprintln!(
+        "retained prefix admission turns={SCALE_TURNS} elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
+    tx.commit().await?;
+    let mut conn = requests.acquire().await?;
+    let mut after = 0;
+    let mut held = Vec::new();
+    loop {
+        let page = cuts::items_page(&mut conn, copied.id, after, i64::MAX, None).await?;
+        let Some(last) = page.last() else { break };
+        after = last.seq_created;
+        held.extend(
+            page.into_iter()
+                .map(|item| (item.id, item.kind, item.payload)),
+        );
+    }
+    assert_eq!(
+        held.iter()
+            .filter(|(_, kind, _)| kind == "agent_message")
+            .count(),
+        usize::try_from(SCALE_TURNS)?
+    );
+    assert!(
+        held.iter()
+            .filter(|(_, kind, _)| kind == "agent_message")
+            .all(|(_, _, body)| body["parts"][0]["blob"].as_str().is_some())
+    );
+    let owned: (i64, i64) = sqlx::query_as(
+        "SELECT
+      (SELECT count(*) FROM thread_history_cut_items WHERE cut_id=$1 AND body IS NOT NULL),
+      (SELECT count(*) FROM thread_history_cut_blobs WHERE cut_id=$1)",
+    )
+    .bind(target)
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(
+        owned,
+        (0, 0),
+        "the immutable prefix already owns its bodies and pins"
+    );
+    drop(conn);
+    // A later deletion freezes into the original prefix atomically. Its reader
+    // retains the original words even though that body did not exist at capture.
+    let removed = held
+        .iter()
+        .find(|(_, kind, _)| kind == "user_message")
+        .ok_or("no question")?
+        .0;
+    sqlx::query("DELETE FROM items WHERE id=$1")
+        .bind(removed)
+        .execute(world.pool.pool())
+        .await?;
+    let mut conn = requests.acquire().await?;
+    let reread = cuts::items_between(&mut conn, target, 0, i64::MAX, None).await?;
+    assert_eq!(
+        reread
+            .into_iter()
+            .map(|item| (item.id, item.kind, item.payload))
+            .collect::<Vec<_>>(),
+        held
+    );
+    assert_eq!(
+        cuts::counts(&mut conn, target).await?.items["agent_message"],
+        SCALE_TURNS
+    );
+    drop(conn);
+    let mut tx = requests.begin().await?;
+    assert!(
+        cuts::release(&mut tx, side).await.is_err(),
+        "a retained prefix cannot lose its original owner"
+    );
+    tx.rollback().await?;
+    let mut tx = requests.begin().await?;
+    cuts::release(&mut tx, target).await?;
+    cuts::release(&mut tx, side).await?;
+    tx.commit().await?;
+    requests.pool().close().await;
     world.shutdown().await;
     Ok(())
 }

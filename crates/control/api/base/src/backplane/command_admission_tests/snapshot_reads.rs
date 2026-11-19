@@ -125,6 +125,7 @@ impl ReadFixture {
             build: orch_build_info::BuildInfo::new("api", "0.0.0-test", "", "1"),
             blobs,
             cache: crate::cache::Cache::new(&config),
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             builtin_sources: Default::default(),
         });
