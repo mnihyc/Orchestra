@@ -1,0 +1,5 @@
+fmt
+clippy
+web typecheck
+web lint
+web test -- tests/component/human-resource-facts.test.tsx
