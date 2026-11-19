@@ -1,0 +1,1 @@
+test -p orch-api-core --test personal -- person_lock:: --nocapture --test-threads=1

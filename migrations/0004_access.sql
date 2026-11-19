@@ -274,7 +274,20 @@ CREATE INDEX permission_entries_ending_idx ON permission_entries USING btree (ex
 
 CREATE INDEX permission_entries_hierarchy_idx ON permission_entries USING btree (object_id) WHERE ((object_kind = 'node'::text) AND (page = 'live'::text) AND (permission <> 'access.own'::text) AND (removed_at IS NULL));
 
-CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id) WHERE (removed_at IS NULL);
+CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id)
+    INCLUDE (object_kind, object_id, holder_role, expires_at) WHERE (removed_at IS NULL);
+
+CREATE INDEX permission_entries_named_view_holder_idx ON permission_entries (holder_kind,holder_id) INCLUDE (expires_at)
+    WHERE (holder_id IS NOT NULL OR holder_kind='everyone') AND removed_at IS NULL AND profile='any' AND object_kind IN ('system','node')
+      AND source<>'creation' AND permission<>'access.own' AND permission NOT LIKE 'thread.%';
+
+CREATE INDEX permission_entries_local_role_view_idx ON permission_entries (object_id)
+    WHERE object_kind='node' AND profile='any' AND removed_at IS NULL AND source<>'creation'
+      AND holder_kind='role' AND holder_id IS NULL;
+
+CREATE INDEX permission_entries_creation_holder_idx ON permission_entries (holder_id) INCLUDE (expires_at)
+    WHERE removed_at IS NULL AND profile='any' AND object_kind IN ('system','node')
+      AND source='creation' AND holder_kind='user' AND permission<>'access.own' AND permission NOT LIKE 'thread.%';
 
 CREATE INDEX related_agent_entrances_idx ON permission_entries USING btree (holder_id, expires_at, object_kind, object_id, permission) WHERE ((holder_kind = 'agents'::text) AND (removed_at IS NULL));
 
@@ -310,6 +323,9 @@ CREATE TABLE permission_rows (
     CONSTRAINT permission_rows_pkey PRIMARY KEY (object_kind, object_id, page, profile, permission),
     CONSTRAINT permission_rows_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES users(id)
 );
+
+CREATE INDEX permission_rows_node_scope_idx ON permission_rows (object_kind)
+    WHERE profile='any' AND object_kind IN ('system','node');
 
 CREATE TRIGGER access_changed_delete AFTER DELETE ON permission_rows FOR EACH ROW WHEN ((old.object_kind = ANY (ARRAY['system'::text, 'node'::text]))) EXECUTE FUNCTION access_page_changed();
 
