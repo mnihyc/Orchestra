@@ -1,0 +1,4 @@
+test -p orch-api-core --test workspace_files
+test -p orch-api-core --lib --test blob_housekeeping --test human_check --test forwarded_edge --test kfix_deploy
+test -p orch-human-check-contract --lib
+test -p orch-human-check --lib --test edge_policy

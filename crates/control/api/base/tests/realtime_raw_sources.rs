@@ -110,6 +110,8 @@ async fn ingest(
         segment_id: segment,
     };
     let event = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n,
         direction: "in".into(),
         payload: json!({"source":text}),

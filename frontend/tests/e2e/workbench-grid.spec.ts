@@ -8,23 +8,26 @@ import { showWorkbenchView } from './workbench-support';
 const ids = Array.from({ length: 160 }, (_, index) => `01960000-0000-7000-8000-${String(index + 1).padStart(12, '0')}`);
 const tabId = (index: number) => `grid-content-${index}`;
 const pane = (page: Page, index: number) => page.locator(`[data-view-instance="${tabId(index)}"]`);
-async function start(page: Page, count: number) {
+async function start(page: Page, count: number, titlePrefix?: string) {
   await scenario();
-  await changeTree(ids.slice(0, count).map((id, index) => ({ id, kind: 'thread', name: `Grid agent ${index + 1}`, parent_id: ACME.fixLogin,
+  await changeTree(ids.slice(0, count).map((id, index) => ({ id, kind: 'thread', name: `${titlePrefix ?? 'Grid agent'} ${index + 1}`, parent_id: ACME.fixLogin,
     thread: { state: 'idle', blocked_reason: null, pending_approvals: 0, activity_seq: 1, last_activity_at: null } })));
   for (const id of ids.slice(0, count)) { await configureThread(id, { reset: true }); await emit(id, { thread: { state: 'idle', directory: 'web' } }); }
   await signIn(page);
   await expect(page.getByRole('button', { name: 'Layout', exact: true }).first()).toBeVisible();
   await expect.poll(() => page.evaluate(() => Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).some((key) => key?.endsWith('.workbench.workspace')))).toBe(true);
   // Seed before app startup: the running page correctly flushes its own state on unload.
-  const prepared = await page.evaluate(({ ids, tabs }) => {
+  const prepared = await page.evaluate(({ ids, tabs, titlePrefix }) => {
     const key = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)).find((key) => key?.endsWith('.workbench.workspace'));
     if (key === null || key === undefined) throw new Error('The signed-in workspace was not persisted');
     const saved = JSON.parse(localStorage.getItem(key) ?? 'null') as { layout: string; [key: string]: unknown };
     const layout = JSON.parse(saved.layout) as { main: unknown; [key: string]: unknown };
     layout.main = { kind: 'group', id: 'grid-origin', tabs: ids.map((id, index) => ({ id: tabs[index], view: 'page', of: { href: `/thread/${id}` } })), active: tabs[0] };
+    if (titlePrefix !== undefined) {
+      saved.titles = Object.fromEntries(tabs.map((id, index) => [id, { title: `${titlePrefix} ${index + 1}` }]));
+    }
     return { key, value: JSON.stringify({ ...saved, layout: JSON.stringify(layout), focusedGroup: 'grid-origin', focusedTab: tabs[0], focusedMainGroup: 'grid-origin', focusedMainTab: tabs[0], activeContent: tabs[0], focusMode: false, closedTabs: [] }) };
-  }, { ids: ids.slice(0, count), tabs: ids.slice(0, count).map((_, index) => tabId(index)) });
+  }, { titlePrefix, ids: ids.slice(0, count), tabs: ids.slice(0, count).map((_, index) => tabId(index)) });
   await page.addInitScript(({ key, value }) => {
     if (sessionStorage.getItem('grid-fixture-loaded') === 'yes') return;
     localStorage.setItem(key, value); sessionStorage.setItem('grid-fixture-loaded', 'yes');
@@ -312,6 +315,29 @@ test('a full chat keeps its address and composer as an ordinary closable main ta
   await layoutAction(page, 'Reopen closed tab');
   await expect(page).toHaveURL(href); await expect(chat.getByRole('textbox', { name: /^Message / })).toHaveValue('A recoverable full-chat draft');
   await page.screenshot({ path: info.outputPath('full-chat-reopened.png'), animations: 'disabled' });
+});
+
+for (const count of [8, 20]) test(`keeps the active view tab fully visible with ${count} open views`, async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await start(page, count, 'Review workspace synchronization changes');
+  const strip = page.getByRole('tablist', { name: 'Main area', exact: true });
+  await expect(strip.getByRole('tab')).toHaveCount(count);
+  await expect.poll(() => strip.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
+  await strip.getByRole('tab').first().press('End');
+  const selected = strip.locator(`#tab-${tabId(count - 1)}`);
+  await expect(selected).toHaveAttribute('aria-selected', 'true');
+  const draft = pane(page, count - 1).getByRole('textbox', { name: 'Message to the agent' });
+  await draft.focus();
+  await expect.poll(() => strip.evaluate((list) => list.scrollTop)).toBeGreaterThan(0);
+  // A restored scroll offset can arrive after the view it belongs to has opened.
+  await strip.evaluate((list) => { list.scrollTop = 0; });
+  await expect.poll(() => selected.evaluate((tab) => {
+    const list = tab.closest('[role="tablist"]')!;
+    const viewport = list.getBoundingClientRect(), box = tab.parentElement!.getBoundingClientRect();
+    return box.top >= viewport.top - 1 && box.bottom <= viewport.bottom + 1
+      && box.left >= viewport.left - 1 && box.right <= viewport.right + 1;
+  })).toBe(true);
+  await expect(draft).toBeFocused();
 });
 
 for (const count of [11, 160]) test(`${count} tabs keep a bounded grid strip and a searchable exact-target locator`, async ({ page }, info) => {

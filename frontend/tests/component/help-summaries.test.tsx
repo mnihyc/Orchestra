@@ -9,7 +9,7 @@ import { articleInLanguage, makeGuide, readArticle } from '@/help/guide';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 const ask = vi.hoisted(() => vi.fn());
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: ask }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: ask }));
 
 const source = makeGuide({ 'plan.md': '---\nsummary: Review the plan before moving work.\n---\n# Plan\n\nThe opening remains separate.\n\n## Next\n\nContinue here.' }, {}, {
   'zh-CN': { 'plan.md': '---\nsummary: 移动工作前先查看计划。\nheading_id.下一步: next\n---\n# 计划\n\n原有开头单独保留。\n\n## 下一步\n\n从这里继续。' },
