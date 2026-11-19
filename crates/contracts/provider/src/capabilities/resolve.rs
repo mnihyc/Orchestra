@@ -1,5 +1,6 @@
 //! No vendor, protocol-name or backend-kind dispatch. Routes and predicates are declarations.
 use super::model::*;
+use super::predicates::RoutePredicates;
 use orch_types::Json;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,6 +36,7 @@ pub enum RegistryError {
 pub struct Registry {
     bundles: BTreeMap<String, Declarations>,
     merged: Declarations,
+    predicates: RoutePredicates,
 }
 
 fn insert<K: Ord + Clone + ToString, V: Clone + PartialEq>(
@@ -63,6 +65,7 @@ impl Registry {
         let mut bundles = self.bundles.clone();
         bundles.insert(name.into(), decl);
         let merged = Self::merge(&bundles)?;
+        self.predicates = RoutePredicates::new(&merged);
         self.bundles = bundles;
         self.merged = merged;
         Ok(())
@@ -79,6 +82,7 @@ impl Registry {
             return false;
         };
         self.bundles = bundles;
+        self.predicates = RoutePredicates::new(&merged);
         self.merged = merged;
         true
     }
@@ -144,10 +148,15 @@ impl Registry {
         self.bundles.get(name)
     }
 
+    /// Check every declared route, native binding, endpoint and program eligibility predicate.
+    pub fn check_route_schemas(&self) -> Result<(), orch_types::schema::Error> {
+        self.predicates.check()
+    }
+
     /// The only per-thread capability route computation.
     #[must_use]
     pub fn resolve(&self, context: &ThreadContext) -> Vec<Resolution> {
-        resolve(&self.merged, context)
+        resolve_with(&self.merged, context, &self.predicates)
     }
 
     /// Derived cells use the exact thread resolver; no independent support matrix is maintained.
@@ -230,6 +239,7 @@ fn candidate<'a>(
     mode: &str,
     route_id: &str,
     explicit: bool,
+    predicates: &RoutePredicates,
 ) -> Result<Candidate<'a>, Refused> {
     let route = declarations
         .routes
@@ -250,6 +260,15 @@ fn candidate<'a>(
         .is_some_and(|executor| !context.executors.contains(executor))
     {
         return Err(refused("executor_not_installed"));
+    }
+    if let Some(required) = &route.execution
+        && !route
+            .executor
+            .as_ref()
+            .and_then(|executor| context.executor_support.get(executor))
+            .is_some_and(|support| support.iter().any(|codec| codec.satisfies(required)))
+    {
+        return Err(refused("execution_codec_unavailable"));
     }
     let backend = if route.uses_backend {
         Some(
@@ -364,7 +383,11 @@ fn candidate<'a>(
         endpoint.map_or(Json::Null, |endpoint| json!(endpoint)),
     );
     let facts = Json::Object(facts);
-    if !eligible(&route.eligible_when, &facts) {
+    let applicable = match predicates.route(route_id) {
+        Some(predicate) => predicate.validate(&facts).is_ok(),
+        None => eligible(&route.eligible_when, &facts),
+    };
+    if !applicable {
         return Err(refused("route_not_applicable"));
     }
     if route.requires_interface
@@ -592,6 +615,14 @@ fn fallback_views(
 /// execute, authorize a call or mutate stored models. Execution rechecks through its existing path.
 #[must_use]
 pub fn resolve(declarations: &Declarations, context: &ThreadContext) -> Vec<Resolution> {
+    resolve_with(declarations, context, &RoutePredicates::default())
+}
+
+fn resolve_with(
+    declarations: &Declarations,
+    context: &ThreadContext,
+    predicates: &RoutePredicates,
+) -> Vec<Resolution> {
     let program = declarations.programs.get(&context.program);
     let access = program.and_then(|program| program.access.get(&context.access));
     declarations
@@ -624,7 +655,7 @@ pub fn resolve(declarations: &Declarations, context: &ThreadContext) -> Vec<Reso
                 .filter(|(mode, definition)| {
                     definition.routes.is_empty()
                         || definition.routes.iter().any(|route| {
-                            candidate(declarations, context, access, id, mode, route, true).is_ok()
+                            candidate(declarations, context, access, id, mode, route, true, predicates).is_ok()
                         })
                 })
                 .map(|(mode, _)| mode.clone())
@@ -670,12 +701,14 @@ pub fn resolve(declarations: &Declarations, context: &ThreadContext) -> Vec<Reso
                     mode,
                     route_id,
                     explicit.is_some(),
+                    predicates,
                 ) {
                     Ok(selected) => {
                         result.route = Some(ResolvedRoute {
                             id: route_id.clone(),
                             kind: selected.route.kind.clone(),
                             executor: selected.route.executor.clone(),
+                            execution: selected.route.execution.clone(),
                             offering: selected.reference.clone(),
                             backend: selected.backend,
                             orch_tool: selected.route.orch_tool.clone(),

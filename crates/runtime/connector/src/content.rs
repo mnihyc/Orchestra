@@ -22,8 +22,8 @@ use orch_link::framing::LinkMeter;
 use orch_link_contract::commands::{BlobRef, CommandError, ErrorCode};
 use orch_link_contract::content::{
     BlobProgress, COMMAND_HEADER, COMPLETE_HEADER, MISSING_PATH, MissingReply, MissingRequest,
-    PutQuery, RECEIVED_HEADER, STATUS_HASH_MISMATCH, STATUS_OFFSET_CONFLICT, authorization,
-    blob_path,
+    PutQuery, RECEIVED_HEADER, STATUS_HASH_MISMATCH, STATUS_OFFSET_CONFLICT, TransferStatus,
+    authorization, blob_path,
 };
 use orch_link_contract::enrollment::Trust;
 use orch_types::{Hash, Id};
@@ -112,6 +112,9 @@ async fn interruptible<T>(
 struct CancellableEndpoint(Arc<dyn BlobEndpoint>);
 #[async_trait]
 impl BlobEndpoint for CancellableEndpoint {
+    async fn status(&self, command: Id, hash: &Hash) -> Result<TransferStatus, PutRefusal> {
+        interruptible(self.0.status(command, hash)).await
+    }
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         interruptible(self.0.head(command, hash)).await
     }
@@ -154,8 +157,7 @@ fn report_bytes(
     }
 }
 
-/// How long one request for content may take from start to end. The link's pieces are sized to a few
-/// seconds of the line's rate, and one that stands still is given up after the link's own limit.
+/// How long a file request may be silent; positive socket I/O renews its patience.
 const REQUEST_TIMEOUT: Duration =
     Duration::from_secs(orch_link_contract::content::STALL_SECS as u64);
 /// How many bytes of a file are read at a time to hash it.
@@ -181,6 +183,7 @@ pub struct HttpsBlobs {
     pinned: HttpsClient,
     public: HttpsClient,
     endpoint: Arc<WhereIsIt>,
+    requests: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for HttpsBlobs {
@@ -198,6 +201,9 @@ impl HttpsBlobs {
             pinned,
             public,
             endpoint,
+            requests: std::sync::atomic::AtomicUsize::new(
+                orch_link_contract::content::TransferPolicy::default().requests as usize,
+            ),
         }
     }
 
@@ -221,16 +227,43 @@ impl HttpsBlobs {
             Trust::Pinned => &self.pinned,
             Trust::Public => &self.public,
         };
+        let maximum = extra
+            .iter()
+            .find(|(name, _)| *name == "range")
+            .and_then(|(_, value)| value.strip_prefix("bytes=")?.split_once('-'))
+            .and_then(|(start, end)| {
+                Some(
+                    end.parse::<usize>()
+                        .ok()?
+                        .checked_sub(start.parse::<usize>().ok()?)?
+                        .saturating_add(1),
+                )
+            })
+            .unwrap_or(crate::https::MAX_REPLY_BYTES);
         client
-            .send(&now.base, method, path, &headers, body, REQUEST_TIMEOUT)
+            .send_content(
+                &now.base,
+                method,
+                path,
+                &headers,
+                body,
+                crate::https::ContentOptions {
+                    idle: REQUEST_TIMEOUT,
+                    maximum_reply: maximum,
+                    pooled_connections: self.requests.load(std::sync::atomic::Ordering::Relaxed),
+                },
+            )
             .await
-            .map_err(|e| PutRefusal::Failed(e.to_string()))
+            .map_err(|error| match error {
+                crate::https::HttpsError::TimedOut => PutRefusal::Silent,
+                other => PutRefusal::Failed(other.to_string()),
+            })
     }
 }
 
 fn refused(status: StatusCode) -> Option<PutRefusal> {
     match status.as_u16() {
-        401 | 403 | 404 | 410 | 413 => {
+        400 | 401 | 403 | 404 | 410 | 413 => {
             Some(PutRefusal::Refused(format!("the system answered {status}")))
         }
         _ => None,
@@ -247,6 +280,31 @@ fn progress_of(reply: &crate::https::Reply) -> Option<BlobProgress> {
 
 #[async_trait]
 impl BlobEndpoint for HttpsBlobs {
+    async fn status(&self, command: Id, hash: &Hash) -> Result<TransferStatus, PutRefusal> {
+        let reply = self
+            .call(
+                Method::GET,
+                &format!("{}/progress", blob_path(hash)),
+                command,
+                Bytes::new(),
+                &[],
+            )
+            .await?;
+        if reply.status != StatusCode::OK {
+            return Err(refused(reply.status).unwrap_or_else(|| {
+                PutRefusal::Failed(format!("progress answered {}", reply.status))
+            }));
+        }
+        let status: TransferStatus =
+            serde_json::from_slice(&reply.body).map_err(|e| PutRefusal::Failed(e.to_string()))?;
+        if status.policy.valid() {
+            self.requests.store(
+                status.policy.requests as usize,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+        Ok(status)
+    }
     async fn head(&self, command: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         let reply = self
             .call(Method::HEAD, &blob_path(hash), command, Bytes::new(), &[])
@@ -293,14 +351,18 @@ impl BlobEndpoint for HttpsBlobs {
         offset: i64,
         len: i64,
     ) -> Result<Bytes, PutRefusal> {
-        let range = format!("bytes={offset}-{}", offset + len - 1);
+        let headers = if len == 0 {
+            Vec::new()
+        } else {
+            vec![("range", format!("bytes={offset}-{}", offset + len - 1))]
+        };
         let reply = self
             .call(
                 Method::GET,
                 &blob_path(hash),
                 command,
                 Bytes::new(),
-                &[("range", range)],
+                &headers,
             )
             .await?;
         match reply.status.as_u16() {
@@ -395,6 +457,9 @@ struct FileSource {
 
 #[async_trait]
 impl BlobSource for FileSource {
+    fn accepted(&mut self, received: i64) {
+        report_bytes(&self.work, received, self.total, "Uploading files");
+    }
     async fn read(&mut self, offset: i64, len: i64) -> std::io::Result<Bytes> {
         check_work(&self.work)?;
         self.file
@@ -410,12 +475,6 @@ impl BlobSource for FileSource {
             filled += read;
         }
         buffer.truncate(filled);
-        report_bytes(
-            &self.work,
-            offset.saturating_add(i64::try_from(filled).unwrap_or(i64::MAX)),
-            self.total,
-            "Uploading files",
-        );
         Ok(Bytes::from(buffer))
     }
 }
@@ -780,10 +839,29 @@ mod tests {
     struct Store {
         blobs: Mutex<HashMap<Hash, Vec<u8>>>,
         missing_batches: Mutex<Vec<Vec<Hash>>>,
+        ranges: Mutex<HashMap<Hash, Vec<orch_api_contract::threads::UploadRange>>>,
     }
 
     #[async_trait]
     impl BlobEndpoint for Store {
+        async fn status(&self, command: Id, hash: &Hash) -> Result<TransferStatus, PutRefusal> {
+            let progress = self.head(command, hash).await?.unwrap_or(BlobProgress {
+                received: 0,
+                complete: false,
+            });
+            Ok(TransferStatus {
+                ranges: if progress.received > 0 {
+                    vec![orch_api_contract::threads::UploadRange {
+                        start: 0,
+                        len: progress.received,
+                    }]
+                } else {
+                    vec![]
+                },
+                progress,
+                policy: Default::default(),
+            })
+        }
         async fn head(&self, _: Id, hash: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
             Ok(self
                 .blobs
@@ -805,13 +883,18 @@ mod tests {
         ) -> Result<BlobProgress, PutRefusal> {
             let mut blobs = self.blobs.lock().unwrap();
             let held = blobs.entry(*hash).or_default();
-            if i64::try_from(held.len()).unwrap() != query.offset {
-                return Err(PutRefusal::Offset {
-                    received: i64::try_from(held.len()).unwrap(),
+            let end = query.offset as usize + body.len();
+            held.resize(held.len().max(end), 0);
+            held[query.offset as usize..end].copy_from_slice(&body);
+            let mut ledger = self.ranges.lock().unwrap();
+            let ranges = ledger.entry(*hash).or_default();
+            if !ranges.iter().any(|r| r.start == query.offset) {
+                ranges.push(orch_api_contract::threads::UploadRange {
+                    start: query.offset,
+                    len: body.len() as i64,
                 });
             }
-            held.extend_from_slice(&body);
-            let received = i64::try_from(held.len()).unwrap();
+            let received = ranges.iter().map(|r| r.len).sum::<i64>();
             let complete = received >= query.size;
             if complete && Hash::of(held) != *hash {
                 blobs.remove(hash);
@@ -1028,6 +1111,19 @@ mod tests {
         assert_eq!(file_name("a\\b\\c.png"), "c.png");
         assert_eq!(file_name("plain.txt"), "plain.txt");
     }
+    #[tokio::test]
+    async fn an_empty_download_is_authorized_and_materialized_as_an_empty_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::default());
+        let hash = Hash::of(b"");
+        store.blobs.lock().unwrap().insert(hash, Vec::new());
+        let content = content(Arc::clone(&store), directory.path());
+        let path = content
+            .fetch(orch_types::new_id(), hash, 0, "empty.txt")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(path).await.unwrap(), Vec::<u8>::new());
+    }
 }
 
 #[cfg(test)]
@@ -1060,6 +1156,17 @@ mod cancellation_tests {
     }
     #[async_trait]
     impl BlobEndpoint for StopBeforeNextPiece {
+        async fn status(&self, command: Id, hash: &Hash) -> Result<TransferStatus, PutRefusal> {
+            let progress = self
+                .head(command, hash)
+                .await?
+                .ok_or_else(|| PutRefusal::Refused("missing content".into()))?;
+            Ok(TransferStatus {
+                ranges: vec![],
+                progress,
+                policy: Default::default(),
+            })
+        }
         async fn head(&self, _: Id, _: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
             Ok(Some(BlobProgress {
                 received: self.bytes.len() as i64,

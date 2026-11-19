@@ -31,6 +31,25 @@ beforeAll(async () => { await startI18n('en'); });
 afterAll(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps a concurrent operation distinct from an outdated edit revision in ${locale}`, async () => {
+    await setLocale(locale);
+    const error=new ApiError({type:'orch:error:conflict.concurrent_change',code:'conflict.concurrent_change',
+      title:diagnostic,detail:diagnostic,status:409,request_id:'concurrent-request'},null);
+    expect(error.message).toBe(locale==='en'
+      ? 'A concurrent change interrupted this operation. Try again.'
+      : '同时发生的更改中断了此操作，请重试。');
+    expect(error.message).not.toBe(i18n.t('errors.conflict.stale_revision'));
+    expect(error.is('conflict.stale_revision')).toBe(false);
+  });
+  it(`explains a web action's missing end in ${locale}`, async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const result = errorText({ code: 'native_web_no_end', message: diagnostic }, t, { locale });
+    expect(result.message).toBe(t('ui.error.nativeWebNoEnd'));
+    expect(result.message).not.toBe(t('ui.error.nativeWebActionUnproven'));
+    expect(hasErrorCode(result.message)).toBe(false);
+  });
+
   it(`gives workspace attachment refusals a catalogued cause and recovery in ${locale}`, async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);

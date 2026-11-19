@@ -1,0 +1,17 @@
+# Initial policy for the bundled node. First start copies this to runtime/node/config.toml.
+# The node reads and updates that one machine file; later starts keep its local choices.
+
+[connector]
+roles = ["node"]
+
+[drivers]
+allowed = ["docker"]
+
+[drivers.images]
+images = ["*"]
+registries = ["*"]
+capabilities = ["*"]
+runtime_classes = ["*"]
+privileged = false
+builds = true
+archives = true

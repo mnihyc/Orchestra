@@ -6,6 +6,45 @@ import { checkReferenceCoverage, documentedReferences, requiredHelpReferences, s
 import { readArticle, type Guide } from '@/help/guide';
 
 const content = readHelpContent();
+it('limits the model-add and default-delivery promises to their actual choices in both languages', () => {
+  const article = content.guide.articles.find((entry) => entry.id === 'settings-reference');
+  for (const language of ['en', 'zh-CN'] as const) {
+    const body = language === 'en' ? article?.body : article?.translations?.[language]?.body;
+    if (body === undefined) throw new Error('Both setting references must ship.');
+    const entries = documentedReferences(body);
+    const models = entries.find((entry) => entry.id === 'setting:models.add_switches_on')?.explanation ?? '';
+    const delivery = entries.find((entry) => entry.id === 'setting:collab.default_delivery')?.explanation ?? '';
+    expect(models).toContain(language === 'en' ? 'context sizes, speeds and access programs' : '上下文大小、速度和访问计划');
+    expect(models).toContain(language === 'en' ? 'configured separately' : '单独配置');
+    expect(models).not.toContain(language === 'en' ? 'everything it offers' : '它提供的全部内容');
+    expect(delivery).not.toMatch(/interrupt|中断/iu);
+    expect(delivery).toContain(language === 'en' ? 'steer' : '送入当前运行');
+  }
+});
+
+it('explains stopping and session reopening facts in both shipped languages', () => {
+  const references = [
+    'state:StopState.stopping', 'state:StopState.stopped', 'state:BlockedReason.source_failed',
+    'state:MarkerKind.session_reopened',
+    ...['unknown', 'instructions', 'limits', 'configuration', 'mcp', 'tools', 'skills', 'program_reloads', 'side_history']
+      .map((reason) => `state:SessionReopenReason.${reason}`),
+    'option:ThreadInterruptBody.turn_id', 'option:ThreadStop.state', 'option:ThreadStop.requested_at',
+    'option:ThreadStop.turn', 'option:Thread.stopping', 'option:ThreadStop.stopping', 'option:Turn.interrupted_at',
+    ...['version', 'requested_at', 'pending', 'thread_seq', 'state_seq'].map((field) => `option:ThreadStopping.${field}`),
+    'option:MarkerSessionReopened.reason',
+  ];
+  for (const language of ['en', 'zh-CN'] as const) {
+    const entries = content.guide.articles.filter((article) => content.userArticles.includes(article.id))
+      .flatMap((article) => documentedReferences(language === 'en' ? article.body : article.translations?.[language]?.body ?? ''));
+    for (const reference of references) {
+      const entry = entries.find((entry) => entry.id === reference);
+      expect(entry, `${language}:${reference}`).toBeDefined();
+      expect(entry?.explanation.trim().length).toBeGreaterThan(0);
+      if (language === 'zh-CN') expect(entry?.explanation).toMatch(/\p{Script=Han}/u);
+    }
+  }
+});
+
 it('covers every currently declared setting, nested option, state and API error in the shipped guide', () => {
   expect(content.references).toContain('setting:threads.offline_deadline');
   expect(content.references).toContain('option:env.after_up.*.command');
@@ -75,5 +114,18 @@ it('refuses a retired setting advertised as a current control', () => {
     }) };
     expect(checkReferenceCoverage(guide, content.userArticles, content.references))
       .toContain(`reference.setting_unknown: ${language}:setting:retired.setting`);
+  }
+});
+
+
+it('documents view-opening choices and topic thread search in both shipped languages', () => {
+  const article = content.guide.articles.find((entry) => entry.id === 'option-reference');
+  if (article === undefined) throw new Error('The shipped option reference is required');
+  for (const locale of ['en', 'zh-CN'] as const) {
+    const body = locale === 'en' ? article.body : article.translations?.[locale]?.body;
+    if (body === undefined) throw new Error('The translated option reference is required');
+    expect(documentedReferences(body).map((entry) => entry.id)).toEqual(expect.arrayContaining([
+      'option:PersonalState.sidebar.open_links', 'option:TopicSearch.q',
+    ]));
   }
 });
