@@ -12,6 +12,7 @@ export type ChoiceValues = Record<string, string | number>;
 /** Schema-only editors receive the setting's context once; nested choices keep the same context. */
 export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup[] | undefined>> = {
   'notify.operations': ['operationNotices'],
+  'models.add_switches_on': ['modelAddSwitches'],
   'ask.paid_by': ['askPayer'],
   'gateways.tunnel_strategy': ['tunnelGateway'],
   'threads.agent_access': ['agentReach', 'agentStep'],

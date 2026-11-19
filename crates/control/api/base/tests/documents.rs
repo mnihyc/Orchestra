@@ -18,10 +18,11 @@ use orch_api_contract::access::{
 };
 use orch_api_contract::common::{ErrorCode, Listed};
 use orch_api_contract::documents::{
-    BlockType, DeletedFilter, DocumentDelete, DocumentFileDelete, DocumentGet, DocumentMove,
-    DocumentMoveBody, DocumentMovePreview, DocumentRestore, DocumentSeen, DocumentSeenBody,
-    DocumentSyncGet, DocumentSyncGetQuery, DocumentUpdate, DocumentUpdateBody, Inline,
-    NewDocumentAccess, NodeDocumentList, NodeDocumentListQuery,
+    BlockType, DeletedFilter, DocumentCreationResponse, DocumentDelete, DocumentFileDelete,
+    DocumentGet, DocumentMove, DocumentMoveBody, DocumentMovePreview, DocumentRestore,
+    DocumentSeen, DocumentSeenBody, DocumentSyncGet, DocumentSyncGetQuery, DocumentUpdate,
+    DocumentUpdateBody, Inline, NewDocumentAccess, NodeDocumentCreate, NodeDocumentList,
+    NodeDocumentListQuery,
 };
 use orch_api_contract::nodes::{NodeArchive, PageState};
 use orch_settings::Target;
@@ -36,15 +37,36 @@ use std::collections::HashSet;
 async fn independently_created_equal_titles_keep_distinct_paths_and_owners() {
     let desk = Desk::new().await;
     let first = desk.make(&desk.ada, "Untitled").await;
-    let (left, right) = tokio::join!(
-        desk.make_body(&desk.ada, body("Untitled")),
-        desk.make_body(&desk.ada, body("Untitled"))
-    );
-    let left = left.ok();
-    let right = right.ok();
-    let ids = [first.base.id, left.base.id, right.base.id];
+    // A concurrent sibling can change directory membership during publication. Both
+    // successful response forms name the committed document for its owner's next read.
+    let create = || async {
+        let created = desk
+            .world
+            .app
+            .call(NodeDocumentCreate, &[&desk.topic])
+            .token(&desk.ada.token)
+            .body(&body("Untitled"))
+            .send()
+            .await
+            .ok();
+        match created {
+            DocumentCreationResponse::Full(document) => document.base.id,
+            DocumentCreationResponse::Receipt(receipt) => receipt.document_id,
+        }
+    };
+    let (left, right) = tokio::join!(create(), create());
+    let ids = [first.base.id, left, right];
     assert_eq!(ids.into_iter().collect::<HashSet<_>>().len(), 3);
-    for made in [&first, &left, &right] {
+    for id in &ids {
+        let made = desk
+            .world
+            .app
+            .call(DocumentGet, &[id])
+            .token(&desk.ada.token)
+            .send()
+            .await
+            .ok();
+        assert_eq!(made.base.id, *id);
         assert_eq!(made.base.title, "Untitled");
         assert_eq!(made.base.node.id, desk.topic);
         assert_eq!(made.base.owner.id, desk.ada.id());
@@ -415,6 +437,33 @@ async fn the_page_of_a_document_is_read_by_whoever_may_read_it_and_changed_by_th
 }
 
 // ---------------------------------------------------------------- listing and reading
+
+#[tokio::test]
+async fn a_document_title_search_reaches_older_matches_before_paging_and_keeps_wildcards_literal() {
+    let desk = Desk::new().await;
+    let first = desk.make(&desk.ada, "Older%_ handbook").await;
+    let second = desk.make(&desk.ada, "Another older%_ handbook").await;
+    desk.make(&desk.ada, "OldersX is not a literal match").await;
+    desk.make(&desk.ada, "Newer unrelated page").await;
+    let list = |cursor: Option<String>| {
+        let call = desk.world.app.call(NodeDocumentList, &[&desk.topic]);
+        let call = call.token(&desk.ada.token).query(&NodeDocumentListQuery {
+            q: Some("older%_".to_owned()),
+            limit: Some(1),
+            cursor,
+            ..Default::default()
+        });
+        async move { call.send().await.ok() }
+    };
+    let page = list(None).await;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].as_visible().unwrap().id, second.base.id);
+    assert!(page.next_cursor.is_some());
+    let page = list(page.next_cursor).await;
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].as_visible().unwrap().id, first.base.id);
+    assert!(page.next_cursor.is_none());
+}
 
 #[tokio::test]
 async fn the_documents_beside_a_node_are_listed_most_recently_changed_first_a_page_at_a_time() {
@@ -1524,4 +1573,95 @@ fn every_request_about_a_document_is_bound() {
     for route in orch_api_contract::documents::ROUTES {
         assert!(bound.contains(route.name), "{} is not bound", route.name);
     }
+}
+
+#[tokio::test]
+async fn a_creator_can_read_the_committed_identity_after_a_sibling_finishes_before_body_delivery() {
+    use orch_api_contract::documents::NodeDocumentCreate;
+
+    async fn headers(desk: &Desk, title: &str) -> axum::response::Response {
+        let response = desk
+            .world
+            .app
+            .call(NodeDocumentCreate, &[&desk.topic])
+            .token(&desk.ada.token)
+            .body(&body(title))
+            .send_response()
+            .await;
+        assert!(
+            response.status().is_success(),
+            "the creation headers report success"
+        );
+        response
+    }
+
+    async fn delivered_id(response: axum::response::Response) -> Id {
+        let data = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the committed creation must deliver a document or its typed receipt");
+        parsed_id(&data)
+    }
+
+    fn parsed_id(data: &[u8]) -> Id {
+        let value: serde_json::Value = serde_json::from_slice(data).unwrap();
+        serde_json::from_value(
+            value
+                .get("document_id")
+                .or_else(|| value.get("id"))
+                .expect("the creation identifies the committed document")
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    let desk = Desk::new().await;
+    let control = delivered_id(headers(&desk, "Delivery control").await).await;
+    let stable = desk
+        .world
+        .app
+        .call(DocumentGet, &[&control])
+        .token(&desk.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(stable.base.owner.id, desk.ada.id());
+
+    let title = "Matching titles";
+    let first = headers(&desk, title).await;
+    let first_id: Id = sqlx::query_scalar("SELECT id FROM documents WHERE node_id=$1 AND title=$2")
+        .bind(desk.topic)
+        .bind(title)
+        .fetch_one(&desk.world.db.pool)
+        .await
+        .unwrap();
+    let second_id = delivered_id(headers(&desk, title).await).await;
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX).await;
+    assert_ne!(first_id, second_id);
+    let paths: Vec<String> =
+        sqlx::query_scalar("SELECT basename FROM documents WHERE node_id=$1 AND title=$2")
+            .bind(desk.topic)
+            .bind(title)
+            .fetch_all(&desk.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(paths.len(), 2);
+    assert_ne!(paths[0], paths[1]);
+    for id in [first_id, second_id] {
+        let current = desk
+            .world
+            .app
+            .call(DocumentGet, &[&id])
+            .token(&desk.ada.token)
+            .send()
+            .await
+            .ok();
+        assert_eq!(current.base.id, id);
+        assert_eq!(current.base.owner.id, desk.ada.id());
+    }
+    eprintln!(
+        "Both same-title writes committed at distinct paths and both ownership checks passed."
+    );
+    let first_body =
+        first_body.expect("the held creation must deliver its identity after a sibling commits");
+    assert_eq!(parsed_id(&first_body), first_id);
 }

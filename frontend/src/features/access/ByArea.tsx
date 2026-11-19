@@ -79,6 +79,7 @@ export function GridView({ grid, target, source, changes, ask, profile, page, ki
   const cellFor = (cell: Cell, extra?: ReactNode) => (
     <RowCell
       cell={cell}
+      fileReach={page.file_reach}
       target={target}
       source={source}
       changes={changes}
