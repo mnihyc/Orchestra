@@ -156,6 +156,7 @@ impl Fixture {
                     name: "Actual copied source",
                     owner_id: world.ada,
                     home_id: world.root,
+                    home_overridden: false,
                     upstreams: &json!([{"protocol":"openai-responses","base_url":"https://api.example.test/v1","options":{}}]),
                     protocols: &["openai-responses".into()],
                     machine_id: copy_keeper.as_ref().map(|keeper|keeper.id),
@@ -1863,10 +1864,12 @@ async fn a_provider_move_cannot_end_its_source_after_raw_closure_or_changed_revi
                     .await?;
             }
             "source" => {
-                sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
-                    .bind(source)
-                    .execute(s.world.pool.pool())
-                    .await?;
+                sqlx::query(
+                    "UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1",
+                )
+                .bind(source)
+                .execute(s.world.pool.pool())
+                .await?;
             }
             "scope" => {
                 let mut scope = s.policy.clone();

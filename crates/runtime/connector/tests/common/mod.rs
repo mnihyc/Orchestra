@@ -234,6 +234,17 @@ impl Rig {
 
     /// Starts the connector and waits for its session.
     pub async fn start(&mut self) {
+        self.start_link().await;
+        tokio::time::timeout(
+            self.patience,
+            self.connector.as_ref().unwrap().link().connected(),
+        )
+        .await
+        .expect("the connector never got a session");
+    }
+
+    /// Starts the actual connector without requiring that a gateway admit its version.
+    pub async fn start_link(&mut self) {
         let mut builder = ConnectorBuilder::new(self.params());
         if let Some(plug) = &self.plug {
             builder = plug(
@@ -248,9 +259,6 @@ impl Rig {
             builder = builder.provider_sources(Arc::clone(sources));
         }
         let connector = builder.start().await.unwrap();
-        tokio::time::timeout(self.patience, connector.link().connected())
-            .await
-            .expect("the connector never got a session");
         self.connector = Some(connector);
     }
 
@@ -332,12 +340,12 @@ impl Rig {
             "workspace_root": directory, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
             "model": "fake-large", "effort": "medium", "params": {},
-            "approval_mode": "on_request", "sandbox_mode": "workspace",
+            "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace",
             "instructions": "You are working inside Orch.", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },
             "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         })
     }
 

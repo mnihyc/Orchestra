@@ -10,14 +10,20 @@ import type { BackendRef, CapabilityBackendCandidate } from '@/generated/api-typ
 import { ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
-import { backendCapabilities, changeBackend, selectedBackend } from './capabilityBackendValue';
+import { backendCapabilities, backendIdentity, changeBackend, selectedBackend } from './capabilityBackendValue';
 import { useDebounced } from '@/lib/debounce';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
 import { ResourcePickerLookup } from '@/ui/ResourcePicker';
 
 const hidden = (error: unknown) => error instanceof ApiError && [401, 403, 404].includes(error.status);
-const identity = (backend: BackendRef) => JSON.stringify([backend.route, backend.offering?.provider, backend.offering?.offering]);
+const identity = backendIdentity;
+const sameOffering = (left: BackendRef, right: BackendRef): boolean => left.route === right.route
+  && left.offering?.provider === right.offering?.provider && left.offering?.offering === right.offering?.offering;
+/** A model-list row supplies a readable name; it does not replace retained placement options. */
+const currentChoice = (rows: CapabilityBackendCandidate[] | undefined, selected: BackendRef | null): CapabilityBackendCandidate | undefined => selected === null ? undefined
+  : rows?.find((row) => identity(row.backend) === identity(selected))
+    ?? rows?.find((row) => row.backend.config === null && sameOffering(row.backend, selected));
 
 function useWords() {
   const { t, i18n } = useTranslation();
@@ -42,8 +48,15 @@ export function CapabilityBackendChoice({ settingKey, target, ...props }: ValueC
   </div>;
 }
 
-function BackendChoice({ reader, place, capability, title, multi, selected, onSelected, disabled = false, error }: ValueControlProps & {
-  reader: string; place: string; capability: string; title: string; multi: boolean; selected: BackendRef | null; onSelected: (value: BackendRef) => void;
+/** A model consumer retains the same exact backend and uses this ordinary scoped supplier. */
+export function CapabilityOfferingChoice({ place, capability, ...props }: ValueControlProps & { place: string; capability: string; onUnavailable?: (reason: string | null) => void }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <BackendChoice {...props} key={`${reader}:${place}:${capability}`} reader={reader} place={place} capability={capability} title={props.label} multi={false}
+    selected={selectedBackend(props.value, capability)} onSelected={(backend) => { props.onEdited?.(); props.onChange(backend); }} />;
+}
+
+function BackendChoice({ reader, place, capability, title, multi, selected, onSelected, onUnavailable, disabled = false, error }: ValueControlProps & {
+  reader: string; place: string; capability: string; title: string; multi: boolean; onUnavailable?: (reason: string | null) => void; selected: BackendRef | null; onSelected: (value: BackendRef) => void;
 }) {
   const { t, route, reason } = useWords();
   const { i18n } = useTranslation();
@@ -60,7 +73,9 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
   const current = useQuery({ ...selectedCapabilityBackendQuery(reader, selectedProvider, place, capability, selected?.offering?.offering ?? ''), enabled: selectedProvider !== '' });
   const list = useInfiniteQuery({ ...capabilityBackendsQuery(reader, provider, place, capability, settled), enabled: open && provider !== '' && !disabled && !waiting });
   const rows = waiting || hidden(list.error) || list.isError && !list.isFetchNextPageError ? [] : [...new Map((list.data?.pages.flatMap((page) => page.items) ?? []).map((row) => [identity(row.backend), row])).values()];
-  const chosen = current.isError ? undefined : current.data?.items.find((row) => selected !== null && identity(row.backend) === identity(selected));
+  const chosen = current.isError ? undefined : currentChoice(current.data?.items, selected);
+  const blocked = chosen !== undefined && !chosen.eligible ? reason(chosen) : null;
+  useEffect(() => { onUnavailable?.(blocked); }, [onUnavailable, blocked]);
   const chosenLabel = provider !== selectedProvider || selected === null ? '' : chosen === undefined
     ? t(hidden(current.error) || current.isSuccess ? 'settings.compact.managed' : current.isPending ? 'common.loading' : 'capabilityBackend.unavailable')
     : `${route(chosen)} · ${chosen.offering_name}`;
@@ -98,7 +113,7 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
             const row = rows.find((row) => identity(row.backend) === option.value);
             if (row === undefined || !row.eligible || waiting || list.isFetching || disabled) return;
             setOpen(false); requested.current = ''; setTyped('');
-            onSelected(selected !== null && identity(selected) === identity(row.backend) ? selected : row.backend);
+            onSelected(selected !== null && sameOffering(selected, row.backend) && row.backend.config === null ? selected : row.backend);
           }} />
         {!open && current.isError && !hidden(current.error) && <ErrorState compact title={t('capabilityBackend.unavailable')} error={current.error} retrying={current.isFetching} onRetry={() => void current.refetch()} />}
         {chosen !== undefined && !chosen.eligible && provider === selectedProvider && <span className="text-xs text-text-muted">{reason(chosen)}</span>}
@@ -121,14 +136,23 @@ export function CapabilityBackendSummary({ settingKey, value, target }: { settin
   })}</span>;
 }
 
+/** Read one saved choice without opening any provider or offering catalogue. */
+export function CapabilityOfferingName({ place, capability, backend }: { place: string; capability: string; backend: BackendRef }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  const { t } = useTranslation();
+  return backend.offering === null ? <span>{t('settings.compact.managed')}</span>
+    : <BackendName reader={reader} provider={backend.offering.provider} place={place} capability={capability} backend={backend} />;
+}
+
 function BackendName({ reader, provider, place, capability, backend }: { reader: string; provider: string; place: string; capability: string; backend: BackendRef }) {
   const { t, route, reason } = useWords();
   const account = useQuery(capabilityProviderQuery(reader, provider));
-  const current = useQuery({ ...selectedCapabilityBackendQuery(reader, provider, place, capability, backend.offering?.offering ?? ''), enabled: place !== '' });
-  const chosen = current.isError ? undefined : current.data?.items.find((row) => identity(row.backend) === identity(backend));
+  const mayRead = place !== '' || capability === 'ask' || capability === 'summary';
+  const current = useQuery({ ...selectedCapabilityBackendQuery(reader, provider, place, capability, backend.offering?.offering ?? ''), enabled: mayRead });
+  const chosen = current.isError ? undefined : currentChoice(current.data?.items, backend);
   if (hidden(account.error) || account.data === null || hidden(current.error) || current.isSuccess && chosen === undefined) return <span className="text-text-muted">{t('settings.compact.managed')}</span>;
-  if (account.isError || current.isError) return <ErrorState compact title={t('capabilityBackend.unavailable')} error={account.error ?? current.error} onRetry={() => { void account.refetch(); if (place !== '') void current.refetch(); }} />;
-  if (account.data === undefined || place !== '' && chosen === undefined) return <span className="text-text-muted">{t('common.loading')}</span>;
+  if (account.isError || current.isError) return <ErrorState compact title={t('capabilityBackend.unavailable')} error={account.error ?? current.error} onRetry={() => { void account.refetch(); if (mayRead) void current.refetch(); }} />;
+  if (account.data === undefined || mayRead && chosen === undefined) return <span className="text-text-muted">{t('common.loading')}</span>;
   return <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1 text-sm">
     <ResourceName subject={{ kind: 'provider', provider: account.data }} />
     {chosen !== undefined && <><span>· {route(chosen)} · {chosen.offering_name}</span>{!chosen.eligible && <span className="text-text-muted">· {reason(chosen)}</span>}</>}
