@@ -37,6 +37,7 @@ impl native::Stored for Sessions {
     type Source = Source;
     type Value = SessionRow;
     const ROWS: &'static [Declaration<Source>] = &[
+        sources::SESSION_GET,
         sources::SESSION_DELETE,
         sources::SESSION_COMPLETE,
         sources::SESSION_PUT,
@@ -48,9 +49,13 @@ impl native::Stored for Sessions {
         _declaration: &'static Declaration<Source>,
     ) -> BoxFuture<'a, ApiResult<(SessionRow, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
-            let row = storage::session(conn, ctx.id("upload_id")?)
-                .await?
-                .ok_or_else(ApiError::not_found)?;
+            let receipt = matches!(ctx.route.name, "UploadSessionGet" | "UploadSessionComplete");
+            let row = if receipt {
+                storage::session_with_receipt(conn, ctx.id("upload_id")?, false).await?
+            } else {
+                storage::session(conn, ctx.id("upload_id")?).await?
+            }
+            .ok_or_else(ApiError::not_found)?;
             check_session_for(ctx, &row, ctx.user()?.id(), ctx.now)?;
             let target = targets::from_upload_session(conn, &row).await?;
             Ok((
@@ -73,5 +78,24 @@ impl native::Stored for Sessions {
         Box::pin(
             async move { check_session_for(ctx, row, principal.user(), principal.now().get()) },
         )
+    }
+}
+
+impl native::StoredRead for Sessions {
+    type Reply = orch_api_contract::threads::UploadSessionStatus;
+    fn render<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        _principal: &'a Principal,
+        row: &'a SessionRow,
+    ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
+        Box::pin(async move {
+            Ok(Self::Reply {
+                received: row.received,
+                ranges: storage::session_ranges(conn, row.id).await?,
+                policy: storage::session_policy(conn, row.id).await?,
+                completed: super::completion(row)?,
+            })
+        })
     }
 }
