@@ -4,14 +4,23 @@ CREATE TABLE blob_uploads (
     hash bytea NOT NULL,
     size bigint NOT NULL,
     received bigint DEFAULT 0 NOT NULL,
+    received_ranges int8multirange DEFAULT '{}' NOT NULL,
+    transfer_policy jsonb NOT NULL DEFAULT '{}',
     machine_id uuid,
     user_id uuid,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     command_id uuid,
+    idle_retention_secs bigint,
+    retention_default boolean,
+    expires_at timestamp with time zone,
     CONSTRAINT blob_uploads_pkey PRIMARY KEY (hash),
     CONSTRAINT blob_uploads_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE INDEX blob_uploads_expiry_idx ON blob_uploads USING btree (expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE INDEX blob_uploads_unreported_idle_idx ON blob_uploads USING btree (updated_at) WHERE expires_at IS NULL;
 
 CREATE INDEX blob_uploads_machine_command_idx ON blob_uploads USING btree (machine_id, command_id, hash) WHERE (command_id IS NOT NULL);
 
@@ -20,6 +29,8 @@ CREATE INDEX blob_uploads_machine_updated_idx ON blob_uploads USING btree (machi
 CREATE TABLE blobs (
     hash bytea NOT NULL,
     size bigint NOT NULL,
+    text_characters bigint,
+    text_ascii_characters bigint,
     stored_at timestamp with time zone DEFAULT now() NOT NULL,
     last_access_at timestamp with time zone DEFAULT now() NOT NULL,
     pin_count integer DEFAULT 0 NOT NULL,
@@ -46,6 +57,7 @@ CREATE INDEX completed_uploads_hash_idx ON completed_uploads USING btree (hash);
 CREATE INDEX completed_uploads_owner_recent_idx ON completed_uploads USING btree (user_id, created_at DESC, id DESC);
 
 CREATE TABLE file_cache (
+    minimum_reach text DEFAULT 'roots' NOT NULL CHECK (minimum_reach IN ('roots','machine')),
     environment_id uuid NOT NULL,
     path text NOT NULL,
     size bigint NOT NULL,
@@ -69,6 +81,7 @@ CREATE TABLE snapshots (
     tree_ref text,
     repository_head text,
     unavailable_reason text,
+    recording_indexing jsonb,
     expires_at timestamp with time zone,
     label text DEFAULT ''::text NOT NULL,
     selection jsonb NOT NULL,
@@ -90,6 +103,7 @@ CREATE TABLE snapshots (
 );
 
 CREATE INDEX snapshots_environment_exports_idx ON snapshots (environment_id, created_at DESC, id DESC) WHERE thread_id IS NULL;
+CREATE INDEX snapshots_label_search_idx ON snapshots USING gin (label gin_trgm_ops);
 
 CREATE TABLE upload_sessions (
     id uuid NOT NULL,
@@ -98,11 +112,14 @@ CREATE TABLE upload_sessions (
     media_type text,
     size bigint NOT NULL,
     received bigint DEFAULT 0 NOT NULL,
+    received_ranges int8multirange DEFAULT '{}' NOT NULL,
+    transfer_policy jsonb NOT NULL DEFAULT '{}',
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     cancelled_at timestamp with time zone,
     completed_at timestamp with time zone,
+    completion jsonb,
     CONSTRAINT upload_sessions_pkey PRIMARY KEY (id),
     CONSTRAINT upload_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -114,3 +131,7 @@ CREATE TABLE snapshot_blob_refs (
     CONSTRAINT snapshot_blob_refs_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash),
     CONSTRAINT snapshot_blob_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
 );
+
+-- Personal upload names are selected before custody and reference pages are projected.
+CREATE INDEX completed_uploads_name_search_idx ON completed_uploads USING gin (name gin_trgm_ops) WHERE name IS NOT NULL;
+CREATE INDEX upload_sessions_name_search_idx ON upload_sessions USING gin (name gin_trgm_ops) WHERE cancelled_at IS NULL AND completed_at IS NULL;

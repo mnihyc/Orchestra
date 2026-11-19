@@ -18,9 +18,13 @@ use orch_types::{Hash, Id, Json, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod change;
 pub mod command;
 mod events;
+mod failure;
+pub use change::{SourceChange, source_change};
 pub use events::node_event;
+pub use failure::Reason;
 mod route;
 mod run;
 pub use route::{preview_route, resolve_route};
@@ -48,6 +52,17 @@ pub struct Selection {
     pub config: Config,
 }
 impl Selection {
+    /// Catch-up keeps the person's selected range. A title follows the whole current chat;
+    /// its snapshot records the actual read position without turning it into a pinned range.
+    #[must_use]
+    pub fn pinned_range(&self) -> Option<SummaryChatRange> {
+        if matches!(self.material.identity.target(), SummaryTarget::Chat { .. }) {
+            self.material.range
+        } else {
+            None
+        }
+    }
+
     /// Canonical typed facts, including every contributing resource.
     pub fn facts(&self) -> Vec<operation_scope::sources::Facts<Role>> {
         let mut groups = BTreeMap::new();
@@ -66,6 +81,96 @@ impl Selection {
             operation_scope::sources::Facts::collection(Role::Inputs, groups.into_iter().collect()),
         ]
     }
+}
+
+/// The model task selected by the resource's actual native kind.
+#[must_use]
+pub fn field_for(target: SummaryTarget) -> orch_summarizer_contract::descriptor::SummaryField {
+    if matches!(target, SummaryTarget::ChatTitle { .. }) {
+        orch_summarizer_contract::descriptor::SummaryField::Title
+    } else {
+        orch_summarizer_contract::descriptor::SummaryField::Summary
+    }
+}
+
+/// The same owned prompt operands for a current proposal and the actual admitted execution.
+pub async fn request_for_selection(
+    conn: &mut Conn,
+    selected: &Selection,
+) -> Result<orch_summarizer_contract::summarizer::SummaryRequest, EngineError> {
+    let place = selected.material.identity.place();
+    let target = selected.material.identity.target();
+    let node = orch_db::queries::hierarchy::node(conn, place)
+        .await?
+        .ok_or_else(refused)?;
+    let named = matches!(
+        target,
+        SummaryTarget::Thread { .. } | SummaryTarget::Topic { .. }
+    );
+    Ok(orch_summarizer_contract::summarizer::SummaryRequest {
+        field: field_for(target),
+        node: orch_plugin_contract::refs::NodeRef {
+            id: place,
+            kind: serde_json::from_value(serde_json::json!(node.kind))?,
+            name: named.then(|| selected.material.title.clone()),
+            redacted: !named,
+        },
+        previous: String::new(),
+        activity: selected.material.activity.clone(),
+        tag_choices: Vec::new(),
+        limits: selected.policy.limits(),
+        config: serde_json::to_value(&selected.config)?,
+    })
+}
+
+/// Effect-free manual operands under the consuming read's actual source roles. No paid operation is captured.
+pub async fn preview_selection(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: SummaryTarget,
+    range: Option<SummaryChatRange>,
+    scope: &sources::ReadScope<'_>,
+    policy: options::Policy,
+    producer: &options::Producer,
+) -> Result<Selection, EngineError> {
+    let mut config = Config::read(&producer.config).map_err(|_| refused())?;
+    let identity = sources::identify(conn, target)
+        .await
+        .map_err(source_error)?;
+    require_model(conn, principal, identity.place(), &config).await?;
+    config.context_tokens = policy.context_tokens.get();
+    config.context_tokens = super::budget::context_tokens(conn, &config, field_for(target)).await?;
+    let budget = orch_summarizer_model::context::resource_budget(
+        &config,
+        field_for(target),
+        &policy.limits(),
+    )
+    .map_err(|_| refused())?;
+    let material =
+        sources::materialize_with_plan(conn, principal, target, Some(scope), range, budget, None)
+            .await
+            .map_err(source_error)?;
+    Ok(Selection {
+        material,
+        policy,
+        config,
+    })
+}
+
+/// A prompt estimate and the same request output reservation as the model producer, never base-rate arithmetic.
+pub async fn proposal_budget(
+    conn: &mut Conn,
+    selected: &Selection,
+) -> Result<(u32, i64), EngineError> {
+    let request = request_for_selection(conn, selected).await?;
+    let (system, input) = orch_summarizer_model::prompts::render(&request, &selected.config);
+    let input = orch_summarizer_model::context::estimated_tokens(&system)
+        .saturating_add(orch_summarizer_model::context::estimated_tokens(&input));
+    let reasons = super::budget::reasons(conn, &selected.config).await?;
+    Ok((
+        input,
+        selected.config.output_reserve(request.field, reasons),
+    ))
 }
 
 /// Select under the consuming operation's common Read roles before materializing words.
@@ -127,6 +232,7 @@ pub async fn select_with_snapshot(
             .unwrap_or_else(|| serde_json::json!({}));
     }
     config.context_tokens = policy.context_tokens.get();
+    let field = field_for(target);
     let previous = snapshot
         .map(sources::context_plan)
         .transpose()
@@ -138,14 +244,9 @@ pub async fn select_with_snapshot(
         }
         config.context_tokens = plan.budget.tokens;
     } else {
-        config.context_tokens = super::budget::context_tokens(conn, &config).await?;
+        config.context_tokens = super::budget::context_tokens(conn, &config, field).await?;
     }
     Config::read(&serde_json::to_value(&config)?).map_err(|_| refused())?;
-    let field = if matches!(target, SummaryTarget::ChatTitle { .. }) {
-        orch_summarizer_contract::descriptor::SummaryField::Title
-    } else {
-        orch_summarizer_contract::descriptor::SummaryField::Summary
-    };
     let budget = orch_summarizer_model::context::resource_budget(&config, field, &policy.limits())
         .map_err(|_| refused())?;
     if previous.as_ref().is_some_and(|plan| plan.budget != budget) {
@@ -202,54 +303,90 @@ pub async fn model_entry(
     place: Id,
     config: &Config,
 ) -> Result<Option<Id>, EngineError> {
-    let provider = resources::provider(conn, config.provider_id)
+    judge_model(conn, principal, place, config)
         .await?
-        .filter(|row| {
-            row.deleted_at.is_none()
-                && crate::providers::request_status_available(&row.status)
-                && !row.protocols.is_empty()
-        })
-        .ok_or_else(refused)?;
-    if completion_protocol(&provider.protocols)?.is_none() {
-        return Err(refused());
+        .map_err(|_| refused())
+}
+
+/// The decision of the native model door: the entry that lets this principal use the model, or the
+/// first thing that keeps it shut, so that whoever asked can be told what to change.
+pub async fn judge_model(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Id,
+    config: &Config,
+) -> Result<Result<Option<Id>, Reason>, EngineError> {
+    let Some(provider) = resources::provider(conn, config.provider_id).await? else {
+        return Ok(Err(Reason::ProviderGone));
+    };
+    if provider.deleted_at.is_some() {
+        return Ok(Err(Reason::ProviderGone));
     }
-    let model = resources::model(conn, config.provider_id, &config.model_name)
+    if !crate::providers::request_status_available(&provider.status) {
+        return Ok(Err(Reason::ProviderNotReady));
+    }
+    if provider.protocols.is_empty() || completion_protocol(&provider.protocols)?.is_none() {
+        return Ok(Err(Reason::NoInterface));
+    }
+    let Some(model) = resources::model(conn, config.provider_id, &config.model_name)
         .await?
         .filter(|row| row.enabled)
-        .ok_or_else(refused)?;
+    else {
+        return Ok(Err(Reason::ModelOff));
+    };
     let effective = crate::resolved::load(conn, place).await?;
     if effective.models_allowed.as_ref().is_some_and(|patterns| {
         !crate::models::allowed_by(patterns, &config.model_name, &model.groups)
-    }) || crate::provider_policy::forbidden(conn, place, provider.id)
+    }) {
+        return Ok(Err(Reason::ModelNotAllowed));
+    }
+    if crate::provider_policy::forbidden(conn, place, provider.id)
         .await?
         .is_some()
     {
-        return Err(refused());
+        return Ok(Err(Reason::ProviderForbidden));
     }
     let policies = crate::access::resource_policies(conn, provider.id).await?;
     let usable =
         orch_authz::usable::usable(conn, principal, provider.id, Some(place), &policies).await?;
-    let orch_authz::usable::Usable::Yes(usable) = usable else {
-        return Err(refused());
+    let usable = match usable {
+        orch_authz::usable::Usable::Yes(usable) => usable,
+        orch_authz::usable::Usable::Unavailable(_) => return Ok(Err(Reason::ProviderNotReady)),
+        orch_authz::usable::Usable::KeptToItsOwner | orch_authz::usable::Usable::No => {
+            return Ok(Err(Reason::NotAllowed));
+        }
     };
-    let effort =
-        orch_provider_contract::calls::requested_effort(&config.params).map_err(|_| refused())?;
+    let Ok(effort) = orch_provider_contract::calls::requested_effort(&config.params) else {
+        return Ok(Err(Reason::EffortNotOffered));
+    };
     // One entry has to allow the model and the effort together.
-    if !usable.allows(&orch_authz::options::Wanted {
+    let wanted = orch_authz::options::Wanted {
+        purpose: orch_access_contract::permissions::UsagePurpose::Summary,
         model: Some((&config.model_name, &model.groups)),
         effort,
         ..orch_authz::options::Wanted::default()
-    }) {
-        return Err(refused());
+    };
+    if !usable.allows(&wanted) {
+        let without_effort = orch_authz::options::Wanted {
+            effort: None,
+            ..wanted
+        };
+        return Ok(Err(if usable.allows(&without_effort) {
+            Reason::EffortNotOffered
+        } else {
+            Reason::ModelNotAllowed
+        }));
     }
-    let machine = provider.key_machine_id.ok_or_else(refused)?;
+    let Some(machine) = provider.key_machine_id else {
+        return Ok(Err(Reason::NoKeeper));
+    };
     if !orch_db::queries::resources::machine(conn, machine)
         .await?
         .is_some_and(|machine| machine.online)
     {
-        return Err(refused());
+        return Ok(Err(Reason::KeeperOffline));
     }
-    Ok(usable.entry)
+    Ok(Ok(usable.entry))
 }
 
 /// Immutable accepted native work. No lease, credential secret or successful admission is
@@ -260,6 +397,7 @@ pub struct Work {
     origin: CapturedOperation,
     http: Option<operation_scope::http_origin::HttpOrigin>,
     request: Id,
+    call: Id,
     target: SummaryTarget,
     issuer: Option<Id>,
     payer: Id,
@@ -276,7 +414,8 @@ impl std::fmt::Debug for Work {
     }
 }
 impl Work {
-    /// Capture only after complete native admission; the body cannot supply this origin.
+    /// Capture a provisional source plan under the accepted operation's complete factual binding.
+    /// Its continuing frame still restores raw identity and all current gates before any effect.
     pub fn capture(
         request: &rows::Request,
         principal: &Principal,
@@ -310,6 +449,7 @@ impl Work {
             origin,
             http,
             request: request.id,
+            call: request.call_id,
             target: selected.material.identity.target(),
             issuer: request.requested_by,
             payer: principal.caller().user(),
@@ -322,7 +462,7 @@ impl Work {
             policy: selected.policy.fingerprint,
             source: selected.material.snapshot.clone(),
             refs: selected.material.source_refs.clone(),
-            range: selected.material.range,
+            range: selected.pinned_range(),
         })
     }
     pub(crate) fn issuer(&self) -> Option<Id> {
@@ -330,6 +470,9 @@ impl Work {
     }
     pub(crate) fn request(&self) -> Id {
         self.request
+    }
+    pub(crate) fn call(&self) -> Id {
+        self.call
     }
     pub(crate) fn context_tokens(&self) -> u32 {
         self.config.context_tokens
@@ -366,23 +509,7 @@ impl Work {
         conn: &mut Conn,
         clock: &dyn orch_types::Clock,
     ) -> Result<operation_scope::continuing::Frame<command::Source>, EngineError> {
-        if let Some(http) = &self.http {
-            if http.origin() != &self.origin {
-                return Err(refused());
-            }
-            return http
-                .prepare::<command::Source>(conn, clock, self.clone())
-                .await
-                .map_err(command::frame_error);
-        }
-        operation_scope::continuing::prepare::<command::Source>(
-            conn,
-            clock,
-            &self.origin,
-            self.clone(),
-        )
-        .await
-        .map_err(command::frame_error)
+        self.read_frame(conn, clock).await
     }
     pub(crate) fn bind_command(
         &self,

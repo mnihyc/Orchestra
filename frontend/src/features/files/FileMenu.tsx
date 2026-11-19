@@ -16,7 +16,7 @@ import { create, useStore } from 'zustand';
 
 import { client } from '@/api/client';
 import { copyFile, deleteFile, makeDirectory, renameFile, writeFile, type Door } from '@/api/workspace';
-import type { DirEntry, Environment } from '@/generated/api-types';
+import type { DirEntry, Environment, FileSourcePolicy } from '@/generated/api-types';
 import { directoryWriter } from '@/realtime/stores/environment';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -104,6 +104,7 @@ export interface FileActions {
 export interface FileActionOptions {
   access: EnvironmentWorkspaceAccess;
   environment: Environment | undefined;
+  policy?: FileSourcePolicy | null | undefined;
   /** A file is opened. */
   open: (entry: DirEntry, permanent: boolean) => void;
   /** The tree shows the directory again after something changed in it. */
@@ -114,7 +115,8 @@ export interface FileActionOptions {
 }
 
 /** The reason a person may not change files here, as a sentence; `false` where they may. */
-export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Environment | undefined, t: TFunction): string | false {
+export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Environment | undefined, t: TFunction, policy?: FileSourcePolicy | null): string | false {
+  if (policy?.writable === false) return t('fileFacts.readOnlyMount');
   if (!access.mayManage) return workspaceDenial(t, 'files.manage', access.environment);
   if (environment === undefined) return t('common.loading');
   if (isAway(environment)) return t('files.menu.why.away', { name: access.environment.name });
@@ -124,7 +126,7 @@ export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Envi
   return false;
 }
 
-export function useFileActions({ access, environment, open, collapseAll, search, entries }: FileActionOptions): FileActions {
+export function useFileActions({ access, environment, policy, open, collapseAll, search, entries }: FileActionOptions): FileActions {
   const { t } = useTranslation();
   const { door } = access;
   const userId = useStore(client.session, (state) => state.userId);
@@ -132,7 +134,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
   const [act, setAct] = useState<FileAct | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const pickInto = useRef('');
-  const why = whyNoWrite(access, environment, t);
+  const why = whyNoWrite(access, environment, t, policy);
   const pasteBlocked = why !== false ? why : clipboard.mode === null ? t('files.menu.nothingToPaste') : clipboard.environmentId !== door.environmentId ? t('files.menu.otherWorkspace') : false;
   const start = useCallback((next: FileAct) => {
     if (why !== false) { toast({ tone: 'info', title: why }); return; }

@@ -125,7 +125,7 @@ impl native::Selected for Content {
 }
 
 async fn get(ctx: Ctx, query: UploadBlobGetQuery, _body: Body) -> ApiResult<Response> {
-    let selected = native::selected_read::<Content>(ctx.clone(), query.clone(), ()).await?;
+    let selected = native::selected_value::<Content>(ctx.clone(), query.clone(), ()).await?;
     ctx.retain_source(selected.row.clone())?;
     let hash = selected.row.blob()?.ok_or_else(ApiError::not_found)?;
     let response =

@@ -11,10 +11,13 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
+import { RELEASE_READ } from '@/api/freshness';
+import { providerFactsModelsKey } from './resourceKeys';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
 import { cachedRow } from '@/api/cache';
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { queryClient, type ReadOptions } from '@/api/query';
 import { type ResourceRows, resourceRows } from '@/api/listed';
 import type {
@@ -44,6 +47,9 @@ import type {
   ProviderFactsOverridesSetBody,
   ProviderListScope,
   ProviderModel,
+  ProviderModelPage,
+  ModelSuggestionPage,
+  ProviderModelUpdateBody,
   ProviderSetup,
   ProviderSourcesSetBody,
   ProviderThreadListReply,
@@ -61,6 +67,19 @@ import type {
 } from '@/generated/api-types';
 
 /** How many rows a page of a list that pages asks for: what a screen shows before "Show more". */
+type MachineChild = 'agents' | 'providers' | 'environments';
+export const machineChildrenQuery = <Kind extends MachineChild>(id: string, collection: Kind, q: string, version = '') => collectionQuery<{ items: Machine[Kind][number][]; next_cursor: string | null }>(['machine-children', id, collection, version], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/machines/{id}', { params: { path: { id }, query: { ...query, collection } }, signal }));
+    return { items: reply[collection], next_cursor: reply.next_cursor ?? null };
+  });
+type HostChild = 'kept_data' | 'kept_layers';
+export const hostChildrenQuery = <Kind extends HostChild>(id: string, collection: Kind, q: string, version = '') => collectionQuery<{ items: NonNullable<Host[Kind]>[number][]; next_cursor: string | null }>(['host-children', id, collection, version], q,
+  async (query, signal) => {
+    const reply = await ok(api.GET('/hosts/{id}', { params: { path: { id }, query: { ...query, collection } }, signal }));
+    return { items: reply[collection] ?? [], next_cursor: reply.next_cursor ?? null };
+  });
+
 export const RESOURCE_PAGE_SIZE = 50;
 
 // ---------------------------------------------------------------- keys
@@ -73,7 +92,7 @@ export const providerKey = (id: string) => ['provider', id] as const;
 export const providerSetupKey = (orgId: string, providerId?: string) => providerId === undefined ? ['provider-setup', orgId] as const : ['provider-setup', orgId, providerId] as const;
 export const providerSettingsKey = (id: string) => ['provider-settings', id] as const;
 export const providerModelsKey = (id: string) => ['provider-models', id] as const;
-export const providerSuggestionsKey = (id: string) => ['provider-suggestions', id] as const;
+export { providerFactsModelsKey };
 export const providerThreadsKey = (id: string) => ['provider-threads', id] as const;
 export const agentsKey = ['agents'] as const;
 export const agentKey = (id: string) => ['agent', id] as const;
@@ -223,29 +242,38 @@ export const providerModelsQuery = (id: string) =>
   queryOptions({
     queryKey: providerModelsKey(id),
     queryFn: ({ signal }): Promise<ProviderModel[]> =>
-      ok(api.GET('/providers/{id}/models', { params: { path: { id } }, signal })),
+      readAllPages((cursor) => ok(api.GET('/providers/{id}/models', { params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
-/** The models the provider's endpoint or harness names that are not listed yet. It fails where the provider cannot be asked. */
-export const providerSuggestionsQuery = (id: string) =>
+/** Resolve only the named catalogue entry through the same policy that creates it. */
+export const providerModelDefaultsQuery = (id: string, modelName: string) => queryOptions({
+  queryKey: ['provider-model-defaults', id, modelName] as const,
+  queryFn: ({ signal }): Promise<ModelParameters> => ok(api.GET('/providers/{id}/models/defaults', { params: { path: { id }, query: { model_name: modelName } }, signal })),
+  retry: false,
+});
+
+/**
+ * The models the provider's endpoint or harness last listed, as it kept them: a provider's view says only how many.
+ * `at` is when that list was read (`facts.field_times.models`): a list read anew is another key, so it is asked for again.
+ */
+export const providerFactsModelsQuery = (id: string, at: string | null) =>
   queryOptions({
-    queryKey: providerSuggestionsKey(id),
+    queryKey: providerFactsModelsKey(id, at),
     queryFn: ({ signal }): Promise<ModelSuggestion[]> =>
-      ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id } }, signal })),
-    // A discovery is a question put to the vendor: it is asked when the reader asks, not on every visit.
-    staleTime: 5 * 60_000,
-    retry: false,
+      ok(api.GET('/providers/{id}/facts/models', { params: { path: { id } }, signal })),
+    // A list read at one time never changes: a list read anew is another key.
+    staleTime: Infinity,
   });
 
 /** The threads bound to a provider that the caller may view, a page at a time. */
-export const providerThreadsQuery = (id: string) =>
+export const providerThreadsQuery = (id: string, q = '') =>
   infiniteQueryOptions({
-    queryKey: providerThreadsKey(id),
+    queryKey: [...providerThreadsKey(id), q],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }): Promise<ProviderThreadListReply> =>
       ok(
         api.GET('/providers/{id}/threads', {
-          params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(pageParam === null ? {} : { cursor: pageParam }) } },
+          params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } },
           signal,
         }),
       ),
@@ -262,12 +290,12 @@ export function updateProvider(id: string, body: ProviderUpdateBody): Promise<Pr
   return ok(api.PATCH('/providers/{id}', { params: { path: { id } }, body }));
 }
 
-export function deleteProvider(id: string): Promise<void> {
-  return done(api.DELETE('/providers/{id}', { params: { path: { id } } }));
+export function deleteProvider(id: string, notification?: {notify:boolean;notification_review?:string}): Promise<void> {
+  return done(api.DELETE('/providers/{id}', { params: { path: { id }, ...(notification===undefined?{}:{query:notification}) } }));
 }
 
-export function disableProvider(id: string,note?:string): Promise<Provider> {
-  return ok(api.POST('/providers/{id}/disable', { params: { path: { id },...(note===undefined?{}:{query:{note}}) } }));
+export function disableProvider(id: string,note?:string, notification?: {notify:boolean;notification_review?:string}): Promise<Provider> {
+  return ok(api.POST('/providers/{id}/disable', { params: { path: { id },query:{...notification,...(note===undefined?{}:{note})} } }));
 }
 
 export function enableProvider(id: string,runWaiting=false): Promise<Provider> {
@@ -306,6 +334,25 @@ export function restartHarness(providerId: string, agentId: string): Promise<Pro
   );
 }
 
+/** Model rows page independently of the provider's complete setup metadata. */
+export const providerModelsPageQuery = (id: string, q: string) => infiniteQueryOptions({
+  queryKey: ['provider-model-pages', id, q] as const,
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }): Promise<ProviderModelPage> => ok(api.GET('/providers/{id}/models', {
+    params: { path: { id }, query: { limit: RESOURCE_PAGE_SIZE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+  })),
+  getNextPageParam: (page) => page.next_cursor,
+});
+
+export const providerSuggestionsPageQuery = (id: string, q: string, observedAt: string | null) => infiniteQueryOptions({
+  queryKey: ['provider-suggestion-pages', id, q, observedAt] as const,
+  initialPageParam: null as string | null,
+  queryFn: ({ pageParam, signal }): Promise<ModelSuggestionPage> => ok(api.GET('/providers/{id}/models/suggestions', {
+    params: { path: { id }, query: { unlisted: true, limit: RESOURCE_PAGE_SIZE, ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+  })),
+  getNextPageParam: (page) => page.next_cursor,
+});
+
 export interface NewModel {
   model_name: string;
   display_name?: string;
@@ -322,7 +369,7 @@ export function createModel(providerId: string, body: NewModel): Promise<Provide
 export function updateModel(
   providerId: string,
   modelId: string,
-  body: { display_name?: string; enabled?: boolean; parameters?: ModelParameters; groups?: string[] },
+  body: ProviderModelUpdateBody,
   note?: string,
   runWaiting?: boolean,
 ): Promise<ProviderModel> {
@@ -371,10 +418,11 @@ export const agentQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Agent> => ok(api.GET('/agents/{id}', { params: { path: { id } }, signal })),
   });
 
-/** The harnesses the system has an adapter for, with the builds there are. */
+/** The harnesses the system has an adapter for, with the builds there are. It changes with a release or an administrator's own act, which says so: it is read once. */
 export const harnessKindsQuery = queryOptions({
   queryKey: harnessKindsKey,
   queryFn: ({ signal }): Promise<HarnessKindInfo[]> => ok(api.GET('/harness-kinds', { signal })),
+  ...RELEASE_READ,
 });
 
 /** Makes a profile for a harness in an org. */
@@ -426,11 +474,10 @@ export function updateHost(id: string, body: HostUpdateBody): Promise<Host> {
 }
 
 /** Everything that runs on a host, whoever's it is, for those who manage the host. */
-export const hostRuntimesQuery = (id: string) =>
-  queryOptions({
-    queryKey: hostRuntimesKey(id),
-    queryFn: ({ signal }): Promise<Runtime[]> => ok(api.GET('/hosts/{id}/runtimes', { params: { path: { id } }, signal })),
-  });
+export const hostRuntimesQuery = (id: string) => queryOptions({ queryKey: hostRuntimesKey(id),
+  queryFn: ({ signal }): Promise<Runtime[]> => readAllPages((cursor) => ok(api.GET('/hosts/{id}/runtimes', { params: { path: { id }, query: cursor === null ? {} : { cursor } }, signal })), signal) });
+export const hostRuntimesPageQuery = (id: string, q: string) => collectionQuery(hostRuntimesKey(id), q,
+  (query, signal) => ok(api.GET('/hosts/{id}/runtimes', { params: { path: { id }, query }, signal })));
 
 /** Stops a unit on a host, interrupting the turns that run in it only when asked to. */
 export function stopHostRuntime(hostId: string, runtimeId: string, interrupt: boolean): Promise<Runtime> {
@@ -468,13 +515,14 @@ export const templateQuery = (id: string) =>
 export const driversQuery = queryOptions({
   queryKey: driversKey,
   queryFn: ({ signal }): Promise<DriverInfo[]> => ok(api.GET('/drivers', { signal })),
+  ...RELEASE_READ,
 });
 
 /** What an environment may be granted beyond the ordinary, each with its risk. */
 export const capabilitiesQuery = queryOptions({
   queryKey: capabilitiesKey,
   queryFn: ({ signal }): Promise<CapabilityDef[]> => ok(api.GET('/capabilities', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 export function createTemplate(body: TemplateCreateBody, key: string): Promise<Template> {

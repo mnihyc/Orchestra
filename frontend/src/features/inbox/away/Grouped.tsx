@@ -18,13 +18,13 @@ import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 import { ReadReceipt, useGroupReads } from './Reads';
 import { mergePlacePages, placeUrl } from './model';
 
-export function PlaceInbox({ filter }: { filter: InboxFilter }) {
+export function PlaceInbox({ filter, q='' }: { filter: InboxFilter; q?:string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const seq = useUserStore((state) => state.lastSeq);
   const before = useRef(seq);
-  const key = useMemo(() => [...groupedKey, filter], [filter]);
-  const query = useInfiniteQuery({ queryKey: key, queryFn: ({ pageParam, signal }) => fetchPlacePage(filter, pageParam, signal), initialPageParam: null as string | null, getNextPageParam: (page) => page.next_cursor, retry: false });
+  const key = useMemo(() => [...groupedKey, filter,q], [filter,q]);
+  const query = useInfiniteQuery({ queryKey: key, queryFn: ({ pageParam, signal }) => fetchPlacePage(filter, pageParam, signal,q), initialPageParam: null as string | null, getNextPageParam: (page) => page.next_cursor, retry: false });
   // An arrival or a complete access/decision repair starts again at a current cut; old pages cannot lend headings or counts.
   useEffect(() => { if (before.current !== seq) { before.current = seq; void client.resetQueries({ queryKey: groupedKey }); } }, [seq, client]);
   const groups = useMemo(() => mergePlacePages(query.data?.pages ?? []), [query.data]);
@@ -37,7 +37,7 @@ export function PlaceInbox({ filter }: { filter: InboxFilter }) {
   if (denied || query.data === undefined && query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   return <div className="flex flex-col gap-3">
     {reads.acts.map((act) => <ReadReceipt key={act.key} act={act} onRetry={() => reads.retry(act)} onUndo={() => reads.undo(act)} />)}
-    {query.isPending ? <SkeletonGroup read={query} className="flex flex-col gap-3">{[0, 1, 2].map((id) => <div key={id} className="rounded-lg border border-border p-4"><Skeleton className="mb-3 h-5 w-1/3" /><Skeleton className="h-12 w-full" /></div>)}</SkeletonGroup> : groups.length === 0 ? <EmptyState icon={<InboxIcon aria-hidden />} title={t(filter === 'unread' ? 'away.inbox.nothingUnread' : 'away.inbox.empty')} /> : groups.map((group) => {
+    {query.isPending ? <SkeletonGroup read={query} className="flex flex-col gap-3">{[0, 1, 2].map((id) => <div key={id} className="rounded-lg border border-border p-4"><Skeleton className="mb-3 h-5 w-1/3" /><Skeleton className="h-12 w-full" /></div>)}</SkeletonGroup> : groups.length === 0 ? <EmptyState icon={<InboxIcon aria-hidden />} title={t(q!=='' ? 'ui.collection.none' : filter === 'unread' ? 'away.inbox.nothingUnread' : 'away.inbox.empty')} /> : groups.map((group) => {
       const name = group.place?.name ?? t('away.inbox.other');
       const url = placeUrl(group.place);
       const act = reads.acts.findLast((one) => one.groupKey === group.key);
@@ -52,7 +52,7 @@ export function PlaceInbox({ filter }: { filter: InboxFilter }) {
             <Button size="sm" icon={<CheckCheck aria-hidden />} pending={pending} disabled={group.unread === 0 && !pending} onClick={() => reads.read(group, name)}>{t('away.inbox.mark')}</Button>
           </div>
         </div>
-        <ul className="divide-y divide-border">{group.rows.map((row) => <NotificationRow key={row.id} row={quiet && row.inbox_seq <= act.through ? { ...row, read_at: row.read_at ?? new Date().toISOString() } : row} byPlace labels={labels} />)}</ul>
+        <ul className="max-h-96 overflow-y-auto divide-y divide-border">{group.rows.map((row) => <NotificationRow key={row.id} row={quiet && row.inbox_seq <= act.through ? { ...row, read_at: row.read_at ?? new Date().toISOString() } : row} byPlace labels={labels} />)}</ul>
       </section>;
     })}
     {query.isError && !query.isFetchNextPageError && <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />}

@@ -1,48 +1,44 @@
-import { ResourcePickerLookup } from '@/ui/ResourcePicker';
-import { BindingPickerScope } from '@/features/resources/PickerContext';
-import { ResourcePicker } from '@/ui/ResourcePicker';
-/** Where a thread runs: an existing environment its creator may use (the topic's first, every other under More), or a new one with template, place, storage, mounts, starting files and who else manages it.
+/** Where a thread runs: one compact control (`PlacePicker`) that lists the environments its creator may use, asks for the Use of those they only see, and makes "New environment…" the first row, which opens a small form of the host and the template it is made from, the files it starts with and who manages it.
  *
- * Where a thread works: an environment the person may use (the topic's own first, with its default
- * marked, as the server lists them; those they only see follow, set apart, and picking one asks for its Use), a new one that is made for the thread from the defaults of the place, or one
- * made here by the form that the resources screens use, or a directory of one of their connected machines, which
- * becomes an environment when it is registered. Starting a thread in an environment puts an agent there that
- * reaches all of it, so each row says whose it is, where, how it stands and who already works in it; one the person
- * may not use is shown with the server's reason. Where nothing may be made, the step says so and how to ask.
+ * Starting a thread in an environment puts an agent there that reaches all of it. The topic's default, from whichever place
+ * sets it, is the one that stands unless the person chose, and the line under the control says where it came from or why it
+ * does not stand. Where the agent the person wanted cannot run in the environment that stands, the line says why and what runs
+ * instead, and offers the act that lifts it. A directory of one of their connected machines becomes an environment when it is
+ * registered. Where nothing may be made, the step says so and how to ask.
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { FolderPlus, Laptop, Plus } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useStore } from 'zustand';
 import { EmptyState } from '@/ui/EmptyState';
 
 import { registerEnvironment } from '@/api/environments';
+import { DirectoryControl, directoryProblem, type DirectoryControlHandle } from '@/features/directory/DirectoryControl';
+import { directoryReader } from '@/features/directory/listing';
 import { ApiError, client } from '@/api/client';
 import { startOptionsQuery } from '@/api/start';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import type { PlaceRef } from '@/features/navigation/places';
-import { ResourceHint, ResourceName, resourcePreview } from '@/features/resource-facts/ResourceFacts';
-import { hostNotes } from '@/features/resources/hosts/words';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
-import { NewAccess } from '@/features/resources/NewAccess';
-import type { BindingEnvironment, Machine, NewEnvironment, PlaceHost } from '@/generated/api-types';
+import { BindingPickerScope } from '@/features/resources/PickerContext';
+import { ResourcePicker } from '@/ui/ResourcePicker';
+import type { BindingEnvironment, Machine } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
-import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert, MissingAccessList } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { SegmentedControl } from '@/ui/SegmentedControl';
-import { type ComboboxGroup } from '@/ui/Combobox';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
+import { useStore } from 'zustand';
 
-import { canCreateEnvironment, canUseEnvironment, CHOOSE_EXISTING_ENVIRONMENT, NEW_ENVIRONMENT } from './choices';
+import { type AgentHere, canCreateEnvironment, canUseEnvironment, CHOOSE_EXISTING_ENVIRONMENT, type EnvironmentNote, type NewPlacement, NEW_ENVIRONMENT } from './choices';
 import type { StartOptions } from '@/api/start';
+import { AgentHereLine, EnvironmentNoteLine } from './EnvironmentWords';
+import { NewEnvironmentForm } from './NewEnvironment';
+import { NEW_PLACE, PlacePicker, type PlaceRow } from './PlacePicker';
 import { reasonWords } from './words';
-import { StartingFiles } from './StartingFiles';
 
 export interface WhereProps {
   compact?: boolean;
@@ -61,103 +57,94 @@ export interface WhereProps {
   onRequestingChange: (environment: BindingEnvironment | null) => void;
   /** Read current choices after a request changes. */
   onRefresh?: () => void;
-  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
-  onNewEnvironmentChange?: (value: Pick<NewEnvironment, 'access' | 'files'>) => void;
+  newEnvironment?: NewPlacement;
+  onNewEnvironmentChange?: (value: NewPlacement) => void;
+  /** What the control says of the default environment where the person did not choose one. */
+  note?: EnvironmentNote | null;
+  /** The profile the person wanted, when the environment that stands shuts it. */
+  agentHere?: AgentHere | null;
+  /** Hosts already belong to the selected template's binding assessment. */
+  assessed?: boolean;
 }
 
-function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void }) {
+function RegisterDirectory(props: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void }) {
+  const reader = useStore(client.session, () => directoryReader());
+  return <DirectoryRegistration key={reader} {...props} reader={reader} />;
+}
+
+function DirectoryRegistration({ machines, loading = false, homeId, onRegistered, reader }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void; reader: string }) {
   const { t } = useTranslation();
   const actKey = useActKey();
   const online = machines.filter((machine) => machine.online);
   const [machineId, setMachineId] = useState('');
   const [root, setRoot] = useState('');
   const [name, setName] = useState('');
+  const [expanded, setExpanded] = useState(false);
+  const [ready, setReady] = useState(false);
+  const directory = useRef<DirectoryControlHandle | null>(null);
+  const sent = useRef(new Set<string>());
   const chosen = machineId === '' ? (online[0]?.id ?? '') : machineId;
+  const machine = online.find((machine) => machine.id === chosen);
   const register = useMutation({
-    mutationFn: () => registerEnvironment(chosen, { name: name.trim() === '' ? root.trim() : name.trim(), root: root.trim(), home_id: homeId }, actKey({ chosen, root, name, homeId })),
+    mutationFn: async (body: { machine: string; root: string; name: string }) => {
+      const key = actKey({ ...body, homeId });
+      if (directoryReader() !== reader || directory.current === null) throw new DOMException('Directory reader changed', 'AbortError');
+      // A lost write reply must reach the original idempotent receipt even if its path changed later.
+      if (!sent.current.has(key)) await directory.current.verify();
+      if (directoryReader() !== reader) throw new DOMException('Directory reader changed', 'AbortError');
+      sent.current.add(key);
+      return registerEnvironment(body.machine, { name: body.name.trim() === '' ? body.root : body.name.trim(), root: body.root, home_id: homeId }, key);
+    },
     onSuccess: (environment) => {
+      if (directoryReader() !== reader) return;
       onRegistered('environment_id' in environment ? String(environment.environment_id) : environment.id);
-      setRoot('');
-      setName('');
+      setRoot(''); setName('');
     },
   });
+  const fieldFailure = register.error instanceof ApiError && register.error.faults().some((fault) => fault.path === 'root' || fault.path === 'path');
   if (loading) return <p role="status" className="text-sm text-text-muted">{t('startFlow.machinesLoading')}</p>;
-  if (machines.length === 0) {
-    return <EmptyState compact title={t('start.where.noMachines')} />;
-  }
-  return (
-    <details className="rounded-lg border border-border px-3 py-2">
-      <summary className="flex cursor-default items-center gap-2 rounded-md text-sm font-medium text-text select-none">
-        <Laptop aria-hidden /> {t('start.where.machineTitle')}
-      </summary>
-      <form
-        className="mt-2 flex flex-col gap-3 pb-1"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (root.trim() !== '' && chosen !== '') register.mutate();
-        }}
-      >
-        <p className="text-sm text-text-muted">{t('start.where.machineAbout')}</p>
-        {online.length === 0 ? (
-          <InlineAlert tone="warning">{t('start.where.allOffline')}</InlineAlert>
-        ) : (
-          <>
-            <ResourcePicker pickerKey="thread-directory-machine"
-              label={t('start.where.machine')}
-              value={chosen}
-              onValueChange={setMachineId}
-              options={online.map((machine) => ({ value: machine.id, label: machine.name, resource:{kind:'machine',id:machine.id,data:machine}, description: machine.owner === null ? undefined : <UserChip user={machine.owner} /> }))}
-            />
-            <Input label={t('start.where.root')} hint={t('start.where.rootHint')} value={root} onChange={(event) => setRoot(event.target.value)} autoComplete="off" />
-            <Input label={t('start.where.envName')} optional value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
-            {register.error !== null && <ErrorAlert error={register.error} />}
-            <Button type="submit" size="sm" icon={<FolderPlus aria-hidden />} pending={register.isPending} disabled={root.trim() === ''} className="self-start">
-              {t('start.where.use')}
-            </Button>
-          </>
-        )}
-      </form>
-    </details>
-  );
-}
-
-/**
- * The hosts a new environment could be made on, with what each has free: the one the scheduler would take first, and
- * one that cannot be chosen with why. The figures are the server's, read when the choices were.
- */
-function Hosts({ hosts }: { hosts: readonly PlaceHost[] }) {
-  const { t } = useTranslation();
-  if (hosts.length === 0) return null;
-  // The same words as where a thread is moved: why a host cannot take the environment, or what to know before it does.
-  const notes = (place: PlaceHost) => hostNotes(place, t);
-  return (
-    <ul className="flex flex-col gap-1 text-xs text-text-muted" aria-label={t('start.where.hosts')} data-start-hosts>
-      {hosts.map((place) => (
-        <li key={place.host.id} className="flex flex-wrap items-center gap-x-2">
-          <ResourceName subject={{ kind: 'host', host: place.host, place }} className="flex-wrap font-medium text-text" />
-          {place.automatic && <span className="rounded-full border border-accent/40 px-2 text-accent-text">{t('start.where.hostChosen')}</span>}
-          {!place.usable && <span>{notes(place).off ?? t('start.where.hostClosed')}</span>}
-          {place.usable && notes(place).warn !== null && <span>{notes(place).warn}</span>}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** Who else works in an environment, in a few words: how many threads, and the other topics they are in. */
-function usedBy(row: BindingEnvironment, t: TFunction): string | null {
-  const others = row.used === 'topic' ? [] : row.topics.map((topic) => topic.name).filter((name): name is string => name !== null);
-  const names = others.slice(0, 2).join(', ');
-  const rest = others.length - 2 + row.topics_hidden;
-  const where = names === '' ? null : rest > 0 ? t('start.where.alsoUsedByMore', { names, count: rest }) : t('start.where.alsoUsedBy', { names });
-  const threads = row.threads > 0 ? t('start.where.threads', { count: row.threads }) : null;
-  return [threads, where].filter((part): part is string => part !== null).join(t('startFlow.separator')) || null;
+  if (machines.length === 0) return <EmptyState compact title={t('start.where.noMachines')} />;
+  return <details className="rounded-lg border border-border px-3 py-2" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <summary className="flex cursor-default items-center gap-2 rounded-md text-sm font-medium text-text select-none"><Laptop aria-hidden /> {t('start.where.machineTitle')}</summary>
+    {expanded && <form className="mt-2 flex flex-col gap-3 pb-1" onSubmit={(event) => { event.preventDefault(); if (ready && root !== '' && chosen !== '') register.mutate({ machine: chosen, root, name }); }}>
+      {online.length === 0 ? <InlineAlert tone="warning">{t('start.where.allOffline')}</InlineAlert> : <>
+        <ResourcePicker pickerKey="thread-directory-machine" label={t('start.where.machine')} value={chosen} disabled={register.isPending}
+          onValueChange={(id) => { setMachineId(id); setRoot(''); setName(''); setReady(false); register.reset(); }}
+          options={online.map((machine) => ({ value: machine.id, label: machine.name, resource: { kind: 'machine', id: machine.id, data: machine }, description: machine.owner === null ? undefined : <UserChip user={machine.owner} /> }))} />
+        {machine !== undefined && <DirectoryControl key={machine.id} ref={directory} target={{ kind: 'machine', machine }} value={root}
+          onChange={(value) => { setRoot(value); if (register.error !== null) register.reset(); }} onReady={setReady} disabled={register.isPending}
+          error={fieldFailure ? directoryProblem(register.error) : undefined} />}
+        <Input label={t('start.where.envName')} optional value={name} disabled={register.isPending} onChange={(event) => { setName(event.target.value); if (register.error !== null) register.reset(); }} autoComplete="off" />
+        {register.error !== null && !fieldFailure && <ErrorAlert error={register.error} />}
+        <Button type="submit" size="sm" icon={<FolderPlus aria-hidden />} pending={register.isPending} disabled={!ready || root === '' || machine === undefined} className="self-start">{t('start.where.use')}</Button>
+      </>}
+    </form>}
+  </details>;
 }
 
 /** An environment the person sees and may not start a thread in: picking it asks for its Use. */
 const USE_REQUIRED = 'environment_use_required';
 
-export function Where({ compact = false, place, options, value, onChange, machines, machinesLoading = false, homeId, requesting, onRequestingChange, onRefresh, newEnvironment, onNewEnvironmentChange }: WhereProps) {
+/** A row of the list for one environment, with the reason that sets it apart where it cannot be used at once. */
+function rowOf(row: BindingEnvironment, t: TFunction, me: string | null): PlaceRow {
+  const usable = canUseEnvironment(row);
+  const askable = row.reason === USE_REQUIRED;
+  const failed = row.environment.status === 'failed' || row.environment.status === 'removed';
+  return {
+    id: row.environment.id,
+    name: row.environment.name,
+    on: row.machine?.name ?? row.host?.name ?? null,
+    owner: row.environment.owner.id === me ? null : row.environment.owner,
+    state: usable && row.environment.status !== 'running' ? t(`environments.status.${row.environment.status}`) : null,
+    group: usable ? 'ready' : askable ? 'ask' : 'unavailable',
+    reason: usable ? null : askable ? t('start.where.askAccess') : failed ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason),
+    status: row.environment.status,
+    isDefault: row.is_default,
+    keywords: [row.environment.address, row.environment.owner.display_name, ...row.topics.map((topic) => topic.name)],
+  };
+}
+
+export function Where({ compact = false, place, options, value, onChange, machines, machinesLoading = false, homeId, requesting, onRequestingChange, onRefresh, newEnvironment, onNewEnvironmentChange, note = null, agentHere = null, assessed = false }: WhereProps) {
   const { t } = useTranslation();
   const reader = useStore(client.session, (state) => JSON.stringify([state.userId, state.readerVersion ?? 0]));
   const context = JSON.stringify([reader, place.id]);
@@ -165,10 +152,9 @@ export function Where({ compact = false, place, options, value, onChange, machin
   const [granted, setGranted] = useState<{ context: string; id: string } | null>(null);
   const mayMake = options.can_create.allowed;
   const canMakeNew = canCreateEnvironment(options);
-  const [moreQuery, setMoreQuery] = useState('');
   const currentRequest = requesting === null ? null : options.environments.find((row) => row.environment.id === requesting.environment.id) ?? requesting;
   // A refusal identifies who can actually give Use; a visible resource does not imply it is requestable.
-  const access = useQuery({ ...startOptionsQuery(place.id, requesting?.environment.id ?? null), enabled: requesting !== null, retry: false, staleTime: 0 });
+  const access = useQuery({ ...startOptionsQuery(place.id, requesting?.environment.id ?? null), enabled: requesting !== null, retry: false });
   const missing = access.error instanceof ApiError ? access.error.extra('authz.denied')?.missing.filter((entry) => entry.object.id === requesting?.environment.id && entry.permissions.includes('environment.use')) ?? [] : [];
   const canAsk = missing.some((entry) => entry.closed === null && (entry.ask.length > 0 || entry.ask_more > 0));
   const available = access.data?.environments.find((row) => row.environment.id === requesting?.environment.id);
@@ -182,36 +168,13 @@ export function Where({ compact = false, place, options, value, onChange, machin
       onChange(acquired.environment.id);
     }
   }, [acquired, onRequestingChange, onChange]);
-  // The server's topic/default rows stay first; More preserves its explicit use categories.
-  const order = (row: BindingEnvironment) => (canUseEnvironment(row) ? 0 : row.reason === USE_REQUIRED ? 1 : 2);
-  const listed = [...options.environments].sort((a, b) => Number(b.is_default) - Number(a.is_default) || order(a) - order(b));
-  const topic = listed.filter((row) => row.is_default || row.used === 'topic');
-  const others = listed.filter((row) => !row.is_default && row.used !== 'topic');
+  // The default comes first; the rest keep the order the server gave them.
+  const listed = [...options.environments].sort((a, b) => Number(b.is_default) - Number(a.is_default));
+  const me = useStore(client.session, (state) => state.userId);
+  const rows = listed.map((row) => rowOf(row, t, me));
   const selectedId = currentRequest?.environment.id ?? value;
-  const selected = listed.find((row) => row.environment.id === selectedId);
-  const primary = selected !== undefined && !topic.includes(selected) ? [...topic, selected] : topic;
-  const mixed = (rows: readonly BindingEnvironment[]) => rows.some((row) => order(row) === 0) && rows.some((row) => order(row) === 1);
-  const rowChoice = (row: BindingEnvironment, group?: string) => {
-    const used = usedBy(row, t);
-    const usable = canUseEnvironment(row);
-    const askable = row.reason === USE_REQUIRED;
-    const refusal = usable || askable ? null : row.environment.status === 'failed' || row.environment.status === 'removed' ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason);
-    return {
-      value: row.environment.id,
-      preview: resourcePreview({ kind: 'environment', environment: row.environment, host: row.host }),
-      accessory: <UserChip user={row.environment.owner} />,
-      name: row.environment.name,
-      ...(group === undefined ? {} : { group }),
-      description: <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <ResourceHint subject={{ kind: 'environment', environment: row.environment, host: row.host }} />
-        {row.machine !== null && <span>{row.machine.name}</span>}
-        {used !== null && <span>{used}</span>}
-        {askable && group === undefined && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
-        {refusal !== null && <span className="text-warning-text">{refusal}</span>}
-      </span>,
-      disabled: !usable && !askable,
-    };
-  };
+  const fresh = currentRequest === null && value === NEW_ENVIRONMENT;
+  const selected = listed.find((row) => row.environment.id === selectedId) ?? null;
   const pickExisting = (id: string) => {
     const row = options.environments.find((each) => each.environment.id === id);
     if (row === undefined) return;
@@ -221,58 +184,20 @@ export function Where({ compact = false, place, options, value, onChange, machin
     setRequestedAt(null);
     onRequestingChange(null); onChange(id);
   };
-  const needle = moreQuery.trim().normalize('NFKC').toLocaleLowerCase();
-  const moreRows = others.filter((row) => [row.environment.name, row.environment.address, row.environment.owner.display_name, row.machine?.name, row.host?.name, ...row.topics.map((topic) => topic.name)]
-    .some((name) => name?.normalize('NFKC').toLocaleLowerCase().includes(needle)));
-  const moreGroups: ComboboxGroup<string>[] = [];
-  for (const use of ['project', 'elsewhere', 'unused'] as const) {
-    const rows = moreRows.filter((row) => row.used === use);
-    for (const permission of [0, 1, 2]) {
-      const choices = rows.filter((row) => order(row) === permission);
-      if (choices.length === 0) continue;
-      const accessLabel = mixed(rows) && permission !== 2 ? t(permission === 0 ? 'start.where.canUse' : 'start.where.askAccess') : null;
-      moreGroups.push({ id: `${use}-${permission}`, label: [t(`start.where.used.${use}`), accessLabel].filter((word) => word !== null).join(' · '),
-        options: choices.map((row) => {
-          const option = rowChoice(row, accessLabel ?? undefined);
-          return { value: option.value, text: option.name, label: option.name, preview: option.preview, disabled: option.disabled,
-            description: <span className="flex flex-wrap items-center gap-x-3 gap-y-1"><UserChip user={row.environment.owner} />{option.description}</span>,
-            icon: <EnvironmentDot status={row.environment.status} /> };
-        }) });
-    }
-  }
-  const kind = currentRequest !== null || value !== NEW_ENVIRONMENT ? 'existing' : 'new';
+  const chooseNew = () => { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(NEW_ENVIRONMENT); };
+  const standing = fresh ? null : selected === null ? null : selected.environment.name;
+  const shownValue = fresh ? NEW_PLACE : currentRequest !== null ? currentRequest.environment.id : value === CHOOSE_EXISTING_ENVIRONMENT ? null : value;
   return <BindingPickerScope options={options} screen="thread-environment" currentHomes={[place.id,...(place.parentId===null?[]:[place.parentId])]}>{(
-    <div className="flex flex-col gap-3" data-start-where>
-      <SegmentedControl<'existing' | 'new'> label={t('start.where.choice')} value={kind}
-        onValueChange={(next) => {
-          if (next === 'new') { if (canMakeNew) { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(NEW_ENVIRONMENT); } }
-          else { const row = listed.find(canUseEnvironment) ?? listed.find((row) => row.reason === USE_REQUIRED); if (row !== undefined) pickExisting(row.environment.id); else { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(CHOOSE_EXISTING_ENVIRONMENT); } }
-        }}
-        segments={[
-          { value: 'existing', name: t('start.where.useExisting'), disabled: listed.length === 0, description: listed.length === 0 ? t('start.where.noExisting') : undefined },
-          { value: 'new', name: t('start.where.createNew'), disabled: !canMakeNew, description: !canMakeNew ? t(mayMake ? 'start.where.noHost' : 'start.where.mayNotMake') : undefined },
-        ]} />
-      {listed.length === 0 && <p className="text-sm text-text-muted">{t('start.where.noExisting')}</p>}
+    <div className="flex flex-col gap-2" data-start-where>
+      <PlacePicker label={t('start.where.title')} value={shownValue} rows={rows} onPick={pickExisting}
+        {...(mayMake ? { newRow: { onNew: chooseNew } } : {})} fieldClassName="min-w-0 max-w-full" />
+      {granted?.context === context && granted.id === value && <span role="status" className="text-sm text-text-muted">{t('startImplicit.grantedSelected')}</span>}
+      {listed.length === 0 && (!mayMake || !canMakeNew) && <p className="text-sm text-text-muted">{t('start.where.noExisting')}</p>}
       {mayMake && !canMakeNew && <p role="status" className="text-sm text-text-muted">{t('start.where.noHost')}</p>}
       {!mayMake && <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>}
-      {kind === 'existing' && listed.length > 0 && <div className="flex min-w-0 flex-wrap items-end gap-2">
-        <ResourcePicker pickerKey="start.Where.start.where.title" label={t('start.where.title')} hideLabel value={selected === undefined ? '' : selected.environment.id}
-          placeholder={t('start.where.chooseExisting')} onValueChange={pickExisting} fieldClassName="min-w-0 flex-1"
-          options={primary.map((row) => rowChoice(row, mixed(primary) ? order(row) === 0 ? t('start.where.canUse') : order(row) === 1 ? t('start.where.askAccess') : undefined : undefined))} />
-        {others.length > 0 && <ResourcePickerLookup pickerKey="thread-environment-more" label={t('start.where.moreTitle')} hideLabel query={moreQuery} onQueryChange={setMoreQuery} displayValue={t('start.where.more')}
-          onOpenChange={(open) => { if (!open) setMoreQuery(''); }} groups={moreGroups} placeholder={t('start.where.search')}
-          empty={t('start.where.noMatches')} fieldClassName="min-w-0 w-(--field-narrow) max-w-full"
-          onSelect={(option) => { pickExisting(option.value); setMoreQuery(''); }} />}
-        {granted?.context === context && granted.id === value && <span role="status" className="text-sm text-text-muted">{t('startImplicit.grantedSelected')}</span>}
-      </div>}
-      {kind === 'new' && canMakeNew && <>
-        <Hosts hosts={options.hosts} />
-        {onNewEnvironmentChange !== undefined && <>
-          <StartingFiles value={newEnvironment?.files} onChange={(files) => onNewEnvironmentChange({ ...newEnvironment, files })} />
-          <NewAccess label={t('start.where.managers')} value={newEnvironment?.access ?? 'defaults'} home={place.name} allowHome={false}
-            onChange={(access) => { if (access !== 'home') onNewEnvironmentChange({ ...newEnvironment, access }); }} />
-        </>}
-      </>}
+      {note !== null && <EnvironmentNoteLine note={note} standing={standing} fresh={fresh} />}
+      {agentHere !== null && <AgentHereLine here={agentHere} environment={fresh ? null : selected} onChanged={() => onRefresh?.()} />}
+      {fresh && mayMake && onNewEnvironmentChange !== undefined && <NewEnvironmentForm assessed={assessed} place={place} hosts={options.hosts} value={newEnvironment} onChange={onNewEnvironmentChange} />}
       {currentRequest !== null && access.isPending && <SkeletonRows read={access} rows={1} />}
       {currentRequest !== null && missing.length > 0 && !canAsk && <MissingAccessList missing={missing} />}
       {currentRequest !== null && canAsk && (
@@ -310,6 +235,6 @@ export function WhereOptions({ place, options, onChange, machines, machinesLoadi
         </details>
       )}
       <RegisterDirectory machines={machines} loading={machinesLoading} homeId={homeId} onRegistered={(environmentId) => onChange(environmentId)} />
-      {making && <MakeEnvironmentDialog forThread home={{ id: place.id, name: place.name }} onClose={() => setMaking(false)} onMade={(environment) => onChange(environment.id)} />}
+      {making && <MakeEnvironmentDialog forThread home={{ id: place.id, name: place.name,kind:place.kind }} onClose={() => setMaking(false)} onMade={(environment) => onChange(environment.id)} />}
   </>;
 }

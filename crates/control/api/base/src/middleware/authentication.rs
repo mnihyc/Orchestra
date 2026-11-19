@@ -23,6 +23,7 @@ use http::header;
 use orch_access_contract::key_scope::KeyScope;
 
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::common::{SessionEnd, SessionEndCause};
 
 use orch_db::queries::identity;
 
@@ -239,9 +240,27 @@ pub async fn authenticate(
             false,
         )
     } else {
-        let row = identity::session_by_access_token(&mut conn, &hash, now)
-            .await?
-            .ok_or_else(invalid_token)?;
+        let row = match identity::session_by_access_token(&mut conn, &hash, now).await? {
+            Some(row) => row,
+            None => {
+                let mut error = invalid_token();
+                // Only an exact retained bearer match may add a fact. Access-token expiry
+                // alone still asks the live session to renew through its ordinary cookie.
+                if let Some(proof) =
+                    identity::session_proof_by_access_hash(&mut conn, &hash).await?
+                {
+                    if let Some(fact) = recorded_session_end(&proof, now) {
+                        error = error.session_ended(fact);
+                    } else if identity::user_by_id(&mut conn, proof.user_id)
+                        .await?
+                        .is_some_and(|user| user.suspended())
+                    {
+                        error = error.session_ended(unavailable_session());
+                    }
+                }
+                return Err(error);
+            }
+        };
         (
             row.user_id,
             Via::Session {
@@ -254,16 +273,46 @@ pub async fn authenticate(
         .await?
         .ok_or_else(invalid_token)?;
     if user.suspended() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSuspended,
-            "this user is suspended",
-        ));
+        let error = ApiError::new(ErrorCode::AuthSuspended, "this user is suspended");
+        return Err(if matches!(&via, Via::Session { .. }) {
+            error.session_ended(unavailable_session())
+        } else {
+            error
+        });
     }
     Ok(Caller::User(Arc::new(Authed {
         user,
         via,
         as_admin,
     })))
+}
+
+/// The first retained session ending wins; cleanup or a later observation supplies no time.
+pub fn recorded_session_end(
+    proof: &identity::SessionProof,
+    now: DateTime<Utc>,
+) -> Option<SessionEnd> {
+    let expired = (proof.expires_at <= now).then_some(proof.expires_at);
+    if let Some(revoked) = proof.revoked_at
+        && expired.is_none_or(|end| revoked < end)
+    {
+        return Some(SessionEnd {
+            cause: SessionEndCause::Revoked,
+            at_if_known: Some(Time::new(revoked)),
+        });
+    }
+    expired.map(|end| SessionEnd {
+        cause: SessionEndCause::Expired,
+        at_if_known: Some(Time::new(end)),
+    })
+}
+
+/// Account standing has no captured change instant, so it cannot supply one.
+pub fn unavailable_session() -> SessionEnd {
+    SessionEnd {
+        cause: SessionEndCause::AccountUnavailable,
+        at_if_known: None,
+    }
 }
 
 fn invalid_token() -> ApiError {
