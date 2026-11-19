@@ -7,7 +7,6 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { suppliedRead } from '@/api/readScheduler';
 import { api, ok } from '@/api/client';
 import { NetworkError } from '@/lib/requests';
 import { readInThread, receiveThreadRead, threadQueryRead, threadReadSelector } from '@/api/threadRead';
@@ -82,7 +81,6 @@ export const namesKey = (search: NameSearch) => ['names', search.kinds.join(',')
 export const namesQuery = (search: NameSearch) =>
   queryOptions({
     queryKey: namesKey(search),
-    ...suppliedRead(namesKey(search)),
     queryFn: async ({ signal }): Promise<NameSearchPage> => {
       const length = Array.from(search.q.trim()).length;
       if (length > 0 && length < NAME_MIN_CHARS) return { items: [], partial: false };
@@ -106,7 +104,7 @@ export const namesQuery = (search: NameSearch) =>
     staleTime: NAMES_FRESH_MS,
     // A lookup made while typing is not made again by itself: the next letter asks anew.
     retry: false,
-    placeholderData: (previous, held) => held?.queryKey[4] === (search.orgId ?? '') && held.queryKey.at(-1) === (search.participating ?? false) && held.queryKey.at(-2) === (search.starred ?? false) ? previous : undefined,
+    placeholderData: (previous, held) => held?.queryKey.at(-1) === (search.participating ?? false) && held.queryKey.at(-2) === (search.starred ?? false) ? previous : undefined,
   });
 
 // ---------------------------------------------------------------- the registry the finder reads settings from
@@ -244,11 +242,10 @@ export const searchPreviewQuery = (filters: SearchFilters) =>
   queryOptions({
     queryKey: ['search-preview', ...searchKey(filters)] as const,
     queryFn: async ({ signal }): Promise<SearchHitPage> =>
-      (await ok(api.GET('/search', { params: { query: { q: filters.q.trim(), limit: SEARCH_PREVIEW, ...(filters.scope === undefined ? {} : { scope: filters.scope }), ...(filters.participating === true ? { participating: true } : {}), ...(filters.sort === undefined ? {} : { sort: filters.sort }) } }, signal }))) as SearchHitPage,
+      (await ok(api.GET('/search', { params: { query: { q: filters.q.trim(), limit: SEARCH_PREVIEW, ...(filters.participating === true ? { participating: true } : {}), ...(filters.sort === undefined ? {} : { sort: filters.sort }) } }, signal }))) as SearchHitPage,
     staleTime: 15_000,
     retry: false,
-    // A different org must never paint the previous org's preview.
-    placeholderData: undefined,
+    placeholderData: (previous, held) => held?.queryKey.at(-1) === (filters.participating ?? false) && held.queryKey.at(-2) === (filters.sort ?? 'newest') ? previous : undefined,
   });
 
 /** One NDJSON response owns the two server-side retrievals; cancelling its signal cancels both. */

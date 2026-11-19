@@ -63,7 +63,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const defaultsName = locale === 'en' ? 'Defaults' : '默认设置';
     const generalName = locale === 'en' ? 'General' : '常规';
     const tabs = page.getByRole('tablist', { name: locale === 'en' ? 'Main area' : '主区域', exact: true });
-    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && url.searchParams.get('section') === 'defaults');
+    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && url.searchParams.get('section') === 'policies');
     await expect(tabs.getByRole('tab', { name: `${defaultsName} · Fix login`, exact: true })).toHaveCount(1);
     await expect(main.getByRole('heading', { level: 1, name: defaultsName, exact: true })).toBeVisible();
     const navigation = main.getByRole('navigation', { name: locale === 'en' ? 'Sections of the settings of Fix login' : 'Fix login设置的各个部分', exact: true });
@@ -73,7 +73,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await page.getByRole('option', { name: generalName, exact: true }).click();
     const heading = main.getByRole('heading', { level: 1, name: generalName, exact: true });
     await expect(heading).toBeVisible();
-    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && !url.searchParams.has('section'));
+    await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && url.searchParams.get('tab') === 'settings' && url.searchParams.get('section') === 'general');
     await expect(tabs.getByRole('tab', { name: `${generalName} · Fix login`, exact: true })).toHaveCount(1);
     await expect(page.getByRole('tab', { name: generalName, exact: true })).toHaveCount(0);
     const path = page.locator('[data-screen-path]:visible');
@@ -91,23 +91,3 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?tab=overview`));
   });
 }
-
-test('an address that names the first section of Settings opens the same screen, is written without it and adds no history entry', async ({ page }) => {
-  await signIn(page);
-  const main = page.getByRole('main');
-  const general = main.getByRole('heading', { level: 1, name: 'General', exact: true });
-  for (const [bare, named] of [
-    [`/topic/${ACME.fixLogin}?tab=settings`, `/topic/${ACME.fixLogin}?tab=settings&section=general`],
-    [`/project/${ACME.web}/settings`, `/project/${ACME.web}/settings?section=general`],
-  ] as const) {
-    await page.goto(bare);
-    await expect(general).toBeVisible();
-    await expect(page).toHaveURL((url) => `${url.pathname}${url.search}` === bare);
-    const before = await page.evaluate(() => history.length);
-    await page.goto(named);
-    await expect(general).toBeVisible();
-    await expect(page).toHaveURL((url) => `${url.pathname}${url.search}` === bare);
-    // The open itself is the one entry; the rewrite to the address without the section replaced it.
-    expect(await page.evaluate(() => history.length)).toBe(before + 1);
-  }
-});

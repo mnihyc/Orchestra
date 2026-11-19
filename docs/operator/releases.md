@@ -47,9 +47,8 @@ gh run list --repo "$REPO" --workflow release.yml --branch "$SNAPSHOT" --commit 
 
 Use the returned run IDs with `gh run watch <id> --repo "$REPO" --exit-status`.
 Keep the branch fixed. Rehearsal checks out the dispatch SHA and waits for the
-newest CI of that exact branch and SHA to be successful. It runs the deployment
-scenarios of a fresh installation against its own x86-64 package (the `scenarios`
-job), and assembly waits for them. It refuses a used version tag naming another
+newest CI of that exact branch and SHA to be a successful manual run, which
+includes deployment scenarios. It refuses a used version tag naming another
 commit and mixed rehearsal/cache/image modes. It uploads `release-inputs`, native
 inputs, one frontend, two server packages and the assembled `verified-release`;
 download the last with `gh run download <release-run-id> --repo "$REPO" -n verified-release`.
@@ -59,8 +58,8 @@ rehearsal. Required performance, browser, native and deployment acceptance evide
 must all name the same frozen candidate.
 
 The catalogue declares Linux x86-64/ARM64, macOS Intel/Apple Silicon and Windows
-x86-64/ARM64 connectors. Linux also supplies both node and server architectures.
-Windows on ARM gets its own native connector, built on the `windows-11-arm` runner.
+x86-64 connectors. Linux also supplies both node and server architectures. Windows
+on ARM uses the x86-64 connector through emulation; it is not a native ARM build.
 Each native job unit-tests, builds and runs its actual connector. Unknown catalogue
 targets need an explicit native runner binding before the gate accepts them.
 
@@ -75,8 +74,8 @@ must agree on shared files before assembly.
 
 Only after qualification, create a new immutable version tag at that exact SHA
 and push it through the reviewed publication process. This starts both full CI
-and release packaging; the deployment scenarios run against that packaging's own
-result. Packaging can finish while CI runs, but publication waits for the most recent CI run for the exact
+(including deployment scenarios) and release packaging. Packaging can finish
+while CI runs, but publication waits for the most recent CI run for the exact
 tag and commit. The publisher checks CI and the remote tag again before changing
 release assets. A green branch rehearsal cannot satisfy the tag's CI gate.
 Failed or cancelled CI stops publication. If CI does not finish within five

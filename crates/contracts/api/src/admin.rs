@@ -1,8 +1,7 @@
 //! Management views: users and their state with what a new person's own org starts as and which proofs are closed at their name, a reset link that may switch a second step off, root orgs and their two limits, both pools of runtimes, health, stored metric series and PKI.
 //!
-//! Management requests require current system administration. A browser session must have its
-//! explicit administrative mode enabled; an operation-scoped key must admit the actual native
-//! operation and every required subject. Shared program metadata and scoped version fetches use
+//! Management requests need a system admin in a browser session: a request made with an API token
+//! is refused with `auth.session_required`. Shared program metadata and scoped version fetches use
 //! their declared user, environment and settings authority. Inside an org a system admin uses the ordinary
 //! requests, as the Admin of every org that they are. A [`Runtime`] is a
 //! unit that a host runs, an [`AdminUser`] a person with what only a system
@@ -33,7 +32,7 @@ use crate::environment::{EnvironmentRef, NetworkState, TemplateRef};
 use crate::nodes::OrgType;
 use crate::nodes::{AuditEntry, NodeRef, Org};
 use crate::resources::{
-    CapabilityDef, Host, MachineOs, MachineRef, OrgAgentCreateBody, ProviderRef, UnitKind,
+    Agent, CapabilityDef, Host, MachineOs, MachineRef, OrgAgentCreateBody, ProviderRef, UnitKind,
 };
 use crate::routes::Access::{Permission, Public, Rule, Session, User};
 use crate::settings::{ResolvedSetting, SettingReach};
@@ -97,47 +96,6 @@ pub struct AdminUser {
     pub created_at: Time,
     /// When they were last seen.
     pub last_seen_at: Option<Time>,
-}
-
-/// An API token in the system inventory, without its secret or hash.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminToken {
-    /// The current credential metadata, including operation rules and retained ceilings.
-    pub info: crate::auth::ApiTokenInfo,
-    /// The actual owning account, including service identities.
-    pub owner: UserRef,
-    /// This metadata was opened through current system administration.
-    pub admin_access: bool,
-}
-
-/// Browser session metadata opened through current system administration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminSession {
-    /// The same ordinary session metadata, never authentication material.
-    #[serde(flatten)]
-    pub info: crate::auth::SessionInfo,
-    /// This metadata was opened through system administration.
-    pub admin_access: bool,
-}
-/// Recent token activity opened through current system administration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminTokenActivity {
-    /// The existing bounded native activity record.
-    #[serde(flatten)]
-    pub info: crate::auth::ApiTokenActivity,
-    /// This metadata was opened through system administration.
-    pub admin_access: bool,
-}
-
-/// A bounded system credential inventory, newest first.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminTokenListQuery {
-    /// Select one actual owner; absent includes every account.
-    pub owner_id: Option<Id>,
-    /// Opaque continuation of this owner-filtered list.
-    pub cursor: Option<String>,
-    /// Requested page size, bounded by the ordinary page limit.
-    pub limit: Option<u32>,
 }
 
 /// The accepted standing change without the account's current private metadata.
@@ -792,28 +750,6 @@ pub struct HarnessVersionFetchBody {
     pub node_id: Option<Id>,
 }
 
-/// Accepted exact-version work without disclosing the global build catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct HarnessFetchReceipt {
-    /// Restricted projection marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The requested native program kind.
-    pub kind: String,
-    /// The exact accepted version.
-    pub version: String,
-}
-
-crate::common::full_or_receipt! {
-    /// The native catalogue under this operation's own Read, or its accepted version receipt.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum HarnessFetchResponse {
-        /// The unchanged ordinary build projection.
-        Full(Vec<HarnessBuild>),
-        /// No global catalogue or check metadata.
-        Receipt(HarnessFetchReceipt),
-    }
-}
-
 /// How a plugin fares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -904,33 +840,10 @@ pub struct AdminUserCreateBody {
 pub struct AdminUserCreateReply {
     /// The person.
     pub user: AdminUser,
-    /// The one-time link; absent on replay after its first successful response.
-    pub reset_url: Option<String>,
+    /// The link to give them.
+    pub reset_url: String,
     /// When the link stops being redeemable, according to the server's clock.
     pub expires_at: Time,
-    /// A retry found this accepted creation; no one-time link is returned again.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
-}
-
-crate::common::full_or_receipt! {
-    /// Current ordinary account metadata and a first-only link, or the accepted identities.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum AdminUserCreateResponse {Full(AdminUserCreateReply),Receipt(AdminUserCreateReceipt),}
-}
-/// Accepted account and one-time-link identities without private account content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdminUserCreateReceipt {
-    /// Restricted acknowledgement marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual created account.
-    pub user_id: Id,
-    /// The actual native reset-link record.
-    pub reset_link_id: Id,
-    /// The first link's accepted expiry.
-    pub expires_at: Time,
-    /// The first result already showed its one-time link.
-    pub already_created: bool,
 }
 
 /// Changes a person. Making somebody a system admin, or any change to one, needs
@@ -962,13 +875,10 @@ pub struct AdminUserResetLinkCreateBody {
 /// A link to give a person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdminUserResetLinkCreateReply {
-    /// The one-time link, returned only on the successful first response.
-    pub url: Option<String>,
+    /// The link.
+    pub url: String,
     /// When it stops being good.
     pub expires_at: Time,
-    /// A retry found the first accepted link and returns no secret again.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 /// Sets a setting of the system.
@@ -992,27 +902,6 @@ pub struct AdminSettingDeleteQuery {
     /// The own revision to remove, when a guarded reset or Undo is requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_revision: Option<Revision>,
-}
-
-/// Accepted root-organization limits without its existing page content.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct OrgLimitsReceipt {
-    /// Restricted response marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The stored root organization changed or already matching the request.
-    pub id: Id,
-    /// Its accepted current revision.
-    pub revision: Revision,
-}
-crate::common::full_or_receipt! {
-    /// Ordinary organization content or a truthful limits acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum OrgLimitsResponse {
-        /// The existing native organization projection under this operation's Read.
-        Full(Org),
-        /// The accepted effect with no organization content.
-        Receipt(OrgLimitsReceipt),
-    }
 }
 
 /// Which runtimes to list.
@@ -1308,28 +1197,6 @@ pub struct SemanticSearchOverview {
     pub orgs: Vec<SemanticSearchOrg>,
 }
 
-/// Accepted administrative index work without disclosing its configuration or progress.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct SemanticSearchReceipt {
-    /// Restricted projection marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual root organization whose index was changed.
-    pub org_id: Id,
-    /// The accepted native request identity.
-    pub request_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// The ordinary index projection under the same operation's Read, or its accepted receipt.
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-    pub enum SemanticSearchResponse {
-        /// The existing native configuration and progress.
-        Full(SemanticSearchOrg),
-        /// The accepted act without configuration content.
-        Receipt(SemanticSearchReceipt),
-    }
-}
-
 /// The active generation an admin chose to keep, with its model, prompts and chunking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1338,70 +1205,13 @@ pub struct SemanticSearchKeepBody {
     pub generation_id: Id,
 }
 
-crate::common::full_or_receipt! {
-    /// The current identity-provider configuration or its accepted identity without content.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum IdentityProviderCreateResponse {
-        Full(IdentityProvider),
-        Receipt(IdentityProviderCreateReceipt),
-    }
-}
-/// Accepted provider identity without sign-in configuration or secret metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct IdentityProviderCreateReceipt {
-    /// Restricted acknowledgement marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The identity provider actually accepted.
-    pub identity_provider_id: Id,
-}
-
 crate::endpoints! {
-    /// Lists the system's unrevoked API tokens, including expired tokens, without secret values.
-    AdminTokenList: GET "/admin/tokens", Session, query AdminTokenListQuery, none, json Page<AdminToken>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Key)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("token_org_names")),
-            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("token_project_names")),
-            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("token_topic_names")),
-            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("token_thread_names")),
-        ]);
-    /// Revokes the selected API token through current system administration.
-    AdminTokenDelete: DELETE "/admin/tokens/{id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Lists one person's API tokens with their current scope and activity timestamps.
-    AdminUserTokenList: GET "/admin/users/{id}/tokens", Session, query AdminTokenListQuery, none, json Page<AdminToken>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Key)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("token_org_names")),
-            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("token_project_names")),
-            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("token_topic_names")),
-            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("token_thread_names")),
-        ]);
-    /// Revokes the selected API token of this exact person.
-    AdminUserTokenDelete: DELETE "/admin/users/{id}/tokens/{token_id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Reads this person's recent token calls, including retained history after revocation.
-    AdminUserTokenActivityList: GET "/admin/users/{id}/tokens/{token_id}/activity", Session, query crate::auth::ApiTokenActivityQuery, none, json Page<AdminTokenActivity>, 200,
-        operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("token"));
-    /// Lists the live browser sessions of this exact person.
-    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query PageQuery, none, json Page<AdminSession>, 200,
-        operation Op::single(Read, &[Identity(I::Session)], Target::ResolvedCollection("results"));
-    /// Ends one session of this exact person and its access tokens.
-    AdminUserSessionDelete: DELETE "/admin/users/{id}/sessions/{session_id}", Session, none, none, none, 204,
-        operation Op::returning(Manage, &[Identity(I::Session)], Target::Resolved("session"));
-    /// Ends all this person's unrevoked sessions, including the caller's if selected.
-    AdminUserSessionsDelete: DELETE "/admin/users/{id}/sessions", Session, none, none, none, 204,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Identity(I::Session)],Target::TypedPath{parameter:"id",kind:Identity(I::Account)}),
-            Facet::required(Manage,&[Identity(I::Session)],Target::ResolvedCollection("session_subjects")),
-            Facet::response_content(&[Identity(I::Session)],Target::TypedPath{parameter:"id",kind:Identity(I::Account)}),
-        ]));
     /// Lists the people of the system with what only a system admin reads about them.
     AdminUserList: GET "/admin/users", Session, query AdminUserListQuery, none, json Page<AdminUser>, 200,
         operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Makes a person, their optional personal org, and a link to set a password.
-    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::System));
+    AdminUserCreate: POST "/admin/users", Session, none, json AdminUserCreateBody, json AdminUserCreateReply, 200,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::System);
     /// Suspends a person or lets them sign in again, or changes whether they are a system admin.
     AdminUserUpdate: PATCH "/admin/users/{id}", Session, none, json AdminUserUpdateBody, json AdminUserUpdateResponse, 200,
         operation Op::receipt(&Op::returning(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }));
@@ -1437,23 +1247,20 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every host on the system; hosts themselves are managed through their own requests.
     AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("names")),
-        ]);
+        operation Op::single(Read, &[Object(K::Host)], Target::Resolved("results"));
     /// Lists the runtimes of both pools, whoever's they are.
     AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200,
-        operation Op::facets(&[
-            Facet::required(Manage, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
-            Facet::required(Manage, &[Object(K::Host),Object(K::Machine),Object(K::Template)], Target::ResolvedCollection("references")),
-            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("names")),
-        ]);
+        operation Op::single(
+            Manage,
+            &[Object(K::Environment), Object(K::Provider)],
+            Target::Resolved("runtime_resources"),
+        );
     /// Reads what the system stored about itself as series over a span.
     AdminMetricList: GET "/admin/metrics", Session, query AdminMetricListQuery, none, json Vec<MetricSeries>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Makes an agent profile of the system, whose profile has no home.
-    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json crate::resources::OrgAgentCreateResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::agent_sources::SYSTEM_CREATE_FACETS));
+    AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json Agent, 200,
+        operation Op::returning(Manage, &[Object(K::Agent)], Target::System);
     /// Lists the external implementations loaded anywhere, with how they fare.
     AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
@@ -1473,8 +1280,8 @@ crate::endpoints! {
     HarnessBuildList: GET "/harnesses/builds", User, none, none, json Vec<HarnessBuild>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Fetches one exact vendor version with its checksum and begins its background check.
-    HarnessVersionFetch: POST "/harnesses/{kind}/{version}/fetch", Rule("manage the named environment or node settings, or system administration"), none, json HarnessVersionFetchBody, json HarnessFetchResponse, 202,
-        operation Op::receipt(&Op::variants(&[
+    HarnessVersionFetch: POST "/harnesses/{kind}/{version}/fetch", Rule("manage the named environment or node settings, or system administration"), none, json HarnessVersionFetchBody, json Vec<HarnessBuild>, 202,
+        operation Op::variants(&[
             Variant {
                 name: "environment",
                 selector: "environment_id is present",
@@ -1482,7 +1289,7 @@ crate::endpoints! {
                     Manage,
                     &[Object(K::Environment)],
                     Target::Resolved("environment"),
-                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+                )],
             },
             Variant {
                 name: "node",
@@ -1491,7 +1298,7 @@ crate::endpoints! {
                     Manage,
                     &[Object(K::Org), Object(K::Project)],
                     Target::Resolved("node"),
-                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+                )],
             },
             Variant {
                 name: "system",
@@ -1500,15 +1307,16 @@ crate::endpoints! {
                     Manage,
                     &[Identity(I::System)],
                     Target::System,
-                ), Facet::response_content(&[Identity(I::System)], Target::System)],
+                )],
             },
-        ]));
+        ]);
     /// Lists the visible units holding each build and those behind their effective version choice.
     AdminHarnessUsageList: GET "/admin/harnesses/usage", Session, none, none, json Vec<HarnessBuildUsage>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)], Target::ResolvedCollection("names")),
-        ]);
+        operation Op::single(
+            Read,
+            &[Object(K::Environment), Object(K::Provider)],
+            Target::Resolved("unit_resources"),
+        );
     /// Lists the program builds held by this environment even when no update is pending.
     EnvironmentHarnessBuildList: GET "/environments/{id}/harnesses", Permission("environment.view"), none, none, json Vec<RunningHarnessBuild>, 200;
     /// Adds or replaces a build of a harness and lists them all.
@@ -1522,7 +1330,7 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Imports a carried-in vendor checksum list and audits its digest.
     AdminHarnessChecksumsImport: POST "/admin/harnesses/checksums", Session, none, json HarnessChecksumsImportBody, json HarnessChecksumsImportReply, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Checks every kept build of a harness at a version again, in the background, and lists the builds.
     AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, none, none, json Vec<HarnessBuild>, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
@@ -1534,23 +1342,16 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every org on the system; with `deleted=only`, those deleted and not purged yet.
     AdminOrgList: GET "/admin/orgs", Session, query AdminOrgListQuery, none, json Page<Org>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)], Target::ResolvedCollection("names")),
-        ]);
+        operation Op::single(Read, &[Object(K::Org)], Target::Resolved("results"));
     /// Sets the two limits of a root org, a personal one or any other: whether its tree takes further members, and whether it holds orgs inside it.
-    AdminOrgUpdate: PATCH "/admin/orgs/{id}", Session, none, json OrgLimitsChange, json OrgLimitsResponse, 200,
-        operation Op::receipt(&Op::facets(&[
-            Facet::required(Manage,&[Object(K::Org)],Target::Path("id")),
-            Facet::response_content(&[Object(K::Org)],Target::Path("id")),
-            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("names")),
-        ]));
+    AdminOrgUpdate: PATCH "/admin/orgs/{id}", Session, none, json OrgLimitsChange, json Org, 200,
+        operation Op::returning(Manage, &[Object(K::Org)], Target::Path("id"));
     /// Lists the identity providers.
     AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
-    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProviderCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
+    AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProvider, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Changes an identity provider.
     AdminIdentityProviderUpdate: PATCH "/admin/identity-providers/{id}", Session, none, json IdentityProviderUpdateBody, json IdentityProvider, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
@@ -1582,11 +1383,11 @@ crate::endpoints! {
     AdminSemanticSearchGet: GET "/admin/semantic-search", Session, none, none, json SemanticSearchOverview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Rebuilds a root org's index in place: its vectors are removed and made anew with the model named.
-    AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Org)], Target::Path("id")));
+    AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchOrg, 200,
+        operation Op::returning(Manage, &[Object(K::Org)], Target::Path("id"));
     /// Keeps the present generation's model, prompts and chunk size, respecting the org's settings and locks.
-    AdminSemanticSearchKeep: POST "/admin/semantic-search/{id}/keep", Session, none, json SemanticSearchKeepBody, json SemanticSearchResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Object(K::Org)], Target::Path("id")));
+    AdminSemanticSearchKeep: POST "/admin/semantic-search/{id}/keep", Session, none, json SemanticSearchKeepBody, json SemanticSearchOrg, 200,
+        operation Op::returning(Manage, &[Object(K::Org)], Target::Path("id"));
     /// Reads the OpenAPI 3.1 document, generated from the same types as this contract.
     OpenapiGet: GET "/openapi.json", User, none, none, raw, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);

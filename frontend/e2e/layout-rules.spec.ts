@@ -54,18 +54,7 @@ test('the layout manifest covers every route and every parameterized section wit
   }
 });
 
-// Navigation alone exposes dozens of menus; threads and Defaults editors add more. Independent, exhaustive parts keep
-// each real-input walk inside the ordinary timeout, including on the shared CI machine.
-const NAVIGATION_MENU_PARTS = 2;
-const THREAD_MENU_PARTS = 4;
-const DEFAULTS_MENU_PARTS = 8;
-function menuParts(row: LayoutRoute): number {
-  const url = new URL(row.url, 'http://layout.test');
-  if (url.pathname.endsWith('/defaults') || url.searchParams.get('section') === 'defaults') return DEFAULTS_MENU_PARTS;
-  return row.pattern === '/thread/$threadId' ? THREAD_MENU_PARTS : NAVIGATION_MENU_PARTS;
-}
-
-async function inspect(page: Page, row: LayoutRoute, locale: string, theme: string, info: TestInfo, menuPart = 0, parts = 1) {
+async function inspect(page: Page, row: LayoutRoute, locale: string, theme: string, info: TestInfo) {
   try {
   await test.step('Open the settled screen', async () => {
     await page.goto(row.url);
@@ -75,12 +64,10 @@ async function inspect(page: Page, row: LayoutRoute, locale: string, theme: stri
   const result = await test.step('Measure the page and reveal every cut value', () => auditPage(page));
   result.faults.push(...await test.step('Hover every icon', () => auditHoverIcons(page, result.icons)));
   // Read-only pickers expose descriptions, labels and boundaries that are absent while closed.
-  const menus = result.menus.filter((_, index) => index % parts === menuPart);
-  result.faults.push(...await test.step(`Open every menu in part ${menuPart + 1}/${parts} and check every option`, () => auditOpenMenus(page, menus)));
+  result.faults.push(...await test.step('Open every menu and check every option', () => auditOpenMenus(page, result.menus)));
   const faults = [...new Map(result.faults.map((fault) => [JSON.stringify(fault), fault])).values()];
   await info.attach('layout-rules', { body: JSON.stringify({ route: row.pattern, url: row.url, actualUrl: page.url(), note: row.note, locale, theme,
-    viewport: page.viewportSize(), faults, menuPart: menuPart + 1, menuParts: parts, menusChecked: menus, totalMenus: result.menus.length,
-    cutValues: result.cuts, duplicateAllowList: DUPLICATE_ALLOW_LIST, fullValueDisclosure: FULL_VALUE_DISCLOSURE, appliedAllowances: result.allowances }, null, 2), contentType: 'application/json' });
+    viewport: page.viewportSize(), faults, cutValues: result.cuts, duplicateAllowList: DUPLICATE_ALLOW_LIST, fullValueDisclosure: FULL_VALUE_DISCLOSURE, appliedAllowances: result.allowances }, null, 2), contentType: 'application/json' });
   expect(faults, `${row.url} ${locale} ${theme} ${page.viewportSize()?.width ?? 0}px`).toEqual([]);
   } finally {
     if (!page.isClosed()) await info.attach('layout-screen', { body: await page.screenshot({ fullPage: true, animations: 'disabled' }), contentType: 'image/png' });
@@ -107,11 +94,11 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       await page.reload();
       await screenReady(page, locale, theme);
     });
-    for (const row of SIGNED_IN_ROUTES) for (let part = 0; part < menuParts(row); part += 1) {
-      test(`${layoutRouteName(row)} menu part ${part + 1}/${menuParts(row)}`, async ({ page, browserName }, info) => {
+    for (const row of SIGNED_IN_ROUTES) {
+      test(layoutRouteName(row), async ({ page, browserName }, info) => {
         expect(browserName, 'Computed-name evidence uses Chromium accessibility nodes.').toBe('chromium');
         await prepareLayoutRoute(page, row);
-        await inspect(page, row, locale, theme, info, part, menuParts(row));
+        await inspect(page, row, locale, theme, info);
       });
     }
     test('the native command palette keeps every keyboard and pointer highlight readable', async ({ page, browserName }, info) => {

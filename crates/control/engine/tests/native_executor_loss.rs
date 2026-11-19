@@ -471,19 +471,14 @@ async fn prove(
             if observed.len()>requests+1 {
                 return Err("the controlled tool-result follow-up made another model request".to_owned());
             }
-            // Arrival publishes the body with round=0/status=None. The model server
-            // fills the selected round before setting its answer status.
-            if observed.len()==requests+1 && observed[requests].status.is_some() {
+            if observed.len()==requests+1 {
                 let response=&observed[requests];
                 let results=response.body["input"].as_array().into_iter().flatten()
                     .filter(|item|item["type"]=="function_call_output").collect::<Vec<_>>();
-                if response.round!=1 || response.status!=Some(200) || results.len()!=1
+                if response.round!=1 || results.len()!=1
                     || results[0]["call_id"].as_str()!=Some(command_ref.as_str())
                     || results[0]["output"].as_str().is_none_or(str::is_empty) {
-                    return Err(format!(
-                        "the extra inference was not the single actual tool-result round: round={} status={:?} outputs={}",
-                        response.round,response.status,results.len()
-                    ));
+                    return Err("the extra inference was not the single actual tool-result round".to_owned());
                 }
                 followup_result=true;
             }

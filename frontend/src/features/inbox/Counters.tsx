@@ -42,23 +42,20 @@ export function CountBadge({ count, tone, label, className }: { count: number; t
  * look at it: they are looking at it. A tab that is hidden is not looking.
  */
 export function useReadWhenOpened(thread: string | null): void {
-  const ready = useFrameReady();
   const rows = useUserStore((state) => state.rows);
+  const loaded = useUserStore((state) => state.loaded);
   useEffect(() => {
-    if (thread === null || !ready) return;
+    if (thread === null || !loaded) return;
     const mark = () => {
-      // A ready shell's zero summary is conclusive even before the Inbox inventory is opened.
-      const state = useUserStore.getState();
-      if (!state.loaded && state.counters.unread === 0) return;
       if (document.visibilityState === 'visible') void markNotificationsRead({ place: thread }, { ask: true });
     };
     mark();
     // Back in front: what came while the tab was hidden was not seen.
     document.addEventListener('visibilitychange', mark);
     return () => document.removeEventListener('visibilitychange', mark);
-  }, [thread, ready]);
+  }, [thread, loaded]);
   useEffect(() => {
     // A notification that arrives while the thread is open is read at once.
-    if (thread !== null && ready && document.visibilityState === 'visible') void markNotificationsRead({ place: thread });
-  }, [thread, ready, rows]);
+    if (thread !== null && loaded && document.visibilityState === 'visible') void markNotificationsRead({ place: thread });
+  }, [thread, loaded, rows]);
 }

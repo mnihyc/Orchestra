@@ -8,6 +8,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { EmptyState } from '@/ui/EmptyState';
 
 import { limitsQuery, parametersQuery } from '@/api/threads';
 import { EnvironmentStartRecovery } from './EnvironmentStartRecovery';
@@ -28,13 +29,12 @@ import { Button } from '@/ui/Button';
 import { providerQuery } from '@/api/resources';
 import { ProviderReset } from '@/features/resources/providers/Reset';
 import { ApiError } from '@/api/client';
-import { useFormatContext } from '@/lib/appearance';
-import { formatDateTime } from '@/lib/time';
 import { Link } from '@tanstack/react-router';
 
 /**
- * The plan's other permitted models after a family limit. Model options do not report vendor-family membership,
- * so their routing names cannot establish whether the reported family includes them.
+ * The plan's other models, where the limit of one family of models stopped the thread's last turn: only those the
+ * thread may use and that are not of that family, chosen by whoever manages the thread. The family is the one the
+ * adapter read from the vendor's fields, never from its words; without one, every other model is offered.
  */
 function OtherModels({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
@@ -62,35 +62,25 @@ function OtherModels({ thread }: { thread: Thread }) {
     onError: async (error) => { await runs.refuse(error); if (isSettingConflict(error)) setOpen(true); },
     onSuccess: runs.clearRefusal,
   });
-  if (!waits) return null;
-  const reads = runs.reads ?? [parameters];
-  const readError = parameters.error ?? runs.failed;
-  const failed = readError !== null && readError !== undefined;
-  const checking = parameters.isPending || parameters.isFetching || runs.pending || reads.some((read) => read.isFetching === true);
-  const available = checking || failed ? undefined : parameters.data;
-  const others = available?.model.options.filter(
-    (option) => option.allowed && option.model_name !== model,
-  ) ?? [];
-  const reason = checking ? t('thread.blocked.familyChecking') : failed ? t('thread.blocked.familyReadFailed')
-    : available === undefined ? t('thread.blocked.familyChecking') : others.length === 0 ? t('thread.blocked.familyNoOther') : undefined;
-  const currentModel = available?.model.value;
+  if (!waits || parameters.data === undefined) return null;
+  const others = parameters.data.model.options.filter(
+    (option) => option.allowed && option.model_name !== model && (family === '' || !option.model_name.toLowerCase().includes((family ?? '').toLowerCase())),
+  );
+  if (others.length === 0) return <EmptyState compact title={t('thread.blocked.familyNoOther')} />;
+  const currentModel = parameters.data.model.value;
   const selected = others.some((option) => option.model_name === currentModel) ? currentModel ?? '' : '';
   return (
     <div className="flex flex-col gap-1" data-family-limit>
       <Select<string>
         size="sm"
         label={t('thread.blocked.familyChoose')}
-        placeholder={reason ?? t('thread.blocked.familyChoose')}
         value={selected}
-        open={reason === undefined && open}
+        open={open}
         onOpenChange={setOpen}
         onValueChange={(value) => change.mutate(value)}
         options={others.map((option) => ({ value: option.model_name, label: option.display_name, description: option.model_name }))}
-        disabled={reason !== undefined || change.isPending || !runs.ready}
+        disabled={change.isPending || !runs.ready}
       />
-      {failed && <ErrorAlert error={readError} action={<Button size="sm" pending={checking} onClick={() => {
-        for (const read of reads) if (read.isError === true) void read.refetch?.();
-      }}>{t('common.tryAgain')}</Button>} />}
       <SettingConflict refusal={runs.refusal} />
       {change.error !== null && runs.refusal === null && <ErrorAlert error={change.error} />}
     </div>
@@ -99,10 +89,7 @@ function OtherModels({ thread }: { thread: Thread }) {
 
 export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed: () => void }) {
   const { t } = useTranslation();
-  const format = useFormatContext();
   const blocked = thread.state === 'blocked' && thread.blocked !== null && thread.lock === null ? thread.blocked : null;
-  const recordedDeadline = blocked?.offline_deadline ?? null;
-  const deadline = recordedDeadline?.turn_id === thread.current_turn_id ? recordedDeadline : null;
   const secondStep = blocked?.reason === 'binding_invalid' && blocked.detail === 'second_step_required';
   const limited = blocked?.reason === 'quota_exceeded';
   const limits = useQuery({ ...limitsQuery(thread.id), enabled: limited && holds(thread.access, 'thread.interact') });
@@ -144,13 +131,6 @@ export function BlockedBanner({ thread, onProceed }: { thread: Thread; onProceed
     >
       <span data-blocked={blocked.reason}>
         {waitingWords(thread, t)}
-        {deadline !== null && <span className="block text-sm" data-offline-deadline>
-          {deadline.at !== null
-            ? t('thread.blocked.offlineDeadline', { when: formatDateTime(deadline.at, format) })
-            : Number.isSafeInteger(deadline.after_seconds)
-              ? t('thread.blocked.offlineDeadlineDuration', { seconds: deadline.after_seconds, since: formatDateTime(deadline.since, format) })
-              : t('thread.blocked.offlineDeadlineBeyondCalendar', { since: formatDateTime(deadline.since, format) })}
-        </span>}
         {!secondStep && !versionMismatch && !manages && blocked.reason !== 'agent_offline' && blocked.reason !== 'quota_exceeded' && blocked.reason !== 'provider_exhausted' && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}
       </span>
     </Banner>

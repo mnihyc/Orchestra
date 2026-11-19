@@ -21,9 +21,8 @@
 //! it at their next turn, and the result counts them.
 //!
 //! **An agent's announcement** checks its current Interact right separately on every recipient. It
-//! chooses its own `delivery` only where `broadcast.agent_options` lists it. Wake is false unless explicitly
-//! chosen and permitted by `broadcast.wake_idle`. Announcements count against `broadcast.rate_per_hour`;
-//! individual thread messages have their own hourly limit. What it received as
+//! chooses its own `delivery` and `wake_idle` only where `broadcast.agent_options` lists them, and may send at most
+//! `broadcast.rate_per_hour` of them, with what it hands to single threads, in a rolling hour. What it received as
 //! an announcement it is told not to announce again. Topic, project and org audiences select candidates;
 //! they never supply authority to send to those candidates.
 //!
@@ -60,9 +59,6 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 
-mod provenance;
-pub use provenance::AnnouncementProvenance;
-
 /// How long an hour is, for the rate of what an agent sends into other threads.
 const RATE_PERIOD: Duration = Duration::hours(1);
 
@@ -84,14 +80,12 @@ pub struct Broadcast {
     pub delivery: AnnouncementDelivery,
     /// Used instead of `steer` when the receiving agent cannot be steered.
     pub fallback: AnnouncementFallback,
-    /// Whether a send may explicitly choose to start an idle thread.
+    /// Whether an idle thread is started.
     pub wake_idle: bool,
-    /// Which of `interrupt`, `steer`, `next_turn` an agent may choose itself.
+    /// Which of `interrupt`, `steer`, `next_turn`, `wake_idle` an agent may choose itself.
     pub agent_options: Vec<String>,
-    /// How many announcements an agent may send in a rolling hour.
+    /// How many an agent may send in a rolling hour.
     pub rate_per_hour: i64,
-    /// How many individual thread messages an agent may send in a rolling hour.
-    pub thread_messages_per_hour: i64,
     /// The texts Orch says to agents here.
     pub messages: BTreeMap<String, String>,
 }
@@ -105,7 +99,6 @@ impl Broadcast {
             definition_of(keys::BROADCAST_WAKE_IDLE)?,
             definition_of(keys::BROADCAST_AGENT_OPTIONS)?,
             definition_of(keys::BROADCAST_RATE_PER_HOUR)?,
-            definition_of(keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?,
             definition_of(keys::AGENT_MESSAGES)?,
         ];
         let snapshot =
@@ -123,31 +116,12 @@ impl Broadcast {
         Ok(Self {
             delivery,
             fallback,
-            wake_idle: setting(&snapshot, keys::BROADCAST_WAKE_IDLE)?.unwrap_or(true),
+            wake_idle: setting(&snapshot, keys::BROADCAST_WAKE_IDLE)?.unwrap_or(false),
             agent_options: setting(&snapshot, keys::BROADCAST_AGENT_OPTIONS)?.unwrap_or_default(),
             rate_per_hour: setting(&snapshot, keys::BROADCAST_RATE_PER_HOUR)?.unwrap_or_default(),
-            thread_messages_per_hour: setting(&snapshot, keys::BROADCAST_THREAD_MESSAGES_PER_HOUR)?
-                .unwrap_or_default(),
             messages: setting(&snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
         })
     }
-
-    /// Availability never chooses wake on behalf of a sender.
-    pub(super) fn wake_for(&self, chosen: Option<bool>) -> Result<bool, Refusal> {
-        if chosen == Some(true) && !self.wake_idle {
-            return Err(Refusal::invalid(
-                "The setting broadcast.wake_idle does not allow waking idle threads here. Omit wake_idle or set it to false.",
-            ));
-        }
-        Ok(self.wake_idle && chosen.unwrap_or(false))
-    }
-}
-
-/// Independent rolling-hour budgets, both owned by the sending thread.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SendRate {
-    Announcements,
-    ThreadMessages,
 }
 
 fn delivery_word(delivery: AnnouncementDelivery) -> &'static str {
@@ -361,6 +335,26 @@ impl Engine {
     /// who may not, `None` for one who may reach all of them.
     #[allow(
         clippy::too_many_arguments,
+        reason = "an announcement is made of who sends it, what, to where and by what right; none of it can be left out"
+    )]
+    pub(crate) async fn deliver_announcement(
+        &self,
+        unit: &mut Unit<'_>,
+        topic: Id,
+        id: Id,
+        group: Option<Id>,
+        sender: &Sender,
+        plan: &Plan,
+        may_reach: Option<&HashSet<Id>>,
+    ) -> Result<Sent, EngineError> {
+        self.deliver_announcement_with_references(
+            unit, topic, id, group, sender, plan, may_reach, &plan.body,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
         reason = "the stored source and resolved text share the same delivery checks"
     )]
     async fn deliver_announcement_with_references(
@@ -381,30 +375,6 @@ impl Engine {
         locked.sort_unstable();
         locked.dedup();
         rows::lock_threads(&mut *unit.conn, &locked).await?;
-        self.deliver_selected_announcement(
-            unit, topic, id, group, sender, plan, may_reach, authored, &found, &messages, None,
-        )
-        .await
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the selected native audience and its settings stay with the one delivery"
-    )]
-    async fn deliver_selected_announcement(
-        &self,
-        unit: &mut Unit<'_>,
-        topic: Id,
-        id: Id,
-        group: Option<Id>,
-        sender: &Sender,
-        plan: &Plan,
-        may_reach: Option<&HashSet<Id>>,
-        authored: &str,
-        found: &[rows::TopicThread],
-        messages: &BTreeMap<String, String>,
-        operation: Option<(&orch_authz::Caller, Id)>,
-    ) -> Result<Sent, EngineError> {
         unit.check_tool_source().await?;
         let targets = match plan.reach {
             Reach::All => "all",
@@ -413,19 +383,7 @@ impl Engine {
         };
         let files = json!([]);
         let now = unit.now();
-        let posting_provenance = operation
-            .map(|(caller, place)| {
-                serde_json::to_value(AnnouncementProvenance::posting(
-                    caller,
-                    place,
-                    topic,
-                    id,
-                    Time::new(now),
-                ))
-            })
-            .transpose()?;
-        unit.before_effect()?;
-        let made = rows::insert_referenced_announcement_with_provenance(
+        let made = rows::insert_referenced_announcement(
             &mut *unit.conn,
             &rows::NewAnnouncement {
                 id,
@@ -449,7 +407,6 @@ impl Engine {
                 at: now,
             },
             authored,
-            posting_provenance.as_ref(),
         )
         .await?;
         let Some(row) = made else {
@@ -546,7 +503,7 @@ impl Engine {
             };
             // Render before the provenance frame, which is deliberately opaque to Markdown.
             let words = announcement_text(
-                messages,
+                &messages,
                 anonymous.as_ref().unwrap_or(sender),
                 plan.category,
                 &recipient.title,
@@ -557,7 +514,7 @@ impl Engine {
                 None
             } else {
                 match self
-                    .deliver_into_with_posting(
+                    .deliver_into(
                         unit,
                         thread.node_id,
                         &recipient,
@@ -565,7 +522,6 @@ impl Engine {
                         plan,
                         &words,
                         may_reach.is_none_or(|reached| reached.contains(&thread.node_id)),
-                        operation,
                     )
                     .await?
                 {
@@ -607,25 +563,6 @@ impl Engine {
         plan: &Plan,
         text: &str,
         may_reach: bool,
-    ) -> Result<Option<&'static str>, EngineError> {
-        self.deliver_into_with_posting(unit, thread_id, row, sender, plan, text, may_reach, None)
-            .await
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the same native recipient retains its actual posting provenance"
-    )]
-    async fn deliver_into_with_posting(
-        &self,
-        unit: &mut Unit<'_>,
-        thread_id: Id,
-        row: &rows::AnnouncementRow,
-        sender: &Sender,
-        plan: &Plan,
-        text: &str,
-        may_reach: bool,
-        operation: Option<(&orch_authz::Caller, Id)>,
     ) -> Result<Option<&'static str>, EngineError> {
         let Some(thread) = threads::thread(&mut *unit.conn, thread_id).await? else {
             return Ok(None);
@@ -680,7 +617,6 @@ impl Engine {
                     text,
                     &crate::tools::thread_message::file_parts(&row.files),
                     arrival,
-                    operation.map(|(caller, place)| (caller, place, row)),
                 )
                 .await?;
                 Ok(Some(match doing {
@@ -701,26 +637,11 @@ impl Engine {
         thread: &ThreadRow,
         broadcast: &Broadcast,
         id: Id,
-        kind: SendRate,
     ) -> Result<Option<Refusal>, EngineError> {
-        let (limit, key, sends) = match kind {
-            SendRate::Announcements => (
-                broadcast.rate_per_hour,
-                keys::BROADCAST_RATE_PER_HOUR,
-                "announcements",
-            ),
-            SendRate::ThreadMessages => (
-                broadcast.thread_messages_per_hour,
-                keys::BROADCAST_THREAD_MESSAGES_PER_HOUR,
-                "thread messages",
-            ),
-        };
-        if limit <= 0 {
+        if broadcast.rate_per_hour <= 0 {
             return Ok(Some(Refusal::new(
                 Code::Limit,
-                format!(
-                    "Agents may not send {sends} here: the setting {key} is 0. A person who sets up the topic can change it."
-                ),
+                "Agents may not announce or send to other threads here: the setting broadcast.rate_per_hour is 0. A person who sets up the topic can change it.",
             )));
         }
         let now = self.inner.clock.now();
@@ -728,14 +649,8 @@ impl Engine {
         if rows::announcement(&mut conn, id).await?.is_some() {
             return Ok(None);
         }
-        let sent = rows::sent_since(
-            &mut conn,
-            thread.node_id,
-            now - RATE_PERIOD,
-            kind == SendRate::ThreadMessages,
-        )
-        .await?;
-        if i64::try_from(sent.len()).unwrap_or(i64::MAX) < limit {
+        let sent = rows::sent_since(&mut conn, thread.node_id, now - RATE_PERIOD).await?;
+        if i64::try_from(sent.len()).unwrap_or(i64::MAX) < broadcast.rate_per_hour {
             return Ok(None);
         }
         // The next one is allowed when the oldest of those that count has been sent an hour.
@@ -745,8 +660,8 @@ impl Engine {
         Ok(Some(Refusal::new(
             Code::RateLimited,
             format!(
-                "You have sent {sends} as often as the setting {key} allows ({} in an hour). The next is allowed in {} seconds.",
-                limit,
+                "You have announced and sent as often as this topic allows ({} in an hour). The next is allowed in {} seconds.",
+                broadcast.rate_per_hour,
                 wait.num_seconds().max(1)
             ),
         )))
@@ -962,9 +877,7 @@ impl Engine {
         let now = self.inner.clock.now();
         let id = announcement_id(thread.node_id, &call.call_ref);
         if audience != Audience::Followers
-            && let Some(refusal) = self
-                .within_hourly_rate(thread, &broadcast, id, SendRate::Announcements)
-                .await?
+            && let Some(refusal) = self.within_hourly_rate(thread, &broadcast, id).await?
         {
             return Ok(refusal.into());
         }
@@ -981,11 +894,11 @@ impl Engine {
         {
             return Ok(Refusal::invalid("The setting broadcast.agent_options does not allow that delivery here. Omit delivery to use the topic's setting.").into());
         }
+        if arguments.wake_idle.is_some() && !may("wake_idle") {
+            return Ok(Refusal::invalid("The setting broadcast.agent_options does not allow wake_idle here. Omit it to use the topic's setting.").into());
+        }
         let delivery = arguments.delivery.unwrap_or(broadcast.delivery);
-        let wake_idle = match broadcast.wake_for(arguments.wake_idle) {
-            Ok(wake) => wake,
-            Err(refusal) => return Ok(refusal.into()),
-        };
+        let wake_idle = arguments.wake_idle.unwrap_or(broadcast.wake_idle);
         let (resolution, body) = {
             let mut conn = self.inner.db.acquire().await?;
             let body = arguments.body.as_deref().unwrap_or_default();
@@ -1013,13 +926,8 @@ impl Engine {
         let (finished, sent, totals) = {
             let mut unit = Unit::new(&mut tx, now);
             let (sent, totals) = if matches!(audience, Audience::Project | Audience::Org) {
-                match self
-                    .announce_to_place_as_agent(&mut unit, thread, id, &plan, &arguments, audience)
+                self.announce_to_place_as_agent(&mut unit, thread, id, &plan, &arguments, audience)
                     .await?
-                {
-                    Ok(sent) => sent,
-                    Err(refusal) => return Ok(refusal.into()),
-                }
             } else {
                 let sender = Sender::Agent(Box::new(thread.clone()));
                 let sent = self
@@ -1087,7 +995,7 @@ impl Engine {
         plan: &Plan,
         arguments: &Arguments,
         audience: Audience,
-    ) -> Result<Result<(Sent, Delivered), Refusal>, EngineError> {
+    ) -> Result<(Sent, Delivered), EngineError> {
         let sender = Sender::Agent(Box::new(thread.clone()));
         let project = if audience == Audience::Org {
             let way = hierarchy::with_ancestors(&mut *unit.conn, &[thread.topic_id]).await?;
@@ -1141,10 +1049,7 @@ impl Engine {
                     .filter(|_| plan.delivery != broadcast.delivery)
                     .map_or(broadcast.delivery, |_| plan.delivery);
                 here.fallback = broadcast.fallback;
-                here.wake_idle = match broadcast.wake_for(arguments.wake_idle) {
-                    Ok(wake) => wake,
-                    Err(refusal) => return Ok(Err(refusal)),
-                };
+                here.wake_idle = broadcast.wake_idle;
             }
             let topic_id = if topic == thread.topic_id {
                 id
@@ -1190,7 +1095,7 @@ impl Engine {
                 .await?
             }
         };
-        Ok(Ok((own, totals)))
+        Ok((own, totals))
     }
 }
 
@@ -1216,9 +1121,6 @@ pub enum AnnounceError {
     /// The request is not one that can be made.
     #[error("{0}")]
     Invalid(String),
-    /// The sender chose to wake idle threads where waking is disabled.
-    #[error("the setting broadcast.wake_idle does not allow waking idle threads here")]
-    WakeUnavailable,
     /// Something the engine stands on failed.
     #[error(transparent)]
     Internal(#[from] EngineError),
@@ -1253,7 +1155,7 @@ pub struct PersonAnnouncement {
     pub delivery: Option<AnnouncementDelivery>,
     /// The topic's setting unless given.
     pub fallback: Option<AnnouncementFallback>,
-    /// False unless explicitly chosen, and only where the receiving place allows wake.
+    /// The topic's setting unless given.
     pub wake_idle: Option<bool>,
 }
 
@@ -1268,49 +1170,12 @@ pub struct PlaceSent {
     pub skipped: i64,
 }
 
-/// The native selected audience of one person's announcement. Plain-connection discovery
-/// is factual only; application requires the original guarded transaction's locked operands.
-pub struct PreparedPersonAnnouncement {
-    actor: Id,
-    transaction: Option<i64>,
-    place: Id,
-    sender: Sender,
-    topics: Vec<PersonTopic>,
-    skipped: i64,
-}
-struct PersonTopic {
-    topic: Id,
-    found: Vec<rows::TopicThread>,
-    messages: BTreeMap<String, String>,
-    plan: Plan,
-    reached: HashSet<Id>,
-    recipients: Vec<Id>,
-}
-impl PreparedPersonAnnouncement {
-    /// The actual submitted place, retained independently of the recipient source collection.
-    #[must_use]
-    pub fn place(&self) -> Id {
-        self.place
-    }
-    /// Topics receiving stored announcements and threads receiving a real native effect.
-    /// A genuinely empty audience stays empty; no root or invented recipient stands for it.
-    pub fn destinations(
-        &self,
-    ) -> impl Iterator<Item = (orch_access_contract::permissions::ObjectKind, Id)> + '_ {
-        use orch_access_contract::permissions::ObjectKind;
-        self.topics.iter().flat_map(|topic| {
-            std::iter::once((ObjectKind::Topic, topic.topic))
-                .chain(topic.recipients.iter().map(|id| (ObjectKind::Thread, *id)))
-        })
-    }
-}
-
 impl Engine {
     /// Of the topics a project-wide announcement could reach, those that follow the project: neither the
     /// topic nor a folder between it and the project was made private. What was made private there is passed
     /// over, and everything in it.
     async fn those_that_follow(
-        conn: &mut orch_db::Conn,
+        unit: &mut Unit<'_>,
         principal: &Principal,
         project: Id,
         topics: Vec<Id>,
@@ -1320,7 +1185,7 @@ impl Engine {
         }
         let wanted: HashSet<Id> = topics.iter().copied().collect();
         // For each topic, the nodes on the way down from the project to it, itself last.
-        let ways: Vec<(Id, Vec<Id>)> = hierarchy::with_ancestors(&mut *conn, &topics)
+        let ways: Vec<(Id, Vec<Id>)> = hierarchy::with_ancestors(&mut *unit.conn, &topics)
             .await?
             .into_iter()
             .filter(|row| wanted.contains(&row.id))
@@ -1342,7 +1207,7 @@ impl Engine {
         asked.sort_unstable();
         asked.dedup();
         let private = nodes::restricted_below(
-            &mut *conn,
+            &mut *unit.conn,
             principal,
             &asked,
             project,
@@ -1377,17 +1242,15 @@ impl Engine {
     /// The threads of a topic whose running turn the person may steer or interrupt: those on which they hold
     /// `thread.interact`.
     async fn threads_the_person_may_reach(
-        conn: &mut orch_db::Conn,
+        &self,
+        unit: &mut Unit<'_>,
         principal: &Principal,
-        selected: &[rows::TopicThread],
+        topic: Id,
     ) -> Result<HashSet<Id>, AnnounceError> {
         let mut reached = HashSet::new();
-        for thread in selected
-            .iter()
-            .filter(|thread| !thread.archived && thread.side_of.is_none())
-        {
+        for thread in rows::topic_threads(&mut *unit.conn, topic).await? {
             let allowed = nodes::check(
-                &mut *conn,
+                &mut *unit.conn,
                 principal,
                 thread.node_id,
                 Permission::ThreadInteract,
@@ -1405,268 +1268,91 @@ impl Engine {
         Ok(reached)
     }
 
-    fn plan_of(request: &PersonAnnouncement, broadcast: &Broadcast) -> Result<Plan, AnnounceError> {
-        Ok(Plan {
+    fn plan_of(request: &PersonAnnouncement, broadcast: &Broadcast) -> Plan {
+        Plan {
             category: request.category.unwrap_or(AnnouncementCategory::Notice),
             title: request.title.clone(),
             body: request.body.clone(),
             severity: request.severity.unwrap_or(AnnouncementSeverity::Info),
             delivery: request.delivery.unwrap_or(broadcast.delivery),
             fallback: request.fallback.unwrap_or(broadcast.fallback),
-            wake_idle: broadcast
-                .wake_for(request.wake_idle)
-                .map_err(|_| AnnounceError::WakeUnavailable)?,
+            wake_idle: request.wake_idle.unwrap_or(broadcast.wake_idle),
             reach: match request.targets {
                 Some(orch_api_contract::topics::AnnouncementSendAudience::Active) => Reach::Active,
                 _ => Reach::All,
             },
-        })
+        }
     }
 
-    /// Selects the ordinary native audience, takes its complete thread lock set in identifier
-    /// order, then reads its current settings and individual control rights. This prepares facts
-    /// and operands only; no announcement, notice, input, sequence or wake is produced.
-    pub async fn prepare_person_announcement_in(
-        &self,
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        place: Id,
-        request: &PersonAnnouncement,
-    ) -> Result<PreparedPersonAnnouncement, AnnounceError> {
-        let in_transaction = orch_db::queries::transaction_guard::in_transaction(conn);
-        Self::check_person_announcement(request)?;
-        Self::require_person_announcement(conn, principal, place).await?;
-        Broadcast::load(conn, place)
-            .await?
-            .wake_for(request.wake_idle)
-            .map_err(|_| AnnounceError::WakeUnavailable)?;
-        let reachable = rows::open_topics_of(conn, place).await?;
-        let topics = Self::those_that_follow(conn, principal, place, reachable).await?;
-        let all = rows::count_topics_of(conn, place).await?;
-        let skipped = all - i64::try_from(topics.len()).unwrap_or(all);
-        let mut selections = Vec::with_capacity(topics.len());
-        let mut locked = Vec::new();
-        for topic in topics {
-            let found = rows::topic_threads(conn, topic).await?;
-            locked.extend(found.iter().map(|row| row.node_id));
-            selections.push((
-                topic,
-                found
-                    .into_iter()
-                    .map(|row| row.node_id)
-                    .collect::<HashSet<_>>(),
-            ));
-        }
-        locked.sort_unstable();
-        locked.dedup();
-        if in_transaction {
-            rows::lock_threads(conn, &locked).await?;
-        }
-        let refreshed = Principal::load(
-            conn,
-            principal.caller().clone(),
-            Time::new(self.inner.clock.now()),
-        )
-        .await?;
-        let refreshed = match principal.second_step_hold() {
-            Some(hold) => refreshed.held_for_second_step(hold.clone()),
-            None => refreshed,
-        };
-        let principal = &refreshed;
-        Self::require_person_announcement(conn, principal, place).await?;
-        let mut prepared = Vec::with_capacity(selections.len());
-        for (topic, selected) in selections {
-            // The native selection does not acquire newly arrived recipients after its lock wait.
-            // Refresh the actual selected rows so archived, deleted or moved threads are not lent
-            // their old state or their old topic. Every remaining row is already locked here.
-            let found = rows::topic_threads(conn, topic)
-                .await?
-                .into_iter()
-                .filter(|row| selected.contains(&row.node_id))
-                .collect::<Vec<_>>();
-            let broadcast = Broadcast::load(conn, topic).await?;
-            let plan = Self::plan_of(request, &broadcast)?;
-            let reached = Self::threads_the_person_may_reach(conn, principal, &found).await?;
-            let mut recipients = Vec::new();
-            for thread in found
-                .iter()
-                .filter(|row| !row.archived && row.side_of.is_none())
-            {
-                if plan.reach != Reach::Active
-                    || threads::active_turn(conn, thread.node_id).await?.is_some()
-                {
-                    recipients.push(thread.node_id);
-                }
-            }
-            prepared.push(PersonTopic {
-                topic,
-                found,
-                messages: broadcast.messages,
-                plan,
-                reached,
-                recipients,
-            });
-        }
-        // The Registry also asks this factual factory at its plain-connection door.
-        // Only a fresh guarded transaction produces operands the native writer can consume.
-        let transaction = if in_transaction {
-            Some(
-                sqlx::query_scalar("SELECT txid_current()")
-                    .fetch_one(&mut *conn)
-                    .await
-                    .map_err(orch_db::DbError::from)?,
-            )
-        } else {
-            None
-        };
-        Ok(PreparedPersonAnnouncement {
-            actor: principal.user(),
-            transaction,
-            place,
-            sender: Sender::Person {
-                user: principal.user(),
-                name: display_name(conn, principal.user()).await?,
-            },
-            topics: prepared,
-            skipped,
-        })
-    }
-
-    async fn require_person_announcement(
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        place: Id,
-    ) -> Result<(), AnnounceError> {
-        let permission = match rows::node_kind(conn, place).await?.as_deref() {
-            Some("org") => Permission::OrgInteract,
-            Some("project") => Permission::ProjectInteract,
-            Some("topic") => Permission::TopicInteract,
-            _ => return Err(AnnounceError::NotFound),
-        };
-        if let orch_access_contract::decisions::Decision::Refused(refusal) = nodes::check(
-            conn,
-            principal,
-            place,
-            permission,
-            Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await?
-        {
-            return Err(AnnounceError::Denied(Box::new(refusal)));
-        }
-        Ok(())
-    }
-
-    /// The same native source-place gate for a current prepared HTTP source checkpoint.
-    pub async fn require_prepared_person_announcement(
-        &self,
-        conn: &mut orch_db::Conn,
-        principal: &Principal,
-        prepared: &PreparedPersonAnnouncement,
-    ) -> Result<(), AnnounceError> {
-        if principal.user() != prepared.actor {
-            return Err(EngineError::unreadable("an announcement has another native actor").into());
-        }
-        Self::require_person_announcement(conn, principal, prepared.place).await
-    }
-
-    /// Uses the current guarded transaction to announce under the ordinary native policy.
+    /// Uses the current guarded transaction to announce to any place under its Interact permission and each topic's settings.
     pub async fn announce_to_place_guarded(
         &self,
-        tx: orch_db::Tx,
-        principal: Principal,
-        place: Id,
-        request: &PersonAnnouncement,
-    ) -> Result<PlaceSent, AnnounceError> {
-        self.announce_to_place_guarded_before(tx, principal, place, request, || Ok(()))
-            .await
-    }
-
-    /// The ordinary native producer with its caller's once-only first-effect check. It runs
-    /// after the real audience/settings/control preparation and every recipient lock wait.
-    pub async fn announce_to_place_guarded_before<'a>(
-        &self,
         mut tx: orch_db::Tx,
         principal: Principal,
         place: Id,
         request: &PersonAnnouncement,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
     ) -> Result<PlaceSent, AnnounceError> {
-        let prepared = self
-            .prepare_person_announcement_in(&mut tx, &principal, place, request)
-            .await?;
-        self.announce_prepared_place_guarded(tx, principal, &prepared, before)
-            .await
-    }
-
-    /// Consumes the actual prepared native audience on its original transaction. This value
-    /// is operands, never an authority: the transport/shared source owner supplies the current
-    /// principal and the first-effect check. Posting provenance supplies no later model authority.
-    pub async fn announce_prepared_place_guarded<'a>(
-        &self,
-        mut tx: orch_db::Tx,
-        principal: Principal,
-        prepared: &PreparedPersonAnnouncement,
-        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
-    ) -> Result<PlaceSent, AnnounceError> {
-        let transaction: i64 = sqlx::query_scalar("SELECT txid_current()")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(orch_db::DbError::from)?;
-        if Some(transaction) != prepared.transaction || principal.user() != prepared.actor {
-            return Err(EngineError::unreadable(
-                "announcement operands belong to another transaction or actor",
+        Self::check_person_announcement(request)?;
+        let now = principal.now().get();
+        let (finished, group, made, skipped) = {
+            let mut unit = Unit::new(&mut tx, now);
+            let node = rows::node_kind(&mut *unit.conn, place).await?;
+            let permission = match node.as_deref() {
+                Some("org") => Permission::OrgInteract,
+                Some("project") => Permission::ProjectInteract,
+                Some("topic") => Permission::TopicInteract,
+                _ => return Err(AnnounceError::NotFound),
+            };
+            if let orch_access_contract::decisions::Decision::Refused(refusal) = nodes::check(
+                &mut *unit.conn,
+                &principal,
+                place,
+                permission,
+                Act::Use,
+                orch_authz::Policy::default(),
             )
-            .into());
-        }
-        let producer = if principal.caller().admitted_operation() == Some("NodeAnnouncementCreate")
-        {
-            Some((principal.caller(), prepared.place))
-        } else if principal
-            .caller()
-            .grant()
-            .is_some_and(|grant| grant.operation_scope().is_some())
-        {
-            return Err(EngineError::unreadable(
-                "a scoped announcement needs its exact prepared operation",
-            )
-            .into());
-        } else {
-            None
-        };
-        let group = orch_types::new_id();
-        let mut made = Vec::with_capacity(prepared.topics.len());
-        let finished = {
-            let mut unit = Unit::with_first_effect(&mut tx, principal.now().get(), before);
-            for topic in &prepared.topics {
+            .await?
+            {
+                return Err(AnnounceError::Denied(Box::new(refusal)));
+            }
+            let reachable = rows::open_topics_of(&mut *unit.conn, place).await?;
+            let topics = Self::those_that_follow(&mut unit, &principal, place, reachable).await?;
+            let all = rows::count_topics_of(&mut *unit.conn, place).await?;
+            let skipped = all - i64::try_from(topics.len()).unwrap_or(all);
+            let group = orch_types::new_id();
+            let name = display_name(&mut *unit.conn, principal.user()).await?;
+            let sender = Sender::Person {
+                user: principal.user(),
+                name,
+            };
+            let mut made = Vec::new();
+            for topic in topics {
+                let broadcast = Broadcast::load(&mut *unit.conn, topic).await?;
+                let plan = Self::plan_of(request, &broadcast);
+                let reached = self
+                    .threads_the_person_may_reach(&mut unit, &principal, topic)
+                    .await?;
                 let sent = self
-                    .deliver_selected_announcement(
+                    .deliver_announcement(
                         &mut unit,
-                        topic.topic,
+                        topic,
                         orch_types::new_id(),
                         Some(group),
-                        &prepared.sender,
-                        &topic.plan,
-                        Some(&topic.reached),
-                        &topic.plan.body,
-                        &topic.found,
-                        &topic.messages,
-                        producer,
+                        &sender,
+                        &plan,
+                        Some(&reached),
                     )
                     .await?;
-                audit_person(&mut unit, principal.user(), topic.topic, &sent.row).await?;
+                audit_person(&mut unit, principal.user(), topic, &sent.row).await?;
                 made.push(sent);
             }
-            orch_db::idempotency::creation::observe_with(unit.conn,Some(principal.user()),"place_announcement",group,
-                json!({"skipped":prepared.skipped,"announcements":made.iter().map(|sent|json!({"id":sent.row.id,"topic_id":sent.row.topic_id,"delivered":sent.delivered})).collect::<Vec<_>>()})).await?;
-            unit.finish().await?
+            (unit.finish().await?, group, made, skipped)
         };
         self.commit(tx, finished).await?;
         Ok(PlaceSent {
             group_id: group,
             sent: made,
-            skipped: prepared.skipped,
+            skipped,
         })
     }
 

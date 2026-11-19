@@ -20,7 +20,7 @@ import type { ViewProps } from '@/features/workbench/views';
 import { revealView } from '@/features/workbench/openView';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { cx } from '@/ui/cx';
-import { ReviewableDiff } from '@/features/source/Review';
+import { DiffView } from '@/ui/DiffView';
 import { EmptyState } from '@/ui/EmptyState';
 import { Button } from '@/ui/Button';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -132,9 +132,9 @@ function GitRow({ change, group, access, open, onToggle }: { change: GitChange; 
           ) : diff.error !== null ? (
             gitReadTooSlow(diff.error) ? <GitLimit /> : <ErrorState compact error={diff.error} onRetry={() => void diff.refetch()} />
           ) : diff.data === undefined ? (
-            <SkeletonRows read={diff} rows={3} />
+            <SkeletonRows rows={3} />
           ) : (
-            <><ReviewableDiff threadId={access.thread.id} path={change.path} itemId={null} diff={diff.data.text === '' ? null : diff.data.text} truncated={diff.data.truncated} label={t('files.difference.label', { name: change.path })} />{diff.data.truncated && <GitLimit cut />}</>
+            <><DiffView diff={diff.data.text === '' ? null : diff.data.text} truncated={diff.data.truncated} label={t('files.difference.label', { name: change.path })} />{diff.data.truncated && <GitLimit cut />}</>
           )}
         </div>
       )}
@@ -142,7 +142,7 @@ function GitRow({ change, group, access, open, onToggle }: { change: GitChange; 
   );
 }
 
-export function GitPanel({ access }: { access: WorkspaceAccess }) {
+function GitPanel({ access }: { access: WorkspaceAccess }) {
   const { t } = useTranslation();
   const shown = useViewShown();
   const client = useQueryClient();

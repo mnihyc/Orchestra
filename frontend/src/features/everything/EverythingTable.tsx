@@ -1,5 +1,4 @@
 /** A lazily read tree grid: safe paths, aligned optional columns, a sticky header and the tree's keyboard. */
-import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
@@ -99,7 +98,7 @@ export function shareableRow(row: EverythingRow): boolean {
 /** Flat rows with a State column keep identity and activity in separate first-line slots. */
 export function KindIcon({ row, activity = true }: { row: { id: string; kind: string; path: EverythingRow['path']; thread_display?: EverythingRow['thread_display'] }; activity?: boolean }) {
   const kind = row.kind;
-  if (kind === 'thread' && activity) return <ThreadStateIcon display={row.thread_display ?? null} />;
+  if (kind === 'thread' && activity) return <ThreadStateIcon display={row.thread_display} />;
   if (kind === 'org' || kind === 'project' || kind === 'topic' || kind === 'thread' || kind === 'document') {
     const parent = row.path.filter((step) => step.id !== row.id).at(-1);
     return <NodeIcon kind={kind === 'project' && parent?.kind === 'project' ? 'folder' : kind} />;
@@ -159,9 +158,9 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
   const rowRef = useRef<HTMLTableRowElement>(null);
   const actions: MenuEntry[] = [];
   if (row.href !== null) actions.push({ id: 'open', label: t('everything.open'), href: row.href, onSelect: () => undefined });
-  if (row.href !== null) actions.push({ id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: () => { void copyText(linkTo({ href: row.href ?? '' })); } });
+  if (row.href !== null) actions.push({ id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: () => { void copyText(new URL(row.href ?? '', location.origin).href); } });
   const shareKind = row.kind;
-  if (row.can_share && shareKind !== 'group' && shareKind !== 'machine') actions.push({ id: 'share', label: t('everything.share'), onSelect: () => openAccess({ kind: shareKind, id: row.id, name }) });
+  if (row.can_share && shareKind !== 'group' && shareKind !== 'machine' && shareKind !== 'chat') actions.push({ id: 'share', label: t('everything.share'), onSelect: () => openAccess({ kind: shareKind, id: row.id, name }) });
   if (row.settings_href !== null) actions.push({ id: 'settings', label: t('everything.settings'), href: row.settings_href, onSelect: () => undefined });
   if (row.href !== null && row.path.length > 0 && ['org', 'project', 'topic', 'thread', 'document', 'chat'].includes(row.kind)) actions.push({ id: 'show-in-tree', label: t('navigation.showInTree'), onSelect: () => showInTree(row) });
   const press = (event: KeyboardEvent<HTMLTableRowElement>) => {
@@ -253,7 +252,7 @@ function Level({ parent, parentKey, depth }: { parent: string | null; parentKey:
     if (shown && tree.all && hasNextPage && !isFetching && !isError) void fetchNextPage();
   }, [shown, tree.all, hasNextPage, isFetching, isError, fetchNextPage]);
   const span = tree.columns.length + 1 + (tree.selection === undefined ? 0 : 1);
-  if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows read={level} rows={3} /></td></tr>;
+  if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows rows={3} /></td></tr>;
   const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
   if (level.isError && (rows.length === 0 || retired)) return failure;
   if (rows.length === 0) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t(tree.filter.q !== '' ? 'everything.noMatches' : filtering ? 'everything.noResults' : 'everything.empty')}</td></tr>;

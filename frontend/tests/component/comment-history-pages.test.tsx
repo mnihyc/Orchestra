@@ -13,9 +13,7 @@ import { documentStateNow, documentWriter } from '@/realtime/stores/document';
 import { setLocale } from '@/i18n';
 import { commentDocument } from './comment-document-fixture';
 import { DORA } from '../doubles/chat-rows';
-import { show, skipOverflowFallback } from './support';
-
-skipOverflowFallback();
+import { show } from './support';
 
 // Shared identity, clock and reaction overlays have their own interaction suites.
 // Keep this regression focused on the real comment rows, paging and author actions.

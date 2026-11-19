@@ -50,7 +50,6 @@ pub mod exports;
 pub mod gauges;
 pub mod heartbeat;
 pub mod outbox;
-pub mod person_notices;
 pub mod provider_renewals;
 pub mod purge;
 pub mod quiet_hours;

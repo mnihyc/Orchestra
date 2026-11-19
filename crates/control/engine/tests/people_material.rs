@@ -74,7 +74,6 @@ async fn write_then_read_then_revoked_gifts_preserve_private_document_cuts_and_i
             &Caller::session(world.ada),
             &Origin::default(),
             &ShareWithAgents {
-                link_origin: None,
                 viewers_read: None,
                 read_first: None,
                 what: ShareWhat::Node(ShareWhatNode { node_id: own_topic }),
@@ -285,7 +284,6 @@ async fn read_first_follows_renames_and_revocation_without_creating_an_input_or_
         )
         .await;
     let request = ShareWithAgents {
-        link_origin: None,
         viewers_read: None,
         read_first: Some(true),
         what: ShareWhat::Document(ShareWhatDocument {

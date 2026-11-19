@@ -16,10 +16,7 @@ import { resourceRows } from '@/api/listed';
 import type { BindingOptions, Environment, NewNodeAccess, ResolvedSetting, ThreadAccess, Topic } from '@/generated/api-types';
 
 /** What a thread of a place could be bound to, as `GET /nodes/{id}/binding/options` answers. */
-export type StartOptions = BindingOptions & {
-  /** Emitted by the creation reader; the explicit shape also covers the pending contracts regeneration. */
-  viewer_default?: { value: boolean; source: ResolvedSetting['source'] } | null;
-};
+export type StartOptions = BindingOptions;
 
 /** The environments the person manages: the ones a thread can join. */
 export const managedEnvironmentsQuery = queryOptions({
@@ -41,11 +38,10 @@ export const startOptionsQuery = (nodeId: string, environmentId: string | null, 
     ...(context?.threadAccess === undefined || context.threadAccess === 'defaults' ? {} : { thread_access: JSON.stringify(context.threadAccess) }) };
   return queryOptions({
     queryKey: Object.keys(audience).length === 0 ? [...startOptionsKey, nodeId, environmentId ?? ''] as const : [...startOptionsKey, nodeId, environmentId ?? '', audience] as const,
-    // A bounded read belongs to the query cache across view remounts. Reader changes
-    // still fence its response through the shared API client and cache lifecycle.
-    queryFn: (): Promise<StartOptions> =>
+    queryFn: ({ signal }): Promise<StartOptions> =>
       ok(
         api.GET('/nodes/{id}/binding/options', {
+          signal,
           params: {
             path: { id: nodeId },
             query: environmentId === 'new'

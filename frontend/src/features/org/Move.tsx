@@ -139,7 +139,7 @@ const indent = (depth: number): string => `calc(var(--spacing-4) * ${Math.min(de
  * why. The arrow keys go from choice to choice; a place above them that holds no such thing is named for the shape of
  * the tree and is no choice.
  */
-export function PlaceChooser({ label, rows, value, onChange, hint }: { label: string; rows: readonly ChooserRow[]; value: string; onChange: (id: string) => void; hint: string | undefined }) {
+function PlaceChooser({ label, rows, value, onChange, hint }: { label: string; rows: readonly ChooserRow[]; value: string; onChange: (id: string) => void; hint: string | undefined }) {
   const { t } = useTranslation();
   const id = useId();
   return (
@@ -147,8 +147,7 @@ export function PlaceChooser({ label, rows, value, onChange, hint }: { label: st
       <span id={`${id}-label`} className="text-sm font-medium text-text">
         {label}
       </span>
-      {/* Destination choices retain their own viewport while the move plan grows beneath them. */}
-      <div role="radiogroup" aria-labelledby={`${id}-label`} data-scroll-allow="choices" className="flex max-h-72 min-w-0 flex-col overflow-y-auto rounded-lg border border-border py-1">
+      <div role="radiogroup" aria-labelledby={`${id}-label`} className="flex max-h-72 min-w-0 flex-col overflow-y-auto rounded-lg border border-border py-1">
         {rows.map((row) =>
           row.type === 'above' ? (
             <div key={row.id} className="flex min-h-8 min-w-0 items-center gap-2 pr-2 text-sm text-text-muted" style={{ paddingInlineStart: indent(row.depth) }}>
@@ -359,7 +358,7 @@ export function MoveDialog({ place, to, open, onClose }: MoveDialogProps) {
         )}
         {destination !== '' &&
           (plan.isPending ? (
-            <SkeletonGroup read={plan} className="flex flex-col gap-2">
+            <SkeletonGroup className="flex flex-col gap-2">
               <Skeleton className="h-4 w-3/4" />
               <Skeleton className="h-4 w-1/2" />
             </SkeletonGroup>

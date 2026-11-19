@@ -1,9 +1,7 @@
 ---
-group: getting-started
 title: Connect a machine
 screens: /resources/machines, /resources/machines/$id, /resources/hosts, /resources/hosts/$id, /resources/environments/$id, /thread/$threadId, /admin/$section
 keywords: connect, computer, install, connector, node, service, foreground, another instance, data directory, root, gateway, region, Automatic, latency, tunnel.gateway_unreachable, 连接机器, 安装, 连接器, 节点, 前台, 多实例
-summary: Connect a machine with the roles, folders and gateway you intend to use.
 ---
 
 # Connect a machine
@@ -23,10 +21,7 @@ The Add machine and Add host forms offer **Gateway**: **Automatic** or one of th
 advertised labels. The command passes that choice to the installer. Automatic
 measures from the machine being installed and chooses the lowest measured round
 trip, measuring again when its primary connection reconnects. The browser does
-not measure the machine's route. Automatic also rechecks while connected, and moves
-when a strictly better measured gateway is available. It waits for active channels
-on the primary and target attachment to finish; a selected primary never moves
-on its own.
+not measure the machine's route. A healthy primary does not move in the background.
 
 A selected gateway stays selected when it is unavailable or removed from the
 catalogue. Change that choice in the machine's local console or installer when
@@ -61,20 +56,10 @@ not imply one gateway for every thread. **Connecting** names a pending attachmen
 When no common gateway can connect the machines, the screen says that the work
 is kept and lists the attempted gateways with the safe refusal detail. Check the
 machines' access to those gateways, then use the ordinary recovery action. A
-fallback can resume a tool connection through another shared gateway while both
-machines retain its original socket and bytes, within the existing one-minute
-grace. It continues the same work; it does not run the tool again. Missing state,
-an expired ticket, a lost port permission or an unreachable common gateway ends
-that connection and uses the normal interrupted-work recovery. People's terminal,
-browser and display attachments still attach afresh. Neither saved primary
-choice changes; a selected primary may stay offline while a tunnel-only connection
-continues elsewhere. New gateway admission still needs the API.
-
-### Pairing measurements
-
-New machine-to-machine tunnels use the gateway with the lowest combined measured round trip from both machines. Both sets of samples must be within the live-link freshness bound, normally 60 seconds; missing or stale measurements use the executor’s primary gateway. The **Tunnel gateway** line shows the choice, its rule, the measured sum when known, each measurement time and the sample limit. A missing measurement stays missing.
-
-The inherited **Tunnel gateway** setting (`gateways.tunnel_strategy`) can pin new tunnels to **Executor’s gateway** for a place. It does not move a machine’s selected primary, change an existing tunnel’s frozen plan or send bytes through another gateway or the API. A common fallback still attaches both ends directly to one reachable gateway.
+fallback applies to the next connection after an attachment fails or resets; an
+open tunnel is not moved between gateways. Neither saved primary choice changes.
+An interrupted tool is not silently replayed, and a change of gateway does not
+change credentials or access.
 
 ## 2. Choose its account and lifetime
 

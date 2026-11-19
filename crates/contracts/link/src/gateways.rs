@@ -9,21 +9,8 @@ use serde::{Deserialize, Serialize};
 pub const TUNNEL_SUBPROTOCOL: &str = "orch-link.tunnel.v1";
 /// Negotiate this before sending auxiliary machine authentication.
 pub const TUNNEL_CAPABILITY: &str = "tunnel_side_attachment";
-/// A recovered relay requires both peers to preserve and check the original channel binding.
-pub const RETAINED_RESUME_CAPABILITY: &str = "retained_tunnel_resume";
 /// Close unused auxiliaries after a minute; references and live channels protect them.
 pub const TUNNEL_IDLE_SECS: u64 = 60;
-
-/// Placement is transport policy only; neither choice moves a connector's primary.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TunnelGatewayStrategy {
-    /// Preserve the executor or credential keeper's primary gateway.
-    Executor,
-    /// Prefer a lower measured sum when both sides have fresh, comparable samples.
-    #[default]
-    LowestCombinedRtt,
-}
 
 /// Control remains on the primary; an auxiliary carries only tunnel traffic.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -47,52 +34,25 @@ impl SessionPurpose {
 /// Frozen carrier placement; none of these fields grants tool authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TunnelPlan {
-    /// The actual policy/evidence that chose this frozen placement.
-    pub decision: orch_api_contract::gateways::TunnelGatewayDecision,
     /// Placement identity.
     pub plan_id: Id,
     /// The ticket's actual authenticated source.
     pub src: Id,
     /// Its actual executor/provider peer.
     pub dst: Id,
-    /// The chosen minimum measured sum, or the executor's primary without comparable samples.
+    /// The executor's primary by default.
     pub preferred_gateway: GatewayInstance,
-    /// Candidates for retained recovery or the next open, in this order.
+    /// Candidates for the next open, in this order.
     pub common_fallbacks: Vec<GatewayInstance>,
     /// The catalogue used to prepare these entrances.
     pub catalogue_revision: String,
 }
 
 impl TunnelPlan {
-    /// Live channels need identities and order only; each machine uses its own verified catalogue for URLs.
-    #[must_use]
-    pub fn retained(&self) -> Self {
-        let mut plan = self.clone();
-        plan.preferred_gateway.endpoints.clear();
-        for gateway in &mut plan.common_fallbacks {
-            gateway.endpoints.clear();
-        }
-        plan
-    }
-
     /// Each attempt traverses one gateway, never a chain.
     pub fn gateways(&self) -> impl Iterator<Item = &GatewayInstance> {
         std::iter::once(&self.preferred_gateway).chain(self.common_fallbacks.iter())
     }
-}
-
-/// Metadata held only with a live channel, allowing its original socket to resume elsewhere.
-/// The ticket remains bound to its original source; possessing this at the destination admits no new work.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TunnelRetention {
-    /// The unchanged signed capability, for exact retained-channel comparison.
-    pub ticket: String,
-    /// Original observed outside peer for a host publication, never a newly inferred identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_peer: Option<crate::ports::HostPortPeer>,
-    /// Original frozen placement and fallback order; entrances still come from the current catalogue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<TunnelPlan>,
 }
 
 /// The original signed ticket with adjacent non-authoritative routing metadata.

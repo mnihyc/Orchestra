@@ -21,11 +21,11 @@ export function ShareToAgent({ thread, onClose }: { thread: Thread; onClose: () 
   const page = useQuery({ ...pageQuery(source ?? { kind: 'thread', id: '' }), enabled: source !== null, retry: false });
   if (source !== null && page.data !== undefined && canGiveToAgents(page.data)) return <ShareWithAgentsDialog target={source} page={page.data} initialRecipient={{ id: thread.id, name: thread.name }} open onClose={onClose} />;
   return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }} title={t('threadViews.knowledge.share')} footer={<Button onClick={onClose}>{t('common.cancel')}</Button>}>
-    <NamePicker pickerKey="inspector.ShareToAgent.threadViews.knowledge.choose" label={t('threadViews.knowledge.choose')} kinds={SHARE_KINDS} chosen={source?.name ?? null} anything={t('threadViews.knowledge.chooseAny')} placeholder={t('threadViews.knowledge.choosePlaceholder')} nothing={t('threadViews.knowledge.chooseNothing')} onChoose={(hit) => {
+    <NamePicker label={t('threadViews.knowledge.choose')} kinds={SHARE_KINDS} chosen={source?.name ?? null} anything={t('threadViews.knowledge.chooseAny')} placeholder={t('threadViews.knowledge.choosePlaceholder')} nothing={t('threadViews.knowledge.chooseNothing')} onChoose={(hit) => {
       if (hit === null) { setSource(null); return; }
       if (hit.id !== thread.id && (hit.kind === 'org' || hit.kind === 'project' || hit.kind === 'topic' || hit.kind === 'thread' || hit.kind === 'document' || hit.kind === 'chat')) setSource({ kind: hit.kind, id: hit.id, name: hit.name });
     }} />
-    {source !== null && page.isPending && <SkeletonRows read={page} rows={3} />}
+    {source !== null && page.isPending && <SkeletonRows rows={3} />}
     {page.error !== null && <ErrorState compact error={page.error} onRetry={() => void page.refetch()} />}
     {source !== null && page.data !== undefined && !canGiveToAgents(page.data) && <InlineAlert tone="info">{t('threadViews.knowledge.cannotShare')}</InlineAlert>}
   </Dialog>;

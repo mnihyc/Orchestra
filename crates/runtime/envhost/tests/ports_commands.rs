@@ -1,5 +1,4 @@
 //! Attached environments answer fresh port reads as live observations rather than command-journal measurements.
-#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

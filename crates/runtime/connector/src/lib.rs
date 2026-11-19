@@ -40,7 +40,6 @@ pub mod connector;
 pub mod console;
 pub mod content;
 pub mod credentials;
-mod data_inventory;
 pub mod dispatch;
 pub mod display_tunnel;
 pub mod doctor;

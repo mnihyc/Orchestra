@@ -3,8 +3,28 @@
 use crate::operation_sources::{Binding, Cardinality, Declaration};
 use crate::operations::{FacetUsage, TargetResolver};
 
-/// Shared typed source identities for native account-owned observations.
-pub use crate::account_sources::Source;
+/// Sources selected by the existing personal state producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The authenticated account whose private state is read.
+    Account,
+    /// Actual thread identities carrying the selected read positions.
+    ReadThreads,
+    /// Actual node identities carrying the selected subscriptions.
+    Subscriptions,
+    /// Native selected favorite node identities.
+    Favorites,
+    /// Protected org names emitted by the native favorite path projection.
+    FavoriteOrgNames,
+    /// Protected project names emitted by that projection.
+    FavoriteProjectNames,
+    /// Protected topic names emitted by that projection.
+    FavoriteTopicNames,
+    /// Protected thread names emitted by that projection.
+    FavoriteThreadNames,
+    /// Actual native readable chats carrying the account's personal chat state.
+    Chats,
+}
 
 const ACCOUNT: Binding<Source> = Binding {
     source: Source::Account,

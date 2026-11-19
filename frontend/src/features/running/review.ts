@@ -1,6 +1,6 @@
 /** A reviewed native set stays fixed through paging and confirmation; a new command belongs to a new review. */
 import { fetchBackground } from '@/api/background';
-import type { BackgroundCommand, BackgroundEndReason, BackgroundEndRequest, BackgroundEndResult, BackgroundWork, ThreadBackground } from '@/generated/api-types';
+import type { BackgroundCommand, BackgroundEndRequest, BackgroundEndResult, BackgroundWork, ThreadBackground } from '@/generated/api-types';
 
 export type BackgroundEndTarget = { task: Pick<BackgroundWork, 'id' | 'item_id' | 'turn_id'> } | { command: Pick<BackgroundCommand, 'id' | 'segment_id' | 'item_id' | 'turn_id'> };
 
@@ -27,7 +27,6 @@ export async function loadReview(thread: string, signal: AbortSignal): Promise<T
     }
     captured.expires_at = page.expires_at;
     captured.can_end = page.can_end;
-    captured.end_reason = page.end_reason ?? null;
     cursor = page.next_cursor;
   }
   captured.next_cursor = null;
@@ -46,37 +45,24 @@ export function reviewedTargetRequest(roster: ThreadBackground, target: Backgrou
 
 /** A partial, unavailable or untransferred set cannot authorize End all. */
 export function canEndAll(roster: ThreadBackground): boolean {
-  return endReasonInReview(roster) === null && roster.total !== null && roster.total > 0 && roster.next_cursor === null && roster.items.length === roster.total
-    && roster.items.every((command) => endReasonInReview(roster, command) === null);
+  return roster.can_end && roster.state === 'live' && roster.list_ref !== null && roster.total !== null && roster.total > 0 && roster.next_cursor === null && roster.items.length === roster.total
+    && roster.items.every((command) => endableInReview(roster, command.id));
 }
 
 function endableInReview(roster: ThreadBackground, id: string): boolean {
-  const command = roster.items.find((command) => command.id === id);
-  return command !== undefined && endReasonInReview(roster, command) === null;
-}
-
-/** Native action facts stay distinct from inspection availability and from an uncaptured target. */
-export function endReasonInReview(roster: ThreadBackground, command?: BackgroundCommand): BackgroundEndReason | null {
-  if (roster.end_reason !== undefined && roster.end_reason !== null) return roster.end_reason;
-  if (!roster.supported) return 'unsupported';
-  if (roster.state === 'offline') return 'offline';
-  if (!roster.can_end || roster.state !== 'live') return 'unavailable';
-  if (roster.list_ref === null || roster.total === 0) return 'no_current_target';
-  if (command === undefined) return null;
-  if (command.end_reason !== undefined && command.end_reason !== null) return command.end_reason;
-  const task = roster.wake?.tasks.find((task) => task.end_id === command.id);
-  return task === undefined || task.can_end && task.state === 'running' ? null : 'no_current_target';
+  const task = roster.wake?.tasks.find((task) => task.end_id === id);
+  return task === undefined || task.can_end && task.state === 'running';
 }
 
 /** Captures the request at confirmation, keeping later native work out of the accepted set. */
 export function reviewedRequest(roster: ThreadBackground, ids: readonly string[] | 'all'): BackgroundEndRequest | null {
-  if (endReasonInReview(roster) !== null || roster.list_ref === null) return null;
+  if (!roster.can_end || roster.list_ref === null || roster.state !== 'live') return null;
   if (ids === 'all') {
     const count = roster.total;
     return count !== null && canEndAll(roster) ? { list_ref: roster.list_ref, all: true, count } : null;
   }
   const selected = new Set(ids);
-  if (selected.size === 0 || selected.size > 200 || selected.size !== ids.length || !ids.every((id) => endableInReview(roster, id))) return null;
+  if (selected.size === 0 || selected.size > 200 || selected.size !== ids.length || !ids.every((id) => roster.items.some((item) => item.id === id) && endableInReview(roster, id))) return null;
   return { list_ref: roster.list_ref, command_ids: [...ids] };
 }
 

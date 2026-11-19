@@ -41,22 +41,6 @@ pub enum BackgroundPlace {
     Provider,
 }
 
-/// A safe action-specific cause, separate from availability of the native inspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum BackgroundEndReason {
-    /// This reader has no current thread Interact.
-    InteractRequired,
-    /// The native source does not support exact End.
-    Unsupported,
-    /// The native session is disconnected.
-    Offline,
-    /// Current End facts could not be obtained.
-    Unavailable,
-    /// No current native target can be reviewed for this work.
-    NoCurrentTarget,
-}
-
 /// One current command with its durable source links and optional native facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BackgroundCommand {
@@ -84,9 +68,6 @@ pub struct BackgroundCommand {
     pub cpu_percent: Option<f64>,
     /// Its native memory use, if reported.
     pub memory_bytes: Option<i64>,
-    /// Why this command cannot currently be ended, without disclosing private sources.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_reason: Option<BackgroundEndReason>,
 }
 
 /// A live roster lives only in memory and is never a durable sync row or job result.
@@ -113,11 +94,8 @@ pub struct ThreadBackground {
     pub list_ref: Option<String>,
     /// Thirty seconds after this review's most recent active transfer.
     pub expires_at: Option<Time>,
-    /// Current thread Interact, native support and an exact current target permit End.
+    /// Current thread Interact and native support permit End.
     pub can_end: bool,
-    /// Why End is unavailable for this reader and current native set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_reason: Option<BackgroundEndReason>,
 }
 
 /// The session's effective completion behavior beside its named owned work.
@@ -133,6 +111,10 @@ pub struct BackgroundWakeStatus {
     pub tasks: Vec<BackgroundWork>,
     /// Finished tasks whose wake is held by Stop until a human sends input.
     pub held_completions: i64,
+    /// The earlier execution author a foreground input is waiting for.
+    pub waiting_author: Option<crate::users::UserRef>,
+    /// That author's running task count.
+    pub waiting_running: i64,
 }
 
 /// A named recorded task, never an arbitrary process or unredacted native roster.

@@ -1,9 +1,7 @@
 ---
-group: settings
 title: Settings and consumption
 screens: /thread/$threadId, /usage, /settings, /settings/profile, /settings/your-page, /settings/security, /settings/tokens, /settings/exports, /settings/interface, /settings/notifications, /settings/usage, /resources/providers/$id, /resources/environments/$id, /project/$projectId/settings, /org/$slug, /org/$slug/settings/$section, /admin, /admin/$section
 keywords: inherited settings, locks, defaults, speed, effort, context, usage, credits, limits, tokens, notifications, variables, sub-agents, nesting, agents.subagents_at_once, agents.subagent_depth
-summary: Read inherited settings and locks, manage personal choices, and inspect usage and limits.
 ---
 
 # Settings and consumption
@@ -19,14 +17,6 @@ and where that result comes from. Values resolve down the place's hierarchy,
 through organizations and folders to the topic and thing concerned. A resource
 also has its own home and local settings. Reset removes your local override,
 so it follows the inherited value again.
-
-Access policies, limits and required protections can only become stricter below
-a scope that sets them, with or without a lock. The smallest limit, highest
-minimum, strongest choice and intersection of allowed choices take effect.
-A local choice that would loosen an ancestor is still saved: the row shows the
-effective value and source, with **The setting above is stricter**. It can apply
-when that ancestor relaxes. Shipped defaults are starting choices, not hidden caps.
-Parameters and behavioral preferences keep their declared replacement rule.
 
 Open the question mark beside a key for its purpose, example, allowed values
 and effects. A descriptor supplies help for an extension's options. A disabled
@@ -158,9 +148,6 @@ another upstream may provide no balance. The page keeps that unknown. Rate
 cards and a catalogue estimate credits where direct cost is absent, and the
 source of a figure stays visible. A failed catalogue refresh keeps the last
 valid catalogue rather than estimating every model at zero.
-
-
-A model request's details keep the vendor-reported total in its original unit beside the credits Orch counted. A provider manager's explicit price or the rate card stays in force. Where Orch would use a catalogue estimate, a reported total in the same unit replaces that estimate using the place's catalogue scale; search fees already included in that total are not added again. An unknown unit keeps the original pricing and the reported amount available for comparison.
 
 ### Plan windows and forecasts
 
@@ -311,11 +298,3 @@ Management holds system settings and the permitted system inventories.
 Administrator access must be enabled through the existing As admin control
 where required. A section's permission checks still apply. A resource's home,
 its owners, a place's settings and system administration are separate authority.
-
-
-Provider Use entries have independent Models and Services lists. Each accepts exact names, family patterns and the provider's @groups. Leaving Services out includes every enabled service, even when Models is limited. A service must also pass every services.allowed policy above its thread. Combining Use entries stays permissive; place policies stay restrictive. A listed service still needs to be enabled by its provider manager before it can run.
-
-
-## System usage
-
-System administrators can choose **System** in the Usage scope picker. If administrator reach is off, the screen keeps that choice and offers the existing switch to enable it; it does not replace the report with personal usage. Usage, Performance and Requests retain the same span and filters at system scope, including the live request feed and exports. Leaving administrator mode removes the privileged view. The URL keeps `scope=system`, so a reload opens the same requested scope under the current session checks.

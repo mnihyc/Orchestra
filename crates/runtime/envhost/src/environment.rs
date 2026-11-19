@@ -303,13 +303,6 @@ pub enum Report {
         /// Why.
         reason: String,
     },
-    /// A tool server cannot run until a missing startup requirement is restored.
-    McpUnavailable {
-        /// The name the server is offered under.
-        name: String,
-        /// The missing requirement.
-        reason: String,
-    },
     /// A tool server that crashed runs again.
     McpRestarted {
         /// The name the server is offered under.
@@ -330,7 +323,6 @@ impl Report {
                 | Self::PtyExited(_)
                 | Self::Facts(_)
                 | Self::McpFailed { .. }
-                | Self::McpUnavailable { .. }
                 | Self::McpRestarted { .. }
         )
     }
@@ -876,7 +868,6 @@ impl Environment {
                     ServerState::Running { .. } => ("running", None),
                     ServerState::Stopped => ("stopped", None),
                     ServerState::Failed { reason } => ("failed", Some(reason)),
-                    ServerState::Unavailable { reason } => ("unavailable", Some(reason)),
                 };
                 orch_link_contract::events::EnvironmentFactsMcpServer {
                     server_id: server.server_id,
@@ -889,7 +880,6 @@ impl Environment {
             .collect();
         facts.index = self.index.state().mode();
         facts.index_reason = self.index.state().reason();
-        facts.index_entry_limit = self.index.state().entry_limit();
         facts.mounts = self.mounts.facts();
         facts.clone()
     }
@@ -3076,28 +3066,6 @@ impl EnvHost {
         })
     }
 
-    /// Holds tracked writers under this exact native job identity.
-    pub async fn proc_suspend_owned(
-        &self,
-        body: &orch_link_contract::commands::ProcSuspendOwned,
-    ) -> Result<ProcHeldResult> {
-        let environment = self.environment(body.environment_id)?;
-        let owner = body.owner_id;
-        let processes = blocking(move || environment.processes.suspend_owned(owner)).await?;
-        Ok(ProcHeldResult { processes })
-    }
-
-    /// Releases only this native job's existing held process identities.
-    pub async fn proc_resume_owned(
-        &self,
-        body: &orch_link_contract::commands::ProcResumeOwned,
-    ) -> Result<ProcHeldResult> {
-        let environment = self.environment(body.environment_id)?;
-        let owner = body.owner_id;
-        let processes = blocking(move || environment.processes.resume_owned(owner)).await?;
-        Ok(ProcHeldResult { processes })
-    }
-
     /// `watch.set`: says which measurements are wanted and how often. Measurements that are not
     /// asked for are not taken.
     pub async fn watch_set(&self, body: &WatchSet) -> Result<()> {
@@ -3381,14 +3349,8 @@ impl EnvHost {
     ) -> Result<McpStartResult> {
         let (environment_id, name, origin, definition) = match body {
             McpStart::Given(given) => {
-                if given.preset && given.server_id.is_none() {
-                    return Err(HostError::Unsupported(
-                        "a preset names its registered server".to_owned(),
-                    ));
-                }
                 let spec: McpServerSpec = given.spec.clone();
                 let definition = McpDefinition {
-                    http_credentials: None,
                     spec,
                     secrets: secrets
                         .iter()
@@ -3400,14 +3362,12 @@ impl EnvHost {
                         })
                         .collect(),
                 };
+                // A definition that arrives with the command is written from Orch, whichever page it came
+                // from, and runs as the user the connector runs as: it takes the machine's permission.
                 (
                     given.environment_id,
                     given.name.clone(),
-                    if given.preset {
-                        Origin::Preset
-                    } else {
-                        Origin::Own
-                    },
+                    Origin::Own,
                     definition,
                 )
             }
@@ -3429,7 +3389,7 @@ impl EnvHost {
             home: Some(PathBuf::from(&facts.home))
                 .filter(|home| !facts.home.is_empty() && home.is_dir()),
         };
-        let outcome = environment
+        environment
             .mcp_host
             .start_identified(
                 &name,
@@ -3441,9 +3401,8 @@ impl EnvHost {
                     McpStart::Local(local) => Some(local.server_id),
                 },
             )
-            .await;
+            .await?;
         environment.announce_facts().await;
-        outcome?;
         Ok(McpStartResult {
             service: crate::mcp::service_of(&name),
         })
@@ -3465,12 +3424,12 @@ impl EnvHost {
         environment.mcp_host.endpoint(name).await
     }
 
-    /// Why the tool server `name` cannot be reached after failure or a missing requirement.
+    /// Why the tool server `name` of an environment cannot be reached, when it was given up on.
     #[must_use]
     pub fn mcp_failure(&self, environment_id: Id, name: &str) -> Option<String> {
         let environment = self.environment(environment_id).ok()?;
         match environment.mcp.get(name)?.state {
-            ServerState::Failed { reason } | ServerState::Unavailable { reason } => Some(reason),
+            ServerState::Failed { reason } => Some(reason),
             _ => None,
         }
     }
@@ -3497,103 +3456,9 @@ impl EnvHost {
         definition: &McpDefinition,
         tools: Option<i64>,
     ) -> Result<McpImportResult> {
-        if body.stored.is_some() || body.transfer.is_some() {
-            return Err(HostError::Unsupported(
-                "a stored copy cannot borrow an offering import".into(),
-            ));
-        }
-        let environment = body.environment_id.ok_or_else(|| {
-            HostError::Unsupported("an offering import needs its actual environment".into())
-        })?;
-        self.environment(environment)?
+        self.environment(body.environment_id)?
             .mcp
             .import(body, definition, tools)
-    }
-    /// Copy an exact managed native snapshot, subject to the current machine import policy.
-    pub fn mcp_stored_copy(&self, body: &McpImport) -> Result<McpImportResult> {
-        if body.environment_id.is_some()
-            || body.expected_fingerprint.is_some()
-            || body.transfer.is_some()
-        {
-            return Err(HostError::Unsupported(
-                "a stored copy cannot borrow an environment offering".into(),
-            ));
-        }
-        let source = body.stored.as_ref().ok_or_else(|| {
-            HostError::Unsupported("a stored copy needs its actual server source".into())
-        })?;
-        let settings = self
-            .inner
-            .settings
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !settings.mcp.import {
-            return Err(HostError::McpImportDisabled);
-        }
-        crate::mcp::copy_stored(&settings.data_dir, body.server_id, source)
-    }
-    /// Read the same native snapshot for a recipient-sealed transfer; nothing is filed here.
-    pub fn mcp_transfer_read(&self, body: &McpImport) -> Result<(McpDefinition, McpImportResult)> {
-        if body.environment_id.is_some()
-            || body.expected_fingerprint.is_some()
-            || !matches!(
-                body.transfer,
-                Some(orch_link_contract::commands::McpSnapshotTransfer::Issue { .. })
-            )
-        {
-            return Err(HostError::Unsupported(
-                "a snapshot issue is not an environment offering".into(),
-            ));
-        }
-        let source = body
-            .stored
-            .as_ref()
-            .filter(|source| source.server_id != body.server_id)
-            .ok_or_else(|| {
-                HostError::Unsupported("a snapshot issue needs its distinct saved source".into())
-            })?;
-        let settings = self
-            .inner
-            .settings
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !settings.mcp.import {
-            return Err(HostError::McpImportDisabled);
-        }
-        let definition = crate::mcp::stored_snapshot(&settings.data_dir, source)?;
-        let reply = crate::mcp::result_of(&definition, None);
-        Ok((definition, reply))
-    }
-    /// Keep the opened sealed snapshot through the same native private copy writer.
-    pub fn mcp_transfer_receive(
-        &self,
-        body: &McpImport,
-        definition: &McpDefinition,
-    ) -> Result<McpImportResult> {
-        if body.environment_id.is_some()
-            || body.expected_fingerprint.is_some()
-            || !matches!(
-                body.transfer,
-                Some(orch_link_contract::commands::McpSnapshotTransfer::Receive { .. })
-            )
-            || body
-                .stored
-                .as_ref()
-                .is_none_or(|source| source.server_id == body.server_id)
-        {
-            return Err(HostError::Unsupported(
-                "a snapshot receive needs its exact new copy".into(),
-            ));
-        }
-        let settings = self
-            .inner
-            .settings
-            .read()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !settings.mcp.import {
-            return Err(HostError::McpImportDisabled);
-        }
-        crate::mcp::keep_snapshot(&settings.data_dir, body.server_id, definition)
     }
 }
 
@@ -4123,7 +3988,6 @@ async fn attach(
         mcp_servers: Vec::new(),
         index: index.state().mode(),
         index_reason: index.state().reason(),
-        index_entry_limit: index.state().entry_limit(),
         mounts: mounts.facts(),
         private_views: false,
         suspend: platform::CAN_SUSPEND,
@@ -4245,7 +4109,6 @@ fn start_background(
         let mut facts = lock(&environment.facts);
         facts.index = environment.index.state().mode();
         facts.index_reason = environment.index.state().reason();
-        facts.index_entry_limit = environment.index.state().entry_limit();
     }
     for watch in lock(&environment.watches).values() {
         watcher.watch_dir(&watch.dir.under(&root));

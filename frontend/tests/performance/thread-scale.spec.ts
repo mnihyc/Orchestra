@@ -31,7 +31,7 @@
  */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, delta, emit, playScene, scenario, signIn, mainArea } from '../e2e/support.ts';
+import { ACME, delta, emit, playScene, scenario, signIn } from '../e2e/support.ts';
 import { agentMessage, command, turn, userMessage } from '../doubles/thread-rows.ts';
 import { ADA } from '../doubles/thread-scenes.ts';
 
@@ -156,7 +156,6 @@ const scrollBy = (page: Page, pixels: number, steps: number): Promise<Scrolled> 
       new Promise<Scrolled>((resolve) => {
         const log = document.querySelector<HTMLElement>('[role="log"]');
         if (log === null) throw new Error('no conversation');
-        const owner = (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner(log);
         const frames: number[] = [];
         const tasks: number[] = [];
         let rowsMax = 0;
@@ -169,7 +168,7 @@ const scrollBy = (page: Page, pixels: number, steps: number): Promise<Scrolled> 
         const tick = (now: number) => {
           if (count > 0) frames.push(now - last);
           last = now;
-          owner.scrollTop += pixels;
+          log.scrollTop += pixels;
           rowsMax = Math.max(rowsMax, log.querySelectorAll('[data-index]').length);
           count += 1;
           if (count <= steps) {
@@ -202,15 +201,6 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   await page.addInitScript(() => {
     // The development server hands over hundreds of modules: the default room for entries would be full.
     performance.setResourceTimingBufferSize(10_000);
-    // The thread gives its list the screen that its controls and its history share, so the log itself does not scroll: what scrolls
-    // a conversation is the nearest element around it that scrolls, which is taller inside than it is outside.
-    (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner = (log) => {
-      for (let at: HTMLElement | null = log; at !== null; at = at.parentElement) {
-        const overflow = getComputedStyle(at).overflowY;
-        if ((overflow === 'auto' || overflow === 'scroll') && at.scrollHeight > at.clientHeight + 1) return at;
-      }
-      return log;
-    };
     const note = { firstRow: null as number | null, previous: null as Element | null, clicked: 0 };
     (window as unknown as { __open: typeof note }).__open = note;
     new MutationObserver(() => {
@@ -225,7 +215,7 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   await page.goto(`/thread/${MAIN}`);
   await expect(conversation(page).getByText(/Question 8\d\d:/).first()).toBeVisible({ timeout: WAIT_MS * slow });
   await page.getByRole('tree', { name: 'Orgs, projects, topics and threads' }).getByRole('treeitem', { name: /Upgrade deps/ }).click();
-  const threads = mainArea(page).getByRole('link', { name: 'Main thread' });
+  const threads = page.getByTestId('main').getByRole('link', { name: 'Main thread' });
   await expect(threads.first()).toBeVisible();
   await page.evaluate(() => {
     const note = (window as unknown as { __open: { firstRow: number | null; previous: Element | null; clicked: number } }).__open;
@@ -264,7 +254,7 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   const reachedTop = async (): Promise<boolean> => {
     await page.evaluate(() => {
       const log = document.querySelector<HTMLElement>('[role="log"]');
-      if (log !== null) (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner(log).scrollTop = 0;
+      if (log !== null) log.scrollTop = 0;
     });
     await page.waitForTimeout(120);
     return page.evaluate(() => (document.querySelector('[role="log"]')?.textContent ?? '').includes('Question 1:'));

@@ -216,7 +216,7 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
       .find((value) => value !== undefined && value !== null && value.trim() !== '');
     return normalize(name ?? '');
   };
-  const repeatedRow = 'li,tr,[role="row"],[role="treeitem"],[role="listitem"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[data-item],[data-footer],[data-timeline-row]';
+  const repeatedRow = 'li,tr,[role="row"],[role="treeitem"],[role="listitem"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[data-item],[data-timeline-row]';
   // A transient layer is read on its own, apart from the page or layer beneath it.
   // Identify actual native layers and shared floating content, never particular words.
   // Duplicates within one layer retain every ordinary action, row and content check.
@@ -232,16 +232,6 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
   function inRepeatedRow(element: Element): boolean {
     const row = element.closest(repeatedRow);
     return row !== null && layerOf(row) === layerOf(element);
-  }
-  // A modal owns input until it closes. Keep static page rules below, but exercise
-  // only its controls and its own portalled controls while the backdrop covers the page.
-  const prompt = Array.from(document.querySelectorAll<HTMLElement>('[data-prompt-current="true"]')).find((element) => visible(element))
-    ?? Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"],[role="alertdialog"][aria-modal="true"],dialog:modal')).reverse().find((element) => visible(element));
-  function receivesInput(element: Element): boolean {
-    if (element.closest('[inert]') !== null) return false;
-    if (prompt === undefined || prompt.contains(element)) return true;
-    const owner = element.closest('[data-prompt-owner]')?.getAttribute('data-prompt-owner');
-    return owner !== undefined && owner !== null && owner === prompt.getAttribute('data-prompt-id');
   }
   const technical = 'pre,code,kbd,input,textarea,[contenteditable="true"],[data-user-content],.cm-editor,.xterm';
   // One CSS pixel permits fractional rectangle rounding, as in the other geometry rules.
@@ -333,13 +323,8 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
     const editableBoundary = element.closest('[contenteditable]');
     const interfaceText = control !== null && control !== content || editableBoundary !== null && editableBoundary !== content && editableBoundary.getAttribute('contenteditable') === 'false';
     if (content?.getAttribute('data-content-role') === 'source' && !interfaceText) continue;
-    const definition = control === null ? element.closest('dd') : null;
-    const pair = definition?.parentElement;
-    // A native definition value belongs to its term, just as a table value belongs
-    // to its row. Captions/controls and duplicate values inside one pair still compare.
-    const definitionRow = pair?.matches('dl > div') === true && Array.from(pair.children).some((child) => child.tagName === 'DT') ? pair : null;
     const block = content?.getAttribute('data-content-role') === 'document' && !interfaceText
-      ? element.closest('[data-ob="block"],[data-ob="leaf"]') ?? content : definitionRow;
+      ? element.closest('[data-ob="block"],[data-ob="leaf"]') ?? content : null;
     let scope = 0;
     if (block !== null) { scope = contentScopes.get(block) ?? contentScopes.size + 1; contentScopes.set(block, scope); }
     const text = directText(element);
@@ -556,7 +541,6 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
 
   for (const element of elements) {
     if (element.closest('[role="tooltip"],[data-tooltip-content],input,textarea') !== null) continue;
-    if (!receivesInput(element)) continue;
     // The initial page pass owns its keyboard disclosures. A later picker pass
     // owns its newly exposed values while that picker holds the input boundary.
     if (input.cutWithin !== undefined && element.closest(input.cutWithin) === null) continue;
@@ -660,11 +644,11 @@ export async function inspectLayout(input: LayoutInput): Promise<LayoutResult> {
     return `[${attribute}="${id}"]`;
   }
   const icons = Array.from(document.querySelectorAll('button,[role="button"]')).filter((button): button is HTMLElement =>
-    button instanceof HTMLElement && receivesInput(button) && visible(button, true) && button.closest('[role="tooltip"],[data-tooltip-content]') === null &&
+    button instanceof HTMLElement && visible(button, true) && button.closest('[role="tooltip"],[data-tooltip-content]') === null &&
     button.querySelector('svg') !== null && normalize(renderedText(button)) === '' && !['absolute', 'fixed'].includes(styleOf(button).position))
     .map((button) => interactionProbe(button, 'icon'));
   const menus = Array.from(document.querySelectorAll('[aria-haspopup="menu"],[aria-haspopup="listbox"],[role="combobox"][aria-haspopup="dialog"]'))
-    .filter((element): element is HTMLElement => element instanceof HTMLElement && receivesInput(element) && visible(element, true) && !element.matches(':disabled,[aria-disabled="true"]'))
+    .filter((element): element is HTMLElement => element instanceof HTMLElement && visible(element, true) && !element.matches(':disabled,[aria-disabled="true"]'))
     .map((element) => interactionProbe(element, 'menu'));
   document.documentElement.setAttribute('data-layout-interaction-sequence', String(probeSequence));
   return { faults, cuts, allowances, icons, menus };

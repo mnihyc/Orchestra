@@ -48,9 +48,6 @@ use orch_types::{Id, Json, Seq, Time};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
-pub mod person_notices;
-pub use person_notices::ThreadMoveNotice;
-
 mod operations;
 pub use operations::{
     NotificationOperation, OperationRecipient, attach_operation, extend_operation_audience,
@@ -60,13 +57,8 @@ pub use operations::{
 tokio::task_local! {static NOTIFICATION_OPERATION:Option<Id>;}
 
 /// Runs an operation's effects without their ordinary per-resource notifications.
-pub fn operation_scope<T>(
-    id: Option<Id>,
-    work: impl std::future::Future<Output = T>,
-) -> impl std::future::Future<Output = T> {
-    // Keep one operation's state out of every enclosing task-local wrapper.
-    let work = Box::pin(work);
-    async move { NOTIFICATION_OPERATION.scope(id, work).await }
+pub async fn operation_scope<T>(id: Option<Id>, work: impl std::future::Future<Output = T>) -> T {
+    NOTIFICATION_OPERATION.scope(id, work).await
 }
 
 /// The kind of notification, as the contract names it.
@@ -827,28 +819,21 @@ pub async fn tell_person_notice(
     root: Option<Id>,
     notice: &NewNotification<'_>,
 ) -> Result<(), EngineError> {
-    tell_person_notice_before(conn, root, notice, None::<fn() -> Result<(), EngineError>>)
-        .await
-        .map(|_| ())
-}
-
-/// The same native notice/fanout writer with a current check immediately before the
-/// first Inbox effect, after the real receiver and deduplication waits. A native replay
-/// or disabled receiver consumes no callback. The returned identity is the actual row,
-/// for a private accepted-producer reference in this same transaction.
-pub async fn tell_person_notice_before<F>(
-    conn: &mut Conn,
-    root: Option<Id>,
-    notice: &NewNotification<'_>,
-    before: Option<F>,
-) -> Result<Option<people::Announced>, EngineError>
-where
-    F: FnOnce() -> Result<(), EngineError> + Send,
-{
-    let Some(announced) = people::announce_with(conn, notice, before).await? else {
-        return Ok(None);
+    let Some(announced) = people::announce(conn, notice).await? else {
+        return Ok(());
     };
-    let snapshot = Snapshot::person_notice(Some(announced.id), notice);
+    let snapshot = Snapshot {
+        id: Some(announced.id),
+        kind: notice.kind.to_owned(),
+        at: Time::new(notice.at),
+        title: notice.title.to_owned(),
+        body: notice.body.to_owned(),
+        node_id: notice.node_id,
+        thread_id: notice.thread_id,
+        approval_id: notice.approval_id,
+        chat_id: notice.chat_id,
+        data: notice.data.clone(),
+    };
     let mail_shared = orch_settings::get::<bool>(conn, Place::System, MAIL_SHARED)
         .await?
         .unwrap_or(true);
@@ -861,7 +846,7 @@ where
         notice.at,
     )
     .await?;
-    Ok(Some(announced))
+    Ok(())
 }
 
 /// A thread's name, as a notification says it.
@@ -1122,7 +1107,7 @@ pub(crate) async fn approval_settled(unit: &mut Unit<'_>, approval: Id) -> Resul
 
 /// A person owns a thread, or sent an input to it: from now on they follow it
 /// at `all`, unless they already chose a level at that thread.
-pub async fn follow_thread(
+pub(crate) async fn follow_thread(
     conn: &mut Conn,
     person: Id,
     thread: Id,
@@ -1442,11 +1427,6 @@ pub async fn job_finished(
         .and_then(|id| id.parse::<Id>().ok());
     if approval.is_some() {
         data["path"] = json!("/approvals");
-    } else if thread.is_none()
-        && let Some(provider) = full.as_ref().and_then(|job| job.provider_id)
-    {
-        data["provider_id"] = json!(provider);
-        data["path"] = json!(format!("/resources/providers/{provider}"));
     }
     if let Some(snapshot) = exported_snapshot {
         data["snapshot_id"] = json!(snapshot);
@@ -1536,65 +1516,6 @@ pub async fn export_finished(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn an_operation_scope_is_inactive_until_polled_and_restores_its_parent() {
-        let parent = Id::from_u128(1);
-        let child = Id::from_u128(2);
-        let child_scope = operation_scope(Some(child), async {
-            assert_eq!(
-                NOTIFICATION_OPERATION.try_with(|id| *id).ok(),
-                Some(Some(child))
-            );
-        });
-        assert!(NOTIFICATION_OPERATION.try_with(|id| *id).is_err());
-        operation_scope(Some(parent), async {
-            assert_eq!(
-                NOTIFICATION_OPERATION.try_with(|id| *id).ok(),
-                Some(Some(parent))
-            );
-            child_scope.await;
-            assert_eq!(
-                NOTIFICATION_OPERATION.try_with(|id| *id).ok(),
-                Some(Some(parent))
-            );
-            operation_scope(None, async {
-                assert_eq!(NOTIFICATION_OPERATION.try_with(|id| *id).ok(), Some(None));
-            })
-            .await;
-            assert_eq!(
-                NOTIFICATION_OPERATION.try_with(|id| *id).ok(),
-                Some(Some(parent))
-            );
-        })
-        .await;
-        assert!(NOTIFICATION_OPERATION.try_with(|id| *id).is_err());
-    }
-
-    #[tokio::test]
-    async fn dropping_an_unpolled_operation_drops_its_work_in_the_current_scope() {
-        struct ObserveDrop<'a>(&'a std::cell::Cell<Option<Id>>);
-
-        impl Drop for ObserveDrop<'_> {
-            fn drop(&mut self) {
-                self.0
-                    .set(NOTIFICATION_OPERATION.try_with(|id| *id).ok().flatten());
-            }
-        }
-
-        let parent = Id::from_u128(1);
-        let child = Id::from_u128(2);
-        let observed = std::cell::Cell::new(None);
-        operation_scope(Some(parent), async {
-            let observer = ObserveDrop(&observed);
-            let unpolled = operation_scope(Some(child), async move {
-                let _observer = observer;
-            });
-            drop(unpolled);
-            assert_eq!(observed.get(), Some(parent));
-        })
-        .await;
-    }
 
     fn destination(level: &str, kinds: &[&str]) -> DestinationRow {
         DestinationRow {

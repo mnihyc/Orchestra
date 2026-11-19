@@ -413,25 +413,19 @@ pub struct MachineFactsPlugin {
 }
 
 /// A machine's link to its gateway, as the connector measures it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFactsRates {
-    /// The measured rate at which it sends; absent until a sample exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub up_bps: Option<i64>,
-    /// The measured rate at which it receives; absent until a sample exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub down_bps: Option<i64>,
-    /// The measured round trip, in milliseconds; a measured zero remains present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub round_trip_ms: Option<i64>,
+    /// The rate at which it sends.
+    pub up_bps: i64,
+    /// The rate at which it receives.
+    pub down_bps: i64,
+    /// The round trip, in milliseconds.
+    pub round_trip_ms: i64,
 }
 
 /// What a machine is and has, as its connector reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFacts {
-    /// The connector's metadata-only directory observation, before any scan it is unknown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_directory: Option<orch_api_contract::storage::MachineDataInventory>,
     /// Latest local primary choice and verified entrance samples; absent on older connectors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<crate::gateways::GatewayStatusReport>,
@@ -493,26 +487,6 @@ mod tests {
 
     const MACHINE: &str = "0199c1a0-0000-7000-8000-00000000000a";
     const SESSION: &str = "0199c1a0-0000-7000-8000-00000000000b";
-
-    #[test]
-    fn fact_rates_distinguish_missing_samples_from_measured_zero_and_legacy_numbers() {
-        let missing: MachineFactsRates = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(missing, MachineFactsRates::default());
-        assert_eq!(serde_json::to_value(missing).unwrap(), json!({}));
-        let partial: MachineFactsRates =
-            serde_json::from_value(json!({"round_trip_ms":16,"up_bps":0})).unwrap();
-        assert_eq!(partial.round_trip_ms, Some(16));
-        assert_eq!(partial.up_bps, Some(0));
-        assert_eq!(partial.down_bps, None);
-        assert_eq!(
-            serde_json::to_value(partial).unwrap(),
-            json!({"round_trip_ms":16,"up_bps":0})
-        );
-        let legacy: MachineFactsRates =
-            round_trip(json!({"up_bps":8000,"down_bps":0,"round_trip_ms":0}));
-        assert_eq!(legacy.down_bps, Some(0));
-        assert_eq!(legacy.round_trip_ms, Some(0));
-    }
 
     fn time(text: &str) -> Time {
         text.parse().unwrap()

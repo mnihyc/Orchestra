@@ -99,12 +99,7 @@ async fn approval_and_sandbox_only_changes_keep_core_and_ordered_tool_bytes_and_
     let original = snapshot(&world, thread).await?;
     assert_eq!(
         original.tools,
-        vec![
-            OrchTool::ListShared,
-            OrchTool::ReadShared,
-            OrchTool::OrchDocs
-        ],
-        "documentation is offered without an opt-in"
+        vec![OrchTool::ListShared, OrchTool::ReadShared]
     );
     assert!(original.instructions().text.contains("FIXED-CORE-RULE"));
     let choices = [
@@ -157,12 +152,7 @@ async fn reordering_enabled_names_keeps_bytes_but_a_real_tool_membership_change_
     let original = snapshot(&world, thread).await?;
     assert_eq!(
         original.tools,
-        vec![
-            OrchTool::ListShared,
-            OrchTool::ReadShared,
-            OrchTool::OrchDocs
-        ],
-        "documentation is offered without an opt-in"
+        vec![OrchTool::ListShared, OrchTool::ReadShared]
     );
     world.run_turn(thread, 0, "Done").await;
     world
@@ -185,10 +175,7 @@ async fn reordering_enabled_names_keeps_bytes_but_a_real_tool_membership_change_
         .running_turn(thread, "One tool deliberately removed")
         .await;
     let changed = snapshot(&world, thread).await?;
-    assert_eq!(
-        changed.tools,
-        vec![OrchTool::ListShared, OrchTool::OrchDocs]
-    );
+    assert_eq!(changed.tools, vec![OrchTool::ListShared]);
     assert_ne!(changed.tool_blocks(), original.tool_blocks());
     assert_ne!(
         changed.orch_tools_revision(),

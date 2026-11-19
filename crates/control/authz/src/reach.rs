@@ -300,7 +300,6 @@ pub struct Reach {
     stopped_nodes: HashSet<Id>,
     outside_bounds: crate::external::LifeBounds,
     people_chat_roots: HashMap<Id, Id>,
-    people_chat_homes: HashMap<Id, Id>,
     givers: givers::Givers,
 }
 
@@ -317,15 +316,15 @@ impl Reach {
     }
 
     /// Prepares current entry-based rights and each distinct giver once for this read.
-    pub fn load_current(
+    pub async fn load_current(
         conn: &mut Conn,
         agent: Agent,
         now: Time,
         things: &Things,
-    ) -> impl std::future::Future<Output = Result<Self, Error>> {
+    ) -> Result<Self, Error> {
         // Current-giver preparation walks the ordinary account frames. Keep that nested
         // future out of every tool, document and turn caller's inline state machine.
-        Box::pin(Self::prepare_current(conn, agent, now, things))
+        Box::pin(Self::prepare_current(conn, agent, now, things)).await
     }
 
     async fn prepare_current(
@@ -343,14 +342,9 @@ impl Reach {
             .iter()
             .map(|chat| (chat.id, chat.org_id))
             .collect();
-        let people_chat_homes: HashMap<Id, Id> = people_chats
-            .iter()
-            .map(|chat| (chat.id, chat.home()))
-            .collect();
         let mut ids: Vec<Id> = agent.path.clone();
         ids.extend(things.nodes.iter().copied());
         ids.extend(people_chat_roots.values().copied());
-        ids.extend(people_chat_homes.values().copied());
         ids.extend(things.documents.iter().map(|document| document.node));
         let mut graph = Graph::load(conn, &ids).await?;
         graph
@@ -375,21 +369,9 @@ impl Reach {
                 .iter()
                 .filter_map(|document| documents::site_of(&graph, document)),
         );
-        for home in people_chat_homes.values() {
-            if !sites.iter().any(|site| site.id == *home)
-                && let Some(site) = graph.site_of(*home)
-            {
-                sites.push(site);
-            }
-        }
         graph.load_profiles(conn, &sites).await?;
         for site in &sites {
             pages.insert(site.page());
-            if graph.get(site.id).is_some_and(|node| node.is_place()) {
-                pages.insert(PageRef::defaults_of(
-                    orch_access_contract::roles::PlaceRef::Node(site.id),
-                ));
-            }
             pages.extend(
                 graph
                     .document_ancestors(site.id)
@@ -452,7 +434,6 @@ impl Reach {
             stopped_nodes,
             outside_bounds,
             people_chat_roots,
-            people_chat_homes,
             givers,
         })
     }
@@ -645,8 +626,7 @@ impl Reach {
         if side {
             return Standing::default();
         }
-
-        Self::share_standing(
+        let shared = Self::share_standing(
             self.named(
                 &site,
                 Permission::ThreadView,
@@ -662,7 +642,8 @@ impl Reach {
                 &[Permission::ThreadInteract, Permission::ThreadManage],
             ),
             self.named(&site, Permission::ThreadManage, &[Permission::ThreadManage]),
-        )
+        );
+        shared
     }
 
     /// What the agent may do with the chat of a node: read it and post in it.
@@ -714,12 +695,7 @@ impl Reach {
             ),
             self.named_for_chat(chat, Permission::ChatManage, &[Permission::ChatManage]),
         );
-        if self.stopped_chats.contains(&chat)
-            || self
-                .people_chat_homes
-                .get(&chat)
-                .is_some_and(|home| self.archived(*home))
-        {
+        if self.stopped_chats.contains(&chat) {
             standing.write = None;
         }
         standing
@@ -818,12 +794,12 @@ impl Reach {
         let Some(site) = documents::site_of(&self.graph, document) else {
             return Standing::default();
         };
-
-        Self::share_standing(
+        let shared = Self::share_standing(
             self.named(&site, Permission::DocView, &DOCUMENT_READ),
             self.named(&site, Permission::DocEdit, &DOCUMENT_WRITE),
             self.named(&site, Permission::DocManage, &DOCUMENT_MANAGE),
-        )
+        );
+        shared
     }
 
     /// Current rights supplied by only the named entries on this exact document. Other givers
@@ -877,7 +853,7 @@ impl Reach {
             ),
             named(Permission::ChatManage, &[Permission::ChatManage]),
         );
-        let source = node.or_else(|| self.people_chat_homes.get(&chat).copied());
+        let source = node.or_else(|| self.people_chat_roots.get(&chat).copied());
         if node.is_some_and(|node| self.stopped_nodes.contains(&node))
             || self.stopped_chats.contains(&chat)
             || source.is_some_and(|source| self.archived(source))
@@ -895,12 +871,12 @@ impl Reach {
         let Some(site) = self.graph.site_of(node) else {
             return Standing::default();
         };
-
-        Self::share_standing(
+        let shared = Self::share_standing(
             self.named(&site, Permission::DocView, &DOCUMENT_READ),
             self.named(&site, Permission::DocEdit, &DOCUMENT_WRITE),
             self.named(&site, Permission::DocManage, &DOCUMENT_MANAGE),
-        )
+        );
+        shared
     }
 
     /// The places whose agents are named in a row that gives a document to agents, on the document's own page or
@@ -1031,41 +1007,5 @@ impl Reach {
             self.named(&site, Permission::DocExport, &[Permission::DocExport])
                 .is_some()
         })
-    }
-
-    /// A declared material root may additionally constrain Export. This defaults policy
-    /// supplies no source access: the actual document's live, giver-bound Export is checked
-    /// separately. Match its agent entries with the same inheritance, expiry and outside bound.
-    #[must_use]
-    pub fn governing_export_allowed(
-        &self,
-        root: Id,
-        permission: Permission,
-        profile: Profile,
-    ) -> bool {
-        if !Permission::EXPORTS.contains(&permission) {
-            return false;
-        }
-        let Some(site) = self.graph.site_of(root) else {
-            return false;
-        };
-        let place = orch_access_contract::roles::PlaceRef::Node(root);
-        let mut chain = Chain::of_defaults(
-            place,
-            self.store
-                .row(PageRef::defaults_of(place), profile, permission),
-        );
-        for above in &site.chain {
-            chain = chain.under(
-                *above,
-                self.store
-                    .row(PageRef::defaults_of(*above), profile, permission),
-            );
-        }
-        let way = crate::external::way_of(&site);
-        agents_in(&chain, &self.agent.path, self.now, |entry| {
-            self.entry_within_bound(entry, root, &way)
-        })
-        .is_some()
     }
 }

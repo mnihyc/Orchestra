@@ -217,7 +217,6 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
     let directory = fixture.workspace.display().to_string();
     SessionSpec {
         settings: SessionSettings {
-            native_model: None,
             agent_id: fixture.start.agent_id,
             thread_id: new_id(),
             segment_id: new_id(),
@@ -237,9 +236,7 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec![MODEL.to_owned()],
             subagent_limits: Default::default(),
-            prompt_cache_ttl: None,
             background_wake: true,
-            image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: Vec::new(),
@@ -268,7 +265,6 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
 
 fn turn(spec: &SessionSpec, text: &str) -> TurnStart {
     TurnStart {
-        native_model: None,
         native_wake: None,
         plan: false,
         thread_id: spec.settings.thread_id,

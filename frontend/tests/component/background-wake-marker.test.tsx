@@ -27,7 +27,7 @@ function LiveMarker() {
 }
 function load(value = data(), detail: string | null = null) {
   const thread = { ...snapshot().thread, id: THREAD, model: 'model-route', model_display: 'Review model', environment: null,
-    background: backgroundWake({ tasks: [], held_completions: 2 }) };
+    background: backgroundWake({ tasks: [], held_completions: 2, waiting_author: author, waiting_running: 3 }) };
   const input: ThreadInput = { ...threadInput('wake-input', 'An internal continuation', { author, position: '1', source: 'system' }), thread_id: THREAD, state_detail: detail };
   threadWriter.reset(READ, { thread, inputs: [input], turns: value.admitted ? [turn('wake-turn', { ordinal: 2, state: 'running', inputId: input.id })] : [],
     items: value.admitted ? [wakeMarker(value), numbered(agentMessage('wake-output', 'The model claims a different cause.', { turn: 'wake-turn' }), 2)] : [wakeMarker(value)] }, false);
@@ -60,12 +60,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   });
 }
 
-it.each(['model_use_required', 'author_lost_access', 'background_wake_off', 'background_stopped', 'background_refresh'] as const)('shows the ordinary %s hold with the recorded cause before admission', (detail) => {
+it.each(['model_use_required', 'author_lost_access', 'background_wake_off', 'background_stopped', 'background_refresh', 'background_author'] as const)('shows the ordinary %s hold with the recorded cause before admission', (detail) => {
   load(data({ admitted: false }), detail);
   const { container } = show(<TimelineContextValue.Provider value={context}><LiveMarker /></TimelineContextValue.Provider>);
   const wake = container.querySelector('[data-background-wake="held"]');
   expect(wake).toHaveTextContent('Build web finished');
   expect(wake).not.toHaveTextContent('Woken by:');
+  if (detail === 'background_author') expect(wake).toHaveTextContent("Waiting for Alex's background tasks (3 running)");
   if (detail === 'background_stopped') expect(wake).toHaveTextContent('2 finished tasks waiting');
   if (detail === 'background_wake_off') expect(wake).toHaveTextContent(i18n.t('backgroundWake.wakeOffHold'));
   if (detail === 'author_lost_access') expect(wake).toHaveTextContent(i18n.t('backgroundWake.authorLostHold', { name: 'Alex' }));

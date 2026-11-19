@@ -50,21 +50,13 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-mod connected;
 mod creator_authority;
-pub use creator_authority::CreatedProvision;
-pub use creator_authority::is_retained as retains_creator_authority;
-pub use creator_authority::lock_command_source as lock_creator_command_source;
 pub use creator_authority::remember_command as remember_creator_command;
 pub use creator_authority::retain as retain_creator_provision_origin;
-pub use creator_authority::retain_fork as retain_fork_provision_origin;
-pub use creator_authority::retain_fork_wake as retain_fork_wake_origin;
-pub use creator_authority::{Checkpoint as CreatorCheckpoint, current as creator_checkpoint};
 pub use creator_authority::{
     command_authorized as creator_command_authorized,
     command_current_callers as creator_command_current_callers,
 };
-pub use creator_authority::{guard_in as creator_guard_in, phase as creator_phase};
 
 /// The phases of making a unit, and where the time usually goes: the image first (a pull or a build
 /// is minutes), then the unit and the wait for its connector. They shape a bar and nothing else.
@@ -156,8 +148,6 @@ pub enum Mode {
     Make,
     /// Starts the unit of an environment that is stopped.
     Start,
-    /// Makes fresh owned workspace/home data on an actual registered machine, then copies files.
-    Copy,
 }
 
 impl Mode {
@@ -167,15 +157,14 @@ impl Mode {
         match self {
             Self::Make => "make",
             Self::Start => "start",
-            Self::Copy => "copy",
         }
     }
 
     fn of(plan: &Json) -> Self {
-        match plan.get("mode").and_then(Json::as_str) {
-            Some("start") => Self::Start,
-            Some("copy") => Self::Copy,
-            _ => Self::Make,
+        if plan.get("mode").and_then(Json::as_str) == Some("start") {
+            Self::Start
+        } else {
+            Self::Make
         }
     }
 }
@@ -192,7 +181,6 @@ pub fn phases(mode: Mode, _init: bool) -> Vec<Phase> {
             all.extend([VERIFY, COMMIT]);
             all
         }
-        Mode::Copy => vec![ATTACH, FILES, AFTER_UP, VERIFY, COMMIT],
         Mode::Start => vec![
             START,
             START_ENROLL,
@@ -216,16 +204,6 @@ pub async fn queue(
 ) -> Result<JobRow, MakeError> {
     let list = phases(mode, false);
     let mut plan = json!({"mode":mode.word(),"by":by,"generation":environment.generation,"origin":orch_db::audit::current_origin()});
-    if mode == Mode::Copy {
-        let machine = environment.machine_id.ok_or(MakeError::NoEnvironment)?;
-        if environment.placement != "connected"
-            || environment.generation != 0
-            || environment.template_id.is_some()
-        {
-            return Err(MakeError::NoEnvironment);
-        }
-        plan["connected_machine"] = json!(machine);
-    }
     if mode == Mode::Make
         && environment.generation == 0
         && let Some(files) =
@@ -256,7 +234,6 @@ pub async fn queue(
             "lost",
         ],
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
-        Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
@@ -501,16 +478,6 @@ impl Provision {
             .begin()
             .await
             .map_err(EngineError::from)?;
-        let snapshot = job.row().await?;
-        creator_authority::lock_parent(
-            &mut tx,
-            &snapshot,
-            self.engine.inner.clock.as_ref(),
-            self.engine.inner.access.as_ref(),
-        )
-        .await?;
-        let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-        creator_authority::preserves_parent(&snapshot, &owner)?;
         let environment = env_rows::lock_environment(&mut tx, self.environment)
             .await?
             .filter(|environment| environment.deleted_at.is_none())
@@ -528,14 +495,10 @@ impl Provision {
                 "the template is gone or switched off",
             )
         })?;
-        let principal = match creator_authority::principal(
-            &mut tx,
-            &owner,
-            self.engine.inner.clock.as_ref(),
-            self.engine.inner.access.as_ref(),
-        )
-        .await?
-        {
+        let owner = jobs::job(&mut tx, job.id())
+            .await?
+            .ok_or_else(|| EngineError::unreadable("The provision disappeared."))?;
+        let principal = match creator_authority::principal(&mut tx, &owner, Time::new(now)).await? {
             Some(principal) => principal,
             None => Principal::load(
                 &mut tx,
@@ -587,7 +550,7 @@ impl Provision {
         .unwrap_or(IDLE_MINUTES_DEFAULT);
         // A completed environment keeps its admitted own-host/template behavior.
         // Only its initial pending provision is a new placement admission.
-        let mut listed = if let Some(host) = previous {
+        let listed = if let Some(host) = previous {
             places::retained_host_places(
                 &mut tx,
                 &principal,
@@ -617,19 +580,6 @@ impl Provision {
             )
             .await?
         };
-        if crate::environment_creation::standalone(&owner) {
-            let known = crate::environment_creation::known_plan(&mut tx, &owner).await?;
-            crate::environment_creation::bound_candidates(
-                &mut tx,
-                principal.caller(),
-                &known,
-                template.id,
-                &wanted.mounts,
-                &mut listed,
-            )
-            .await
-            .map_err(|error| failed("denied", error.to_string()))?;
-        }
         let chosen = places::choose(&listed, named)
             .cloned()
             .map_err(|none| failed(none.code, none.message))?;
@@ -643,21 +593,6 @@ impl Provision {
                 "no_capacity",
                 "The selected Use entry has no remaining environment capacity.",
             ));
-        }
-        let standalone_check = if crate::environment_creation::standalone(&owner) {
-            creator_authority::selected(
-                &mut tx,
-                &owner,
-                chosen.host.id,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-            )
-            .await?
-        } else {
-            None
-        };
-        if let Some(checked) = &standalone_check {
-            checked.check(self.engine.inner.clock.as_ref())?;
         }
         // A unit that failed is taken away before its successor is made, so that two never run at once.
         if let Some(old) = env_rows::live_runtime(&mut tx, environment.id).await? {
@@ -731,22 +666,7 @@ impl Provision {
             now,
         )
         .await?;
-        let fresh = jobs::job(&mut tx, job.id()).await?.ok_or(Stop::Lost)?;
-        creator_authority::preserves_parent(&owner, &fresh)?;
-        let checked = creator_authority::current(
-            &mut tx,
-            &fresh,
-            self.engine.inner.clock.as_ref(),
-            self.engine.inner.access.as_ref(),
-        )
-        .await?;
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         Ok(Done::Finished)
     }
 
@@ -1077,79 +997,31 @@ impl Provision {
         let placed = self.placed(job).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
-        let enrollment: Enrollment = if super::recreate::environment_authority::is_restricted(
-            &job.row().await?,
-        ) {
-            super::recreate::environment_authority::enrollment(
-                job,
-                services.as_ref(),
-                &EnrollmentAsk {
-                    runtime: placed.runtime.id,
-                    host: placed.host.id,
-                    created_by: placed.environment.owner_id,
-                    name_hint: format!("{}-enroll", placed.runtime.unit_name),
-                },
-            )
-            .await?
-        } else {
-            match plan.get("enrollment") {
-                Some(kept) => serde_json::from_value(kept.clone()).map_err(EngineError::from)?,
-                None => {
-                    if super::recreate::batch_authority::applies(&job.row().await?) {
-                        let mut tx = self.engine.db().begin().await.map_err(EngineError::from)?;
-                        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
-                        super::recreate::batch_authority::guard_in(&mut tx, job).await?;
-                        let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-                        if owner.environment_id != Some(placed.environment.id)
-                            || owner.plan.get("runtime") != Some(&json!(placed.runtime.id))
-                        {
-                            return Err(failed(
-                                "access.denied",
-                                "the enrollment target no longer belongs to the accepted replacement",
-                            ));
-                        }
-                        let made = services
-                            .enrollment(
-                                &mut tx,
-                                &EnrollmentAsk {
-                                    runtime: placed.runtime.id,
-                                    host: placed.host.id,
-                                    created_by: placed.environment.owner_id,
-                                    name_hint: format!("{}-enroll", placed.runtime.unit_name),
-                                },
-                            )
-                            .await
-                            .map_err(|error| hosting_stop(&error))?;
-                        jobs::merge_plan(&mut tx, job.id(), &json!({"enrollment":made}), job.now())
-                            .await?;
-                        super::recreate::batch_authority::deadline_in(&mut tx, job).await?;
-                        tx.commit().await.map_err(DbError::from)?;
-                        made
-                    } else {
-                        let mut conn = self
-                            .engine
-                            .inner
-                            .db
-                            .acquire()
-                            .await
-                            .map_err(EngineError::from)?;
-                        let made = services
-                            .enrollment(
-                                &mut conn,
-                                &EnrollmentAsk {
-                                    runtime: placed.runtime.id,
-                                    host: placed.host.id,
-                                    created_by: placed.environment.owner_id,
-                                    name_hint: format!("{}-enroll", placed.runtime.unit_name),
-                                },
-                            )
-                            .await
-                            .map_err(|error| hosting_stop(&error))?;
-                        drop(conn);
-                        job.remember(&json!({ "enrollment": made })).await?;
-                        made
-                    }
-                }
+        let enrollment: Enrollment = match plan.get("enrollment") {
+            Some(kept) => serde_json::from_value(kept.clone()).map_err(EngineError::from)?,
+            None => {
+                let mut conn = self
+                    .engine
+                    .inner
+                    .db
+                    .acquire()
+                    .await
+                    .map_err(EngineError::from)?;
+                let made = services
+                    .enrollment(
+                        &mut conn,
+                        &EnrollmentAsk {
+                            runtime: placed.runtime.id,
+                            host: placed.host.id,
+                            created_by: placed.environment.owner_id,
+                            name_hint: format!("{}-enroll", placed.runtime.unit_name),
+                        },
+                    )
+                    .await
+                    .map_err(|error| hosting_stop(&error))?;
+                drop(conn);
+                job.remember(&json!({ "enrollment": made })).await?;
+                made
             }
         };
         let tools: Vec<ToolBuild> = plan
@@ -1698,10 +1570,7 @@ impl Provision {
         {
             return Ok(Done::Finished);
         }
-        let moving = crate::environments::ending::moving_review(&job.row().await?)?.is_some();
-        if !moving {
-            job.pass_commit().await?;
-        }
+        job.pass_commit().await?;
         let placed = self.placed(job).await?;
         let now = job.now();
         let mut tx = self
@@ -1712,26 +1581,6 @@ impl Provision {
             .await
             .map_err(EngineError::from)?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let checked = if moving {
-            creator_authority::guard_in(&mut tx, job).await?;
-            let owner = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
-            let checked = creator_authority::current(
-                &mut tx,
-                &owner,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-            )
-            .await?
-            .ok_or_else(|| failed("copy_changed", "the original Move creator disappeared"))?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-            if !jobs::pass_commit(&mut tx, job.id(), now).await? {
-                return Err(Stop::Cancelled);
-            }
-            Some(checked)
-        } else {
-            None
-        };
-
         let (machine, _) = host_rows::machine_of_runtime(&mut tx, placed.runtime.id)
             .await?
             .ok_or_else(|| failed("unit_failed", "the unit's connector is not known"))?;
@@ -1838,7 +1687,6 @@ impl Provision {
                 recipe.by,
                 recipe.restored.contains_key("home"),
                 true,
-                None,
             )
             .await?;
         }
@@ -1865,17 +1713,6 @@ impl Provision {
             now,
         )
         .await?;
-        if let Some(checked) = &checked {
-            crate::environments::ending::finish(
-                &self.engine,
-                &mut tx,
-                &row,
-                checked.principal(),
-                self.engine.inner.clock.as_ref(),
-            )
-            .await?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         orch_db::queries::jobs::merge_plan(
             &mut tx,
             job.id(),
@@ -1883,9 +1720,6 @@ impl Provision {
             now,
         )
         .await?;
-        if let Some(checked) = &checked {
-            checked.check(self.engine.inner.clock.as_ref())?;
-        }
         tx.commit().await.map_err(DbError::from)?;
         Ok(Done::Finished)
     }
@@ -2157,10 +1991,6 @@ impl Provision {
 impl Phased for Provision {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         creator_authority::phase(job, phase).await?;
-        if self.mode == Mode::Copy {
-            return connected::run(job, self.environment, phase).await;
-        }
-        super::recreate::batch_authority::guard(job).await?;
         match phase {
             "schedule" => self.schedule(job).await,
             "image" => self.image(job).await,
@@ -2227,7 +2057,6 @@ impl Phased for Provision {
         match self.mode {
             Mode::Make => self.undo_make(job, why).await,
             Mode::Start => self.undo_start(job, why).await,
-            Mode::Copy => connected::undo(job, self.environment, why).await,
         }
     }
 

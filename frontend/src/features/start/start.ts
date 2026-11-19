@@ -1,16 +1,17 @@
 /** Starts the exact named setup with one repeatable creation request. The native action admits the thread,
  * its first input, any new environment and a project's new topic together, before provisioning can begin.
- * The requested environment audience is admitted in that same birth.
+ * Optional sharing runs after acceptance; retrying it reuses the accepted thread.
  */
 import { useMutation } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { useRef, useState } from 'react';
 
 import { ApiError, client } from '@/api/client';
-import { permissionsQuery } from '@/api/access';
+import { permissionsQuery, readPage } from '@/api/access';
 import { queryClient } from '@/api/query';
 import { createTopicAndThread } from '@/api/nodes';
 import { createThread } from '@/api/threads';
+import { letThreadViewersIn } from '@/features/access/doors';
 import { generalAccessChange, type GeneralAccessPreset, indexCatalogue } from '@/features/access/model';
 import type { PlaceRef } from '@/features/navigation/places';
 import type { AgentAccessChoice, CreateThread, Thread } from '@/generated/api-types';
@@ -25,7 +26,7 @@ import { startOptionsKey, type StartOptions } from '@/api/start';
 /** Which request of the act is under way. */
 export type Step = 'check' | 'thread';
 
-/** What the accepted act made. A refused atomic birth leaves this empty. */
+/** What the accepted act made, retained if an optional sharing change is refused. */
 export interface Standing {
   topic: { id: string; name: string } | null;
   environment: { id: string; name: string } | null;
@@ -95,12 +96,10 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
       const chosen = { agent: resolved.agent.id, provider: resolved.provider.id, model: resolved.model.model_name,
         arrangement: resolved.arrangement, effort: resolved.effort,
         environment: resolved.environment === null ? null : { id: resolved.environment.environment.id, name: resolved.environment.environment.name } };
-      const newEnvironment = resolved.fresh ? structuredClone(resolved.newEnvironment ?? {}) : undefined;
       const intent = JSON.stringify({ place: place.id, provider: chosen.provider, agent: chosen.agent, model: chosen.model,
         effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environment?.id ?? null,
-        name: plan.name, directory: plan.directory, newEnvironment, temporary: plan.temporary, prepareSource: plan.prepareSource,
-        privately: plan.privately, generalAccess: plan.generalAccess, agentAccess: plan.agentAccess,
-        letIntoEnvironment: plan.letIntoEnvironment, message: plan.message });
+        name: plan.name, directory: plan.directory, temporary: plan.temporary, prepareSource: plan.prepareSource,
+        privately: plan.privately, generalAccess: plan.generalAccess, agentAccess: plan.agentAccess, message: plan.message });
       let thread = accepted.current?.intent === intent ? accepted.current.thread : null;
       if (thread === null) {
         setStep('check');
@@ -114,12 +113,11 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
           binding: { agent_id: chosen.agent, provider_id: chosen.provider, arrangement: chosen.arrangement },
           model: chosen.model,
           ...(chosen.effort === null ? {} : { effort: chosen.effort }),
-          environment: chosen.environment === null ? { new: { ...newEnvironment, ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: chosen.environment.id },
+          environment: chosen.environment === null ? { new: { ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: chosen.environment.id },
           ...(plan.directory === '' ? {} : { directory: plan.directory }),
           ...(plan.prepareSource === undefined ? {} : { prepare_source: plan.prepareSource }),
           ...(access === undefined ? {} : { access }),
           ...(plan.agentAccess === undefined ? {} : { agent_access: plan.agentAccess }),
-          ...(plan.letIntoEnvironment === undefined ? {} : { let_into_environment: plan.letIntoEnvironment }),
           ...(plan.message === '' ? {} : { first_input: { content: [{ type: 'text' as const, text: plan.message }], client_id: inputId } }),
         };
         const key = keyOf({ step: 'thread', place: place.id, body });
@@ -130,6 +128,10 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
       if (environment === null) throw new Error(i18n.t('startPreflight.changed'));
       made.current = { ...made.current, environment: { id: environment.id, name: environment.name } };
       setStanding(made.current);
+      if (plan.letIntoEnvironment === true) {
+        const page = await readPage({ kind: 'thread', id: thread.id });
+        if (!await letThreadViewersIn(page)) throw new Error(i18n.t('access.general.cannotLetIn', { name: environment.name }));
+      }
       rememberSetup(person, { place: thread.topic_id, picks: { provider: chosen.provider, agent: chosen.agent, model: chosen.model, effort: chosen.effort, environment: environment.id, arrangement: chosen.arrangement } });
       return thread;
     },

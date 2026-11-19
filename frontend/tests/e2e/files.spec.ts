@@ -50,11 +50,10 @@ test('the tree opens at the thread\'s directory, and a file opens in the code vi
   await expect(editor(page)).toContainText("import { greet } from './util';");
   // The conversation stays where it was.
   await expect(page.getByRole('tab', { name: 'Main thread' })).toBeVisible();
-  // Ordinary files now retain their tabs; selecting another keeps the first and focuses the second.
+  // Looking at another file gives the tab of the one that was only looked at to the next.
   await row(page, /^util\.ts/).click();
   await expect(page.getByRole('tab', { name: 'util.ts' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'app.ts' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'util.ts' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'app.ts' })).toHaveCount(0);
   await expect(editor(page)).toContainText('export const VERSION = 3;');
 });
 
@@ -76,7 +75,7 @@ test('a path in the conversation opens its file at the line it names', async ({ 
   await expect(page.getByRole('tab', { name: 'app.ts' })).toBeVisible();
   // The view is brought to the line the item names (the line is lit for a moment, which a slow machine can miss: the cursor stays).
   await expect(page.getByTestId('code-status')).toContainText('Line 4, column 1');
-  await page.getByRole('tab', { name: 'Idle Main thread · Fix login', exact: true }).click();
+  await page.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ }).click();
   // A change names its file the same way, and a path of the workspace that is not there says so.
   const changeDetails = page.getByRole('button', { name: /^Edited src\/util\.ts/ });
   if (await changeDetails.getAttribute('aria-expanded') !== 'true') await changeDetails.click();
@@ -196,8 +195,6 @@ test('a file is made, renamed, duplicated and deleted from the menu of the tree'
   await expect(row(page, /^tasks copy\.txt/)).toHaveCount(0);
   expect(await onDisk('web/tasks copy.txt')).toBeNull();
   // A name that is there already is refused where the person is looking.
-  // Toolbar creation uses the focused directory; a root file keeps this attempt in web/.
-  await row(page, /^README\.md/).focus();
   await filesPanel(page).getByRole('button', { name: 'New folder…' }).click();
   await page.getByRole('textbox', { name: 'Name' }).fill('src');
   await page.getByRole('button', { name: 'Create' }).click();

@@ -116,7 +116,6 @@ pub fn reset(shared: &Shared) {
     inner.queue.clear();
     inner.default = None;
     inner.stored.clear();
-    inner.released.clear();
 }
 
 fn queue(shared: &Shared, body: &[u8]) -> Response {

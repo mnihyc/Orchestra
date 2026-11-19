@@ -1,10 +1,10 @@
 /** Agents available to a new thread here, and its current defaults, from the same authorized answer as Start. */
+import { useQuery } from '@tanstack/react-query';
 import { Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { StartOptions } from '@/api/start';
-import { modelName, NO_PICKS } from '@/features/start/choices';
-import { useStartOptions } from '@/features/start/options';
+import { startOptionsQuery, type StartOptions } from '@/api/start';
+import { modelName } from '@/features/start/choices';
 import type { AgentRef, BindingAgent, Topic } from '@/generated/api-types';
 import { offeredChoice } from '@/i18n/choices';
 import { canCreateIn } from '@/lib/permissions';
@@ -30,13 +30,13 @@ function available(options: StartOptions) {
 export function TopicAgents({ topic }: { topic: Topic }) {
   const { t } = useTranslation();
   const mayStart = canCreateIn('topic', topic.access) && !topic.archived;
-  const query = useStartOptions(topic.id, NO_PICKS, { suggest: true, respectDefaults: true }, mayStart, undefined, topic.default_environment_id);
+  const query = useQuery({ ...startOptionsQuery(topic.id, null), enabled: mayStart });
   if (!mayStart) return <EmptyState compact title={topic.archived ? t('topicAgents.archived') : t('topicAgents.notAllowed', { owner: topic.owner.display_name })} />;
-  if (query.failed !== null) return <ErrorState compact error={query.failed} retrying={query.read.isFetching} onRetry={query.retry} />;
-  if (query.options === null || query.refreshing && (query.resolved?.missing.length ?? 0) > 0) return <SkeletonRows read={query.read} rows={3} />;
+  if (query.isPending) return <SkeletonRows rows={3} />;
+  if (query.isError) return <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
 
-  const { providers, agents } = available(query.options);
-  const defaults = query.options.defaults;
+  const { providers, agents } = available(query.data);
+  const defaults = query.data.defaults;
   const provider = providers.find((entry) => entry.provider.id === defaults.provider_id);
   const agent = provider?.agents.find((entry) => entry.agent.id === defaults.agent_id && usable(entry));
   const model = provider?.models.find((entry) => entry.allowed && entry.model_name === defaults.model_name);
@@ -44,7 +44,7 @@ export function TopicAgents({ topic }: { topic: Topic }) {
   const effort = defaults.effort ?? model?.parameters.default_effort ?? null;
   const effortName = effort === null || !efforts.includes(effort) ? null : offeredChoice(t, 'effort', effort)?.name ?? t('changeCompact.otherEffort');
   const incomplete = provider === undefined || agent === undefined || model === undefined;
-  const settings = <Button size="sm" variant="ghost" asChild><a href={`/topic/${topic.id}?tab=settings&section=defaults`}>{t('topicAgents.defaults')}</a></Button>;
+  const settings = <Button size="sm" variant="ghost" asChild><a href={`/topic/${topic.id}?tab=settings&section=policies`}>{t('topicAgents.defaults')}</a></Button>;
   if (agents.length === 0) return <EmptyState compact icon={<Bot aria-hidden />} title={t('topicAgents.empty')} action={settings} />;
 
   return <div data-topic-agents className="flex min-w-0 flex-col gap-4">

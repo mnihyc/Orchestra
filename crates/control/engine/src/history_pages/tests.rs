@@ -569,17 +569,16 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
             break;
         }
         assert!(page.len() <= 3);
-        for bundle in page {
-            forward.push((
+        forward.extend(page.into_iter().map(|bundle| {
+            (
                 bundle.turn.ordinal,
                 bundle
                     .items
-                    .into_vec()?
-                    .into_iter()
-                    .map(|item| (item.id, item.kind))
+                    .iter()
+                    .map(|item| (item.id, item.kind.clone()))
                     .collect::<Vec<_>>(),
-            ));
-        }
+            )
+        }));
     }
     assert_eq!(forward, expected);
     for id in loose_ids {
@@ -610,17 +609,16 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
         if page.is_empty() {
             break;
         }
-        for bundle in page {
-            backward.push((
+        backward.extend(page.into_iter().map(|bundle| {
+            (
                 bundle.turn.ordinal,
                 bundle
                     .items
-                    .into_vec()?
-                    .into_iter()
-                    .map(|item| (item.id, item.kind))
+                    .iter()
+                    .map(|item| (item.id, item.kind.clone()))
                     .collect::<Vec<_>>(),
-            ));
-        }
+            )
+        }));
     }
     backward.reverse();
     assert_eq!(backward, expected);
@@ -843,27 +841,6 @@ async fn an_oversized_neutral_turn_stops_after_one_item_page_without_holding_the
         .await?;
     tx.commit().await?;
     world.exec("ANALYZE items").await;
-    let expected: (i64, i64) = sqlx::query_as(
-        "SELECT count(*)::bigint,COALESCE(sum(payload_bytes),0)::bigint FROM items
-         WHERE continuation_id=$1 AND turn_id=$2 AND stream='main' AND kind='agent_message'",
-    )
-    .bind(row.active_continuation_id)
-    .bind(turn)
-    .fetch_one(&mut *conn)
-    .await?;
-    let maintained: (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(sum(item_count),0)::bigint,COALESCE(sum(payload_bytes),0)::bigint
-         FROM thread_history_turn_counts WHERE continuation_id=$1 AND turn_id=$2
-         AND stream='main' AND kind='agent_message'",
-    )
-    .bind(row.active_continuation_id)
-    .bind(turn)
-    .fetch_one(&mut *conn)
-    .await?;
-    assert_eq!(
-        maintained, expected,
-        "bulk insertion keeps exact count and bytes"
-    );
     let cut = captured(&world, thread).await?;
     // A KiB cannot hold this turn, so the whole-turn rule leaves it out. Its size must be discovered in the first
     // ordinary item page, without retaining or reading the remaining items, on either source.
@@ -1431,12 +1408,11 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
         .await?
         .ok_or("absent")?
         .active_continuation_id;
-    fn check(bundle: Bundle, ordinal: i64, expected: &[(i32, Id)]) -> Proof {
+    fn check(bundle: Bundle, ordinal: i64, expected: &[(i32, Id)]) {
         assert_eq!(i64::from(bundle.turn.ordinal), ordinal);
         let answers: Vec<Id> = bundle
             .items
-            .into_vec()?
-            .into_iter()
+            .iter()
             .filter(|item| item.kind == "agent_message")
             .map(|item| item.id)
             .collect();
@@ -1446,7 +1422,6 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             .map(|(_, id)| *id)
             .collect();
         assert_eq!(answers, wanted, "answer membership of turn {ordinal}");
-        Ok(())
     }
     for source in [Source::Live { thread, view }, Source::Cut(&cut)] {
         let mut forward = Forward::between(source, &mut conn, (1, TURNS), false).await?;
@@ -1464,7 +1439,7 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             }
             assert!(page.len() <= ASKED);
             for bundle in page {
-                check(bundle, ordinal, &expected)?;
+                check(bundle, ordinal, &expected);
                 ordinal += 1;
             }
             page = forward.next(&mut conn, ASKED).await?;
@@ -1486,7 +1461,7 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             }
             assert!(page.len() <= ASKED);
             for bundle in page {
-                check(bundle, ordinal, &expected)?;
+                check(bundle, ordinal, &expected);
                 ordinal -= 1;
             }
             page = backward.next(&mut conn, ASKED).await?;
@@ -1692,355 +1667,6 @@ async fn copy_pages_skip_markers_but_keep_order_identity_and_the_reserved_sequen
             "new copied payloads receive dense positions in their frozen order"
         );
     }
-    world.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn maintained_plan_totals_use_frozen_payload_sizes_and_cut_positions_after_source_changes()
--> Proof {
-    use orch_db::queries::thread_continuations::{
-        self as continuations, NewContinuation, QueueRow,
-    };
-    let world = common::World::new().await;
-    let thread = conversation(&world, 3).await?;
-    let mut conn = world.pool.acquire().await?;
-    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
-    let owner = row.active_continuation_id;
-    let before = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
-    let position: i64 = sqlx::query_scalar("SELECT next_seq FROM threads WHERE node_id=$1")
-        .bind(thread)
-        .fetch_one(&mut *conn)
-        .await?;
-    let input: Id =
-        sqlx::query_scalar("SELECT input_id FROM turns WHERE thread_id=$1 AND ordinal=1")
-            .bind(thread)
-            .fetch_one(&mut *conn)
-            .await?;
-    let frozen = new_id();
-    continuations::insert(
-        &mut conn,
-        &NewContinuation {
-            id: frozen,
-            thread,
-            parent: owner,
-            before_input: input,
-            actor: world.ada,
-            at: world.clock.now(),
-            seq: position,
-            queue: QueueRow {
-                held: false,
-                held_by: None,
-                held_at: None,
-                revision: 1,
-            },
-        },
-    )
-    .await?;
-    continuations::freeze_prefix(&mut conn, thread, owner, frozen, 4, position, position - 1)
-        .await?;
-    let frozen_before = thread_history::range_counts(&mut conn, thread, frozen, 1, 3).await?;
-    assert_eq!(frozen_before, before);
-    let cut = captured(&world, thread).await?;
-    let cut_counts = cuts::counts(&mut conn, cut.id).await?;
-    let cut_size = cuts::payload_bytes(&mut conn, cut.id).await?;
-    let all_positions = cuts::item_count(&mut conn, cut.id).await?;
-    let expected: i64=sqlx::query_scalar("SELECT COALESCE(sum(payload_bytes),0)::bigint FROM items WHERE thread_id=$1 AND continuation_id=$2 AND stream='main'")
-        .bind(thread).bind(owner).fetch_one(&mut *conn).await?;
-    assert_eq!(
-        cut_size, expected,
-        "current and frozen sizes both measure decoded payloads"
-    );
-    let changed: Id=sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1")
-        .bind(thread).fetch_one(&mut *conn).await?;
-    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{text}',to_jsonb(repeat('large compressible text ',10000))),seq_updated=$2 WHERE id=$1")
-        .bind(changed).bind(position).execute(&mut *conn).await?;
-    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
-        .bind(thread)
-        .bind(position + 1)
-        .execute(&mut *conn)
-        .await?;
-    let current = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
-    let expected: i64=sqlx::query_scalar("SELECT sum(payload_bytes)::bigint FROM items WHERE thread_id=$1 AND continuation_id=$2 AND stream='main' AND kind<>'reasoning' AND turn_id IS NOT NULL")
-        .bind(thread).bind(owner).fetch_one(&mut *conn).await?;
-    assert_eq!(current.bytes, expected);
-    assert!(
-        current.bytes > before.bytes + 100000,
-        "compressed storage must not reduce decoded accounting"
-    );
-    assert_eq!(
-        thread_history::range_counts(&mut conn, thread, frozen, 1, 3).await?,
-        before
-    );
-    assert_eq!(cuts::counts(&mut conn, cut.id).await?, cut_counts);
-    assert_eq!(cuts::payload_bytes(&mut conn, cut.id).await?, cut_size);
-    sqlx::query("DELETE FROM items WHERE id=$1")
-        .bind(changed)
-        .execute(&mut *conn)
-        .await?;
-    let deleted = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
-    assert_eq!(
-        deleted.items["agent_message"],
-        before.items["agent_message"] - 1
-    );
-    assert_eq!(cuts::item_count(&mut conn, cut.id).await?, all_positions);
-    assert_eq!(cuts::payload_bytes(&mut conn, cut.id).await?, cut_size);
-    assert_eq!(cuts::row_count(&mut conn, cut.id, "turn").await?, 3);
-    assert_eq!(cuts::max_ordinal(&mut conn, cut.id, "turn").await?, 3);
-    // Ordinary counter queries seek the requested turn summaries, not every selected payload.
-    let one = thread_history::range_counts(&mut conn, thread, owner, 2, 2).await?;
-    assert_eq!(one.turns, 1);
-    assert_eq!(one.items["agent_message"], 1);
-    drop(conn);
-    world.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_turn_over_many_pages_is_spooled_in_both_directions_and_written_without_a_turn_vector()
--> Proof {
-    let world = common::World::new().await;
-    let thread = conversation(&world, 1).await?;
-    let mut conn = world.pool.acquire().await?;
-    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
-    let seed:Id=sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1").bind(thread).fetch_one(&mut *conn).await?;
-    let base: i64 = sqlx::query_scalar("SELECT next_seq+1000 FROM threads WHERE node_id=$1")
-        .bind(thread)
-        .fetch_one(&mut *conn)
-        .await?;
-    let added = cuts::PAGE * 3 + 7;
-    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE id=$1)
-      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$3::bigint) n
-      CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
-        'id',md5($1::text||':spooled:'||n::text)::uuid,'native_ref',NULL,'seq_created',$2+n,'seq_updated',$2+n,
-        'payload',jsonb_build_object('text','spooled answer '||n::text,'text_len',20,'phase',NULL))) copied")
-      .bind(seed).bind(base).bind(added).execute(&mut *conn).await?;
-    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
-        .bind(thread)
-        .bind(base + added + 1)
-        .execute(&mut *conn)
-        .await?;
-    let cut = captured(&world, thread).await?;
-    for source in [
-        Source::Live {
-            thread,
-            view: row.active_continuation_id,
-        },
-        Source::Cut(&cut),
-    ] {
-        let mut forward = Forward::between(source, &mut conn, (1, 1), true).await?;
-        let mut page = forward.next(&mut conn, 1).await?;
-        let bundle = page.pop().ok_or("one complete turn")?;
-        assert_eq!(
-            bundle.items.held(),
-            0,
-            "a multi-page turn stays in private file storage"
-        );
-        let mut count = 0;
-        let mut previous = 0;
-        for item in bundle.items.iter() {
-            let item = item?;
-            assert!(item.seq_created > previous);
-            previous = item.seq_created;
-            count += 1;
-        }
-        assert!(count >= added as usize);
-        let people = crate::views::People::load(&mut conn, bundle.authors()?).await?;
-        let info = bundle.presentation(&people)?;
-        let written = bundle.write(
-            &people,
-            &written::Beside::default(),
-            "Agent",
-            Detail::Full,
-            &info,
-        )?;
-        let text = written.read(None)?;
-        assert!(text.contains("spooled answer 1"));
-        assert!(text.contains(&format!("spooled answer {added}")));
-        assert_eq!(
-            text.matches("**Agent:** spooled answer ").count(),
-            added as usize
-        );
-        let mut backward = Backward::between(source, &mut conn, (1, 1), 1, true).await?;
-        let mut page = backward.next(&mut conn, 1).await?;
-        let bundle = page.pop().ok_or("one reversed complete turn")?;
-        assert_eq!(bundle.items.held(), 0);
-        let mut reverse_count = 0;
-        let mut previous = 0;
-        for item in bundle.items.iter() {
-            let item = item?;
-            assert!(item.seq_created > previous);
-            previous = item.seq_created;
-            reverse_count += 1;
-        }
-        assert_eq!(reverse_count, count);
-    }
-    drop(conn);
-    world.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn before_item_supplier_reads_every_page_and_exports_a_history_with_no_synthetic_turn()
--> Proof {
-    let world = common::World::new().await;
-    let template = conversation(&world, 1).await?;
-    let target = world.thread("Before import only").await;
-    let mut conn = world.pool.acquire().await?;
-    let template_row = threads::thread(&mut conn, template)
-        .await?
-        .ok_or("template")?;
-    let target_row = threads::thread(&mut conn, target).await?.ok_or("target")?;
-    let segment = if let Some(segment) = target_row.current_segment_id {
-        segment
-    } else {
-        let segment = new_id();
-        sqlx::query("INSERT INTO segments SELECT copied.* FROM segments s CROSS JOIN LATERAL jsonb_populate_record(NULL::segments,to_jsonb(s)||jsonb_build_object(
-          'id',$2::uuid,'thread_id',$3::uuid,'continuation_id',$3::uuid,'ordinal',1,'native_session_ref',NULL)) copied WHERE s.id=$1")
-          .bind(template_row.current_segment_id).bind(segment).bind(target).execute(&mut *conn).await?;
-        segment
-    };
-    let count = cuts::PAGE * 2 + 7;
-    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE thread_id=$1 AND kind='agent_message' LIMIT 1)
-      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$4::bigint) n CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
-        'id',md5($3::text||':before:'||n::text)::uuid,'thread_id',$3::uuid,'continuation_id',$3::uuid,'segment_id',$2::uuid,
-        'turn_id',NULL,'model_input_id',NULL,'native_ref',NULL,'before_orch',true,'seq_created',n,'seq_updated',n,
-        'payload',jsonb_build_object('text','before answer '||n::text,'text_len',20,'phase',NULL))) copied")
-      .bind(template).bind(segment).bind(target).bind(count).execute(&mut *conn).await?;
-    sqlx::query("UPDATE threads SET current_segment_id=$2,next_seq=$3 WHERE node_id=$1")
-        .bind(target)
-        .bind(segment)
-        .bind(count + 1)
-        .execute(&mut *conn)
-        .await?;
-    let mut supplier = cuts::BeforeItems::new(target, target);
-    let mut seen = 0;
-    let mut pages = 0;
-    let mut previous = 0;
-    loop {
-        let page = supplier.next(&mut conn).await?;
-        if page.is_empty() {
-            break;
-        }
-        pages += 1;
-        assert!(page.len() <= cuts::PAGE as usize);
-        for item in page {
-            assert!(item.before_orch);
-            assert!(item.turn_id.is_none());
-            assert!(item.seq_created > previous);
-            previous = item.seq_created;
-            seen += 1;
-        }
-    }
-    assert_eq!(seen, count);
-    assert_eq!(pages, 3);
-    let row = threads::thread(&mut conn, target)
-        .await?
-        .ok_or("before-only thread")?;
-    let temporary = tempfile::tempdir()?;
-    let file = temporary.path().join("before.md");
-    let output =
-        crate::summaries::indexed_transcript_file(&mut conn, &row, None, None, &file).await?;
-    assert_eq!(output.turns, 0);
-    let text = std::fs::read_to_string(file)?;
-    assert!(text.contains("before answer 1"));
-    assert!(text.contains(&format!("before answer {count}")));
-    assert!(!text.contains("## Turn 1"));
-    drop(conn);
-    world.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn decoded_page_bytes_follow_the_frozen_revision_and_always_make_progress_on_large_items()
--> Proof {
-    let world = common::World::new().await;
-    let thread = conversation(&world, 1).await?;
-    let mut conn = world.pool.acquire().await?;
-    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
-    let seed: Id = sqlx::query_scalar(
-        "SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' LIMIT 1",
-    )
-    .bind(thread)
-    .fetch_one(&mut *conn)
-    .await?;
-    let base: i64 = sqlx::query_scalar("SELECT next_seq+1000 FROM threads WHERE node_id=$1")
-        .bind(thread)
-        .fetch_one(&mut *conn)
-        .await?;
-    let size = thread_history::PAGE_BYTES / 2 + 1;
-    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE id=$1)
-      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,3) n CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
-        'id',md5($1::text||':large:'||n::text)::uuid,'native_ref',NULL,'seq_created',$2+n,'seq_updated',$2+n,
-        'payload',jsonb_build_object('text',repeat('z',$3::integer),'text_len',$3::bigint,'phase',NULL))) copied")
-      .bind(seed).bind(base).bind(size).execute(&mut *conn).await?;
-    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
-        .bind(thread)
-        .bind(base + 4)
-        .execute(&mut *conn)
-        .await?;
-    let page = reading::items_bounded(
-        &mut conn,
-        thread,
-        row.active_continuation_id,
-        Some(base),
-        true,
-        Some("main"),
-        cuts::PAGE,
-    )
-    .await?;
-    assert_eq!(
-        page.len(),
-        2,
-        "a byte target admits its boundary item, never the whole large-item range"
-    );
-    let next = reading::items_bounded(
-        &mut conn,
-        thread,
-        row.active_continuation_id,
-        Some(page[1].seq_created),
-        true,
-        Some("main"),
-        cuts::PAGE,
-    )
-    .await?;
-    assert_eq!(next.len(), 1);
-    let changed = page[0].id;
-    drop((page, next));
-    let cut = captured(&world, thread).await?;
-    sqlx::query("UPDATE items SET payload=jsonb_build_object('text','short','text_len',5,'phase',NULL),seq_updated=$2 WHERE id=$1")
-        .bind(changed).bind(base+4).execute(&mut *conn).await?;
-    let frozen = cuts::items_page_bounded(
-        &mut conn,
-        cut.id,
-        base,
-        cut.captured_seq,
-        Some("main"),
-        false,
-    )
-    .await?;
-    assert_eq!(
-        frozen.len(),
-        2,
-        "the frozen byte measure does not shrink to the newer source body"
-    );
-    assert_eq!(
-        frozen[0].payload["text"].as_str().ok_or("text")?.len(),
-        size as usize
-    );
-    drop(frozen);
-    let live = reading::items_bounded(
-        &mut conn,
-        thread,
-        row.active_continuation_id,
-        Some(base),
-        true,
-        Some("main"),
-        cuts::PAGE,
-    )
-    .await?;
-    assert_eq!(live.len(), 3);
-    drop((live, conn));
     world.shutdown().await;
     Ok(())
 }

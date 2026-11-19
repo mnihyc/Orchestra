@@ -5,7 +5,6 @@
 pub mod access;
 pub mod activity;
 pub mod addresses;
-pub mod admin_messages;
 pub mod adoption;
 pub mod agent_history;
 pub mod approval_rules;
@@ -13,7 +12,6 @@ pub mod approvals;
 pub mod archive_plans;
 pub mod binding_start;
 pub mod browsers;
-pub mod capability_work;
 pub mod chats;
 pub mod component_updates;
 pub mod displays;
@@ -67,7 +65,6 @@ pub mod shared;
 pub mod shares;
 pub mod source;
 pub mod storage;
-pub mod summaries;
 pub mod terminals;
 pub mod thread_continuations;
 pub mod thread_history;
@@ -77,10 +74,4 @@ pub mod tokens;
 pub mod trace;
 pub mod transaction_guard;
 pub mod trust;
-/// Bounded projections over existing upload audit records.
-pub mod upload_history;
 pub mod uploads;
-
-pub mod ask;
-/// Durable fenced progress of the offline document purge.
-pub mod document_purge_progress;

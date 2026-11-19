@@ -562,25 +562,12 @@ pub enum MemberState {
     /// The source does not declare it, and it was never told.
     #[default]
     Unsupported,
-    /// Unsupported with a declared, actionable reason, rather than an error or a pending read.
-    UnsupportedBecause {
-        /// Why this member is not currently offered.
-        reason: FactUnavailableReason,
-    },
     /// The source declares it, and it was never told.
     NotReadYet,
     /// It was told as `null` or `[]`: none offered.
     Empty,
     /// It was told with a value.
     Told,
-}
-
-/// Reasons a source-declared member cannot currently be offered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum FactUnavailableReason {
-    /// The source requires its own separate administrative credential.
-    NeedsAdminKey,
 }
 
 impl MemberState {

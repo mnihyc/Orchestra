@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use orch_agent_programs::browsers;
 use orch_link_contract::browser::{
     EnvironmentFactsBrowser, EnvironmentFactsProgram, EnvironmentFactsVnc,
 };
@@ -153,7 +152,14 @@ fn bundled_browsers() -> Vec<PathBuf> {
                 found.push(executable_path);
             }
         }
-        for relative in browsers::BUNDLED_EXECUTABLES {
+        for relative in [
+            "chrome-win/chrome.exe",
+            "chrome-win64/chrome.exe",
+            "chrome-win32/chrome.exe",
+            "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+            "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ] {
             let executable_path = directory.path().join(relative);
             if executable(&executable_path) {
                 found.push(executable_path);
@@ -212,13 +218,28 @@ pub async fn discover(
         .into_iter()
         .map(|p| ("chromium".to_owned(), p))
         .collect();
-    for name in browsers::PATH_EXECUTABLES {
+    for name in [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "microsoft-edge",
+    ] {
         if let Some(path) = find_program(name) {
             candidates.push((name.to_owned(), path));
         }
     }
     #[cfg(target_os = "macos")]
-    for (name, path) in browsers::MACOS_APPLICATIONS {
+    for (name, path) in [
+        (
+            "google-chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            "microsoft-edge",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ),
+    ] {
         if executable(Path::new(path)) {
             candidates.push((name.to_owned(), PathBuf::from(path)));
         }
@@ -228,7 +249,10 @@ pub async fn discover(
         .iter()
         .filter_map(std::env::var_os)
     {
-        for (name, path) in browsers::WINDOWS_APPLICATIONS {
+        for (name, path) in [
+            ("google-chrome", "Google/Chrome/Application/chrome.exe"),
+            ("microsoft-edge", "Microsoft/Edge/Application/msedge.exe"),
+        ] {
             let path = PathBuf::from(&root).join(path);
             if executable(&path) {
                 candidates.push((name.to_owned(), path));

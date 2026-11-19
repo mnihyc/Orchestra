@@ -165,21 +165,6 @@ pub async fn answer(
     let Some(before) = of_harness(&mut *conn, environment, harness).await? else {
         return Ok(None);
     };
-    write_answer(conn, environment, harness, answer, by, at, &before).await?;
-    Ok(Some(before))
-}
-
-/// Writes the already selected native question while its Environment row is serialized.
-/// The caller keeps its first-effect check between native preparation and this update.
-pub async fn write_answer(
-    conn: &mut Conn,
-    environment: Id,
-    harness: &str,
-    answer: &str,
-    by: Id,
-    at: DateTime<Utc>,
-    before: &Trust,
-) -> Result<(), DbError> {
     let member = json!({
         "answer": answer,
         "by": by.to_string(),
@@ -195,7 +180,7 @@ pub async fn write_answer(
     .bind(member)
     .execute(conn)
     .await?;
-    Ok(())
+    Ok(Some(before))
 }
 
 /// The threads of an environment that wait for its answer about a workspace configuration.

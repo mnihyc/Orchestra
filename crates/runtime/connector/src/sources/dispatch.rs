@@ -134,28 +134,6 @@ struct Opened {
     authorization: Option<Secret>,
     protected: Vec<String>,
     send_key: bool,
-    secret_source: Option<String>,
-    by_default: bool,
-}
-impl Opened {
-    fn fields(&self, descriptor: &SourceDescriptor, element: SourceElement) -> SourceAsk {
-        let mut ask = self.ask.clone();
-        if self
-            .secret_source
-            .as_ref()
-            .is_some_and(|name| name != &descriptor.name)
-            || self.by_default && self.secret_source.is_none()
-        {
-            ask.secrets.clear();
-            ask.config.clear();
-        }
-        ask.secrets.retain(|name, _| {
-            descriptor
-                .secret_fields_for(element)
-                .any(|field| field.name == *name)
-        });
-        ask
-    }
 }
 struct Facts {
     source: Arc<dyn FactsSource>,
@@ -283,18 +261,13 @@ impl Context {
             authorization,
             protected,
             send_key,
-            secret_source: spec.secret_source.clone(),
-            by_default: spec.by == SourceBy::Default,
         })
     }
 
-    fn ask(
-        &self,
-        opened: &Opened,
-        descriptor: &SourceDescriptor,
-        element: SourceElement,
-    ) -> SourceAsk {
-        let mut ask = opened.fields(descriptor, element);
+    fn ask(&self, opened: &Opened, descriptor: &SourceDescriptor) -> SourceAsk {
+        let mut ask = opened.ask.clone();
+        ask.secrets
+            .retain(|name, _| descriptor.secret_fields().any(|field| field.name == *name));
         if opened.send_key && descriptor.wants_key() {
             ask.credential = self.key.as_ref().map(|key| SourceAskCredential {
                 key: Secret::new(key.expose().to_owned()),
@@ -705,7 +678,7 @@ impl Context {
                     },
                 ));
             }
-            let ask = self.ask(&opened, &descriptor, SourceElement::Facts);
+            let ask = self.ask(&opened, &descriptor);
             let used = selected.native || ask.credential.is_some();
             let answered = tokio::time::timeout(
                 orch_provider_contract::wire::READ_DEADLINE,
@@ -736,7 +709,7 @@ impl Context {
         match read {
             Ok((mut facts, source)) => {
                 self.add_keeper(&mut facts, kept);
-                let status = if signed_out || self.key_required && self.key.is_none() {
+                let status = if signed_out {
                     "needs_setup"
                 } else if exhausted(&facts, self.services.clock.time()) {
                     "exhausted"
@@ -812,7 +785,7 @@ impl Context {
             }
             let report = tokio::time::timeout(
                 orch_provider_contract::wire::LIST_DEADLINE,
-                source.list_models(self.ask(&opened, &descriptor, SourceElement::Models)),
+                source.list_models(self.ask(&opened, &descriptor)),
             )
             .await
             .map_err(|_| {
@@ -881,7 +854,7 @@ impl Context {
         if !descriptor.spends_resets() {
             return Err(SourceError::unsupported("resets.spend"));
         }
-        let ask = self.ask(&opened, &descriptor, SourceElement::Facts);
+        let ask = self.ask(&opened, &descriptor);
         let used = selected.native || ask.credential.is_some();
         let keeper = async {
             if !selected.native
@@ -990,69 +963,5 @@ pub fn failed_reset(error: SourceError) -> ProviderResetConsumeResult {
         }),
         outcome: String::new(),
         facts: ProviderFacts::default(),
-    }
-}
-
-#[cfg(test)]
-mod field_tests {
-    use super::*;
-    use orch_provider_contract::source::SourceDescriptorFacts;
-    use orch_provider_contract::{FactMember, SourceElement};
-
-    #[test]
-    fn a_changed_default_source_never_inherits_another_sources_admin_secret() {
-        let mut source = SourceDescriptor::new("first", "First", "Test facts source.");
-        source.facts = Some(SourceDescriptorFacts {
-            reports: vec![FactMember::Spend],
-            ..Default::default()
-        });
-        source.set_admin_credential(orch_provider_contract::source::AdminCredential {
-            labels: [("en".into(), "Admin key".into())].into(),
-            reports: vec![FactMember::Spend],
-        });
-        let mut opened = Opened {
-            secret_source: Some("first".into()),
-            by_default: true,
-            ask: SourceAsk {
-                provider: SourceAskProvider {
-                    id: orch_types::new_id(),
-                    name: "Example".into(),
-                },
-                endpoints: Vec::new(),
-                config: Default::default(),
-                secrets: [("admin_key".into(), Secret::new("test-first-admin"))].into(),
-                credential: None,
-            },
-            authorization: None,
-            protected: Vec::new(),
-            send_key: false,
-        };
-        assert!(
-            opened
-                .fields(&source, SourceElement::Facts)
-                .secrets
-                .contains_key("admin_key")
-        );
-        assert!(
-            opened
-                .fields(&source, SourceElement::Models)
-                .secrets
-                .is_empty()
-        );
-        source.name = "second".into();
-        assert!(
-            opened
-                .fields(&source, SourceElement::Facts)
-                .secrets
-                .is_empty()
-        );
-        opened.secret_source = None;
-        assert!(
-            opened
-                .fields(&source, SourceElement::Facts)
-                .secrets
-                .is_empty(),
-            "an unbound default cannot send administrative fields"
-        );
     }
 }

@@ -12,7 +12,6 @@
  * measured are written into the report of the run.
  */
 import { expect, type Page, test } from '@playwright/test';
-import english from '../../src/i18n/en.json' with { type: 'json' };
 
 import { fillNames, scenario, signIn } from '../e2e/support.ts';
 
@@ -96,7 +95,7 @@ test('the finder answers within its budget with ten thousand names in the fake A
   const factor = await slowdown(page);
 
   const local: number[] = [];
-  for (const [text, expected] of [['>sign', 'Sign out'], ['>theme', 'Theme: Dark'], [':sandbox', english.settingRegistry.sandbox.mode.title], ['>new org', 'New org'], [':idle stop', 'Idle stop']] as const) {
+  for (const [text, expected] of [['>sign', 'Sign out'], ['>theme', 'Theme: Dark'], [':sandbox', 'Sandbox'], ['>new org', 'New org'], [':idle stop', 'Idle stop']] as const) {
     local.push(await timeTo(page, text, expected));
   }
   const named: number[] = [];

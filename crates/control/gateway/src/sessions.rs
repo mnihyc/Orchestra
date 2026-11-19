@@ -270,14 +270,9 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         old.sender.bye(ByeCode::Replaced);
         tracing::info!(%machine, "a session replaced the one before it");
     }
-    inner.relay.with(|relay| {
-        relay.session_up_capable(
-            machine,
-            session_id,
-            sender.clone(),
-            auth.capabilities.clone(),
-        )
-    });
+    inner
+        .relay
+        .with(|relay| relay.session_up(machine, session_id, sender.clone()));
     if purpose.is_primary() {
         inner.backplane.send(BackplaneFrame::MachineUp(MachineUp {
             capabilities: auth.capabilities.clone(),

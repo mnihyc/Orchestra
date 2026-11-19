@@ -1,4 +1,4 @@
-//! Required effects of native Thread creators and adoption, shared by HTTP and the
+//! Required effects of the two existing thread creators, shared by HTTP and the
 //! ordinary writer's last rollbackable checkpoint before birth effects.
 //!
 //! A prefix owns only its current caller and canonical operation. It never exposes
@@ -100,16 +100,10 @@ impl Prefix {
         new: &NewThread,
         newly_created: Option<(Id, Id)>,
     ) -> Result<Self, CreateThreadError> {
-        if !matches!(
-            selection,
-            "ThreadCreate" | "TopicCreate.with_thread" | "ThreadAdopt"
-        ) {
+        if !matches!(selection, "ThreadCreate" | "TopicCreate.with_thread") {
             return Err(unreadable(
                 "an unrelated operation cannot enter a creator prefix",
             ));
-        }
-        if selection == "ThreadAdopt" && newly_created.is_some() {
-            return Err(unreadable("native adoption uses an existing Environment"));
         }
         let plan = Prepared::for_selection(selection).map_err(scope)?;
         plan.compatible(principal.caller()).map_err(scope)?;
@@ -117,9 +111,6 @@ impl Prefix {
         let new_environment_home = newly_created.map(|(home, _)| home);
         let new_environment_job = newly_created.map(|(_, job)| job);
         new_environment(&mut known, conn, new_environment_home).await?;
-        if selection == "ThreadAdopt" {
-            crate::adoption::operation::bind_creation(conn, &mut known, new).await?;
-        }
         // The returned partial Caller remains private in this opaque proof. It is used
         // only by the one writer's rollbackable prefix, never persisted or returned.
         let caller = known
@@ -149,9 +140,6 @@ impl Prefix {
         }
         let mut plan = subject_plan(conn, &self.selection, new.topic).await?;
         new_environment(&mut plan, conn, self.new_environment_home).await?;
-        if self.selection == "ThreadAdopt" {
-            crate::adoption::operation::bind_creation(conn, &mut plan, new).await?;
-        }
         let env = orch_db::queries::environments::thread_engine::environment(conn, new.environment)
             .await?
             .ok_or_else(|| unreadable("the creator Environment disappeared"))?;
@@ -168,13 +156,6 @@ impl Prefix {
             new.environment,
             pending,
             birth.worktree.is_some(),
-        )
-        .await?;
-        super::creator_files::bind_readers(
-            conn,
-            &mut plan,
-            new.environment,
-            birth.let_into_environment,
         )
         .await?;
         let frozen = birth
@@ -254,8 +235,12 @@ impl Prefix {
         } else {
             None
         };
-        let source_thread = match initial.as_ref().and_then(|initial| initial.source_thread()) {
-            Some(thread) => Some(targets::node(conn, thread).await.map_err(unreadable)?),
+        let source_thread = match &initial {
+            Some(initial) => Some(
+                targets::node(conn, initial.source_thread())
+                    .await
+                    .map_err(unreadable)?,
+            ),
             None => None,
         };
         let source_environment = match &initial {
@@ -336,13 +321,11 @@ impl Prefix {
             crate::jobs::provision::retain_creator_provision_origin(
                 conn,
                 &origin,
-                crate::jobs::provision::CreatedProvision {
-                    thread,
-                    environment: new.environment,
-                    home,
-                    job,
-                    new_created: true,
-                },
+                thread,
+                new.environment,
+                home,
+                job,
+                true,
                 self.principal.now(),
             )
             .await?;
@@ -454,7 +437,7 @@ pub async fn restore_initial_files(
     origin: &orch_authz::CapturedOperation,
     created_thread: Id,
     target_environment: Id,
-    source_thread: Option<Id>,
+    source_thread: Id,
     source_environment: Id,
     now: orch_types::Time,
 ) -> Result<Option<Caller>, EngineError> {
@@ -483,14 +466,9 @@ pub async fn restore_initial_files(
     let home = targets::node(conn, env.home_node_id)
         .await
         .map_err(EngineError::unreadable)?;
-    let source = match source_thread {
-        Some(thread) => Some(
-            targets::node(conn, thread)
-                .await
-                .map_err(EngineError::unreadable)?,
-        ),
-        None => None,
-    };
+    let source = targets::node(conn, source_thread)
+        .await
+        .map_err(EngineError::unreadable)?;
     let source_env = targets::page_object(
         conn,
         orch_access_contract::decisions::ObjectRef {
@@ -505,24 +483,21 @@ pub async fn restore_initial_files(
             "creator_new_environment_homes",
             orch_access_contract::key_scope::KeyAction::Write,
             ObjectKind::Environment,
-            Some(&home),
+            &home,
         ),
         (
             "creator_initial_file_threads",
             orch_access_contract::key_scope::KeyAction::Read,
             ObjectKind::Thread,
-            source.as_ref(),
+            &source,
         ),
         (
             "creator_initial_file_environments",
             orch_access_contract::key_scope::KeyAction::Read,
             ObjectKind::Environment,
-            Some(&source_env),
+            &source_env,
         ),
     ] {
-        let Some(target) = target else {
-            continue;
-        };
         facts.extend(super::creator_files::required_facet(
             &plan,
             TargetResolver::ResolvedCollection(role),

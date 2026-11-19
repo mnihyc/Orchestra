@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Wait for the exact ref and commit's full CI run before allowing publication.
-
-The deployment scenarios are not a job of that run: the release workflow runs them against its own package
-(`scenarios.yml`), and `assemble` waits for them.
-"""
+"""Wait for the exact ref and commit's full CI run before allowing publication."""
 
 import argparse
 import json
@@ -27,13 +23,16 @@ def latest_run(tag, commit, runs):
     return max(eligible, key=lambda run: run["id"]) if eligible else None
 
 
-def status(tag, commit, runs):
+def status(tag, commit, runs, *, require_dispatch=False):
     """Return the green run, wait for an unfinished one, or refuse a finished failure."""
     run = latest_run(tag, commit, runs)
     if run is None or run.get("status") != "completed":
         return None
     if run.get("conclusion") != "success":
         raise ValueError(f"CI run {run['id']} for {tag} completed with {run.get('conclusion') or 'no conclusion'}; nothing published")
+    # Branch pushes skip the deployment scenarios; snapshot rehearsals require the manual full run.
+    if require_dispatch and run.get("event") != "workflow_dispatch":
+        return None
     return run
 
 
@@ -44,10 +43,10 @@ def fetch(repo, commit):
     return [run for page in json.loads(response.stdout) for run in page["workflow_runs"]]
 
 
-def wait(tag, commit, repo, once=False, clock=time.monotonic, sleep=time.sleep):
+def wait(tag, commit, repo, once=False, clock=time.monotonic, sleep=time.sleep, *, require_dispatch=False):
     deadline = clock() + (0 if once else WAIT_SECONDS)
     while True:
-        run = status(tag, commit, fetch(repo, commit))
+        run = status(tag, commit, fetch(repo, commit), require_dispatch=require_dispatch)
         if run is not None:
             print(f"CI run {run['id']} attempt {run.get('run_attempt', 1)} is green for {tag} ({commit})", flush=True)
             return run
@@ -64,11 +63,12 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"), required=False)
     parser.add_argument("--once", action="store_true", help="recheck immediately before publication")
+    parser.add_argument("--require-dispatch", action="store_true", help="require the manual CI run that includes deployment on a snapshot branch")
     args = parser.parse_args()
     try:
         if not args.repo:
             raise ValueError("--repo is required")
-        wait(args.ref, args.commit, args.repo, args.once)
+        wait(args.ref, args.commit, args.repo, args.once, require_dispatch=args.require_dispatch)
         return 0
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
         print(f"::error::release CI: {error}", file=sys.stderr)

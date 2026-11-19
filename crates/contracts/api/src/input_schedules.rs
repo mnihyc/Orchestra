@@ -52,38 +52,6 @@ pub enum InputTiming {
         /// ISO weekdays, 1..7; empty for daily.
         weekdays: Vec<u8>,
     },
-    /// An explicit five-field UTC cron expression used by managed agent schedules.
-    Cron {
-        /// Minute, hour, day of month, month and weekday; numeric lists/ranges/steps.
-        expression: String,
-        /// Always UTC; civil daily/weekly schedules keep their existing IANA-zone rules.
-        zone: String,
-    },
-}
-
-/// A managed future input created by the thread's own agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum InputScheduleKind {
-    /// Ordinary agent-scheduled work, governed by the existing input queue.
-    Agent,
-}
-
-/// Safe origin and end conditions; the note remains ordinary thread content/private definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AgentInputSchedule {
-    /// The only thread this agent schedule can address.
-    pub thread_id: Id,
-    /// The profile which created it.
-    pub agent_id: Id,
-    /// The actual source turn which made the call.
-    pub source_turn_id: Id,
-    /// The inclusive final instant for recurring work.
-    pub until: Time,
-    /// The positive occurrence limit explicitly chosen or defaulted at creation.
-    pub max_runs: i64,
-    /// Occurrences already claimed, including visible refusals/skips.
-    pub runs: i64,
 }
 
 /// A repeating civil frequency.
@@ -126,28 +94,6 @@ pub enum InputScheduleState {
     Deleted,
 }
 
-/// One pending agent continuation visible beside the thread's timeline.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ThreadPendingAgentSchedule {
-    /// The actual schedule controlled by the ordinary cancellation route.
-    pub id: Id,
-    /// Its safe authored name, without the private note or definition.
-    pub name: String,
-    /// The native future-work state; only active rows enter this projection.
-    pub state: InputScheduleState,
-    /// The next due instant recorded by the schedule producer.
-    pub next_run_at: Time,
-}
-
-/// The current thread's pending agent rows at one native topic-feed cut.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ThreadPendingAgentSchedules {
-    /// The topic feed sequence that supplied these pending rows.
-    pub seq: Seq,
-    /// Active agent schedules for this exact thread, next due first.
-    pub items: Vec<ThreadPendingAgentSchedule>,
-}
-
 /// The author's private frozen draft, shown to nobody else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputScheduleDefinition {
@@ -173,12 +119,6 @@ pub struct InputScheduleDestination {
 pub struct InputSchedule {
     /// Schedule identity.
     pub id: Id,
-    /// Present only for agent-created schedules; absent preserves existing people's schedules.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<InputScheduleKind>,
-    /// Safe agent origin and end conditions, where this is an agent schedule.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<AgentInputSchedule>,
     /// Topic, redacted where unreadable.
     pub topic: Option<NodeRef>,
     /// The person whose current authority will be used.
@@ -340,7 +280,6 @@ crate::endpoints! {
             Facet::required(Write, &[Object(K::Thread)], Target::Resolved("scheduled_destinations")),
             Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("scheduled_management")),
             Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
             Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
             Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
@@ -376,7 +315,6 @@ crate::endpoints! {
             Facet::required(Write, &[Object(K::Thread)], Target::Resolved("scheduled_destinations")),
             Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("scheduled_management")),
             Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
-            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
             Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
             Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),

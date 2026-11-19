@@ -30,10 +30,8 @@ export function adoptSession(topicId: string, body: ThreadAdoptBody, key: string
 }
 
 /** Reads a failed adoption's earlier record again, without an agent input or turn. */
-export async function retryAdoptedHistory(threadId: string, key: string): Promise<Thread> {
-  const result = await ok(api.POST('/threads/{id}/adopt/retry-history', { params: { path: { id: threadId } }, ...repeatable(key) }));
-  if ('projection' in result) throw new Error('The history retry completed, but its content is no longer available.');
-  return result;
+export function retryAdoptedHistory(threadId: string, key: string): Promise<Thread> {
+  return ok(api.POST('/threads/{id}/adopt/retry-history', { params: { path: { id: threadId } }, ...repeatable(key) }));
 }
 
 /** The band reads only stored history and present machine facts; opening it asks no harness or model. */

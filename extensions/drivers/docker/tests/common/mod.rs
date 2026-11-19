@@ -343,9 +343,7 @@ impl Lab {
             .unwrap_or_else(|error| panic!("{} could not be made: {error}", spec.name))
     }
 
-    /// Makes and starts a unit, then waits for its connector's completion marker.
-    /// A kept state volume can carry an earlier run's marker: wait for the actual output
-    /// with `wait_read` before inspecting effects of a new command on reused volumes.
+    /// Makes and starts a unit, and waits until its connector has done what it was asked.
     pub async fn run(&self, spec: &RuntimeSpec) -> UnitRef {
         let unit = self.create(spec).await;
         self.driver
@@ -381,36 +379,6 @@ impl Lab {
             }
         }
         None
-    }
-
-    /// Waits for actual file contents, preserving `read`'s shape for the caller's assertions.
-    /// The ordinary connector budget and poll interval also bound stalled Docker reads.
-    pub async fn wait_read(
-        &self,
-        unit: &UnitRef,
-        path: &str,
-        ready: impl Fn(&str) -> bool,
-    ) -> Option<String> {
-        let mut last = None;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let result = tokio::time::timeout_at(deadline, async {
-            loop {
-                last = self.read(unit, path).await;
-                if let Some(text) = last.as_deref()
-                    && ready(text)
-                {
-                    return last.take();
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
-        .await;
-        result.unwrap_or_else(|_| {
-            panic!(
-                "{} did not publish the expected contents of {path} within 60s; last read: {last:?}",
-                unit.name
-            )
-        })
     }
 
     /// Waits for the file a connector writes when it has done what it was asked.

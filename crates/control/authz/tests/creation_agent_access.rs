@@ -67,6 +67,7 @@ async fn node(conn: &mut orch_db::Conn, principal: &Principal, parent: Id, threa
                 name: "Actual created topic",
                 name_by_person: true,
                 description: "",
+                description_by_person: false,
                 owner: first,
                 org: None,
                 at: principal.now().get(),

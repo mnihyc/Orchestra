@@ -3,8 +3,6 @@
 //! These declarations describe producer facts. They add no permission evaluator or wire
 //! authority shape: each consumer still publishes its own ordinary operation/facet list.
 
-use crate::operation_sources::{Binding, Cardinality, Declaration};
-use crate::operations::FacetUsage;
 use crate::operations::{FacetSpec, TargetResolver};
 use orch_access_contract::key_scope::{KeyAction, KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::{ObjectKind, ResourceKind};
@@ -37,21 +35,6 @@ pub struct Family {
     pub names: NameRoles,
 }
 
-/// Factual roles of the same native family at a transport or continuing boundary.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// The selected native primary subject.
-    Primary,
-    /// A distinct native content-source collection, by declaration position.
-    Content(usize),
-    /// Selected access Group names.
-    Groups,
-    /// Org, Project, Topic or Thread names, by declaration position.
-    Node(usize),
-    /// Selected document-folder names.
-    Containers,
-}
-
 /// The existing typed business family as a static facet declaration.
 pub const fn resources(kind: ResourceKind) -> &'static [KeyTargetKind] {
     match kind {
@@ -68,69 +51,6 @@ pub const fn resources(kind: ResourceKind) -> &'static [KeyTargetKind] {
 }
 
 impl Family {
-    /// The same factual row used by a native continuation. Actions and business kinds
-    /// still come exclusively from this family's canonical operation facets.
-    pub const fn bindings<const N: usize>(&self, primary: TargetResolver) -> [Binding<Source>; N] {
-        let count = 1
-            + self.sources.len()
-            + self.names.groups.is_some() as usize
-            + self.names.nodes.len()
-            + self.names.containers.is_some() as usize;
-        assert!(N == count);
-        let root = Binding {
-            source: Source::Primary,
-            target: primary,
-            usage: FacetUsage::Required,
-            cardinality: if matches!(primary, TargetResolver::ResolvedCollection(_)) {
-                Cardinality::Collection
-            } else {
-                Cardinality::One
-            },
-        };
-        let mut bindings = [root; N];
-        let mut next = 1;
-        let mut source = 0;
-        while source < self.sources.len() {
-            bindings[next] = Binding {
-                source: Source::Content(source),
-                target: TargetResolver::ResolvedCollection(self.sources[source].role),
-                usage: FacetUsage::Required,
-                cardinality: Cardinality::Collection,
-            };
-            source += 1;
-            next += 1;
-        }
-        if let Some(role) = self.names.groups {
-            bindings[next] = Binding {
-                source: Source::Groups,
-                target: TargetResolver::ResolvedCollection(role),
-                usage: FacetUsage::Required,
-                cardinality: Cardinality::Collection,
-            };
-            next += 1;
-        }
-        let mut node = 0;
-        while node < self.names.nodes.len() {
-            bindings[next] = Binding {
-                source: Source::Node(node),
-                target: TargetResolver::ResolvedCollection(self.names.nodes[node]),
-                usage: FacetUsage::Required,
-                cardinality: Cardinality::Collection,
-            };
-            node += 1;
-            next += 1;
-        }
-        if let Some(role) = self.names.containers {
-            bindings[next] = Binding {
-                source: Source::Containers,
-                target: TargetResolver::ResolvedCollection(role),
-                usage: FacetUsage::Required,
-                cardinality: Cardinality::Collection,
-            };
-        }
-        bindings
-    }
-
     /// Compose the primary resolver with these same native source/name roles. The exact
     /// array length is checked in const evaluation; no unresolved role becomes empty.
     pub const fn facets<const N: usize>(&self, primary: TargetResolver) -> [FacetSpec; N] {
@@ -227,10 +147,4 @@ pub const HOST: Family = Family {
         ],
         containers: None,
     },
-};
-
-/// Host Get and its once-only native ports proposal keep the same canonical roles.
-pub const HOST_GET: Declaration<Source> = Declaration {
-    operation: "HostGet",
-    bindings: &HOST.bindings::<7>(TargetResolver::Path("id")),
 };

@@ -113,7 +113,7 @@ function NewToken({ onClose, returned }: { onClose: () => void; returned: Return
   );
 }
 
-export function ScopesCell({ token, compact = false }: { token: ApiTokenInfo; compact?: boolean }) {
+function ScopesCell({ token, compact = false }: { token: ApiTokenInfo; compact?: boolean }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   if (token.rules !== undefined && token.rules !== null) return <span>{token.rules.length === 0 ? t('operationKeys.denyAllShort') : t('operationKeys.ruleCount', { count: token.rules.length })}</span>;
@@ -140,7 +140,7 @@ function KeyReview({ token }: { token: ApiTokenInfo }) {
 }
 
 /** A token's native place name needs no additional read until its shared reference card opens. */
-export function TokenPlace({ node }: { node: ApiTokenInfo['node'] }) {
+function TokenPlace({ node }: { node: ApiTokenInfo['node'] }) {
   const { t } = useTranslation();
   if (node === null) return <span>{t('tokens.everywhere')}</span>;
   if (node.redacted || node.name === null) return <span>{t('people.privateReference')}</span>;
@@ -228,7 +228,7 @@ export function Tokens() {
         </Button>
       </div>
       {list.isPending ? (
-        <SkeletonRows read={list} rows={3} />
+        <SkeletonRows rows={3} />
       ) : list.isError ? (
         <ErrorState error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (

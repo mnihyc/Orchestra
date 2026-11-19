@@ -8,7 +8,7 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
-import { accepted, api, done, ok, repeatable } from '@/api/client';
+import { api, done, ok, repeatable } from '@/api/client';
 import { cachedRow, feedSequences } from '@/api/cache';
 import { agentReachKey } from '@/api/agentReach';
 import { queryClient, type ReadOptions } from '@/api/query';
@@ -18,7 +18,6 @@ import type {
   AgentReachOverview,
   Environment,
   EnvironmentMcp,
-  EnvironmentMcpImportCreateBody,
   EnvironmentUpdateBody,
   Job,
   MachineEnvironmentCreateBody,
@@ -33,13 +32,6 @@ export const environmentMcpKey = (id: string) => ['environment-mcp', id] as cons
 
 /** Current hosted server states and masked failures. */
 export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: environmentMcpKey(id), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
-
-/** Import and optional enablement are one producer, including an accepted restricted receipt. */
-export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImportCreateBody, key: string) {
-  const reply = await accepted(api.POST('/environments/{id}/mcp/imports', { params: { path: { id } }, body, ...repeatable(key) }));
-  if ('projection' in reply) return { id: reply.server_id, server: null };
-  return { id: reply.id, server: reply };
-}
 
 /** Restart only this server, as a job; environment files and running turns stay in place. */
 export function restartEnvironmentMcpServer(id: string, name: string): Promise<Job> {
@@ -84,11 +76,8 @@ export const environmentSettingsQuery = (id: string) =>
       ok(api.GET('/environments/{id}/settings', { params: { path: { id } }, signal })),
   });
 
-/** An omitted home is selected from the registered Machine in the guarded native creation. */
-export type MachineEnvironmentRegistration = Omit<MachineEnvironmentCreateBody, 'home_id'> & {home_id?: string};
-
 /** Registers a directory on a machine of the caller's as an environment. The machine checks the root against its own policy. */
-export function registerEnvironment(machineId: string, body: MachineEnvironmentRegistration, key: string) {
+export function registerEnvironment(machineId: string, body: MachineEnvironmentCreateBody, key: string): Promise<Environment> {
   return ok(api.POST('/machines/{id}/environments', { params: { path: { id: machineId } }, body, ...repeatable(key) }));
 }
 

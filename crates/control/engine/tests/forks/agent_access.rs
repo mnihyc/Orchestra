@@ -304,7 +304,6 @@ async fn side_lane_keeps_its_reading_boundary(mode: orch_link_contract::commands
                 &rig.caller(),
                 &Origin::default(),
                 &ShareWithAgents {
-                    link_origin: None,
                     viewers_read: None,
                     what,
                     parts: Some(parts),

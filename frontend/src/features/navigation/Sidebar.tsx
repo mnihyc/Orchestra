@@ -37,7 +37,7 @@ import { meQuery } from '@/api/auth';
 import { markRead as markThreadRead } from '@/api/threads';
 import { read as readChat } from '@/features/chat/acts';
 import { useOpenPath } from '@/features/chat/open';
-import { type Command, registerCommands } from '@/features/finder/commands';
+import { type Command, useRegisterCommands } from '@/features/finder/commands';
 import { useShowArchived } from '@/features/navigation/archived';
 import { attentionWriter, isUnread, reloadAttention, useAttention, useAttentionFeed } from '@/features/navigation/attention';
 import {
@@ -91,7 +91,7 @@ import {
   type TreeView,
 } from '@/features/navigation/treeRows';
 import { RECENT_ROWS, recentsOfOrgQuery, useSeenHere } from '@/features/navigation/visits';
-import { useViewportShape } from '@/features/workbench/Narrow';
+import { useShape } from '@/features/workbench/Narrow';
 import type { EverythingRow, NodeKind, TreeNode } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
@@ -112,7 +112,6 @@ import { Menu, type MenuEntry } from '@/ui/Menu';
 import { NodeIcon } from '@/ui/NodeIcon';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusDot } from '@/ui/StatusDot';
-import { Pagination } from '@/ui/Pagination';
 import { toast } from '@/ui/Toast';
 import type { ViewMenuProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
@@ -312,10 +311,9 @@ export function NavigationActions({ entries, label }: Partial<ViewMenuProps> = {
 
 export function Sidebar() {
   const orgId = useNavigationOrg();
-  const orgRead = useQuery({ ...orgsQuery, enabled: false });
-  const orgs = orgRead.data ?? [];
+  const orgs = useQuery({ ...orgsQuery, enabled: false }).data ?? [];
   const person = useQuery({ ...meQuery, enabled: false }).data;
-  if (orgId === null) return <div className="flex h-(--control-md) items-stretch"><OrgSwitcher orgs={railOrgs(orgs, person)} current={null} loading={orgRead.isPending} /></div>;
+  if (orgId === null) return <div className="flex h-(--control-md) items-stretch"><OrgSwitcher orgs={railOrgs(orgs, person)} current={null} /></div>;
   return <NavigationBody orgId={orgId} />;
 }
 
@@ -332,9 +330,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   const heading = useCurrentHeading();
   const preferences = useSidebarPreferences();
   const participationCopy = useParticipationCopy();
-  // A small screen has no rail: there the head of Navigation is the way to another org. Beside a rail it is the org in view,
-  // whatever the width of the cell the bar stands in.
-  const screen = useViewportShape();
+  const shape = useShape();
   const { show } = preferences;
   const shown = useViewShown();
   const [arrangedAs, chooseArrangement] = useViewChoice<string>('navigation', 'arrangement', 'tree', orgId ?? undefined);
@@ -372,7 +368,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   // Whether the screen in view shows the chat of its place: that chat's row is then the one in view.
   const chatInView = useRouterState({ select: (state) => (state.location.search as { panel?: unknown }).panel === 'chat' });
   const showArchived = useShowArchived(orgId);
-  const unreadChats = useUnreadChats(orgId);
+  const unreadChats = useUnreadChats(orgId, shown && show.chats);
 
   // The reader's standing in chats, as their own feed keeps it, and the org's group chats they are in.
   const chatStates = useChatStates((state) => state.states);
@@ -837,9 +833,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
     ],
     [words, begin, nearer, noNearer, beginning, up, upKeys],
   );
-  // The tree's beginning is the frame's, not a tab's: its acts are offered whichever view has the keyboard, as the bar
-  // stands beside them all (a view's own commands wait for that view's focus).
-  useEffect(() => registerCommands(commands), [commands]);
+  useRegisterCommands(commands);
 
   const viewEntries: MenuEntry[] = [
     { id: 'open-everything', label: t('navigation.openEverything'), icon: <ListTree aria-hidden />, onSelect: () => {
@@ -908,9 +902,9 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
   return (
     <nav ref={bar} aria-label={t('views.navigation.title')} className="flex h-full min-h-0 flex-col bg-bar-surface">
       {keyboardHere && <TreeKeys up={stepUp} only={showOnlyRow} narrow={filterKey} />}
-      <div className="flex h-(--control-md) shrink-0 items-stretch border-b border-border">
-        <OrgSwitcher orgs={ownOrgs} current={current} loading={orgs.isPending} choose={screen === 'small'} />
-      </div>
+      {shape === 'small' && <div className="flex h-(--control-md) shrink-0 items-stretch border-b border-border">
+        <OrgSwitcher orgs={ownOrgs} current={current} />
+      </div>}
       <div data-bar-scroll className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {current !== null && (
           <ul className="flex flex-col py-1">
@@ -985,7 +979,7 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
             {orgs.isError ? (
               <ErrorState compact error={orgs.error} retrying={orgs.isRefetching} onRetry={() => void orgs.refetch()} />
             ) : orgId === null || rootId === null || (!tree.loaded && tree.error === null) ? (
-              <SkeletonRows read={tree} rows={6} />
+              <SkeletonRows rows={6} />
             ) : !tree.loaded ? (
               <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />
             ) : hasRows ? (
@@ -1008,7 +1002,6 @@ function NavigationBody({ orgId }: { orgId: string | null }) {
               <EmptyState compact icon={<FolderOpen aria-hidden />} title={t(beginning === null ? 'navigation.noProjects' : 'navigation.begins.empty')} />
             )}
           </div>
-          {show.chats && <Pagination hasMore={mine.hasNextPage} loading={mine.isFetchingNextPage} error={mine.error} onMore={() => void mine.fetchNextPage()} />}
           {tree.loaded && tree.error !== null && orgId !== null && <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />}
           </>}
         </Section>

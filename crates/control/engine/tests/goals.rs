@@ -12,10 +12,7 @@
 )]
 
 mod common;
-
 mod native_tools;
-#[path = "goals/policy_limits.rs"]
-mod policy_limits;
 
 use common::{World, eventually, meanwhile, turn_ended};
 use orch_api_contract::goals::{

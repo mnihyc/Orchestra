@@ -1,7 +1,7 @@
 /** The finder at work: opened by its key from anywhere, names found as they are typed and opened by Enter, commands run from it, the signs that keep it to one kind of answer, what a person may not see never listed, and the list of keys drawn from what is bound. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, deny, failNames, fillNames, holdSearch, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, bodySent, deny, failNames, fillNames, holdSearch, PEOPLE, scenario, signIn } from './support.ts';
 import { id, LATER_AT } from '../doubles/fixtures.ts';
 import { DOCS } from './documents-support.ts';
 
@@ -60,10 +60,11 @@ test('the finder opens by its key from anywhere, and gives the keyboard back to 
 
 test('with nothing typed it lists where the person went and offers what can be done here', async ({ page }) => {
   await signIn(page);
-  // The page's own read tells the server where the person went.
+  // Going to a place is told to the server, which is what makes it one of the person's recents.
+  const told = page.waitForResponse((response) => response.url().includes('/me/recents') && response.request().method() === 'POST');
   await page.goto(`/topic/${ACME.fixLogin}`);
   await expect(page.getByRole('heading', { name: 'Fix login', level: 1 })).toBeVisible();
-  await page.waitForLoadState('networkidle');
+  await told;
   await openFinder(page);
 
   await expect(finder(page).getByText('Recent', { exact: true })).toBeVisible();
@@ -85,19 +86,18 @@ test('documents and resources share Starred, Recent and the same selected-name s
   await expect(result(page, /Team Anthropic/)).toBeVisible();
   await finder(page).getByRole('button', { name: 'Star Team Anthropic', exact: true }).click();
   await expect(finder(page).getByRole('button', { name: 'Unstar Team Anthropic', exact: true })).toBeVisible();
-  // Authorized page reads record visits; drawing a page no longer sends a second mutation.
-  const providerVisit = page.waitForResponse((response) => /\/providers\/[^/]+$/.test(new URL(response.url()).pathname)
-    && response.request().method() === 'GET' && response.request().headers()['x-orch-view']?.startsWith('/resources/providers/') === true);
+  const providerVisit = page.waitForResponse(async (response) => response.url().endsWith('/me/visits')
+    && response.request().method() === 'POST' && ((await bodySent(response.request())) as { kind?: string }).kind === 'provider');
   await field(page).focus();
   await field(page).press('Enter');
   await expect(page).toHaveURL(/\/resources\/providers\//);
-  expect((await providerVisit).status()).toBe(200);
+  expect((await providerVisit).status()).toBe(204);
 
-  const documentVisit = page.waitForResponse((response) => new RegExp(`/documents/${DOCS.plan}(?:/sync)?$`).test(new URL(response.url()).pathname)
-    && response.request().method() === 'GET' && response.request().headers()['x-orch-view']?.startsWith(`/doc/${DOCS.plan}`) === true);
+  const documentVisit = page.waitForResponse(async (response) => response.url().endsWith('/me/visits')
+    && response.request().method() === 'POST' && ((await bodySent(response.request())) as { kind?: string }).kind === 'document');
   await page.goto(`/doc/${DOCS.plan}`);
   await expect(page.getByRole('textbox', { name: 'Title', exact: true })).toHaveValue('Rollout plan');
-  expect((await documentVisit).status()).toBe(200);
+  expect((await documentVisit).status()).toBe(204);
   await openFinder(page);
   await expect(finder(page).getByText('Starred', { exact: true })).toBeVisible();
   await expect(result(page, /Team Anthropic/)).toBeVisible();
@@ -105,16 +105,9 @@ test('documents and resources share Starred, Recent and the same selected-name s
   await expect(result(page, /Rollout plan/)).toBeVisible();
 
   await field(page).fill('rollout plan');
-  // The open workbench tab is also a command; select the real name before its footer action.
-  const document = result(page, /Rollout plan document:/);
-  await document.hover();
-  await expect(document).toHaveAttribute('aria-selected', 'true');
   await finder(page).getByRole('button', { name: 'Star Rollout plan', exact: true }).click();
   await expect(finder(page).getByRole('button', { name: 'Unstar Rollout plan', exact: true })).toBeVisible();
   await field(page).fill('team anthropic');
-  const provider = result(page, /Team Anthropic provider/);
-  await provider.hover();
-  await expect(provider).toHaveAttribute('aria-selected', 'true');
   await finder(page).getByRole('button', { name: 'Unstar Team Anthropic', exact: true }).click();
   await expect(finder(page).getByRole('button', { name: 'Star Team Anthropic', exact: true })).toBeVisible();
   await field(page).clear();
@@ -134,8 +127,7 @@ test('a name is found by three letters, says where it lies, and is opened by Ent
   await expect(topic).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Enter');
 
-  // The overview keeps its list choices in its address.
-  await expect.poll(() => new URL(page.url()).pathname).toBe(`/topic/${ACME.fixLogin}`);
+  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}$`));
   await expect(page.getByRole('heading', { name: 'Fix login', level: 1 })).toBeVisible();
   await expect(finder(page)).toHaveCount(0);
 });
@@ -193,16 +185,17 @@ test('a folder is listed like a project, with the way to it', async ({ page }) =
   await expect(page).toHaveURL(new RegExp(`/project/${ACME.checkout}$`));
 });
 
-test('control and Enter open a result in a new tab of the workbench, and leave the one in view open', async ({ page, context }) => {
+test('control and Enter open a result in a new tab of the browser, and leave this one where it was', async ({ page, context }) => {
   await signIn(page);
+  const here = page.url();
   await openFinder(page);
   await typeIn(page, 'fix');
   await expect(result(page, /Fix login.*topic/)).toBeVisible();
-  // A new tab is a tab of the workbench: the result opens beside what was open, which stays.
-  await page.keyboard.press('Control+Enter');
-  const tabs = page.getByRole('tablist', { name: 'Main area' });
-  await expect(tabs.getByRole('tab', { name: /Fix login/ })).toHaveCount(1);
-  expect(context.pages()).toHaveLength(1);
+  const [opened] = await Promise.all([context.waitForEvent('page'), page.keyboard.press('Control+Enter')]);
+  await opened.waitForLoadState('domcontentloaded');
+  expect(opened.url()).toContain(`/topic/${ACME.fixLogin}`);
+  expect(page.url()).toBe(here);
+  await opened.close();
 });
 
 test('a command is run from it: found by what it does, and done by Enter', async ({ page }) => {
@@ -246,8 +239,7 @@ test('a command the person may not use is listed, switched off, with the reason'
   const make = result(page, /New topic/);
   await expect(make).toBeVisible();
   await expect(make).toHaveAttribute('aria-disabled', 'true');
-  // Its reason names what it takes and whom to ask.
-  await expect(make).toContainText('You can’t create topics in Web. Ask Ada Lovelace, who owns it.');
+  await expect(make).toContainText(/Interact Project/);
   // Enter does nothing with it: nothing opens.
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog', { name: /New topic/ })).toHaveCount(0);
@@ -293,9 +285,7 @@ test('the last row of a full name group opens the paged inventory for the same w
 test('Everything retains the ordinary focus carried by a finder continuation', async ({ page }) => {
   await signIn(page);
   await page.goto('/everything?q=main&participating=true');
-  // The focus is among the filters, behind the button that counts what is on.
-  await page.locator('[data-filter-bar]').getByRole('button', { name: /filter/i }).click();
-  const focus = page.getByRole('dialog', { name: 'Filters' }).getByRole('switch');
+  const focus = page.locator('[data-filter-bar]').getByRole('switch');
   await expect(focus).toBeChecked();
   await expect(page.getByRole('searchbox', { name: 'Search by name' })).toHaveValue('main');
   await focus.uncheck();
@@ -373,32 +363,21 @@ test('a chat found from another org opens the chat in its own org by its served 
   const chat = new URL(page.url()).searchParams.get('chat');
   await page.goto(`/org/${id(2, 1)}`);
   await openFinder(page);
-  const scoped = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.pathname.endsWith('/search/names') && url.searchParams.get('q') === 'dora'
-      && url.searchParams.get('org_id') === id(2, 1) && url.searchParams.get('kinds')?.includes('chat') === true;
-  });
   await field(page).fill('dora');
   const direct = result(page, /Ada Lovelace, Dora Developer.*chat/);
-  expect((await scoped).status()).toBe(200);
-  await expect(direct).toHaveCount(0);
-  // Searches start in this org; widen explicitly before looking for Acme's chat.
-  await finder(page).getByRole('button', { name: /^Search org:/ }).click();
-  await page.getByRole('menuitemradio', { name: 'All my orgs', exact: true }).click();
   await expect(direct).toBeVisible();
   await direct.click();
   await expect(page).toHaveURL(new RegExp(`/org/${ACME.org}/messages\\?chat=`));
   expect(new URL(page.url()).searchParams.get('chat')).toBe(chat);
-  await expect(page.getByText('Say hello to Dora Developer.', { exact: true })).toBeVisible();
+  await expect(page.getByText('No messages yet. Say hello to Dora Developer.')).toBeVisible();
 });
 
-test('an org result opens at the address the server gives it, not one guessed from its name', async ({ page }) => {
+test('an org result keeps its identifier address instead of guessing from its current slug', async ({ page }) => {
   await signIn(page);
   await openFinder(page);
   await field(page).fill('acme');
   await result(page, /^Acme.*org/).click();
-  // The served address is the org's own; the overview then keeps its list choices in the address.
-  await expect(page).toHaveURL(/\/org\/acme(\?|$)/);
+  await expect(page).toHaveURL(new RegExp(`/org/${ACME.org}$`));
   await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
 });
 
@@ -439,8 +418,7 @@ test('/ and words lead to the search of what was said', async ({ page }) => {
   const started = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/search/stream'));
   await page.keyboard.press('End');
   await page.keyboard.press('Enter');
-  // The search keeps the org in view, which the person may widen there.
-  await expect(page).toHaveURL(new RegExp(`/search\\?q=redirect(\\+|%20)loop&org=${ACME.org}$`));
+  await expect(page).toHaveURL(/\/search\?q=redirect(\+|%20)loop$/);
   await expect(page.getByRole('textbox', { name: 'Words to look for' })).toHaveValue('redirect loop');
   expect((await started).status()).toBe(200);
 });
@@ -451,7 +429,7 @@ test('the last finder row opens advanced search without words', async ({ page })
   const last = finder(page).getByRole('option').last();
   await expect(last).toHaveText('Advanced search');
   await last.click();
-  await expect(page).toHaveURL(new RegExp(`/search\\?org=${ACME.org}$`));
+  await expect(page).toHaveURL(/\/search$/);
   await expect(page.getByRole('textbox', {name:'Words to look for'})).toHaveValue('');
 });
 
@@ -461,7 +439,7 @@ test('the buttons under the field write the signs', async ({ page }) => {
   await typeIn(page, 'dora');
   await finder(page).getByRole('button', { name: /People/ }).click();
   await expect(field(page)).toHaveValue('@ dora');
-  await finder(page).getByRole('button', { name: 'All', exact: true }).click();
+  await finder(page).getByRole('button', { name: 'Everything' }).click();
   await expect(field(page)).toHaveValue('dora');
 });
 
@@ -530,6 +508,21 @@ test('the list of keys is drawn from what is bound: a key bound while a screen i
   await expect(list.getByText('Y', { exact: true })).toHaveCount(0);
 });
 
+test('a hint inside the finder opens its card over it, and Escape closes the card before the finder', async ({ page }) => {
+  await signIn(page);
+  await openFinder(page);
+  await finder(page).getByRole('button', { name: 'Help: The signs of the finder' }).click();
+  const card = page.getByRole('dialog', { name: 'The signs of the finder' });
+  await expect(card).toBeVisible();
+  await expect(card.getByText(/One field finds names/)).toBeVisible();
+  await expect(finder(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(card).toHaveCount(0);
+  await expect(finder(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(finder(page)).toHaveCount(0);
+});
+
 test('on a small screen the finder is opened from the header and fits the screen', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
   await signIn(page);
@@ -541,8 +534,5 @@ test('on a small screen the finder is opened from the header and fits the screen
   const box = await finder(page).boundingBox();
   expect(box?.width ?? 0).toBeLessThanOrEqual(390);
   await topic.click();
-  // The overview keeps its list choices in its address.
-  await expect.poll(() => new URL(page.url()).pathname).toBe(`/topic/${ACME.fixLogin}`);
-  await expect(page.getByRole('heading', { name: 'Fix login', level: 1 })).toBeVisible();
-  await expect(finder(page)).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}$`));
 });

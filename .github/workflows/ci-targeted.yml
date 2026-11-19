@@ -1,7 +1,7 @@
 name: CI targeted
 
-# A branch under ci-t/ runs only what its .ci-targets file names. Rust and frontend checks use independent
-# runners, as in the whole CI, so the web typecheck has its own runner's memory. The whole CI decides a release.
+# A branch under ci-t/ runs only what its .ci-targets file names, in one job, so that several fixes are tested at the
+# same time without each waiting for the whole CI. The whole CI still decides a release.
 on:
   push:
     branches: ['ci-t/**']
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   targeted:
-    name: Targeted Rust (${{ github.ref_name }})
+    name: Targeted (${{ github.ref_name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     services:
@@ -55,27 +55,5 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: frontend/.nvmrc
-      - name: Plan the assigned native fixtures
-        id: native-fixtures
-        run: |
-          fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --targets .ci-targets --plan)
-          printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
-      - name: Install the native fixtures' C compiler
-        if: ${{ fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector }}
-        run: |
-          bash .github/scripts/ci_apt_mirror.sh
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Run the Rust checks .ci-targets names
-        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust
-
-  targeted-web:
-    name: Targeted web (${{ github.ref_name }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version-file: frontend/.nvmrc
-      - name: Run the frontend checks .ci-targets names
-        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group web
+      - name: Run what .ci-targets names
+        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets

@@ -8,7 +8,7 @@
 import { useTranslation } from 'react-i18next';
 
 import type { FileChoice } from '@/features/change/choices';
-import { SegmentedControl } from '@/ui/SegmentedControl';
+import { RadioGroup } from '@/ui/RadioGroup';
 import { Textarea } from '@/ui/Textarea';
 
 export function FilesChoice({ value, onChange }: { value: FileChoice; onChange: (files: FileChoice) => void }) {
@@ -16,11 +16,12 @@ export function FilesChoice({ value, onChange }: { value: FileChoice; onChange: 
   return (
     <div className="flex flex-col gap-2">
       <h4 className="text-sm font-medium text-text">{t('fork.files.title')}</h4>
-      <SegmentedControl
+      <RadioGroup
+        variant="list"
         label={t('fork.files.title')}
         value={value.mode}
         onValueChange={(mode) => onChange(mode === 'selection' ? { mode, include: value.mode === 'selection' ? value.include : '', exclude: value.mode === 'selection' ? value.exclude : '' } : { mode })}
-        segments={[
+        options={[
           { value: 'all', name: t('changeCompact.files.all') },
           { value: 'selection', name: t('changeCompact.files.selection') },
           { value: 'none', name: t('changeCompact.files.none') },

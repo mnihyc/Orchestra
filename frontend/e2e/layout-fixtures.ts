@@ -1,8 +1,5 @@
 /** Routes not implemented by the HTTP double reuse the typed data of their existing browser proofs. */
 import type { Page } from '@playwright/test';
-import type { AdminMessage } from '../src/generated/api-types.ts';
-import { me, userRef } from '../tests/doubles/fixtures.ts';
-import { ADMIN_MESSAGE_ID } from './layout-routes.ts';
 import { readStorageSearch, storageRequest } from '../src/features/storage/search.ts';
 import { storageReport } from '../tests/doubles/storage-report.ts';
 import { expect } from '@playwright/test';
@@ -26,14 +23,6 @@ export async function signInScreenRoute(page: Page, mode: (typeof SCREEN_PRESENT
 
 /** Install state before navigation; browser reads still pass through the ordinary fake API. */
 export async function prepareLayoutRoute(page: Page, row: LayoutRoute): Promise<void> {
-  if (row.pattern === '/messages/$id') {
-    // Reuse the received-message contract exercised by the administrator-message browser proofs.
-    const message: AdminMessage = { id: ADMIN_MESSAGE_ID, org: null, title: 'A message for everyone',
-      body: '## What changed\n\nRead this **important** change.', sender: userRef(me(1, 'ada', 'Ada Lovelace')),
-      created_at: '2026-11-08T12:00:00Z', recipient_count: 4, delivery_job_id: null };
-    await page.route(`**/api/v1/messages/${ADMIN_MESSAGE_ID}`, (route) => route.fulfill({ json: message }));
-    return;
-  }
   if (row.fixture === 'document-tree') { await documentTreeFixture(page); return; }
   if (row.fixture === undefined) return;
   const response = await page.request.post(`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/__double/screen-gate`, { data: { name: row.fixture } });
@@ -58,14 +47,12 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
       await page.getByRole('button', { name: words('providers.models.menuOf').replace('{{name}}', 'Screen model'), exact: true }).click();
       await page.getByRole('menuitem', { name: words('models.list.edit'), exact: true }).click();
       const editor = page.getByRole('dialog', { name: words('models.editor.title'), exact: true });
-      await expect(editor.getByRole('group', { name: words('webSearch.title'), exact: true }).getByRole('switch', { name: words('webSearch.modeSwitch').replace('{{mode}}', words('choiceCatalog.webSearch.live.name')), exact: true })).toBeChecked();
-      const raw = editor.locator('[data-option-schema-editor] details').filter({ hasText: words('providerFields.raw') });
-      if (await raw.getAttribute('open') === null) await raw.locator('summary').click();
-      await expect(editor.getByRole('textbox', { name: words('providerFields.raw'), exact: true })).toHaveValue(/"native"/u);
+      await expect(editor.getByRole('group', { name: words('webSearch.title'), exact: true }).getByRole('switch', { name: words('choiceCatalog.webSearch.live.name'), exact: true })).toBeChecked();
+      await expect(editor.getByRole('textbox', { name: words('providerOptions.schemaTitle'), exact: true })).toHaveValue(/"native"/u);
       await expect(editor.getByRole('textbox', { name: `${words('webSearch.price')} ${words('ui.field.optional')}`, exact: true })).toHaveValue('0.01');
     }
   } else if (row.fixture === 'agent-share-ladders' || row.fixture === 'agent-access-ladders') {
-    await page.locator('[data-thread-header]').getByRole('button', { name: words('thread.header.shareThread'), exact: true }).click();
+    await page.locator('[data-thread-header]').getByRole('button', { name: words('actions.share.label'), exact: true }).click();
     const access = page.getByRole('dialog').filter({ has: page.locator('[data-tutorial-target="permission-page"]') });
     await access.getByRole('tab', { name: words('access.tabs.agents'), exact: true }).click();
     const recorded = access.getByRole('list', { name: words('access.agents.shared'), exact: true });
@@ -101,7 +88,7 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
     if (row.fixture === 'gateway-offline') await expect(card).toContainText(words('regionalGateways.offline'));
     if (row.fixture === 'gateway-unreported') await expect(card).toContainText(words('regionalGateways.notReported'));
   } else if (row.fixture === 'tunnel-attached') {
-    await expect(page.locator('[data-screen="thread"]').getByLabel(words('regionalGateways.toolConnection'), { exact: true })).toContainText('Asia tools');
+    await expect(page.locator('[data-screen="thread"]').getByLabel(words('regionalGateways.tunnel'), { exact: true })).toContainText('Asia tools');
   } else if (row.fixture === 'tunnel-unavailable') {
     await expect(page.getByRole('list', { name: words('regionalGateways.attempted') })).toContainText('Europe gateway');
   }

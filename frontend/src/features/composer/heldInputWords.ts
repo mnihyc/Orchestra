@@ -13,6 +13,10 @@ const COMMAND_HOLDS = {
 export function heldInputWords(input: ThreadInput, thread: Thread | null, t: TFunction): string | null {
   const sender = input.author?.display_name ?? t('composer.queue.theSender');
   const background = thread?.background;
+  if (input.state_detail === 'background_author') {
+    if (background !== undefined && background !== null && background.waiting_running > 0) return t(background.waiting_author === null ? 'backgroundWake.waitingUnknownAuthor' : 'backgroundWake.waitingAuthor', { name: background.waiting_author?.display_name, count: background.waiting_running });
+    return t('backgroundWake.waitingTasks');
+  }
   if (input.state_detail === 'background_stopped') return (background?.held_completions ?? 0) > 0 ? t('backgroundWake.held', { count: background?.held_completions }) : t('composer.queue.heldStop');
   if (input.state_detail === 'background_refresh') return t('backgroundWake.refreshHold');
   if (input.state_detail === 'background_wake_off') return t('backgroundWake.wakeOffHold');
@@ -22,8 +26,7 @@ export function heldInputWords(input: ThreadInput, thread: Thread | null, t: TFu
   if (input.state_detail === 'owner_lacks_access') return t('composer.queue.heldOwner', { owner: thread?.owner.display_name ?? '', provider: thread?.binding?.provider.name ?? '' });
   if (input.state_detail === 'second_step_required') return t('composer.queue.heldSecondStep', { name: sender });
   if (input.state_detail === 'model_use_required') {
-    const selectedModel = thread?.model;
-    const model = selectedModel === null || selectedModel === undefined ? '' : modelDisplayName(thread?.model_display);
+    const model = thread === null || thread.model === null ? '' : modelDisplayName(thread.model_display);
     return thread?.environment !== null && thread?.environment !== undefined ? t('composer.queue.heldUse', { model, environment: thread.environment.name }) : t('composer.queue.heldModel', { model });
   }
   if (input.state_detail === 'files') return t('composer.queue.preparing');

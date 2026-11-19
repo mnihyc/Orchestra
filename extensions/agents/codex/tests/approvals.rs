@@ -70,12 +70,7 @@ async fn a_command_asks_is_allowed_runs_and_its_output_arrives_as_events() {
     let started = before
         .iter()
         .find_map(|event| match event {
-            SessionEvent::ItemStarted(item)
-                if matches!(&item.content,
-                ItemContent::ToolCall(call) if matches!(call.tool, ToolPayload::Command { .. })) =>
-            {
-                Some(item)
-            }
+            SessionEvent::ItemStarted(item) => Some(item),
             _ => None,
         })
         .expect("the command is on the timeline while it waits to be allowed");

@@ -442,8 +442,6 @@ pub fn confinement(
 /// What a turn is set up from.
 #[derive(Debug, Clone)]
 pub struct StartSnapshot {
-    /// One current offering/core resolution, shared unchanged by session and turn commands.
-    pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
     /// Current topic-document policy and first-reading material paths.
     pub material: crate::material::Material,
     /// The thread.
@@ -547,7 +545,7 @@ impl StartSnapshot {
     pub fn model_parameters(&self) -> Result<ModelParameters, EngineError> {
         self.model
             .as_ref()
-            .map(|row| binding::model_parameters_for(row, self.arrangement.protocol.as_deref()))
+            .map(binding::model_parameters)
             .transpose()
             .map(Option::unwrap_or_default)
     }
@@ -577,24 +575,7 @@ impl StartSnapshot {
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
             cwd: self.cwd(),
-            prompt_cache_ttl: self
-                .settings
-                .prompt_cache_ttl
-                .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
             background_wake: self.settings.background_wake,
-            image_generation: self.settings.image_generation,
-            native_configuration: self
-                .native_model
-                .as_deref()
-                .filter(|native| native.model == self.turn.model)
-                .map(|native| native.native_configuration())
-                .unwrap_or_default(),
-            model_details: self
-                .native_model
-                .as_deref()
-                .filter(|native| native.model == self.turn.model)
-                .and_then(|native| native.extensions.get("model_details"))
-                .cloned(),
             restart_sensitive: self
                 .descriptor
                 .capabilities
@@ -661,8 +642,7 @@ impl StartSnapshot {
             browsers: &self.browser_line,
             rates: instructions::ToolRates {
                 calls_per_minute: self.settings.tool_calls_per_minute,
-                announcements_per_hour: self.settings.announcements_per_hour,
-                thread_messages_per_hour: self.settings.thread_messages_per_hour,
+                sends_per_hour: self.settings.sends_per_hour,
             },
         }
     }
@@ -759,11 +739,10 @@ impl StartSnapshot {
         self.tools
             .iter()
             .map(|tool| {
-                let definition = crate::tools::definitions::definition_at_with_search_budgets(
+                let definition = crate::tools::definitions::definition_at(
                     *tool,
                     &self.settings.messages,
                     &self.settings.broadcast_agent_options,
-                    &self.settings.search_budgets,
                 );
                 crate::model_inputs::ModelBlock::new(
                     tool.name(),
@@ -794,19 +773,12 @@ impl StartSnapshot {
     pub fn tool_schemas(&self) -> std::collections::BTreeMap<String, Json> {
         self.tools
             .iter()
-            .filter(|tool| {
-                matches!(
-                    **tool,
-                    orch_agent_contract::events::OrchTool::Announce
-                        | orch_agent_contract::events::OrchTool::SearchShared
-                )
-            })
+            .filter(|tool| **tool == orch_agent_contract::events::OrchTool::Announce)
             .map(|tool| {
-                let definition = crate::tools::definitions::definition_at_with_search_budgets(
+                let definition = crate::tools::definitions::definition_at(
                     *tool,
                     &self.settings.messages,
                     &self.settings.broadcast_agent_options,
-                    &self.settings.search_budgets,
                 );
                 (tool.name().to_owned(), definition.input_schema)
             })
@@ -1054,7 +1026,6 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
-        native_model: snapshot.native_model.clone(),
         transport_only: false,
         turn_changes_require_restart: snapshot
             .descriptor
@@ -1085,9 +1056,7 @@ pub fn session_open_body_importing(
         approval_mode: convert(&snapshot.approval)?,
         available_models: snapshot.available_models.clone(),
         subagent_limits: snapshot.settings.subagent_limits,
-        prompt_cache_ttl: configuration.prompt_cache_ttl,
         background_wake: snapshot.settings.background_wake,
-        image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
         memory: configuration.memory,
@@ -1357,7 +1326,7 @@ impl Engine {
         let facts = Facts {
             descriptor: &descriptor,
             provider: &provider,
-            environment: Some(&environment),
+            environment: &environment,
             offers,
             settings: &settings,
             entry: None,
@@ -1399,18 +1368,16 @@ impl Engine {
         } else {
             vec![turn.model.clone()]
         };
-        let path = binding::selected_path(&arrangement, &provider, &agent);
-        if crate::approval_review::reviewer_allowed_for(
+        if crate::approval_review::reviewer_allowed(
             approval,
             harnesses::descriptor_of(&agent)?.as_ref(),
             &available_models,
-            path,
-            &turn.model,
         )
         .is_err()
         {
             return Ok(StartLoad::Unstartable(turn.id));
         }
+        let path = binding::selected_path(&arrangement, &provider, &agent);
         let mut lease = match turn.lease_id {
             Some(id) => threads::lease(conn, id).await?,
             None => None,
@@ -1458,14 +1425,13 @@ impl Engine {
             agent: agent.id,
             machine: machine_id,
         };
-        let tools = self
-            .offered_tools_for_session(
-                conn,
-                &thread,
-                descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
-                self.inner.clock.time(),
-            )
-            .await?;
+        let tools = crate::tools::offered_for_session(
+            conn,
+            &thread,
+            descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
+            self.inner.clock.time(),
+        )
+        .await?;
         let view = self.environment_capabilities(conn, environment.id).await?;
         let isolation = view
             .as_ref()
@@ -1498,8 +1464,7 @@ impl Engine {
         let context_sent = threads::context_sent(conn, segment.id).await?;
         // Keep the shared-material future out of the snapshot's accumulated state.
         let material = Box::pin(self.topic_material(conn, thread_id)).await?;
-        let mut snapshot = StartSnapshot {
-            native_model: None,
+        Ok(StartLoad::Ready(Box::new(StartSnapshot {
             material,
             thread,
             pending_notice_positions: Vec::new(),
@@ -1535,11 +1500,7 @@ impl Engine {
             cut,
             unnamed_before,
             context_sent,
-        };
-        let allowed = Box::pin(self.native_model_use_preview(conn, &snapshot)).await?;
-        snapshot.native_model =
-            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
-        Ok(StartLoad::Ready(Box::new(snapshot)))
+        })))
     }
 }
 

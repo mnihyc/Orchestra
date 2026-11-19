@@ -61,17 +61,15 @@ class SourceContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 source_contract(root, HEAD, TAG)
 
-    def test_matrix_comes_from_the_native_catalogue_and_keeps_all_six_targets(self):
+    def test_matrix_comes_from_the_native_catalogue_and_keeps_all_five_targets(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             self.candidate(root)
             seal_schema(root)
             record = source_contract(root, HEAD, TAG)
-            self.assertEqual(len(record["native_matrix"]["include"]), 6)
+            self.assertEqual(len(record["native_matrix"]["include"]), 5)
             self.assertEqual({item["arch"] for item in record["package_matrix"]["include"]}, {"x86_64", "aarch64"})
             self.assertIn("orch-connector-windows-x86_64.exe", record["connectors"])
-            self.assertIn("orch-connector-windows-aarch64.exe", record["connectors"])
-            self.assertIn({"os": "windows-11-arm", "target": "aarch64-pc-windows-msvc"}, record["native_matrix"]["include"])
             self.assertEqual(len(record["nodes"]), 2)
             self.assertEqual(json.loads(json.dumps(record)), record)
 
@@ -85,7 +83,7 @@ class SourceContractTests(unittest.TestCase):
             target.write_text(original.replace("x86_64-pc-windows-msvc", "unassigned-native-target"))
             with self.assertRaisesRegex(ValueError, "unassigned"):
                 source_contract(root, HEAD, TAG)
-            target.write_text(original.replace("TARGETS: [(&str, &str, &str, &str); 6]", "TARGETS: [(&str, &str, &str, &str); 7]", 1))
+            target.write_text(original.replace("TARGETS: [(&str, &str, &str, &str); 5]", "TARGETS: [(&str, &str, &str, &str); 6]", 1))
             with self.assertRaisesRegex(ValueError, "catalogue expression"):
                 source_contract(root, HEAD, TAG)
 

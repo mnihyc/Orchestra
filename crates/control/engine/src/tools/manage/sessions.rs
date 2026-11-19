@@ -408,7 +408,7 @@ impl Engine {
                 self.audit_shared_thread(
                     &mut tx,
                     &asking,
-                    orch_db::audit::action!(AuditAction::ThreadDeletedByAgent),
+                    AuditAction::ThreadDeletedByAgent,
                     target,
                     giver,
                 )
@@ -437,9 +437,9 @@ impl Engine {
                         &mut tx,
                         &asking,
                         if archive {
-                            orch_db::audit::action!(AuditAction::ThreadArchivedByAgent)
+                            AuditAction::ThreadArchivedByAgent
                         } else {
-                            orch_db::audit::action!(AuditAction::ThreadUnarchivedByAgent)
+                            AuditAction::ThreadUnarchivedByAgent
                         },
                         target,
                         giver,

@@ -17,10 +17,7 @@ use std::path::{Path, PathBuf};
 use orch_agent_contract::adapter::AdapterError;
 use orch_agent_contract::descriptor::{ApprovalMode, SandboxMode};
 use orch_agent_contract::loopback::{EXEC_SERVER, Loopback, ORCH_SERVER};
-use orch_agent_contract::session::{
-    NativeModelContext, NoteKeeper, PromptCacheTtl, ProviderAccess, SessionSpec,
-};
-use orch_provider_contract::models::ModelParameters;
+use orch_agent_contract::session::{NoteKeeper, ProviderAccess, SessionSpec};
 use orch_types::Json;
 use serde_json::json;
 
@@ -82,22 +79,6 @@ pub struct HarnessSetup {
     pub as_root: bool,
 }
 
-impl HarnessSetup {
-    /// The configured native home, or the same native default used for transcript discovery.
-    pub(crate) fn files_home(&self) -> Option<PathBuf> {
-        self.home.clone().or_else(|| {
-            self.inherited
-                .get("HOME")
-                .map(|person| PathBuf::from(person).join(".claude"))
-        })
-    }
-
-    /// Shared with the host's retained-output publisher; never derived from reported tool data.
-    pub(crate) fn outputs_directory(&self) -> Option<PathBuf> {
-        self.files_home().map(|home| home.join("outputs"))
-    }
-}
-
 /// What a turn states every time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnSettings {
@@ -111,110 +92,8 @@ pub struct TurnSettings {
     pub sandbox_mode: SandboxMode,
     /// The values of the adapter's parameters.
     pub params: Json,
-    /// The core's native page-reader switch; absence keeps the program's current default.
-    pub page_fetch: Option<bool>,
-    /// Admitted extra cache lifetimes for this model; None means model facts are unavailable.
-    /// Some(empty) is a known model with only the ordinary five-minute lifetime.
-    pub cache_lifetimes: Option<Vec<String>>,
     /// Whether the turn plans: the harness's own plan mode, whatever the approval mode is.
     pub plan: bool,
-}
-
-/// Consume the captured native flag for this model without resolving a capability or reading a mode.
-pub(crate) fn native_page_fetch(native: Option<&NativeModelContext>, model: &str) -> Option<bool> {
-    native
-        .filter(|native| native.model == model)?
-        .capabilities
-        .as_array()?
-        .iter()
-        .filter(|row| row.get("capability").and_then(Json::as_str) == Some("page_fetch"))
-        .find_map(|row| row.get("native_config")?.get("page_fetch")?.as_bool())
-}
-
-/// Project the same admitted model facts without inferring enablement from its offered defaults.
-pub(crate) fn native_cache_lifetimes(
-    native: Option<&NativeModelContext>,
-    model: &str,
-) -> Option<Vec<String>> {
-    native.filter(|native| native.model == model).map(|native| {
-        native
-            .parameters
-            .cache_lifetimes
-            .clone()
-            .unwrap_or_default()
-    })
-}
-
-const CACHE_TTL_VARIABLES: [&str; 2] = [
-    "CLAUDE_CODE_PROMPT_CACHE_TTL",
-    "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
-];
-
-/// Version discovery has no model choice; session launches install only validated overrides.
-pub(crate) fn clear_cache_ttl_environment(environment: &mut BTreeMap<String, String>) {
-    environment.retain(|name, _| {
-        !CACHE_TTL_VARIABLES
-            .iter()
-            .any(|key| name.eq_ignore_ascii_case(key))
-    });
-}
-
-fn cache_choice_error(message: String) -> AdapterError {
-    AdapterError::Other {
-        code: "invalid_input".into(),
-        message,
-        retryable: false,
-    }
-}
-
-fn cache_ttls(
-    setup: &HarnessSetup,
-    spec: &SessionSpec,
-    turn: &TurnSettings,
-) -> Result<BTreeMap<&'static str, PromptCacheTtl>, AdapterError> {
-    if let Some(ttl) = spec.settings.prompt_cache_ttl {
-        return Ok(CACHE_TTL_VARIABLES
-            .into_iter()
-            .map(|name| (name, ttl))
-            .collect());
-    }
-    let parameters = ModelParameters {
-        cache_lifetimes: turn.cache_lifetimes.clone(),
-        ..ModelParameters::default()
-    };
-    let mut choices = BTreeMap::new();
-    for name in CACHE_TTL_VARIABLES {
-        let mut choice = None;
-        for (_, value) in setup
-            .profile_env
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
-        {
-            let ttl: PromptCacheTtl =
-                serde_json::from_value(Json::String(value.clone())).map_err(|_| {
-                    cache_choice_error(format!("Profile variable {name} must be 5m or 1h."))
-                })?;
-            if choice.replace(ttl).is_some_and(|earlier| earlier != ttl) {
-                return Err(cache_choice_error(format!(
-                    "Profile variable {name} has conflicting values under different letter cases."
-                )));
-            }
-        }
-        if let Some(ttl) = choice {
-            if !parameters.cache_lifetime_enabled(ttl.as_str()) {
-                let reason = if turn.cache_lifetimes.is_some() {
-                    "the provider has not enabled this cache lifetime on the admitted model"
-                } else {
-                    "admitted cache-lifetime facts for this model are unavailable"
-                };
-                return Err(cache_choice_error(format!(
-                    "Profile variable {name} cannot be used: {reason}."
-                )));
-            }
-            choices.insert(name, ttl);
-        }
-    }
-    Ok(choices)
 }
 
 /// Where a session's conversation comes from when its process starts.
@@ -580,32 +459,19 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
     if setup.managed_home {
         settings.extend(managed_settings(keeps_memory(spec)));
     }
-    if setup.managed_home
-        && let Some(env) = settings.get_mut("env").and_then(Json::as_object_mut)
-    {
-        env.insert(
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
-            json!(if spec.settings.background_wake {
-                "0"
-            } else {
-                "1"
-            }),
-        );
-        env.insert(
-            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_owned(),
-            json!("0"),
-        );
-    }
-    if let Some(ttl) = spec.settings.prompt_cache_ttl {
-        settings.insert("promptCacheTtl".into(), json!(ttl));
-        settings.insert("subagentPromptCacheTtl".into(), json!(ttl));
-        // The native environment override takes precedence over the settings member.
-        let env = settings.entry("env").or_insert_with(|| json!({}));
-        if let Some(env) = env.as_object_mut() {
-            env.insert("CLAUDE_CODE_PROMPT_CACHE_TTL".into(), json!(ttl.as_str()));
+    if setup.managed_home {
+        if let Some(env) = settings.get_mut("env").and_then(Json::as_object_mut) {
             env.insert(
-                "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into(),
-                json!(ttl.as_str()),
+                "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".to_owned(),
+                json!(if spec.settings.background_wake {
+                    "0"
+                } else {
+                    "1"
+                }),
+            );
+            env.insert(
+                "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_owned(),
+                json!("0"),
             );
         }
     }
@@ -695,12 +561,6 @@ pub(crate) fn managed_settings(keep_memory: bool) -> serde_json::Map<String, Jso
     settings.insert("crossSessionInbound".to_owned(), json!("refuse"));
     settings.insert("autoContinueAtUsageLimit".to_owned(), json!(false));
     settings.insert("idleCompaction".to_owned(), json!(false));
-    settings.insert("precomputeCompactionEnabled".to_owned(), json!(false));
-    settings.insert("switchModelsOnFlag".to_owned(), json!(false));
-    settings.insert(
-        "permissions".to_owned(),
-        json!({"denyInsteadOfPrompting":false}),
-    );
     settings.insert("agentPushNotifEnabled".to_owned(), json!(false));
     settings.insert("disableAgentView".to_owned(), json!(true));
     settings.insert("disableAllHooks".to_owned(), json!(true));
@@ -712,47 +572,6 @@ pub(crate) fn managed_settings(keep_memory: bool) -> serde_json::Map<String, Jso
     settings.insert("enableArtifact".to_owned(), json!(false));
     settings.insert("env".to_owned(), json!(managed_environment(keep_memory)));
     settings
-}
-
-/// Only explicitly installed safety pins enter the native settings read-back; never full configuration.
-pub(crate) fn expected_managed_pins(
-    setup: &HarnessSetup,
-    spec: &SessionSpec,
-    turn: &TurnSettings,
-) -> BTreeMap<String, Json> {
-    if !setup.managed_home {
-        return BTreeMap::new();
-    }
-    let installed = settings_json(setup, spec, turn);
-    let mut pins = BTreeMap::new();
-    for (name, value) in managed_settings(keeps_memory(spec)) {
-        if name == "env" {
-            if let Some(env) = installed.get("env").and_then(Json::as_object) {
-                for key in managed_environment(keeps_memory(spec)).keys() {
-                    if let Some(value) = env.get(key) {
-                        pins.insert(format!("env.{key}"), value.clone());
-                    }
-                }
-            }
-        } else if name == "permissions" {
-            pins.insert("permissions.denyInsteadOfPrompting".into(), json!(false));
-        } else if value.is_boolean() || value.is_string() || value.is_number() {
-            pins.insert(name, value);
-        }
-    }
-    if let Some(ttl) = spec.settings.prompt_cache_ttl {
-        pins.insert("promptCacheTtl".into(), json!(ttl));
-        pins.insert("subagentPromptCacheTtl".into(), json!(ttl));
-        pins.insert(
-            "env.CLAUDE_CODE_PROMPT_CACHE_TTL".into(),
-            json!(ttl.as_str()),
-        );
-        pins.insert(
-            "env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into(),
-            json!(ttl.as_str()),
-        );
-    }
-    pins
 }
 
 /// Whether the harness keeps its memory, in the thread's directory: the thread says so, and the harness is
@@ -774,7 +593,6 @@ pub(crate) fn managed_environment(keep_memory: bool) -> BTreeMap<String, String>
         .collect();
     for (key, value) in [
         ("DISABLE_AUTOUPDATER", "1"),
-        ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "1"),
         ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
         ("CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "0"),
         ("CLAUDE_CODE_DISABLE_WORKFLOWS", "1"),
@@ -782,9 +600,6 @@ pub(crate) fn managed_environment(keep_memory: bool) -> BTreeMap<String, String>
         ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
         ("CLAUDE_AUTO_BACKGROUND_TASKS", "0"),
         ("CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND", "1"),
-        ("CLAUDE_CODE_DISABLE_CRON", "1"),
-        // Keep the existing in-process reviewer when the vendor defaults to its server reviewer.
-        ("CLAUDE_CODE_AUTO_MODE_SERVER", "0"),
         ("CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS", "0"),
         ("CLAUDE_CODE_DISABLE_AGENT_VIEW", "1"),
         ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "0"),
@@ -832,59 +647,39 @@ pub(crate) fn place_home(env: &mut BTreeMap<String, String>, setup: &HarnessSetu
     }
 }
 
-/// The provider's routing and credential selectors, independent of profile and home placement.
-const PROVIDER_VARIABLES: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-    "CLAUDE_CODE_USE_GATEWAY",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
-];
-
-fn provider_variable(name: &str) -> bool {
-    PROVIDER_VARIABLES
-        .iter()
-        .any(|reserved| name.eq_ignore_ascii_case(reserved))
-}
-
-/// A profile customizes its program; the bound provider owns routing and credentials.
-pub(crate) fn validate_profile_environment(
-    env: &BTreeMap<String, String>,
-) -> Result<(), orch_agent_contract::adapter::AdapterError> {
-    if env.keys().any(|name| provider_variable(name)) {
-        return Err(orch_agent_contract::adapter::AdapterError::Other {
-            code: "invalid_input".into(),
-            retryable: false,
-            message: "A profile cannot set provider routing or credential variables; configure its provider instead."
-                .into(),
-        });
-    }
-    Ok(())
-}
-
-/// Remove stale or case-aliased provider choices before applying the selected access kind.
-pub(crate) fn clear_provider_environment(env: &mut BTreeMap<String, String>) {
-    env.retain(|name, _| !provider_variable(name));
-}
-
 /// The environment of a session's process.
-pub fn environment(launch: &Launch<'_>) -> Result<BTreeMap<String, String>, AdapterError> {
+#[must_use]
+pub fn environment(launch: &Launch<'_>) -> BTreeMap<String, String> {
     let Launch {
         setup, spec, turn, ..
     } = *launch;
-    let cache = cache_ttls(setup, spec, turn)?;
     let mut env = base_environment(setup.inherited.clone());
     place_home(&mut env, setup);
+    match &spec.provider {
+        ProviderAccess::Forwarded { .. } => {
+            env.insert(
+                "ANTHROPIC_BASE_URL".to_owned(),
+                setup.loopback.llm(&spec.session_key),
+            );
+            env.insert(
+                "ANTHROPIC_AUTH_TOKEN".to_owned(),
+                setup.loopback.token.expose().to_owned(),
+            );
+        }
+        ProviderAccess::Native { .. }
+        | ProviderAccess::Shared { .. }
+        | ProviderAccess::Handover { .. } => {
+            if let Some(token) = launch.oauth_token {
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), token.to_owned());
+            }
+        }
+    }
     let values = Values::from_json(&turn.params);
     for (name, value) in model_environment(&turn.model, values.small_model.as_deref()) {
         env.insert(name.to_owned(), value);
+    }
+    if let Some(effort) = effort_for_harness(turn.effort.as_deref()) {
+        env.insert("CLAUDE_CODE_EFFORT_LEVEL".to_owned(), effort.to_owned());
     }
     // The harness is told the context, and nothing else: it keeps its own room for the answer. A model whose
     // name it may not know (a gateway's own) is told its window, or the context where that is larger.
@@ -922,40 +717,6 @@ pub fn environment(launch: &Launch<'_>) -> Result<BTreeMap<String, String>, Adap
     );
     // Personal sessions retain the profile's choices; managed sessions stay supervised.
     env.extend(setup.profile_env.clone());
-    // Apply these after every profile overlay, including a profile stored by an older adapter.
-    clear_provider_environment(&mut env);
-    match &spec.provider {
-        ProviderAccess::Forwarded { .. } => {
-            env.retain(|name, _| {
-                !name.eq_ignore_ascii_case("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK")
-            });
-            env.insert("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK".into(), "1".into());
-            env.insert(
-                "ANTHROPIC_BASE_URL".into(),
-                setup.loopback.llm(&spec.session_key),
-            );
-            env.insert(
-                "ANTHROPIC_AUTH_TOKEN".into(),
-                setup.loopback.token.expose().into(),
-            );
-        }
-        ProviderAccess::Native { .. }
-        | ProviderAccess::Shared { .. }
-        | ProviderAccess::Handover { .. } => {
-            if let Some(token) = launch.oauth_token {
-                env.insert("CLAUDE_CODE_OAUTH_TOKEN".into(), token.into());
-            }
-        }
-    }
-    env.retain(|name, _| !name.eq_ignore_ascii_case(MCP_TOKEN_VARIABLE));
-    env.insert(
-        MCP_TOKEN_VARIABLE.into(),
-        setup.loopback.token.expose().into(),
-    );
-    clear_cache_ttl_environment(&mut env);
-    for (name, ttl) in cache {
-        env.insert(name.into(), ttl.as_str().into());
-    }
     if setup.managed_home {
         env.extend(managed_environment(keeps_memory(spec)));
     }
@@ -971,13 +732,6 @@ pub fn environment(launch: &Launch<'_>) -> Result<BTreeMap<String, String>, Adap
     env.insert(
         "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS".to_owned(),
         "0".to_owned(),
-    );
-    // Absence is resolved too: otherwise native model or profile defaults can add an unselected effort.
-    env.insert(
-        "CLAUDE_CODE_EFFORT_LEVEL".to_owned(),
-        effort_for_harness(turn.effort.as_deref())
-            .unwrap_or("unset")
-            .to_owned(),
     );
     // This native switch is read at process start and must follow the turn's approval mode.
     if turn.approval_mode == ApprovalMode::Bypass {
@@ -996,7 +750,7 @@ pub fn environment(launch: &Launch<'_>) -> Result<BTreeMap<String, String>, Adap
         "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH".to_owned(),
         spec.settings.subagent_limits.depth.to_string(),
     );
-    Ok(env)
+    env
 }
 
 /// The reviewer's declared model is resolved from the same fully composed environment that the
@@ -1020,7 +774,7 @@ pub fn approval_reviewer(
         origin: &Origin::New,
         turn,
         oauth_token: None,
-    })?;
+    });
     crate::review::reviewer_in_environment(&settings, &env)
 }
 
@@ -1113,11 +867,7 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
     args.push("off".to_owned());
     args.extend(tool_arguments(
         through_executor(spec),
-        orch_agent_contract::parameters::WebSearchMode::selected(&turn.params)
-            .ok()
-            .flatten()
-            == Some(orch_agent_contract::parameters::WebSearchMode::Live),
-        turn.page_fetch.unwrap_or(true),
+        turn.params.get("web_search").and_then(Json::as_str) == Some("live"),
     ));
     if !through_executor(spec) {
         let directory = spec.settings.directory.trim_end_matches('/');
@@ -1134,18 +884,18 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
 }
 
 /// Everything a session's process is started with.
-pub fn launch(launch: &Launch<'_>) -> Result<LaunchSpec, AdapterError> {
-    let env = environment(launch)?;
-    Ok(LaunchSpec {
+#[must_use]
+pub fn launch(launch: &Launch<'_>) -> LaunchSpec {
+    LaunchSpec {
         program: launch.setup.program.clone(),
         args: arguments(launch),
-        env,
+        env: environment(launch),
         cwd: working_directory(launch.setup, launch.spec),
         label: format!(
             "session-{}",
             &launch.spec.session_key[..8.min(launch.spec.session_key.len())]
         ),
-    })
+    }
 }
 
 /// Where the harness keeps the transcript of a session in a home of Orch's, which is the same place for
@@ -1184,7 +934,6 @@ mod tests {
     fn spec() -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
-                native_model: None,
                 agent_id: new_id(),
                 thread_id: new_id(),
                 segment_id: new_id(),
@@ -1208,9 +957,7 @@ mod tests {
                 instructions: "You are working inside Orch.".into(),
                 available_models: vec!["gpt-x".to_owned()],
                 subagent_limits: Default::default(),
-                prompt_cache_ttl: None,
                 background_wake: true,
-                image_generation: None,
                 memory: Some(SessionMemory {
                     directory: "/workspace/web/.orch/memory".into(),
                     kept_by: NoteKeeper::Harness,
@@ -1296,8 +1043,6 @@ mod tests {
 
     fn turn() -> TurnSettings {
         TurnSettings {
-            cache_lifetimes: None,
-            page_fetch: None,
             model: "gpt-x".into(),
             effort: Some("high".into()),
             approval_mode: ApprovalMode::OnRequest,
@@ -1358,7 +1103,6 @@ mod tests {
             turn,
             oauth_token: None,
         })
-        .unwrap()
     }
 
     fn after(args: &[String], flag: &str) -> Option<String> {
@@ -1618,23 +1362,6 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_resolved_effort_is_explicit_and_profile_defaults_cannot_replace_it() {
-        for managed in [false, true] {
-            let mut setup = setup();
-            setup.managed_home = managed;
-            setup
-                .profile_env
-                .insert("CLAUDE_CODE_EFFORT_LEVEL".to_owned(), "max".to_owned());
-            let mut wanted = turn();
-            for (effort, expected) in [(None, "unset"), (Some("low"), "low")] {
-                wanted.effort = effort.map(str::to_owned);
-                let launch = built(&setup, &spec(), &wanted, &Origin::New);
-                assert_eq!(launch.env["CLAUDE_CODE_EFFORT_LEVEL"], expected);
-            }
-        }
-    }
-
-    #[test]
     fn behind_a_forwarder_the_harness_calls_the_connector_with_its_token_and_never_holds_a_key() {
         let launch = built(&setup(), &spec(), &turn(), &Origin::New);
         assert_eq!(
@@ -1654,126 +1381,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_overlays_cannot_replace_the_bound_provider_on_any_native_entrypoint() {
-        for managed in [false, true] {
-            let mut setup = setup();
-            setup.managed_home = managed;
-            for key in PROVIDER_VARIABLES {
-                setup
-                    .profile_env
-                    .insert((*key).into(), "profile-secret".into());
-                setup
-                    .profile_env
-                    .insert(key.to_ascii_lowercase(), "alias-secret".into());
-            }
-            setup
-                .profile_env
-                .insert("PROFILE_CHOICE".into(), "kept".into());
-            setup
-                .profile_env
-                .insert(MCP_TOKEN_VARIABLE.into(), "profile-mcp".into());
-            for origin in [
-                Origin::New,
-                Origin::Resume,
-                Origin::Fork {
-                    from: "parent".into(),
-                },
-                Origin::ForkPrefix {
-                    from: "parent".into(),
-                    through: "input".into(),
-                },
-            ] {
-                let mut wanted = spec();
-                let settings = turn();
-                let forwarded = launch(&Launch {
-                    setup: &setup,
-                    spec: &wanted,
-                    session_id: "s",
-                    origin: &origin,
-                    turn: &settings,
-                    oauth_token: Some("unused-subscription-token"),
-                })
-                .unwrap();
-                assert_eq!(
-                    forwarded.env["ANTHROPIC_BASE_URL"],
-                    setup.loopback.llm(&wanted.session_key)
-                );
-                assert_eq!(
-                    forwarded.env["ANTHROPIC_AUTH_TOKEN"],
-                    setup.loopback.token.expose()
-                );
-                assert_eq!(
-                    forwarded.env[MCP_TOKEN_VARIABLE],
-                    setup.loopback.token.expose()
-                );
-                assert_eq!(forwarded.env["PROFILE_CHOICE"], "kept");
-                assert!(!forwarded.env.values().any(|value| value.contains("secret")));
-                assert!(!forwarded.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
-                for provider in [
-                    ProviderAccess::Native {
-                        provider_id: new_id(),
-                    },
-                    ProviderAccess::Shared {
-                        provider_id: new_id(),
-                        form: "oauth_token".into(),
-                    },
-                    ProviderAccess::Handover {
-                        provider_id: new_id(),
-                        form: "auth_file".into(),
-                    },
-                ] {
-                    wanted.provider = provider;
-                    for token in [None, Some("selected-subscription-token")] {
-                        let native = launch(&Launch {
-                            setup: &setup,
-                            spec: &wanted,
-                            session_id: "s",
-                            origin: &origin,
-                            turn: &settings,
-                            oauth_token: token,
-                        })
-                        .unwrap();
-                        assert_eq!(
-                            native
-                                .env
-                                .get("CLAUDE_CODE_OAUTH_TOKEN")
-                                .map(String::as_str),
-                            token
-                        );
-                        assert!(!native.env.contains_key("ANTHROPIC_BASE_URL"));
-                        assert!(!native.env.contains_key("ANTHROPIC_AUTH_TOKEN"));
-                        assert!(!native.env.contains_key("ANTHROPIC_API_KEY"));
-                        assert!(!native.env.values().any(|value| value.contains("secret")));
-                        assert_eq!(native.env["PROFILE_CHOICE"], "kept");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn forwarded_fast_mode_uses_the_selected_tier_without_an_external_org_probe() {
-        let mut setup = setup();
-        setup
-            .profile_env
-            .insert("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK".into(), "0".into());
-        for tier in [None, Some("fast")] {
-            let mut settings = turn();
-            settings.params = json!({"service_tier":tier});
-            let launch = built(&setup, &spec(), &settings, &Origin::New);
-            assert_eq!(launch.env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"], "1");
-            assert!(
-                !launch
-                    .env
-                    .contains_key("CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS")
-            );
-            let native: Json =
-                serde_json::from_str(&after(&launch.args, "--settings").unwrap()).unwrap();
-            assert_eq!(native["fastMode"], json!(tier == Some("fast")));
-        }
-    }
-
-    #[test]
     fn on_a_token_of_the_subscription_the_harness_runs_on_it_and_calls_no_forwarder() {
         let (setup, mut spec, turn) = (setup(), spec(), turn());
         spec.provider = ProviderAccess::Shared {
@@ -1787,8 +1394,7 @@ mod tests {
             origin: &Origin::New,
             turn: &turn,
             oauth_token: Some("sk-ant-oat01-abc"),
-        })
-        .unwrap();
+        });
         assert_eq!(
             launch
                 .env
@@ -2011,85 +1617,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_prompt_cache_lifetimes_reach_new_resumed_and_forked_launches_and_unset_adds_nothing()
-     {
-        use orch_agent_contract::session::PromptCacheTtl;
-        for origin in [
-            Origin::New,
-            Origin::Resume,
-            Origin::Fork {
-                from: "source-session".into(),
-            },
-        ] {
-            let mut setup = setup();
-            let mut spec = spec();
-            let ordinary = built(&setup, &spec, &turn(), &origin);
-            let settings: Json =
-                serde_json::from_str(&after(&ordinary.args, "--settings").unwrap()).unwrap();
-            assert!(settings.get("promptCacheTtl").is_none());
-            assert!(settings.get("subagentPromptCacheTtl").is_none());
-            assert!(!ordinary.env.contains_key("CLAUDE_CODE_PROMPT_CACHE_TTL"));
-            assert!(
-                !ordinary
-                    .env
-                    .contains_key("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")
-            );
-            assert!(
-                settings["env"]
-                    .get("CLAUDE_CODE_PROMPT_CACHE_TTL")
-                    .is_none()
-            );
-            setup.profile_env.insert(
-                "CLAUDE_CODE_PROMPT_CACHE_TTL".into(),
-                "profile-value".into(),
-            );
-            setup.profile_env.insert(
-                "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into(),
-                "profile-value".into(),
-            );
-            setup.profile_env.insert(
-                "claude_code_subagent_prompt_cache_ttl".into(),
-                "alias-value".into(),
-            );
-            for ttl in [PromptCacheTtl::FiveMinutes, PromptCacheTtl::OneHour] {
-                spec.settings.prompt_cache_ttl = Some(ttl);
-                let launched = built(&setup, &spec, &turn(), &origin);
-                let settings: Json =
-                    serde_json::from_str(&after(&launched.args, "--settings").unwrap()).unwrap();
-                assert_eq!(settings["promptCacheTtl"], ttl.as_str());
-                assert_eq!(settings["subagentPromptCacheTtl"], ttl.as_str());
-                assert_eq!(
-                    settings["env"]["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"],
-                    ttl.as_str()
-                );
-                assert_eq!(
-                    launched.env["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"],
-                    ttl.as_str()
-                );
-                assert!(
-                    !launched
-                        .env
-                        .contains_key("claude_code_subagent_prompt_cache_ttl")
-                );
-                assert_eq!(
-                    expected_managed_pins(&setup, &spec, &turn())["subagentPromptCacheTtl"],
-                    json!(ttl)
-                );
-                assert_eq!(
-                    settings["env"]["CLAUDE_CODE_PROMPT_CACHE_TTL"],
-                    ttl.as_str()
-                );
-                assert_eq!(
-                    launched.env["CLAUDE_CODE_PROMPT_CACHE_TTL"],
-                    ttl.as_str(),
-                    "the native higher-priority environment must preserve the explicit thread choice"
-                );
-            }
-        }
-        assert!(crate::descriptor::capabilities().prompt_cache_ttl);
-    }
-
-    #[test]
     fn managed_sessions_keep_updates_account_sync_and_unattended_work_off_despite_profile_overrides()
      {
         let mut setup = setup();
@@ -2105,9 +1632,6 @@ mod tests {
         setup
             .profile_env
             .insert("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "0".into());
-        setup
-            .profile_env
-            .insert("CLAUDE_CODE_DISABLE_FEATURE_FLAGS".into(), "0".into());
         let mut no_notes = spec();
         no_notes.settings.memory = None;
         let launch = built(&setup, &no_notes, &turn(), &Origin::New);
@@ -2117,35 +1641,13 @@ mod tests {
         assert_eq!(launch.env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1");
         assert_eq!(launch.env["MCP_DISCOVERY_CACHE"], "0");
         assert_eq!(launch.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1");
-        assert_eq!(launch.env["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"], "1");
         let settings: Json =
             serde_json::from_str(&after(&launch.args, "--settings").unwrap()).unwrap();
-        assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"], "1");
         assert_eq!(settings["disableClaudeAiConnectors"], true);
         assert_eq!(settings["syncClaudeAiSkills"], false);
         assert_eq!(settings["syncClaudeAiPlugins"], false);
         assert_eq!(settings["remoteControlAtStartup"], false);
         assert_eq!(settings["crossSessionInbound"], "refuse");
-        for pin in [
-            "autoContinueAtUsageLimit",
-            "idleCompaction",
-            "precomputeCompactionEnabled",
-            "switchModelsOnFlag",
-            "enableWorkflows",
-            "workflowKeywordTriggerEnabled",
-        ] {
-            assert_eq!(settings[pin], false, "{pin}");
-        }
-        assert_eq!(settings["disableAllHooks"], true);
-        assert_eq!(settings["disableWorkflows"], true);
-        assert_eq!(settings["permissions"]["denyInsteadOfPrompting"], false);
-        assert_eq!(launch.env["CLAUDE_CODE_DISABLE_CRON"], "1");
-        assert_eq!(launch.env["CLAUDE_CODE_AUTO_MODE_SERVER"], "0");
-        assert_eq!(launch.env["CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND"], "1");
-        assert!(
-            !launch.env.contains_key("CLAUDE_CODE_DISABLE_MCP_TASKS"),
-            "native MCP tasks retain in-call waiting"
-        );
         assert_eq!(settings["cleanupPeriodDays"], 3650);
         assert!(settings.get("autoMemoryEnabled").is_none());
         assert_eq!(settings["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1");
@@ -2392,7 +1894,7 @@ mod tests {
         session.exec.executor = Some("orch-exec".into());
         session.exec.tool_set = Some("claude-code".into());
         let mut wanted = turn();
-        for mode in ["disabled", "live", "service"] {
+        for mode in ["disabled", "live"] {
             wanted.params = json!({"web_search":mode});
             let launch = built(&setup(), &session, &wanted, &Origin::New);
             let tools = after(&launch.args, "--tools").unwrap();

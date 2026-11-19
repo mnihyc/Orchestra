@@ -50,31 +50,13 @@ for (const width of [1280, 400]) for (const theme of ['light', 'dark'] as const)
     await page.getByRole('region', { name: 'Start a thread' }).getByRole('button', { name: 'Thread setup' }).click();
     const dialog = page.getByRole('dialog', { name: 'New thread in Fix login' });
     await dialog.getByRole('combobox', { name: 'Where it runs' }).click();
-    // The popup owns a separate option list for each interactive home group.
-    const list = page.getByRole('dialog', { name: 'Where it runs', exact: true });
-    const usable = list.getByRole('group', { name: 'Can use' }).getByRole('listbox');
-    await expect(usable.getByRole('option', { name: 'Workspace' })).toBeVisible();
+    const list = page.getByRole('listbox');
+    await expect(list.getByRole('group', { name: 'Can use' }).getByRole('option', { name: 'Workspace' })).toBeVisible();
     const ask = list.getByRole('group', { name: 'Ask for access' });
-    const partnerOption = ask.getByRole('listbox').getByRole('option', { name: 'Partner workspace' });
-    await expect(partnerOption).toBeVisible();
-    for (const box of await list.getByRole('listbox').all()) {
-      expect(await box.getAttribute('aria-owns')).toBeNull();
-      expect(await box.locator('button, a[href]').count()).toBe(0);
-    }
-    const ownerControl = ask.getByRole('button', { name: 'Vera Rubin', exact: true });
-    const optionBox = await partnerOption.boundingBox(), ownerBox = await ownerControl.boundingBox();
-    if (optionBox === null || ownerBox === null) throw new Error('The choice and sibling owner action are visible');
-    // One CSS pixel allows fractional painting, retaining the shared row alignment.
-    expect(Math.abs(optionBox.y + optionBox.height / 2 - ownerBox.y - ownerBox.height / 2)).toBeLessThanOrEqual(1);
+    await expect(ask.getByRole('option', { name: 'Partner workspace' })).toBeVisible();
+    await expect(list.getByRole('option', { name: 'New', exact: true })).toBeVisible();
     const audit = await new AxeBuilder({ page }).include('[role="listbox"]').withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
-    if (audit.violations.length > 0) await test.info().attach('environment-picker-axe', { body: JSON.stringify(audit.violations), contentType: 'application/json' });
     expect(audit.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical').map((violation) => violation.id)).toEqual([]);
-    // Creation moved from a list option to its own environment-setup choice.
-    await page.keyboard.press('Escape');
-    await expect(dialog.getByRole('radio', { name: 'Create new', exact: true })).toBeDisabled();
-    // The words are also the accessible description of the disabled choice, in a hidden node: the status line is the one that is shown.
-    await expect(dialog.getByRole('status').filter({ hasText: 'No host can make the default environment here' })).toBeVisible();
-    await dialog.getByRole('combobox', { name: 'Where it runs' }).click();
     await ask.getByRole('option', { name: 'Partner workspace' }).click();
     await expect(dialog.getByRole('textbox', { name: 'Why do you need it?' })).toBeVisible();
     expect(starts).toEqual([]);
@@ -135,7 +117,7 @@ test('a thread and the usage log name access programs while retaining the progra
   await expect(log).toContainText('Daybreak Blue');
   const filters = page.getByRole('button', { name: 'Filter requests', exact: true });
   if (await filters.isVisible()) await filters.click();
-  await page.getByRole('combobox', { name: 'Access program' }).click();
+  await page.getByRole('combobox', { name: 'Access programme' }).click();
   await page.getByRole('option', { name: 'Daybreak Blue', exact: true }).click();
   await expect(page).toHaveURL(/program=daybreakBlue/);
 });

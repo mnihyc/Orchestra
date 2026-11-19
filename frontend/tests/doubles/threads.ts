@@ -41,7 +41,7 @@ import type {
 } from '../../src/generated/api-types.ts';
 import { contextOf, turnCostOf, turnUsagePage } from './context.ts';
 import { ACME, MADE_AT, MODEL_ESTIMATE, userRef } from './fixtures.ts';
-import { ACCESS_FEATURE, parameterViews, projectNativeParameter, providerOptionViews, type ThreadChoices } from './model.ts';
+import { ACCESS_FEATURE, parameterViews, projectNativeParameter, type ThreadChoices } from './model.ts';
 import type { Places } from './places.ts';
 import { type Answer, type Part, type Person, Refusal, type Subscriber, type World } from './world.ts';
 
@@ -161,12 +161,6 @@ export class ThreadWorld implements Part {
     return held;
   }
 
-  /** Workspace changes are filtered by the native file-change item's actual turn. */
-  changeTurn(threadId: string, itemId: string): string | null {
-    const item = this.threads.get(threadId)?.items.get(itemId);
-    return item?.kind === 'tool_call' && item.payload.tool.kind === 'file_change' ? item.turn_id : null;
-  }
-
   private rowOf(threadId: string): TreeNode {
     const row = this.places.rowOf(threadId);
     if (row?.kind !== 'thread') throw new Refusal(404, 'not_found', 'there is no such thread, or it was deleted');
@@ -186,9 +180,6 @@ export class ThreadWorld implements Part {
     const running = turns.find((entry) => entry.state === 'running' || entry.state === 'starting');
     const pendingInputs = [...held.inputs.values()].filter((input) => input.state === 'pending' || input.state === 'delivering').length;
     const mayInteract = base.access.permissions.includes('thread.interact');
-    const environmentPermissions = this.world.access.environmentPermissions(person, row.id);
-    const mayPlace = !(held.fields.archived ?? base.archived) && (held.fields.side_of === undefined || held.fields.side_of === null)
-      && base.access.permissions.includes('thread.view') && (refs.environment === null ? base.access.permissions.includes('thread.manage') : environmentPermissions.includes('environment.manage'));
     const owner = this.places.userOfName(meta.owner);
     const made: Thread = {
       ...base,
@@ -221,7 +212,7 @@ export class ThreadWorld implements Part {
               provider: refs.provider,
             },
       blocked: blockedFor(treeThread?.blocked_reason),
-      can: { archive: base.access.permissions.includes('thread.archive') || base.access.permissions.includes('thread.manage'), export: base.access.permissions.includes('thread.export'), fork: true, place: mayPlace },
+      can: { archive: base.access.permissions.includes('thread.archive') || base.access.permissions.includes('thread.manage'), export: base.access.permissions.includes('thread.export'), fork: true, place: base.access.permissions.includes('thread.manage') },
       current_segment_id: SEGMENT(row.id),
       current_turn_id: running?.id ?? null,
       cwd: '/work',
@@ -235,14 +226,13 @@ export class ThreadWorld implements Part {
       directory_threads: row.id === ACME.mainThread ? 1 : 0,
       effort: bound.effort,
       environment: refs.environment,
-      environment_permissions: environmentPermissions,
+      environment_permissions: this.world.access.environmentPermissions(person, row.id),
       input_access: mayInteract
         ? { allowed: true, missing: [] }
         : { allowed: false, missing: [{ ask: [owner], ask_more: 0, override: false, closed: null, object: { id: row.id, kind: 'thread', name: row.name, owner }, options: null, permissions: ['thread.interact'] }] },
       last_activity_at: treeThread?.last_activity_at ?? null,
       lock: null,
       memory: { kept_by: 'agent', native: true, why: null },
-      program_model: null,
       model: bound.model,
       model_display: displayOf(resources.modelsOf(bound.provider).find((entry) => entry.model_name === bound.model)?.display_name, bound.model),
       my_last_read_seq: held.read.get(person.me.username) ?? null,
@@ -363,8 +353,6 @@ export class ThreadWorld implements Part {
     const seq = held.seq;
     if (rows.thread !== undefined) {
       if (rows.thread.display !== undefined) rows.thread.display = { ...rows.thread.display, seq };
-      // A new state is shown by its own display, not by one a read or an earlier state left in the row.
-      if (rows.thread.state !== undefined && rows.thread.display === undefined) delete held.fields.display;
       held.fields = { ...held.fields, ...rows.thread };
       // The tree row is what the left bar and the topic read: it follows the thread's state.
       const state = rows.thread.state ?? row.thread?.state ?? 'idle';
@@ -680,7 +668,7 @@ export class ThreadWorld implements Part {
 
     if ((found = /^GET \/threads\/([^/]+)\/gateway$/.exec(route))) {
       const id = found[1] ?? '';
-      this.world.change.threadOf(person, id);
+      this.places.need(person, id, 'thread.view');
       return { status: 200, body: this.gatewayStatuses.get(id) ?? { thread_id: id, state: 'unknown', source_primary_gateway_id: null,
         destination_primary_gateway_id: null, attached_gateway_id: null, plan: null, refusal: null } };
     }
@@ -790,8 +778,7 @@ export class ThreadWorld implements Part {
       const threadId = found[1] ?? '';
       const current = this.thread(person, this.rowOf(threadId)).display;
       const icon = current.state === 'finished' && seq >= current.seq ? display('idle', { ...current, state: 'idle', read_seq: seq }) : current;
-      // Only what the read changed is kept (a finished mark cleared): the display of a state the thread has left is not a fact to keep.
-      if (icon !== current) held.fields.display = icon;
+      held.fields.display = icon;
       this.world.users.tell(person.me.username, { what: 'read_state', thread_id: threadId, last_read_seq: seq, thread_display: icon });
       return { status: 200, body: { last_read_seq: seq, thread_display: icon } };
     }
@@ -807,7 +794,7 @@ export class ThreadWorld implements Part {
     if ((found = /^POST \/nodes\/([^/]+)\/auto$/.exec(route)) && this.places.rowOf(found[1] ?? '')?.kind === 'thread') {
       const threadId = found[1] ?? '';
       this.places.need(person, threadId, 'thread.manage');
-      this.emit(threadId, { thread: body.field === 'tags' ? { tags_source: 'auto' } : { title_source: 'auto' } });
+      this.emit(threadId, { thread: { title_source: body.field === 'title' ? 'auto' : 'user', description_source: body.field === 'description' ? 'auto' : 'user' } });
       return { status: 200, body: this.thread(person, this.rowOf(threadId)) };
     }
     if ((found = /^PUT \/nodes\/([^/]+)\/settings\/([^/]+)$/.exec(route)) && this.places.rowOf(found[1] ?? '')?.kind === 'thread') {
@@ -1031,13 +1018,11 @@ export class ThreadWorld implements Part {
   private parameterViewsOf(person: Person, threadId: string, model: string | null): ParameterView[] {
     const held = this.held(threadId);
     const row = this.rowOf(threadId);
-    const thread = this.thread(person, row);
-    const providerId = thread.binding?.provider.id ?? '';
+    const providerId = this.thread(person, row).binding?.provider.id ?? '';
     const entry = this.world.resources.modelsOf(providerId).find((candidate) => candidate.model_name === model);
     if (entry === undefined) return [];
     const writable = this.places.access(person, threadId).permissions.includes('thread.manage');
-    const choices = { own: held.params, features: this.features, writable, lockedBy: held.lockedBy };
-    return [...parameterViews(entry.parameters, choices), ...(thread.binding?.isolation.credential_path === 'forwarded' ? providerOptionViews(entry.parameters, choices) : [])];
+    return parameterViews(entry.parameters, { own: held.params, features: this.features, writable, lockedBy: held.lockedBy });
   }
 
   /** The normal queued-input preparation, also read by the people preview without publishing a row. */

@@ -26,22 +26,12 @@ members = [
     "crates/contracts/settings",
     "crates/contracts/summarizer",
     "crates/control/api",
-    "crates/control/api/base",
-    "crates/control/api/threads",
-    "crates/control/api/documents",
-    "crates/control/api/resources",
-    "crates/control/api/environments",
-    "crates/control/api/admin",
-    "crates/control/api/collaboration",
-    "crates/control/api/interactive",
     "crates/control/authz",
     "crates/control/chat",
     "crates/control/db",
     "crates/control/documents",
     "crates/control/engine",
     "crates/control/gateway",
-    "crates/control/operation-scope",
-    "crates/control/person-notices",
     "crates/control/settings",
     "crates/control/worker",
     "crates/foundation/build-info",
@@ -51,7 +41,6 @@ members = [
     "crates/platform/link",
     "crates/platform/pki",
     "crates/platform/plugin",
-    "crates/platform/private-file",
     "crates/platform/telemetry",
     "crates/runtime/connector",
     "crates/runtime/envhost",
@@ -65,7 +54,6 @@ members = [
     "extensions/agents/codex",
     "extensions/agents/fake",
     "extensions/blobs/local",
-    "extensions/capabilities/images",
     "extensions/drivers/docker",
     "extensions/drivers/host",
     "extensions/drivers/kubernetes",
@@ -78,9 +66,6 @@ members = [
     "extensions/notifiers/webhook",
     "extensions/protocols/anthropic-messages",
     "extensions/protocols/openai-responses",
-    "extensions/providers/anthropic",
-    "extensions/providers/builtins",
-    "extensions/providers/openai",
     "extensions/providers/deepseek",
     "extensions/providers/openrouter",
     "extensions/summarizers/model",
@@ -95,8 +80,6 @@ repository = "https://github.com/mnihyc/Orchestra"
 publish = false
 
 [workspace.dependencies]
-memmap2 = { version = "=0.9.11", default-features = false } # immutable process-private file views; 0.9.11 fixes RUSTSEC-2026-0186
-orch-private-file = { path = "crates/platform/private-file" }
 # Workspace crates.
 orch-access-contract = { path = "crates/contracts/access" }
 orch-adapter-acp = { path = "extensions/agents/acp" }
@@ -108,14 +91,6 @@ orch-agent-programs = { path = "crates/contracts/agent-programs" }
 orch-api = { path = "apps/api" }
 orch-api-contract = { path = "crates/contracts/api" }
 orch-api-core = { path = "crates/control/api" }
-orch-api-base = { path = "crates/control/api/base" }
-orch-api-threads = { path = "crates/control/api/threads" }
-orch-api-documents = { path = "crates/control/api/documents" }
-orch-api-resources = { path = "crates/control/api/resources" }
-orch-api-environments = { path = "crates/control/api/environments" }
-orch-api-admin = { path = "crates/control/api/admin" }
-orch-api-collaboration = { path = "crates/control/api/collaboration" }
-orch-api-interactive = { path = "crates/control/api/interactive" }
 orch-authz = { path = "crates/control/authz" }
 orch-blob-contract = { path = "crates/contracts/blob" }
 orch-blob-local = { path = "extensions/blobs/local" }
@@ -141,7 +116,6 @@ orch-gateway = { path = "apps/gateway" }
 orch-gateway-core = { path = "crates/control/gateway" }
 orch-identity-contract = { path = "crates/contracts/identity" }
 orch-identity-oidc = { path = "extensions/identity/oidc" }
-orch-image-backends = { path = "extensions/capabilities/images" }
 orch-link = { path = "crates/platform/link" }
 orch-link-contract = { path = "crates/contracts/link" }
 orch-model-contract = { path = "crates/contracts/model" }
@@ -152,17 +126,12 @@ orch-notifier-email = { path = "extensions/notifiers/email" }
 orch-notifier-push = { path = "extensions/notifiers/push" }
 orch-notifier-telegram = { path = "extensions/notifiers/telegram" }
 orch-notifier-webhook = { path = "extensions/notifiers/webhook" }
-orch-operation-scope = { path = "crates/control/operation-scope" }
-orch-person-notices = { path = "crates/control/person-notices" }
 orch-pki = { path = "crates/platform/pki" }
 orch-plugin = { path = "crates/platform/plugin" }
 orch-plugin-contract = { path = "crates/contracts/plugin" }
 orch-provider-contract = { path = "crates/contracts/provider" }
 orch-protocol-anthropic-messages = { path = "extensions/protocols/anthropic-messages" }
 orch-protocol-openai-responses = { path = "extensions/protocols/openai-responses" }
-orch-provider-anthropic = { path = "extensions/providers/anthropic" }
-orch-provider-builtins = { path = "extensions/providers/builtins" }
-orch-provider-openai = { path = "extensions/providers/openai" }
 orch-provider-deepseek = { path = "extensions/providers/deepseek" }
 orch-provider-openrouter = { path = "extensions/providers/openrouter" }
 orch-realtime-contract = { path = "crates/contracts/realtime" }

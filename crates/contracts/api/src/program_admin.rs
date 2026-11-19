@@ -162,8 +162,8 @@ crate::endpoints! {
     AdminProgramChannelsRead: POST "/admin/programs/{kind}/channels", Session, none, none, json ProgramChannelReadReply, 200,
         operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Fetches and checks one exact version; at most the six supported platform builds are returned.
-    AdminProgramVersionFetch: POST "/admin/programs/{kind}/builds/{version}/fetch", Session, none, none, json crate::admin::HarnessFetchResponse, 200,
-        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
+    AdminProgramVersionFetch: POST "/admin/programs/{kind}/builds/{version}/fetch", Session, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads one version, independently of the current build page.
     AdminProgramVersionGet: GET "/admin/programs/{kind}/builds/{version}", Session, none, none, json Vec<HarnessBuild>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);

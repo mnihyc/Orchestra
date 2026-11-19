@@ -48,15 +48,14 @@ export const sourceQuery = (source: PageSource) =>
     queryFn: ({ signal }): Promise<PermissionPage> => source.type === 'page' ? readPage(source.target, signal) : source.type === 'system-defaults' ? readSystemDefaults(signal) : readDefaults(source.place.id, signal),
   });
 
-const sourceChange = (source: PageSource, change: PageChange, confirmation?: string): Promise<PermissionPage> =>
-  source.type === 'page' ? changePage(source.target, change, undefined, confirmation) : source.type === 'system-defaults' ? changeSystemDefaults(change, confirmation) : changeDefaults(source.place.id, change, confirmation);
+const sourceChange = (source: PageSource, change: PageChange): Promise<PermissionPage> =>
+  source.type === 'page' ? changePage(source.target, change) : source.type === 'system-defaults' ? changeSystemDefaults(change) : changeDefaults(source.place.id, change);
 
 export const sourcePreview = (source: PageSource, change: PageChange): Promise<PagePreview> =>
   source.type === 'page' ? previewPage(source.target, change) : source.type === 'system-defaults' ? previewSystemDefaults(change) : previewDefaults(source.place.id, change);
 
 /** What was done to the page, in words, and how to do it again against a newer page. */
 export interface Request {
-  confirmation?: string | undefined;
   label: string;
   make: (page: PermissionPage) => PageChange;
 }
@@ -94,7 +93,7 @@ export function useChanges(source: PageSource): Changes {
     mutationFn: async (request: Request): Promise<PermissionPage> => {
       // The page as it stands now, not as the screen drew it a minute ago.
       const page = queryClient.getQueryData<PermissionPage>(key) ?? (await queryClient.query(sourceQuery(source)));
-      return sourceChange(source, request.make(page), request.confirmation);
+      return sourceChange(source, request.make(page));
     },
     onMutate: (request) => {
       setDoing(request.label);

@@ -242,7 +242,6 @@ pub async fn run(args: &Args) -> anyhow::Result<()> {
         };
         let fixture = Fixture {
             start: AgentStart {
-                provider_kind: None,
                 provider_id: new_id(),
                 agent_id: new_id(),
                 harness_kind: args.kind.clone(),

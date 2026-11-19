@@ -242,12 +242,6 @@ fn default_network_prefix() -> u8 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressConfig {
-    /// The trusted node's parent HTTP proxy for restricted connections; no template may choose it.
-    #[serde(default)]
-    pub parent_proxy: Option<String>,
-    /// The node's configured Orch transport used by the same parent reachability probe.
-    #[serde(default)]
-    pub parent_probe: Option<String>,
     /// The operator's trusted sidecar image. Never taken from a runtime's requested image; none refuses restriction.
     #[serde(default)]
     pub proxy_image: Option<String>,

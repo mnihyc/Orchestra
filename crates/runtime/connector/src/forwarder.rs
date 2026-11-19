@@ -73,10 +73,7 @@ use crate::tunnels::TunnelServer;
 use crate::upstream::{
     End, IDLE_TIMEOUT, Relay, Upstream, UpstreamError, UpstreamRequest, Watcher,
 };
-use crate::usage::lease_denied;
-
-mod generation;
-mod service;
+use crate::usage::{lease_denied, lease_usage};
 
 /// How long a harness is told to wait before it asks again when the forwarder could not reach the
 /// upstream, or the provider is not there: the first pause of the harnesses' own backoff.
@@ -420,86 +417,6 @@ impl Forwarder {
         &self.protocols
     }
 
-    /// The installed provider declarations are shared with discovery and final request enforcement.
-    #[must_use]
-    pub fn capability_sources(&self) -> &orch_provider_contract::builtins::BuiltinSources {
-        &self.services.builtin_sources
-    }
-
-    fn declared_parameters(
-        &self,
-        protocol: &str,
-        endpoint: &EndpointEntry,
-        model: &str,
-        parameters: &orch_provider_contract::models::ModelParameters,
-    ) -> orch_provider_contract::models::ModelParameters {
-        let mut parameters = parameters.clone();
-        let projection = self.services.builtin_sources.endpoint_capabilities(
-            protocol,
-            endpoint.base_url(),
-            model,
-        );
-        if !projection.native_tools.is_empty() {
-            let recorded = parameters.native_tools.entry(protocol.into()).or_default();
-            for (capability, binding) in projection.native_tools {
-                if binding.is_none() {
-                    // A current endpoint refusal narrows even an earlier open lease.
-                    recorded.insert(capability, None);
-                } else {
-                    // Compatible defaults cannot reopen a closed or replace a narrower
-                    // endpoint/model binding captured by the issuer.
-                    recorded.entry(capability).or_insert(binding);
-                }
-            }
-        }
-        parameters
-    }
-
-    /// Current installed grammar identifies a closed native capability; caller functions remain separate.
-    fn native_request_allowed(
-        &self,
-        protocol: &str,
-        endpoint: &EndpointEntry,
-        model: &str,
-        parameters: &orch_provider_contract::models::ModelParameters,
-        body: &serde_json::Value,
-    ) -> Result<(), &'static str> {
-        let installed = self.services.builtin_sources.capabilities().declarations();
-        let current = self.services.builtin_sources.endpoint_capabilities(
-            protocol,
-            endpoint.base_url(),
-            model,
-        );
-        let recorded = parameters.native_tools.get(protocol);
-        for capability in recorded
-            .into_iter()
-            .flat_map(|tools| tools.keys())
-            .chain(current.native_tools.keys())
-        {
-            let closed = recorded.is_some_and(|tools| tools.get(capability) == Some(&None))
-                || current.native_tools.get(capability) == Some(&None);
-            if !closed {
-                continue;
-            }
-            let binding = current
-                .native_tools
-                .get(capability)
-                .and_then(Option::as_ref)
-                .or_else(|| recorded?.get(capability)?.as_ref())
-                .or_else(|| {
-                    installed
-                        .interfaces
-                        .get(protocol)?
-                        .native_tools
-                        .get(capability)
-                });
-            if binding.is_some_and(|binding| binding.native_request_selected(body)) {
-                return Err("the selected native capability is closed by this model or endpoint");
-            }
-        }
-        Ok(())
-    }
-
     /// The client to the upstreams.
     #[must_use]
     pub fn upstream(&self) -> &Upstream {
@@ -551,22 +468,7 @@ impl Forwarder {
                 .await
                 .map_err(AuthorizationError::Presentation)?;
             for (name, value) in &presented {
-                if entry.is_some_and(|entry| {
-                    entry
-                        .protocol
-                        .joined_headers()
-                        .iter()
-                        .any(|known| known.eq_ignore_ascii_case(name.as_str()))
-                }) {
-                    orch_model_contract::endpoint::append_comma_header(
-                        headers,
-                        name.clone(),
-                        value.clone(),
-                    )
-                    .map_err(AuthorizationError::Endpoint)?;
-                } else {
-                    headers.insert(name.clone(), value.clone());
-                }
+                headers.insert(name.clone(), value.clone());
             }
             Ok(query)
         } else {
@@ -730,8 +632,6 @@ impl Forwarder {
             );
         };
 
-        let source_capability = entry.protocol.native_capability(&path);
-
         // 3. The body, and the model it names.
         if parts
             .headers
@@ -784,16 +684,7 @@ impl Forwarder {
             let (parts, bytes) = (entry.models)(lease.allowed_models()).into_parts();
             return Response::from_parts(parts, full(bytes));
         }
-        let candidates = match entry.protocol.model_candidates(&path, &body) {
-            Ok(candidates) => candidates,
-            Err(reason) => {
-                return self.refuse(
-                    Some(entry),
-                    Refusal::new(StatusCode::FORBIDDEN, code::MODEL_NOT_ALLOWED, reason),
-                );
-            }
-        };
-        let named = candidates.first().cloned();
+        let named = entry.protocol.model_of(&path, &body);
         let model = match named {
             Some(model) if lease.allows(&model) => model,
             other => {
@@ -954,9 +845,7 @@ impl Forwarder {
                     !target.protocol.allowed(&translated_method, &request.path)
                         || target
                             .protocol
-                            .model_candidates(&request.path, &request.body)
-                            .ok()
-                            .and_then(|names| names.into_iter().next())
+                            .model_of(&request.path, &request.body)
                             .as_deref()
                             != Some(model.as_str())
                 })
@@ -1006,28 +895,15 @@ impl Forwarder {
             }
             converter = Some(response);
         }
-        let Some(model_parameters) = lease.model_parameters(&model) else {
-            return self.refuse(
-                Some(entry),
-                Refusal::new(
-                    StatusCode::FORBIDDEN,
-                    code::REQUEST_REFUSED,
-                    "this lease lacks provider option constraints; start a new turn",
-                ),
-            );
-        };
-        let model_parameters =
-            self.declared_parameters(endpoint_protocol, endpoint, &model, model_parameters);
         let endpoint_entry = self.protocols.get(endpoint_protocol);
         if !endpoint.options().params.is_empty() {
             let applied = match endpoint_entry {
-                Some(wire) => orch_model_contract::parameters::apply_request_for_model(
+                Some(wire) => orch_model_contract::parameters::apply_request(
                     wire.protocol.as_ref(),
                     &sent_path,
                     &sent_body,
                     &endpoint.options().request_params(),
                     true,
-                    &model_parameters,
                 ),
                 None => orch_model_contract::parameters::apply(
                     endpoint_protocol,
@@ -1071,49 +947,23 @@ impl Forwarder {
                 );
             }
         }
-        if let Some(values) = lease.request_options(endpoint_protocol) {
-            let applied = (|| {
-                let values = orch_model_contract::parameters::thread::selected(
-                    endpoint_protocol,
-                    &model_parameters,
-                    values,
-                )?;
-                match endpoint_entry {
-                    Some(wire) => orch_model_contract::parameters::apply_request_for_model(
-                        wire.protocol.as_ref(),
-                        &sent_path,
-                        &sent_body,
-                        values,
-                        false,
-                        &model_parameters,
-                    ),
-                    None => orch_model_contract::parameters::apply(
-                        endpoint_protocol,
-                        &sent_body,
-                        values,
-                        false,
-                    ),
-                }
-            })();
-            sent_body = match applied {
-                Ok(body) => Bytes::from(body),
-                Err(reason) => {
-                    self.denied(&lease, &model, code::REQUEST_REFUSED).await;
-                    return self.refuse(
-                        Some(entry),
-                        Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED, reason),
-                    );
-                }
-            };
-        }
         // Every final payload is checked after translation and every overlay, including translators
         // whose target format has no built-in implementation. A legacy lease cannot prove a ceiling.
-        sent_body = match orch_model_contract::parameters::outgoing_with_access_program(
+        let Some(model_parameters) = lease.model_parameters(&model) else {
+            return self.refuse(
+                Some(entry),
+                Refusal::new(
+                    StatusCode::FORBIDDEN,
+                    code::REQUEST_REFUSED,
+                    "this lease lacks provider option constraints; start a new turn",
+                ),
+            );
+        };
+        sent_body = match orch_model_contract::parameters::outgoing_at(
             endpoint_protocol,
             &sent_path,
-            &model_parameters,
+            model_parameters,
             &sent_body,
-            lease.access_program(),
         ) {
             Ok(body) => Bytes::from(body),
             Err(reason) => {
@@ -1149,155 +999,30 @@ impl Forwarder {
                 ),
             );
         }
-        let final_json: serde_json::Value = serde_json::from_slice(&sent_body).unwrap_or_default();
-        if let Err(reason) = self.native_request_allowed(
-            endpoint_protocol,
-            endpoint,
-            &model,
-            &model_parameters,
-            &final_json,
-        ) {
-            self.denied(&lease, &model, code::REQUEST_REFUSED).await;
-            return self.refuse(
-                Some(entry),
-                Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED, reason),
-            );
-        }
-        let target_capability =
-            endpoint_entry.and_then(|wire| wire.protocol.native_capability(&sent_path));
-        if source_capability.is_some() && source_capability != target_capability {
-            return self.refuse(Some(entry), Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED,
-                "the translator cannot replace this native side request with another capability"));
-        }
-        if let Some(capability) = target_capability {
-            let admitted = (|| {
-                let current_endpoint = self.services.builtin_sources.endpoint_capabilities(
-                    endpoint_protocol,
-                    endpoint.base_url(),
-                    &model,
-                );
-                if !current_endpoint
-                    .native_tools
-                    .get(capability)
-                    .is_some_and(Option::is_some)
-                {
-                    return Err("the current endpoint has not declared this native side request");
-                }
-                let native = lease
-                    .native_model()
-                    .filter(|native| native.model == model)
-                    .ok_or("this lease lacks the admitted native session configuration")?;
-                let resolution = native
-                    .capabilities
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|resolution| {
-                        resolution
-                            .get("capability")
-                            .and_then(serde_json::Value::as_str)
-                            == Some(capability)
-                    })
-                    .ok_or("the session has no resolution of this native capability")?;
-                let configuration = resolution
-                    .get("native_config")
-                    .and_then(serde_json::Value::as_object)
-                    .ok_or("the admitted capability has no native configuration")?
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                let mode = resolution
-                    .get("mode")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or("the admitted capability has no reported native mode")?;
-                let body = serde_json::from_slice(&sent_body)
-                    .map_err(|_| "native request must be JSON")?;
-                orch_model_contract::web_search::for_model(endpoint_protocol, &model_parameters)
-                    .ok_or("the endpoint has no native search binding")?
-                    .admit_native_request(&sent_path, &body, &configuration, mode)
-            })();
-            if let Err(reason) = admitted {
-                self.denied(&lease, &model, code::REQUEST_REFUSED).await;
-                return self.refuse(
-                    Some(entry),
-                    Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED, reason),
-                );
-            }
-        }
-        let candidates = endpoint_entry.map_or_else(
+        if endpoint_entry.map_or_else(
             || {
-                let primary = serde_json::from_slice::<serde_json::Value>(&sent_body)
+                serde_json::from_slice::<serde_json::Value>(&sent_body)
                     .ok()
                     .and_then(|body| {
                         body.get("model")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_owned)
-                    });
-                orch_model_contract::protocol::model_candidates(
-                    primary,
-                    &sent_body,
-                    entry.protocol.model_lists(),
-                )
+                    })
+                    .as_deref()
+                    != Some(model.as_str())
             },
-            |wire| wire.protocol.model_candidates(&sent_path, &sent_body),
-        );
-        let candidates = match candidates {
-            Ok(candidates)
-                if candidates.first().map(String::as_str) == Some(model.as_str())
-                    && candidates.iter().all(|candidate| lease.allows(candidate)) =>
-            {
-                candidates
-            }
-            _ => {
-                self.denied(&lease, &model, code::MODEL_NOT_ALLOWED).await;
-                return self.refuse(
+            |wire| {
+                wire.protocol.model_of(&sent_path, &sent_body).as_deref() != Some(model.as_str())
+            },
+        ) {
+            return self.refuse(
                 Some(entry),
                 Refusal::new(
                     StatusCode::FORBIDDEN,
                     code::MODEL_NOT_ALLOWED,
-                    "the final request must retain the admitted model and every fallback must be allowed by the lease",
+                    "the final request does not retain the admitted model",
                 ),
             );
-            }
-        };
-        // One final body must satisfy every candidate's frozen ceiling; fallback selection is upstream.
-        for candidate in candidates.iter().filter(|candidate| *candidate != &model) {
-            let checked = lease
-                .model_parameters(candidate)
-                .ok_or("the fallback model lacks frozen provider constraints")
-                .and_then(|parameters| {
-                    self.native_request_allowed(
-                        endpoint_protocol,
-                        endpoint,
-                        candidate,
-                        parameters,
-                        &final_json,
-                    )?;
-                    orch_model_contract::parameters::outgoing_at(
-                        endpoint_protocol,
-                        &sent_path,
-                        parameters,
-                        &sent_body,
-                    )
-                })
-                .and_then(|body| {
-                    serde_json::from_slice::<serde_json::Value>(&body)
-                        .map_err(|_| "the fallback model options cannot be read")
-                })
-                .and_then(|body| {
-                    if body == final_json {
-                        Ok(())
-                    } else {
-                        Err("the fallback model requires different request options")
-                    }
-                });
-            if let Err(reason) = checked {
-                self.denied(&lease, candidate, code::REQUEST_REFUSED).await;
-                return self.refuse(
-                    Some(entry),
-                    Refusal::new(StatusCode::FORBIDDEN, code::REQUEST_REFUSED, reason),
-                );
-            }
         }
         let extra_query = match self
             .authorize(
@@ -1338,21 +1063,6 @@ impl Forwarder {
                 );
             }
         };
-        if let Some(wire) = endpoint_entry
-            && let Err(error) = wire
-                .protocol
-                .finalize_request_headers(&mut headers, &sent_body)
-        {
-            return self.refuse(
-                Some(entry),
-                Refusal::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    code::PROVIDER_UNAVAILABLE,
-                    error.to_string(),
-                )
-                .later(),
-            );
-        }
         let url = upstream_url(endpoint, &sent_path, sent_query.as_deref(), &extra_query);
 
         // 7. Send it, and hand the answer on as it comes.
@@ -1363,83 +1073,13 @@ impl Forwarder {
             .and_then(|body| {
                 orch_model_contract::parameters::requested_service_tier(endpoint_protocol, &body)
             });
-        let hourly_cache = orch_model_contract::parameters::has_cache_controls(endpoint_protocol)
-            .then(|| {
-                orch_model_contract::parameters::requested_cache_lifetimes(
-                    endpoint_protocol,
-                    &final_json,
-                )
-                .is_ok_and(|lifetimes| lifetimes.iter().any(|lifetime| lifetime == "1h"))
-            });
         let timing = orch_api_contract::usage::RequestTiming {
-            native_prices: model_parameters
-                .native_tools
-                .get(endpoint_protocol)
-                .map(|bindings| {
-                    orch_model_contract::declared_usage::native_prices(bindings, &final_json)
-                })
-                .unwrap_or_default(),
-            cache_write_1h_tokens: hourly_cache.map(|selected| {
-                if selected {
-                    orch_api_contract::usage::UsageMeasurement::Unread
-                } else {
-                    orch_api_contract::usage::UsageMeasurement::Unsupported
-                }
-            }),
-            requested_capacity_tier: orch_model_contract::parameters::requested_capacity_tier(
-                endpoint_protocol,
-                &final_json,
-            ),
-            reported_capacity_tier: if orch_model_contract::parameters::reports_capacity_tier(
-                endpoint_protocol,
-            ) {
-                orch_api_contract::usage::UsageMeasurement::Unread
-            } else {
-                orch_api_contract::usage::UsageMeasurement::Unsupported
-            },
-            asked: Some(self.services.clock.time()),
             web_searches: if endpoint_entry
-                .and_then(|wire| {
-                    orch_model_contract::web_search::for_model(
-                        wire.protocol.name(),
-                        &model_parameters,
-                    )
-                })
+                .and_then(|wire| orch_model_contract::web_search::declared(wire.protocol.name()))
                 .is_some_and(|search| {
                     serde_json::from_slice(&sent_body)
                         .ok()
                         .is_some_and(|body| search.selected(&body))
-                }) {
-                orch_api_contract::usage::UsageMeasurement::Unread
-            } else {
-                orch_api_contract::usage::UsageMeasurement::Unsupported
-            },
-            web_fetches: if target_capability == Some("web_search")
-                || model_parameters
-                    .native_tools
-                    .get(endpoint_protocol)
-                    .into_iter()
-                    .flat_map(|tools| tools.values().flatten())
-                    .any(|binding| {
-                        binding
-                            .counters
-                            .get("web_fetches")
-                            .is_some_and(|counter| !counter.optional)
-                    }) {
-                orch_api_contract::usage::UsageMeasurement::Unread
-            } else {
-                orch_api_contract::usage::UsageMeasurement::Unsupported
-            },
-            reported_cost: if model_parameters
-                .native_tools
-                .get(endpoint_protocol)
-                .into_iter()
-                .flat_map(|tools| tools.values().flatten())
-                .any(|binding| {
-                    binding
-                        .counters
-                        .values()
-                        .any(|counter| counter.reported_cost)
                 }) {
                 orch_api_contract::usage::UsageMeasurement::Unread
             } else {
@@ -1457,38 +1097,6 @@ impl Forwarder {
             ..Default::default()
         };
         let meter = Meter::start_observed(Arc::clone(&lease));
-        let mut watcher = Metered {
-            hourly_cache,
-            hourly_observed: false,
-            observer: endpoint_entry.map(|wire| {
-                orch_model_contract::declared_usage::configured(
-                    wire.protocol.usage_observer_at(&sent_path, &sent_body),
-                    model_parameters
-                        .native_tools
-                        .get(endpoint_protocol)
-                        .unwrap_or(&Default::default()),
-                )
-            }),
-            meter,
-            model,
-            timing,
-            request_id: orch_types::new_id().to_string(),
-            redactions: credential
-                .as_ref()
-                .map(|credential| credential.expose().to_owned())
-                .into_iter()
-                .chain(
-                    provider
-                        .secrets()
-                        .values()
-                        .map(|secret| secret.expose().to_owned()),
-                )
-                .filter(|secret| !secret.is_empty())
-                .collect(),
-            clock: Arc::clone(&self.services.clock),
-            publisher: Arc::clone(&self.services.publisher),
-            runtime: tokio::runtime::Handle::current(),
-        };
         let sent = self
             .upstream
             .send(UpstreamRequest {
@@ -1508,7 +1116,6 @@ impl Forwarder {
                     _ => (StatusCode::BAD_GATEWAY, code::UPSTREAM_UNREACHABLE),
                 };
                 tracing::warn!(provider = %provider.id(), %error, "a model call could not be forwarded");
-                watcher.end(End::Cut(error.to_string()));
                 return self.refuse(
                     Some(entry),
                     Refusal::new(status, label, error.to_string()).later(),
@@ -1516,19 +1123,14 @@ impl Forwarder {
             }
         };
         self.note_key(&provider, answer.status).await;
-        if let Some(observer) = &mut watcher.observer {
-            observer.response_status(answer.status.as_u16());
-        }
-        watcher.timing.upstream_status = Some(i64::from(answer.status.as_u16()));
-        watcher.timing.provider_request_id = ["x-request-id", "request-id"]
-            .into_iter()
-            .find_map(|name| {
-                answer
-                    .headers
-                    .get(name)
-                    .and_then(|value| value.to_str().ok())
-            })
-            .map(str::to_owned);
+        let watcher = Metered {
+            observer: endpoint_entry.map(|wire| wire.protocol.usage_observer()),
+            meter,
+            model,
+            timing,
+            publisher: Arc::clone(&self.services.publisher),
+            runtime: tokio::runtime::Handle::current(),
+        };
         let translated = converter.is_some();
         let body = match converter {
             Some(converter) => TranslatedRelay::new(
@@ -1785,37 +1387,22 @@ impl Forwarder {
                 "a model and a positive output token limit are required",
             ));
         }
-        let mut request = request.clone();
-        if let Some(endpoint) = provider.endpoint_for(&request.protocol)
-            && let Some(parameters) = &request.model_parameters
-        {
-            request.model_parameters = Some(self.declared_parameters(
-                &request.protocol,
-                endpoint,
-                &request.model_name,
-                parameters,
-            ));
-        }
         let call = OwnCall {
-            capture_native_result: false,
             provider,
             protocol: &request.protocol,
             model: &request.model_name,
             label: "completion",
             kind: CommandKind::ProviderComplete,
-            progress: None,
-            cancel: None,
         };
         let (text, usage, timing) = self
             .own_request(
                 &call,
-                |protocol, options| completion_request(protocol, options, &request),
+                |protocol| completion_request(protocol, request),
                 |protocol, body| {
                     protocol
                         .completion_text(body)
                         .map_err(|_| "the upstream did not return a completed text answer")
                 },
-                None,
             )
             .await?;
         Ok(ProviderCompleteResult {
@@ -1845,20 +1432,17 @@ impl Forwarder {
             ));
         }
         let call = OwnCall {
-            capture_native_result: false,
             provider,
             protocol: &request.protocol,
             model: &request.model_name,
             label: "embeddings",
             kind: CommandKind::ProviderEmbed,
-            progress: None,
-            cancel: None,
         };
         let inputs = request.inputs.len();
         let (vectors, usage, timing) = self
             .own_request(
                 &call,
-                |protocol, _options| {
+                |protocol| {
                     let (method, path, body) = protocol
                         .embedding_request(&request.model_name, &request.inputs, request.dimensions)
                         .ok_or_else(|| {
@@ -1896,7 +1480,6 @@ impl Forwarder {
                         .embedding_vectors(body, inputs)
                         .map_err(|_| "the upstream did not return one vector for each text")
                 },
-                None,
             )
             .await?;
         Ok(ProviderEmbedResult {
@@ -1916,13 +1499,11 @@ impl Forwarder {
         call: &OwnCall<'_>,
         build: impl FnOnce(
             &dyn WireProtocol,
-            &orch_model_contract::endpoint::EndpointOptions,
         ) -> Result<
             (Method, &'static str, Bytes),
             orch_link_contract::commands::CommandError,
         >,
         read: impl FnOnce(&dyn WireProtocol, &Bytes) -> Result<T, &'static str>,
-        stream_command: Option<Id>,
     ) -> Result<
         (T, ObservedUsage, orch_api_contract::usage::RequestTiming),
         orch_link_contract::commands::CommandError,
@@ -1943,7 +1524,7 @@ impl Forwarder {
         })?;
         // Structured commands carry the issuer's final immutable options. Only the raw
         // incoming request path applies runtime endpoint defaults, never this replay path.
-        let (method, path, body) = build(entry.protocol.as_ref(), endpoint.options())?;
+        let (method, path, body) = build(entry.protocol.as_ref())?;
         if u64::try_from(body.len()).unwrap_or(u64::MAX) > self.max_request_bytes {
             return Err(CommandError::new(
                 ErrorCode::TooLarge,
@@ -1953,16 +1534,10 @@ impl Forwarder {
                 ),
             ));
         }
-        if !entry
-            .protocol
-            .model_candidates(path, &body)
-            .is_ok_and(|models| {
-                !models.is_empty() && models.iter().all(|model| model == call.model)
-            })
-        {
+        if entry.protocol.model_of(path, &body).as_deref() != Some(call.model) {
             return Err(CommandError::new(
                 ErrorCode::Conflict,
-                "model options name a model outside this command's authorized model",
+                "model options changed the selected model",
             ));
         }
         if self.protocols.privacy().refused_member(&body).is_some() {
@@ -1971,43 +1546,17 @@ impl Forwarder {
                 "model options contain a refused request member",
             ));
         }
-        let native = self
-            .services
-            .builtin_sources
-            .endpoint_capabilities(call.protocol, endpoint.base_url(), call.model)
-            .native_tools;
-        let native_prices = serde_json::from_slice(&body)
-            .ok()
-            .map(|body| orch_model_contract::declared_usage::native_prices(&native, &body))
-            .unwrap_or_default();
-        let mut observed_parameters = orch_provider_contract::models::ModelParameters::default();
-        observed_parameters
-            .native_tools
-            .insert(call.protocol.into(), native.clone());
-        let search_selected =
-            orch_model_contract::web_search::for_model(entry.protocol.name(), &observed_parameters)
-                .is_some_and(|search| {
-                    serde_json::from_slice(&body)
-                        .ok()
-                        .is_some_and(|body| search.selected(&body))
-                });
+        let search_selected = orch_model_contract::web_search::declared(entry.protocol.name())
+            .is_some_and(|search| {
+                serde_json::from_slice(&body)
+                    .ok()
+                    .is_some_and(|body| search.selected(&body))
+            });
         let requested_service_tier = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|body| {
                 orch_model_contract::parameters::requested_service_tier(call.protocol, &body)
             });
-        let requested_capacity_tier = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|body| {
-                orch_model_contract::parameters::requested_capacity_tier(call.protocol, &body)
-            });
-        let hourly_cache = serde_json::from_slice::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|body| {
-                orch_model_contract::parameters::requested_cache_lifetimes(call.protocol, &body)
-                    .ok()
-            })
-            .is_some_and(|lifetimes| lifetimes.iter().any(|lifetime| lifetime == "1h"));
         let credential = provider.credential(&self.store);
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -2035,15 +1584,6 @@ impl Forwarder {
                     retryable: error.retryable,
                     details: None,
                 },
-            })?;
-        entry
-            .protocol
-            .finalize_request_headers(&mut headers, &body)
-            .map_err(|_| {
-                CommandError::new(
-                    ErrorCode::Conflict,
-                    "the interface's required request headers could not be formed",
-                )
             })?;
         let url = upstream_url(endpoint, path, None, &extra);
         let timeout = std::time::Duration::from_secs(u64::from(call.kind.deadline_secs()));
@@ -2075,76 +1615,27 @@ impl Forwarder {
                 output_streamed: Some(false),
                 ..Default::default()
             };
-            request.error_reason = error
-                .details
-                .as_ref()
-                .and_then(|details| details.pointer("/failure/reason"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            request.upstream_status = error
-                .details
-                .as_ref()
-                .and_then(|details| details.pointer("/failure/status"))
-                .and_then(serde_json::Value::as_i64);
             request.finish(code, Some(&error.detail), said.as_deref());
-            if let Some(progress) = &call.progress {
-                let observed = progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                request.output_streamed = observed.streamed;
-                if let Some(usage) = &observed.usage {
-                    request.tokens = usage.tokens.into();
-                }
-                if call
-                    .cancel
-                    .as_ref()
-                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-                {
-                    request.error_reason = Some("cancelled".into());
-                }
-            }
             let mut details = error
                 .details
                 .clone()
                 .unwrap_or_else(|| serde_json::json!({}));
             details["model_request"] = serde_json::json!(request);
-            if !native_prices.is_empty() {
-                details["model_request"]["native_prices"] = serde_json::json!(native_prices);
-            }
             details["model_request"]["requested_service_tier"] =
                 serde_json::json!(requested_service_tier);
-            if let Some(progress) = &call.progress
-                && let Some(usage) = &progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .usage
-            {
-                details["model_request"]["reported_service_tier"] =
-                    serde_json::json!(usage.service_tier);
-                details["model_request"]["provider_request_id"] =
-                    serde_json::json!(usage.request_ref);
-                details["model_request"]["web_searches"] = serde_json::json!(usage.web_searches);
-            }
             error.with_details(details)
         };
-        let received = tokio::time::timeout(
+        let (status, response_headers, body) = tokio::time::timeout(
             timeout,
-            async {
-                let exchange=self.own_reply(
-                call,
+            self.upstream.fetch(
                 UpstreamRequest {
                     method,
                     url,
                     headers,
                     body,
                 },
-                stream_command,
-                );
-                tokio::select! {
-                    response=exchange=>response,
-                    ()=async {match &call.cancel {Some(cancel)=>cancel.cancelled().await,None=>std::future::pending().await}}=>Err(UpstreamError::Http("owned generation was stopped".into())),
-                }
-            },
+                crate::upstream::MAX_WHOLE_REPLY_BYTES,
+            ),
         )
         .await
         .map_err(|_| {
@@ -2155,24 +1646,15 @@ impl Forwarder {
             )
         })?
         .map_err(|_| {
-            let cancelled=call.cancel.as_ref().is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
             failed(
                 CommandError::new(
-                    if cancelled {ErrorCode::Conflict} else {ErrorCode::Internal},
-                    if cancelled {"generation was stopped".to_owned()} else {format!("the {} upstream could not be reached",call.label)},
+                    ErrorCode::Internal,
+                    format!("the {} upstream could not be reached", call.label),
                 ),
-                if cancelled {"stream_interrupted"} else {"provider_unreachable"},
+                "provider_unreachable",
                 None,
             )
         })?;
-        let generation::OwnReply {
-            status,
-            headers: response_headers,
-            body,
-            usage: stream_usage,
-            streamed,
-            first_output,
-        } = received;
         let reply: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         if !status.is_success() || reply.get("error").is_some_and(|error| !error.is_null()) {
             let raw = String::from_utf8_lossy(&body);
@@ -2228,10 +1710,7 @@ impl Forwarder {
             self.note_key(provider, status).await;
             let mut error=failed(CommandError::new(ErrorCode::Internal,"The vendor filter refused this request")
                 .with_details(serde_json::json!({"failure":{"code":classified.code,"reason":classified.reason,"status":status.as_u16(),"retryable":true}})),&classified.code,Some(said));
-            let mut observer = orch_model_contract::declared_usage::configured(
-                entry.protocol.usage_observer(),
-                &native,
-            );
+            let mut observer = entry.protocol.usage_observer();
             observer.observe(&body);
             if let Some(usage) = observer.usage()
                 && let Some(details) = error.details.as_mut()
@@ -2239,7 +1718,6 @@ impl Forwarder {
                 details["model_request"]["tokens"] =
                     serde_json::json!(orch_api_contract::usage::RequestTokens::from(usage.tokens));
                 details["model_request"]["web_searches"] = serde_json::json!(usage.web_searches);
-                details["model_request"]["web_fetches"] = serde_json::json!(usage.web_fetches);
                 details["model_request"]["reported_service_tier"] =
                     serde_json::json!(usage.service_tier);
             }
@@ -2252,12 +1730,9 @@ impl Forwarder {
                 None,
             )
         })?;
-        let mut observer = orch_model_contract::declared_usage::configured(
-            entry.protocol.usage_observer(),
-            &native,
-        );
+        let mut observer = entry.protocol.usage_observer();
         observer.observe(&body);
-        let usage = stream_usage.or_else(|| observer.usage()).ok_or_else(|| {
+        let usage = observer.usage().ok_or_else(|| {
             failed(
                 CommandError::new(
                     ErrorCode::Internal,
@@ -2271,11 +1746,10 @@ impl Forwarder {
         let mut timing = orch_api_contract::performance::request_timing(
             &orch_api_contract::usage::RequestSample {
                 asked: Some(started),
-                first_output,
                 end: Some(self.services.clock.time()),
                 output_tokens: Some(usage.tokens.output_tokens),
                 reported_tokens: Some(usage.tokens.into()),
-                output_streamed: Some(streamed),
+                output_streamed: Some(false),
                 outcome: orch_api_contract::usage::UsageMeasurement::Told {
                     value: "done".to_owned(),
                 },
@@ -2290,71 +1764,7 @@ impl Forwarder {
             },
             |value| orch_api_contract::usage::UsageMeasurement::Told { value },
         );
-        timing.declared_counters = usage
-            .declared_counters
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.clone(),
-                    value.map_or(
-                        orch_api_contract::usage::UsageMeasurement::Unread,
-                        |value| orch_api_contract::usage::UsageMeasurement::Told { value },
-                    ),
-                )
-            })
-            .collect();
-        timing.native_prices = native_prices.clone();
-        timing.reported_cost = usage.cost.as_ref().map_or(
-            if native.values().flatten().any(|binding| {
-                binding
-                    .counters
-                    .values()
-                    .any(|counter| counter.reported_cost)
-            }) {
-                orch_api_contract::usage::UsageMeasurement::Unread
-            } else {
-                orch_api_contract::usage::UsageMeasurement::Unsupported
-            },
-            |amount| orch_api_contract::usage::UsageMeasurement::Told {
-                value: orch_api_contract::usage::ReportedCost {
-                    amount: amount.clone(),
-                    unit: usage.cost_unit.clone(),
-                },
-            },
-        );
-        timing.web_fetches = usage.web_fetches.map_or(
-            orch_api_contract::usage::UsageMeasurement::Unsupported,
-            |value| orch_api_contract::usage::UsageMeasurement::Told { value },
-        );
-        timing.upstream_status = Some(i64::from(status.as_u16()));
-        timing.provider_request_id = usage.request_ref.clone();
         timing.requested_service_tier = requested_service_tier.clone();
-        timing.requested_capacity_tier = requested_capacity_tier;
-        timing.cache_write_1h_tokens = usage
-            .cache_write_1h_tokens
-            .map(|value| orch_api_contract::usage::UsageMeasurement::Told { value })
-            .or_else(|| {
-                orch_model_contract::parameters::has_cache_controls(call.protocol).then_some({
-                    if hourly_cache {
-                        orch_api_contract::usage::UsageMeasurement::Empty
-                    } else {
-                        orch_api_contract::usage::UsageMeasurement::Unsupported
-                    }
-                })
-            });
-        timing.cache_write_12h_tokens = usage
-            .cache_write_12h_tokens
-            .map(|value| orch_api_contract::usage::UsageMeasurement::Told { value });
-        timing.reported_capacity_tier = usage.capacity_tier.as_ref().map_or(
-            if orch_model_contract::parameters::reports_capacity_tier(call.protocol) {
-                orch_api_contract::usage::UsageMeasurement::Empty
-            } else {
-                orch_api_contract::usage::UsageMeasurement::Unsupported
-            },
-            |value| orch_api_contract::usage::UsageMeasurement::Told {
-                value: value.clone(),
-            },
-        );
         timing.reported_service_tier = usage.service_tier.as_ref().map_or(
             if orch_model_contract::parameters::reports_service_tier(call.protocol) {
                 orch_api_contract::usage::UsageMeasurement::Empty
@@ -2372,14 +1782,12 @@ impl Forwarder {
 /// Builds a completion without allowing model options to replace protocol-owned request fields.
 fn completion_request(
     protocol: &dyn WireProtocol,
-    options: &orch_model_contract::endpoint::EndpointOptions,
     request: &orch_link_contract::commands::ProviderComplete,
 ) -> Result<(Method, &'static str, Bytes), orch_link_contract::commands::CommandError> {
     use orch_link_contract::commands::{CommandError, ErrorCode};
     let invalid = |message: &str| CommandError::new(ErrorCode::Conflict, message);
     let (method, path, body) = protocol
-        .completion_request_at(
-            options,
+        .completion_request(
             &request.model_name,
             &request.system,
             &request.input,
@@ -2391,18 +1799,16 @@ fn completion_request(
                 "this protocol cannot make text completions",
             )
         })?;
-    let parameters = request.model_parameters.as_ref().ok_or_else(|| {
-        invalid("this retained request lacks provider option constraints; issue a new request")
-    })?;
     let body = match request.params.as_ref() {
         Some(params) => Bytes::from(
-            orch_model_contract::parameters::apply_request_for_model(
-                protocol, path, &body, params, false, parameters,
-            )
-            .map_err(invalid)?,
+            orch_model_contract::parameters::apply_request(protocol, path, &body, params, false)
+                .map_err(invalid)?,
         ),
         None => body,
     };
+    let parameters = request.model_parameters.as_ref().ok_or_else(|| {
+        invalid("this retained request lacks provider option constraints; issue a new request")
+    })?;
     let body = Bytes::from(
         orch_model_contract::parameters::outgoing_at(protocol.name(), path, parameters, &body)
             .map_err(invalid)?,
@@ -2416,20 +1822,11 @@ fn completion_request(
 /// A request the system makes on its own behalf: whose key, in which protocol, for which model, what it is
 /// called in what it says, and the command whose deadline bounds it.
 struct OwnCall<'a> {
-    capture_native_result: bool,
     provider: &'a ProviderEntry,
     protocol: &'a str,
     model: &'a str,
     label: &'static str,
     kind: orch_link_contract::commands::CommandKind,
-    progress: Option<Arc<std::sync::Mutex<OwnProgress>>>,
-    cancel: Option<tokio_util::sync::CancellationToken>,
-}
-
-#[derive(Default)]
-struct OwnProgress {
-    usage: Option<ObservedUsage>,
-    streamed: Option<bool>,
 }
 
 /// A stage of a relay that does not need another observation.
@@ -2609,11 +2006,6 @@ fn upstream_url(
 
 /// Watches a forwarded answer: reads what it used as it passes and keeps the lease up to date.
 struct Metered {
-    hourly_cache: Option<bool>,
-    hourly_observed: bool,
-    request_id: String,
-    redactions: Vec<String>,
-    clock: Arc<dyn orch_types::Clock>,
     observer: Option<Box<dyn UsageObserver>>,
     meter: Meter,
     model: String,
@@ -2625,65 +2017,8 @@ struct Metered {
 impl Metered {
     fn update(&mut self, seen: &ObservedUsage, complete: bool) {
         use orch_api_contract::usage::UsageMeasurement;
-        if let Some(model) = &seen.model
-            && !model.trim().is_empty()
-        {
-            self.model.clone_from(model);
-        }
         if let Some(value) = seen.web_searches {
             self.timing.web_searches = UsageMeasurement::Told { value };
-        }
-        if let Some(value) = seen.cache_write_1h_tokens {
-            self.hourly_observed = true;
-            self.timing.cache_write_1h_tokens = Some(UsageMeasurement::Told { value });
-        } else if self.hourly_observed || self.hourly_cache == Some(true) {
-            self.timing.cache_write_1h_tokens = Some(if complete {
-                UsageMeasurement::Empty
-            } else {
-                UsageMeasurement::Unread
-            });
-        } else if self.hourly_cache == Some(false) {
-            self.timing.cache_write_1h_tokens = Some(UsageMeasurement::Unsupported);
-        }
-        if let Some(value) = seen.cache_write_12h_tokens {
-            self.timing.cache_write_12h_tokens = Some(UsageMeasurement::Told { value });
-        } else if self.timing.cache_write_12h_tokens.is_some() {
-            self.timing.cache_write_12h_tokens = Some(if complete {
-                UsageMeasurement::Empty
-            } else {
-                UsageMeasurement::Unread
-            });
-        }
-        if let Some(value) = &seen.capacity_tier {
-            self.timing.reported_capacity_tier = UsageMeasurement::Told {
-                value: value.clone(),
-            };
-        } else if complete && matches!(self.timing.reported_capacity_tier, UsageMeasurement::Unread)
-        {
-            self.timing.reported_capacity_tier = UsageMeasurement::Empty;
-        }
-        if let Some(value) = seen.web_fetches {
-            self.timing.web_fetches = UsageMeasurement::Told { value };
-        }
-        for (name, value) in &seen.declared_counters {
-            let measured = value.map_or(UsageMeasurement::Unread, |value| UsageMeasurement::Told {
-                value,
-            });
-            if name == "web_searches" {
-                self.timing.web_searches = measured.clone();
-            }
-            if name == "web_fetches" {
-                self.timing.web_fetches = measured.clone();
-            }
-            self.timing.declared_counters.insert(name.clone(), measured);
-        }
-        if let Some(amount) = &seen.cost {
-            self.timing.reported_cost = UsageMeasurement::Told {
-                value: orch_api_contract::usage::ReportedCost {
-                    amount: amount.clone(),
-                    unit: seen.cost_unit.clone(),
-                },
-            };
         }
         if let Some(value) = &seen.service_tier {
             self.timing.reported_service_tier = UsageMeasurement::Told {
@@ -2693,16 +2028,8 @@ impl Metered {
         {
             self.timing.reported_service_tier = UsageMeasurement::Empty;
         }
-        if self
-            .observer
-            .as_ref()
-            .is_none_or(|observer| observer.tokens_reported())
-        {
-            self.meter
-                .update_observed(&self.model, &seen.tokens, &self.timing);
-        } else {
-            self.meter.update_counters(&self.model, &self.timing);
-        }
+        self.meter
+            .update_observed(&self.model, &seen.tokens, &self.timing);
     }
 }
 
@@ -2712,20 +2039,12 @@ impl Watcher for Metered {
             return;
         };
         observer.observe(piece);
-        if observer.response_facts().output_started {
-            self.timing
-                .first_output
-                .get_or_insert_with(|| self.clock.time());
-        }
         if let Some(seen) = observer.usage() {
             self.update(&seen, false);
         }
     }
 
     fn end(&mut self, end: End) {
-        if let Some(observer) = &mut self.observer {
-            observer.finish(matches!(end, End::Whole));
-        }
         let seen: Option<ObservedUsage> =
             self.observer.as_ref().and_then(|observer| observer.usage());
         if let Some(seen) = &seen {
@@ -2736,120 +2055,16 @@ impl Watcher for Metered {
         if let End::Cut(why) = &end {
             tracing::debug!(%why, "a forwarded answer was cut");
         }
-        use orch_api_contract::usage::{RequestSample, UsageMeasurement};
-        let facts = self
-            .observer
-            .as_ref()
-            .map(|observer| observer.response_facts())
-            .unwrap_or_default();
-        self.timing.provider_request_id = facts
-            .request_id
-            .or_else(|| seen.as_ref().and_then(|seen| seen.request_ref.clone()))
-            .or_else(|| self.timing.provider_request_id.clone());
-        let message = facts
-            .failure
-            .as_ref()
-            .and_then(|body| {
-                body.pointer("/error/message")
-                    .or_else(|| body.get("message"))
-            })
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let status = self.timing.upstream_status;
-        let failed = facts.failure.is_some() || status.is_some_and(|status| status >= 400);
-        let (mut outcome, reason, words) = if failed {
-            let classification = orch_provider_contract::failure::classify_body(
-                status,
-                facts.failure.as_ref().unwrap_or(&serde_json::Value::Null),
-                message.as_deref().unwrap_or_default(),
-            );
-            let reason = facts
-                .failure
-                .as_ref()
-                .and_then(|body| body.pointer("/error/reason"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .or(classification.reason);
-            (classification.code, reason, message)
-        } else {
-            match &end {
-                End::Whole if facts.output_started && !facts.completed => (
-                    "stream_interrupted".into(),
-                    None,
-                    Some("The upstream ended before its terminal event.".into()),
-                ),
-                End::Whole => ("done".to_owned(), None, None),
-                End::Abandoned => ("forced".to_owned(), None, None),
-                End::Cut(why) => (
-                    if self.timing.first_output.is_some() {
-                        "stream_interrupted"
-                    } else {
-                        "provider_unreachable"
-                    }
-                    .to_owned(),
-                    None,
-                    Some(why.clone()),
-                ),
-            }
+        let Some(event) = seen.and_then(|seen| {
+            lease_usage(
+                self.meter.lease().id(),
+                &self.model,
+                &seen,
+                self.timing.clone(),
+            )
+        }) else {
+            return;
         };
-        if outcome == "provider_unreachable" && self.timing.first_output.is_some() {
-            outcome = "stream_interrupted".into();
-        }
-        let measured = orch_api_contract::performance::request_timing(&RequestSample {
-            asked: self.timing.asked,
-            first_output: self.timing.first_output,
-            end: Some(self.clock.time()),
-            reported_tokens: seen
-                .as_ref()
-                .filter(|_| {
-                    self.observer
-                        .as_ref()
-                        .is_some_and(|observer| observer.tokens_reported())
-                })
-                .map(|seen| seen.tokens.into()),
-            output_tokens: seen
-                .as_ref()
-                .filter(|_| {
-                    self.observer
-                        .as_ref()
-                        .is_some_and(|observer| observer.tokens_reported())
-                })
-                .map(|seen| seen.tokens.output_tokens),
-            // The relay cannot prove that hidden reasoning was streamed separately.
-            output_streamed: None,
-            outcome: UsageMeasurement::Told { value: outcome },
-            error_message: words.clone(),
-            vendor_words: words,
-            ..Default::default()
-        });
-        self.timing.first_token_ms = measured.first_token_ms;
-        self.timing.request_ms = measured.request_ms;
-        // HTTP body completion is not an observation of the last generated token.
-        // A matching harness report can supply that boundary and its eligible speed.
-        self.timing.generation_ms = UsageMeasurement::Unsupported;
-        self.timing.reported_tokens = measured.reported_tokens;
-        self.timing.end = measured.end;
-        self.timing.outcome = measured.outcome;
-        let redact = |words: String| {
-            self.redactions
-                .iter()
-                .fold(words, |words, secret| words.replace(secret, "[redacted]"))
-        };
-        self.timing.error_message = measured.error_message.map(redact);
-        self.timing.vendor_words = measured.vendor_words.map(redact);
-        self.timing.error_reason = reason.map(redact);
-        let event =
-            orch_link_contract::events::Event::LeaseUsage(orch_link_contract::events::LeaseUsage {
-                lease_id: self.meter.lease().id(),
-                model: self.model.clone(),
-                usage: seen.as_ref().map(|seen| seen.tokens).unwrap_or_default(),
-                request_ref: Some(
-                    seen.as_ref()
-                        .and_then(|seen| seen.request_ref.clone())
-                        .unwrap_or_else(|| self.request_id.clone()),
-                ),
-                timing: Some(self.timing.clone()),
-            });
         let stream = Stream::Provider {
             provider_id: self.meter.lease().provider_id(),
         };

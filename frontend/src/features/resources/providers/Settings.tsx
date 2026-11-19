@@ -14,7 +14,6 @@ import { Section } from '@/shell/Page';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { ProviderSources } from './Sources';
-import { ProviderServices } from './Services';
 
 export function ProviderSettings({ provider }: { provider: Provider }) {
   const { t } = useTranslation();
@@ -22,10 +21,9 @@ export function ProviderSettings({ provider }: { provider: Provider }) {
   return (
     <div className="flex min-w-0 flex-col gap-6">
     <ProviderSources provider={provider} />
-    <ProviderServices provider={provider} />
     <Section id="provider-settings" title={t('providerRecovery.runtimeSettings')}>
       {settings.isPending ? (
-        <SkeletonRows read={settings} rows={4} />
+        <SkeletonRows rows={4} />
       ) : settings.isError ? (
         <ErrorState compact error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />
       ) : (

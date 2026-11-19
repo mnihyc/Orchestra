@@ -270,21 +270,6 @@ impl Displays {
                     return Err(DisplayFailure::Engine(EngineError::ToolCallIdentity));
                 }
                 if row.state == "open" {
-                    if orch_db::idempotency::creation::captures(
-                        request.requester.person(),
-                        "display_creation",
-                    ) {
-                        orch_db::idempotency::creation::observe_with_status(
-                            &mut tx,
-                            request.requester.person(),
-                            "display_creation",
-                            row.id,
-                            serde_json::json!({"environment":row.environment_id}),
-                            201,
-                        )
-                        .await?;
-                        tx.commit().await.map_err(orch_db::DbError::from)?;
-                    }
                     return Ok(row.clone());
                 }
             }
@@ -340,15 +325,6 @@ impl Displays {
                     .await
                     .map_err(orch_db::DbError::from)?;
             }
-            orch_db::idempotency::creation::observe_with_status(
-                &mut tx,
-                request.requester.person(),
-                "display_creation",
-                id,
-                serde_json::json!({"environment":site.id}),
-                201,
-            )
-            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             (site, geometry)
         };

@@ -53,8 +53,6 @@ pub struct LinkCertificates {
 pub struct MachineRow {
     /// Its identifier.
     pub id: Id,
-    /// Advances with every stored machine-row update.
-    pub revision: i64,
     /// What it is called.
     pub name: String,
     /// The person it belongs to; none for a machine the system made.
@@ -169,7 +167,7 @@ impl MachineRow {
 /// The columns of a machine, in the order [`MachineRow`] has them.
 macro_rules! machine_columns {
     () => {
-        "id, revision, name, owner_id, placement, host_id, runtime_id, roles, platform_os, platform_arch,
+        "id, name, owner_id, placement, host_id, runtime_id, roles, platform_os, platform_arch,
          connector_version, protocol_version, cert_serial, cert_fingerprint, cert_not_after,
          cert_public_key, cert_next_fingerprint, cert_next_public_key, cert_next_serial,
          cert_next_not_after, cert_next_again, status, lost_at,
@@ -248,24 +246,6 @@ pub async fn machine(conn: &mut Conn, id: Id) -> Result<Option<MachineRow>, DbEr
         " FROM machines WHERE id = $1"
     ))
     .bind(id)
-    .fetch_optional(conn)
-    .await?)
-}
-
-/// The registered home of an origin machine, with legacy owner/context fallback.
-/// Native import writers pin both the machine and the actual chosen place until filing commits.
-pub async fn machine_registration_home(
-    conn: &mut Conn,
-    machine: Id,
-    legacy: Option<Id>,
-) -> Result<Option<(Id, Id)>, DbError> {
-    Ok(sqlx::query_as(
-        "SELECT n.id,n.org_id FROM machines m LEFT JOIN users u ON u.id=m.owner_id
-         JOIN nodes n ON n.id=COALESCE(m.home_id,u.personal_org_id,$2)
-         WHERE m.id=$1 AND m.deleted_at IS NULL AND n.deleted_at IS NULL FOR SHARE OF m,n",
-    )
-    .bind(machine)
-    .bind(legacy)
     .fetch_optional(conn)
     .await?)
 }
@@ -376,7 +356,7 @@ pub async fn set_machine_facts(
     conn: &mut Conn,
     id: Id,
     facts: &Json,
-    rates: (Option<i64>, Option<i64>),
+    rates: (i64, i64),
     weight: f64,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
@@ -410,10 +390,10 @@ pub async fn set_machine_facts(
                 THEN COALESCE((facts #>> '{$link,next,again}')::boolean, false) END),
             facts = CASE WHEN jsonb_typeof($2::jsonb) = 'object'
                 THEN $2::jsonb - '$link' ELSE $2::jsonb END,
-            rate_up_bps = CASE WHEN $3::bigint IS NULL OR $3 < 0 THEN rate_up_bps
+            rate_up_bps = CASE WHEN $3 <= 0 THEN rate_up_bps
                                WHEN rate_up_bps IS NULL THEN $3
                                ELSE round(rate_up_bps * (1 - $5) + $3 * $5)::bigint END,
-            rate_down_bps = CASE WHEN $4::bigint IS NULL OR $4 < 0 THEN rate_down_bps
+            rate_down_bps = CASE WHEN $4 <= 0 THEN rate_down_bps
                                  WHEN rate_down_bps IS NULL THEN $4
                                  ELSE round(rate_down_bps * (1 - $5) + $4 * $5)::bigint END,
             updated_at = $6
@@ -565,39 +545,6 @@ pub async fn set_enrollment_roles(
     Ok(())
 }
 
-/// Retain private original request provenance with this still-unspent native token reservation.
-pub async fn set_enrollment_issuer_origin(
-    conn: &mut Conn,
-    token_hash: &[u8],
-    origin: &Json,
-) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE enrollment_tokens SET issuer_origin=$2,issuer_required=true WHERE token_hash=$1 AND used_at IS NULL AND issuer_origin IS NULL")
-        .bind(token_hash).bind(origin).execute(conn).await?.rows_affected() == 1)
-}
-
-/// Private issuer provenance; never part of enrollment progress or a public resource projection.
-pub async fn enrollment_issuer_origin(
-    conn: &mut Conn,
-    token_hash: &[u8],
-) -> Result<Option<Json>, DbError> {
-    Ok(sqlx::query_scalar::<_, Option<Json>>(
-        "SELECT issuer_origin FROM enrollment_tokens WHERE token_hash=$1",
-    )
-    .bind(token_hash)
-    .fetch_optional(conn)
-    .await?
-    .flatten())
-}
-
-/// Observe only replacement provenance to establish its native identity/source locks before the ledger row.
-pub async fn replacement_issuer_origin(
-    conn: &mut Conn,
-    token_hash: &[u8],
-) -> Result<Option<Json>, DbError> {
-    Ok(sqlx::query_scalar::<_,Option<Json>>("SELECT issuer_origin FROM enrollment_tokens WHERE token_hash=$1 AND again_machine_id IS NOT NULL")
-        .bind(token_hash).fetch_optional(conn).await?.flatten())
-}
-
 /// The token whose secret hashes to `token_hash`, locked until the
 /// transaction ends, so that two requests with one token are served one
 /// after the other.
@@ -612,14 +559,6 @@ pub async fn lock_enrollment_token(
     .bind(token_hash)
     .fetch_optional(conn)
     .await?)
-}
-
-/// Effect-free native reservation lookup; the consumer owns its later ledger lock.
-pub async fn enrollment_token(
-    conn: &mut Conn,
-    token_hash: &[u8],
-) -> Result<Option<TokenRow>, DbError> {
-    Ok(sqlx::query_as("SELECT token_hash,created_by,purpose,org_id,name_hint,expires_at,used_at,machine_id,again_machine_id FROM enrollment_tokens WHERE token_hash=$1").bind(token_hash).fetch_optional(conn).await?)
 }
 
 /// Enrollment identity for its issuer alone; no secret or credential material leaves this query.
@@ -814,47 +753,6 @@ pub mod thread_engine {
         .await?)
     }
 
-    /// Actual providers in one source snapshot; omitted IDs remain absent.
-    pub async fn providers(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ProviderRow>, DbError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(sqlx::query_as(
-            "SELECT id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, protocols, provider_placement(machine_id) AS placement, machine_id,
-                    key_machine_id, arrangements, held_by_environment_id, status, status_detail, sources, facts, revision, deleted_at
-               FROM providers WHERE id = ANY($1)",
-        ).bind(ids).fetch_all(conn).await?)
-    }
-
-    /// Endpoint parameter defaults for a native set of providers, keyed by provider and interface.
-    pub async fn provider_request_defaults_among(
-        conn: &mut Conn,
-        ids: &[Id],
-    ) -> Result<std::collections::HashMap<(Id, String), Json>, DbError> {
-        let mut result = std::collections::HashMap::new();
-        if ids.is_empty() {
-            return Ok(result);
-        }
-        let rows: Vec<(Id, Json)> =
-            sqlx::query_as("SELECT id,upstreams FROM providers WHERE id=ANY($1)")
-                .bind(ids)
-                .fetch_all(conn)
-                .await?;
-        for (id, upstreams) in rows {
-            for endpoint in upstreams.as_array().into_iter().flatten() {
-                if let Some(protocol) = endpoint.get("protocol").and_then(Json::as_str) {
-                    result.entry((id, protocol.to_owned())).or_insert_with(|| {
-                        endpoint
-                            .pointer("/options/params")
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::json!({}))
-                    });
-                }
-            }
-        }
-        Ok(result)
-    }
-
     /// The actual endpoint's body defaults, read once when issuing a frozen model request.
     pub async fn provider_request_defaults(
         conn: &mut Conn,
@@ -885,8 +783,6 @@ pub mod thread_engine {
         pub display_name: String,
         /// What it can be run with here: its efforts, tiers, programs, context and rate.
         pub parameters: Json,
-        /// Current factual endpoint and named-group option declarations.
-        pub option_layers: Json,
         /// The groups its managers put it in.
         pub groups: Vec<String>,
         /// Whether the provider offers it.
@@ -900,25 +796,13 @@ pub mod thread_engine {
         model_name: &str,
     ) -> Result<Option<ModelRow>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT model_name, display_name, parameters, provider_option_layers(provider_id, groups) AS option_layers, groups, enabled FROM provider_models
+            "SELECT model_name, display_name, parameters, groups, enabled FROM provider_models
               WHERE provider_id = $1 AND model_name = $2",
         )
         .bind(provider)
         .bind(model_name)
         .fetch_optional(conn)
         .await?)
-    }
-
-    /// Stable factual candidates for direct model helpers. Admission remains with the native
-    /// model Use, place policy and cap producers, not with this list or its ordering.
-    pub async fn default_api_models(
-        conn: &mut Conn,
-        preferred: Option<Id>,
-    ) -> Result<Vec<(Id, String)>, DbError> {
-        Ok(sqlx::query_as("SELECT m.provider_id,m.model_name FROM provider_models m JOIN providers p ON p.id=m.provider_id
-            WHERE p.kind='api' AND p.deleted_at IS NULL AND m.enabled
-            ORDER BY (p.id=$1) DESC NULLS LAST,p.name,m.model_name,p.id")
-            .bind(preferred).fetch_all(conn).await?)
     }
 
     /// An agent profile, as far as a turn needs it.
@@ -1445,15 +1329,6 @@ pub async fn resources_under_home(conn: &mut Conn, node: Id) -> Result<Vec<Acces
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT f.* FROM ({facts}) f JOIN nodes n ON n.id=f.home_id WHERE $1=ANY(n.path) AND NOT f.deleted ORDER BY f.id"
     ))).bind(node).fetch_all(conn).await?)
-}
-
-/// Actual live thread bindings settled by the native withdrawal of this resource.
-pub async fn ending_threads(conn: &mut Conn, resource: Id) -> Result<Vec<Id>, DbError> {
-    Ok(sqlx::query_scalar("SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id
-        WHERE n.deleted_at IS NULL AND (t.provider_id=$1 OR t.environment_id=$1 OR t.agent_id=$1
-            OR EXISTS(SELECT 1 FROM runtimes r WHERE r.host_id=$1 AND r.successor_of IS NULL AND r.state NOT IN ('retired','removed')
-                AND (r.environment_id=t.environment_id OR r.provider_id=t.provider_id))) ORDER BY t.node_id")
-        .bind(resource).fetch_all(conn).await?)
 }
 
 /// Registrations on the member's personal machines, even if another person also owns the page.
@@ -2637,7 +2512,7 @@ mod tests {
             &mut conn,
             id,
             &json!({ "hostname": "a" }),
-            (Some(1000), Some(4000)),
+            (1000, 4000),
             0.25,
             now,
         )
@@ -2647,7 +2522,7 @@ mod tests {
             &mut conn,
             id,
             &json!({ "hostname": "b" }),
-            (Some(2000), None),
+            (2000, 0),
             0.25,
             now,
         )
@@ -2664,61 +2539,8 @@ mod tests {
         assert_eq!(
             row.rate_down_bps,
             Some(4000),
-            "an absent sample does not replace the last measured average"
+            "a rate of 0 is no measurement"
         );
-    }
-
-    #[tokio::test]
-    async fn rate_averages_preserve_sample_absence_and_accept_a_real_zero() {
-        let test = TestDb::fresh().await;
-        let mut conn = test.pool.acquire().await.unwrap();
-        let id = new_id();
-        insert_machine(&mut conn, &enrolled(id, &[7u8; 32], &[]), clock::start())
-            .await
-            .unwrap();
-        set_machine_facts(
-            &mut conn,
-            id,
-            &json!({"rates":{}}),
-            (None, None),
-            0.25,
-            clock::start(),
-        )
-        .await
-        .unwrap();
-        let unseen = machine(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!((unseen.rate_up_bps, unseen.rate_down_bps), (None, None));
-        set_machine_facts(
-            &mut conn,
-            id,
-            &json!({"rates":{"up_bps":0,"down_bps":160}}),
-            (Some(0), Some(160)),
-            0.25,
-            clock::start(),
-        )
-        .await
-        .unwrap();
-        let measured = machine(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!(
-            (measured.rate_up_bps, measured.rate_down_bps),
-            (Some(0), Some(160))
-        );
-        set_machine_facts(
-            &mut conn,
-            id,
-            &json!({"rates":{}}),
-            (None, None),
-            0.25,
-            clock::start(),
-        )
-        .await
-        .unwrap();
-        let later = machine(&mut conn, id).await.unwrap().unwrap();
-        assert_eq!(
-            (later.rate_up_bps, later.rate_down_bps),
-            (Some(0), Some(160))
-        );
-        assert_eq!(later.facts["rates"], json!({}));
     }
 
     #[tokio::test]
@@ -2808,7 +2630,7 @@ mod tests {
             id,
             &json!({"hostname":"new",
             LINK_MEMBER:{"public_key":"spoof","next":null}}),
-            (None, None),
+            (0, 0),
             0.25,
             clock::start(),
         )
@@ -2968,8 +2790,6 @@ pub struct ProviderModelRow {
     pub display_name: String,
     /// What it can be run with here: its efforts, tiers, programs, context and rate.
     pub parameters: Json,
-    /// Current factual endpoint and named-group option declarations.
-    pub option_layers: Json,
     /// The groups its managers put it in.
     pub groups: Vec<String>,
     /// Whether the provider's managers have it enabled.
@@ -2982,37 +2802,12 @@ pub async fn models_of_provider(
     provider: Id,
 ) -> Result<Vec<ProviderModelRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT model_name, display_name, parameters, provider_option_layers(provider_id, groups) AS option_layers, groups, enabled FROM provider_models
+        "SELECT model_name, display_name, parameters, groups, enabled FROM provider_models
           WHERE provider_id = $1 ORDER BY model_name",
     )
     .bind(provider)
     .fetch_all(conn)
     .await?)
-}
-
-/// The same native model rows for several actual providers, grouped after one query.
-pub async fn models_of_providers(
-    conn: &mut Conn,
-    providers: &[Id],
-) -> Result<std::collections::HashMap<Id, Vec<ProviderModelRow>>, DbError> {
-    #[derive(sqlx::FromRow)]
-    struct AtProvider {
-        provider_id: Id,
-        #[sqlx(flatten)]
-        model: ProviderModelRow,
-    }
-    let mut result = std::collections::HashMap::<Id, Vec<ProviderModelRow>>::new();
-    if providers.is_empty() {
-        return Ok(result);
-    }
-    let rows: Vec<AtProvider> = sqlx::query_as(
-        "SELECT provider_id,model_name,display_name,parameters,provider_option_layers(provider_id,groups) AS option_layers,groups,enabled
-           FROM provider_models WHERE provider_id=ANY($1) ORDER BY provider_id,model_name",
-    ).bind(providers).fetch_all(conn).await?;
-    for row in rows {
-        result.entry(row.provider_id).or_default().push(row.model);
-    }
-    Ok(result)
 }
 
 /// The groups that the managers of each provider put each of the models in `pairs` (a provider, a routing
@@ -3478,6 +3273,25 @@ pub mod routes {
         .await?)
     }
 
+    /// How many people are in the Owners row of each of the resources `ids`: a person counts while
+    /// their entry stands.
+    pub async fn owner_counts(
+        conn: &mut Conn,
+        ids: &[Id],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(Id, i64)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT object_id, count(*) FROM permission_entries
+              WHERE object_id = ANY($1) AND page = 'live' AND permission = 'access.own'
+                AND removed_at IS NULL AND (expires_at IS NULL OR expires_at > $2)
+              GROUP BY object_id",
+        )
+        .bind(ids)
+        .bind(now)
+        .fetch_all(conn)
+        .await?)
+    }
+
     // ---- Providers ----------------------------------------------------------------------------
 
     /// A provider, as stored.
@@ -3501,10 +3315,6 @@ pub mod routes {
         pub agent_id: Option<Id>,
         /// For an API provider, its endpoints.
         pub upstreams: Json,
-        /// Option declarations on existing model groups.
-        pub model_group_options: Json,
-        /// Explicit enablement, groups and per-unit prices for declared service offerings.
-        pub service_offerings: Json,
         /// What its adapter's options allow.
         pub config: Json,
         /// What it can serve.
@@ -3547,7 +3357,7 @@ pub mod routes {
     }
 
     const PROVIDER_COLUMNS: &str = "id, name, owner_id, org_id, home_id, kind, harness_kind, agent_id, upstreams,
-        config, model_group_options, service_offerings, protocols, provider_placement(machine_id) AS placement, machine_id, key_machine_id, arrangements, held_by_environment_id, held_since,
+        config, protocols, provider_placement(machine_id) AS placement, machine_id, key_machine_id, arrangements, held_by_environment_id, held_since,
         runtime_config, status, status_detail, runtime_unavailable, sources, facts, facts_overrides, facts_at, revision, created_at, updated_at";
 
     /// The providers `ids` that are not deleted, in the order they were made.
@@ -3629,10 +3439,6 @@ pub mod routes {
         pub upstreams: Option<(&'a Json, &'a [String])>,
         /// New options of its adapter.
         pub config: Option<&'a Json>,
-        /// Replacement declarations for existing named model groups.
-        pub model_group_options: Option<&'a Json>,
-        /// Replacement manager choices for extension-declared services.
-        pub service_offerings: Option<&'a Json>,
         /// New arrangement types.
         pub arrangements: Option<&'a [String]>,
         /// New values of its runtime.
@@ -3657,7 +3463,7 @@ pub mod routes {
             "UPDATE providers SET name = COALESCE($3, name), upstreams = COALESCE($4, upstreams),
                     protocols = COALESCE($5, protocols), config = COALESCE($6, config),
                     arrangements = COALESCE($7, arrangements), runtime_config = COALESCE($8, runtime_config),
-                    facts_overrides = COALESCE($9, facts_overrides), model_group_options = COALESCE($11, model_group_options), service_offerings = COALESCE($12, service_offerings), revision = revision + 1, updated_at = $10
+                    facts_overrides = COALESCE($9, facts_overrides), revision = revision + 1, updated_at = $10
               WHERE id = $1 AND revision = $2 AND deleted_at IS NULL",
         )
         .bind(id)
@@ -3670,8 +3476,6 @@ pub mod routes {
         .bind(change.runtime_config)
         .bind(change.facts_overrides)
         .bind(at)
-        .bind(change.model_group_options)
-        .bind(change.service_offerings)
         .execute(conn)
         .await?
         .rows_affected();
@@ -3737,57 +3541,14 @@ pub mod routes {
         .await?)
     }
 
-    /// Stored clocks and inventory for the same provider display page.
-    #[derive(Debug, sqlx::FromRow)]
-    pub struct ProviderPageFacts {
-        /// The provider whose current row supplied the facts.
-        pub id: Id,
-        /// The last change of its status.
-        pub status_at: DateTime<Utc>,
-        /// The last attempt to read its facts, independent of its status.
-        pub facts_requested_at: Option<DateTime<Utc>>,
-        /// Its active Owners entries. A provider without explicit entries shows its first owner.
-        pub owners: i64,
-        /// Its currently running threads.
-        pub running_threads: i64,
-        /// Names of configured secrets, with no values.
-        pub secret_names: Vec<String>,
-    }
-
-    /// Batched display facts on the caller's snapshot, with no runtime or catalogue request.
-    pub async fn provider_page_facts(
-        conn: &mut Conn,
-        ids: &[Id],
-        now: DateTime<Utc>,
-    ) -> Result<Vec<ProviderPageFacts>, DbError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
+    /// How many threads run on each of the providers `ids`.
+    pub async fn running_on(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, i64)>, DbError> {
         Ok(sqlx::query_as(
-            "WITH owners AS (
-                SELECT object_id, count(*) AS n FROM permission_entries
-                 WHERE object_id = ANY($1) AND page = 'live' AND permission = 'access.own'
-                   AND removed_at IS NULL AND (expires_at IS NULL OR expires_at > $2)
-                 GROUP BY object_id
-             ), running AS (
-                SELECT t.provider_id, count(*) AS n FROM threads t JOIN nodes n ON n.id = t.node_id
-                 WHERE t.provider_id = ANY($1) AND t.state = 'running' AND n.deleted_at IS NULL
-                 GROUP BY t.provider_id
-             ), configured AS (
-                SELECT owner_id, array_agg(name ORDER BY name) AS names FROM secrets
-                 WHERE owner_kind = 'provider' AND owner_id = ANY($1)
-                 GROUP BY owner_id
-             )
-             SELECT p.id, p.status_at, p.facts_requested_at, COALESCE(o.n, 1) AS owners,
-                    COALESCE(r.n, 0) AS running_threads, COALESCE(s.names, ARRAY[]::text[]) AS secret_names
-             FROM providers p
-             LEFT JOIN owners o ON o.object_id = p.id
-             LEFT JOIN running r ON r.provider_id = p.id
-             LEFT JOIN configured s ON s.owner_id = p.id
-             WHERE p.id = ANY($1) AND p.deleted_at IS NULL",
+            "SELECT t.provider_id, count(*) FROM threads t JOIN nodes n ON n.id = t.node_id
+              WHERE t.provider_id = ANY($1) AND t.state = 'running' AND n.deleted_at IS NULL
+              GROUP BY t.provider_id",
         )
         .bind(ids)
-        .bind(now)
         .fetch_all(conn)
         .await?)
     }
@@ -3878,8 +3639,6 @@ pub mod routes {
         pub display_name: String,
         /// What it can be run with here.
         pub parameters: Json,
-        /// Current factual endpoint and named-group option declarations.
-        pub option_layers: Json,
         /// The groups its managers put it in.
         pub groups: Vec<String>,
         /// Whether it may be chosen.
@@ -3888,7 +3647,8 @@ pub mod routes {
         pub source: String,
     }
 
-    const MODEL_COLUMNS: &str = "id, provider_id, model_name, display_name, parameters, provider_option_layers(provider_id, groups) AS option_layers, groups, enabled, source";
+    const MODEL_COLUMNS: &str =
+        "id, provider_id, model_name, display_name, parameters, groups, enabled, source";
 
     /// The models of the providers `ids`, in the order they were added.
     pub async fn models_of(conn: &mut Conn, ids: &[Id]) -> Result<Vec<ModelRow>, DbError> {
@@ -4777,11 +4537,16 @@ pub mod binding {
 
     /// The kinds of adapter that the registered machines say they can drive, each once.
     pub async fn machine_adapter_kinds(conn: &mut Conn) -> Result<Vec<String>, DbError> {
-        Ok(
-            sqlx::query_scalar("SELECT DISTINCT kind FROM machine_program_adapters ORDER BY kind")
-                .fetch_all(conn)
-                .await?,
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT adapter ->> 'kind'
+               FROM machines m
+              CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(m.facts -> 'adapters') = 'array'
+                         THEN m.facts -> 'adapters' ELSE '[]'::jsonb END) AS adapter
+              WHERE m.deleted_at IS NULL AND m.status = 'active' AND adapter ->> 'kind' IS NOT NULL",
         )
+        .fetch_all(conn)
+        .await?)
     }
 
     /// The builds of harnesses that the registered machines found installed, by kind and version, each once.
@@ -4789,7 +4554,13 @@ pub mod binding {
         conn: &mut Conn,
     ) -> Result<Vec<(String, String)>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT DISTINCT kind,version FROM machine_harness_builds ORDER BY kind,version",
+            "SELECT DISTINCT found ->> 'kind', found ->> 'version'
+               FROM machines m
+              CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(m.facts -> 'harnesses') = 'array'
+                         THEN m.facts -> 'harnesses' ELSE '[]'::jsonb END) AS found
+              WHERE m.deleted_at IS NULL AND m.status = 'active'
+                AND found ->> 'kind' IS NOT NULL AND found ->> 'version' IS NOT NULL",
         )
         .fetch_all(conn)
         .await?)
@@ -4866,8 +4637,8 @@ pub mod binding {
         .await?)
     }
 
-    /// The machine's default-login profile, including a manager's retained display-home override.
-    /// A different harness attach directory still names another sign-in and is never adopted here.
+    /// The profile of `harness_kind` that was registered from `machine` in the org `home` for the harness's own
+    /// default home, if one was. A profile pointed at another home keeps another sign-in and is never reused here.
     pub async fn machine_agent(
         conn: &mut Conn,
         machine: Id,
@@ -4876,8 +4647,7 @@ pub mod binding {
     ) -> Result<Option<Id>, DbError> {
         Ok(sqlx::query_scalar(
             "SELECT id FROM agents
-              WHERE machine_id = $1 AND (home_id = $2 OR home_overridden_at IS NOT NULL)
-                AND harness_kind = $3 AND deleted_at IS NULL
+              WHERE machine_id = $1 AND home_id = $2 AND harness_kind = $3 AND deleted_at IS NULL
                 AND (profile #>> '{attach,home}') IS NULL
               ORDER BY created_at, id LIMIT 1",
         )
@@ -5862,28 +5632,15 @@ pub mod management {
         build: &Json,
         at: DateTime<Utc>,
     ) -> Result<bool, DbError> {
-        put_channel_build_before(conn, key, build, at, || Ok::<_, DbError>(())).await
-    }
-
-    /// Same native first insert, with a cut after the existing presence read.
-    pub async fn put_channel_build_before<E: From<DbError>>(
-        conn: &mut Conn,
-        key: &str,
-        build: &Json,
-        at: DateTime<Utc>,
-        before: impl FnOnce() -> Result<(), E>,
-    ) -> Result<bool, E> {
         let known: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM settings WHERE node_id IS NULL AND key = $1)",
         )
         .bind(key)
         .fetch_one(&mut *conn)
-        .await
-        .map_err(DbError::from)?;
+        .await?;
         if known {
             return Ok(false);
         }
-        before()?;
         sqlx::query(
             "INSERT INTO settings (node_id, key, value, locked, revision, updated_by, updated_at)
              VALUES (NULL, $1, $2, false, 1, NULL, $3)",
@@ -5892,8 +5649,7 @@ pub mod management {
         .bind(build)
         .bind(at)
         .execute(conn)
-        .await
-        .map_err(DbError::from)?;
+        .await?;
         Ok(true)
     }
 
@@ -6069,23 +5825,6 @@ pub mod provider_runtime {
     use chrono::{DateTime, Utc};
     use orch_types::{Id, Json};
 
-    /// Durable reasons that pause scheduled observations until an explicit start or renewal.
-    pub const STOPPED_IDLE: &str = "provider_idle_stop";
-    /// A person asked the runtime to stay stopped.
-    pub const STOPPED_PERSON: &str = "provider_person_stop";
-    /// Shared by scheduled candidate, admission and start guards.
-    pub const INTENTIONAL_STOP_DETAILS: [&str; 2] = [STOPPED_IDLE, STOPPED_PERSON];
-
-    /// Whether this unit is being or has been stopped deliberately.
-    #[must_use]
-    pub fn intentionally_stopped(runtime: &RuntimeFull) -> bool {
-        matches!(runtime.state.as_str(), "stopping" | "stopped" | "failed")
-            && runtime
-                .state_detail
-                .as_deref()
-                .is_some_and(|detail| INTENTIONAL_STOP_DETAILS.contains(&detail))
-    }
-
     const RUNTIME_COLUMNS: &str = "id, kind, host_id, machine_id, unit_name, successor_of, provider_id,
         environment_id, driver, template_id, spec_hash, generation, state, state_detail, remove_at, volumes,
         last_active_at, created_at, updated_at";
@@ -6229,26 +5968,6 @@ pub mod provider_runtime {
         machine_id, key_machine_id, status, status_detail, runtime_config, config, login_state, login_pending,
         login_pending_at, held_by_environment_id, sources, facts, deleted_at, revision";
 
-    /// An explicit fresh credential home; absence keeps the native profile's choice.
-    pub async fn credential_home(conn: &mut Conn, provider: Id) -> Result<Option<Json>, DbError> {
-        Ok(sqlx::query_scalar::<_, Option<Json>>(
-            "SELECT credential_home FROM providers WHERE id=$1 AND deleted_at IS NULL",
-        )
-        .bind(provider)
-        .fetch_optional(conn)
-        .await?
-        .flatten())
-    }
-    /// The native creator's new, unsigned subscription gets its own isolated credential directory.
-    pub async fn set_initial_owned_credential_home(
-        conn: &mut Conn,
-        provider: Id,
-        owner: Id,
-    ) -> Result<bool, DbError> {
-        Ok(sqlx::query("UPDATE providers SET credential_home='{\"kind\":\"made_by_orch\"}'::jsonb WHERE id=$1 AND owner_id=$2 AND kind='subscription' AND status='needs_setup' AND machine_id IS NULL AND login_state IS NULL AND login_pending IS NULL AND credential_home IS NULL AND deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM runtimes WHERE provider_id=$1) AND NOT EXISTS(SELECT 1 FROM jobs WHERE provider_id=$1)")
-            .bind(provider).bind(owner).execute(conn).await?.rows_affected()==1)
-    }
-
     /// The provider `id`, deleted or not.
     pub async fn state(conn: &mut Conn, id: Id) -> Result<Option<State>, DbError> {
         Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -6259,11 +5978,10 @@ pub mod provider_runtime {
         .await?)
     }
 
-    /// The provider `id`, deleted or not, locked against edits until the transaction ends.
-    /// Its immutable identity remains available to foreign-key checks on harness reports.
+    /// The provider `id`, deleted or not, locked until the transaction ends.
     pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<State>, DbError> {
         Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT {STATE_COLUMNS} FROM providers WHERE id = $1 FOR NO KEY UPDATE"
+            "SELECT {STATE_COLUMNS} FROM providers WHERE id = $1 FOR UPDATE"
         )))
         .bind(id)
         .fetch_optional(conn)
@@ -6564,11 +6282,10 @@ pub mod provider_runtime {
             .bind(after).bind(limit).fetch_all(conn).await?)
     }
 
-    /// Renewal starts a unit only when a live unit actually keeps the sign-in.
-    /// A staged successor also owns its native home before replacement verification.
+    /// Renewal starts a unit only when that unit actually keeps the sign-in.
     pub async fn keeper_has_unit(conn: &mut Conn, provider: Id) -> Result<bool, DbError> {
         Ok(sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM providers p JOIN runtimes r ON r.provider_id=p.id
-            WHERE p.id=$1 AND r.state NOT IN ('retired','removed')
+            WHERE p.id=$1 AND r.successor_of IS NULL AND r.state NOT IN ('retired','removed')
               AND (p.key_machine_id IS NULL OR EXISTS (SELECT 1 FROM machines keeper WHERE keeper.id=p.key_machine_id AND keeper.runtime_id=r.id)))")
             .bind(provider).fetch_one(conn).await?)
     }
@@ -7306,9 +7023,6 @@ pub mod mounts;
 
 /// MCP preset and environment-owned resources and their enablement.
 pub mod mcp;
-
-/// Stored home and origin identities for bounded native resource lists and pickers.
-pub mod grouping;
 
 /// Skills, their immutable versions, their drafts, and the versions each turn was given.
 pub mod skills;

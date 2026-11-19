@@ -9,32 +9,7 @@
 //! issue it; and waiting for it survives nothing but the row.
 
 pub mod authority;
-mod host_probe;
-mod http_origin;
-mod receipts;
-pub use http_origin::HttpCommand;
-pub use receipts::McpImportAck;
-mod machine_controls;
-mod terminal_creation;
-pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
-pub use host_probe::HostPortsProbe;
-pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
-};
-pub use machine_controls::{
-    PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
-    policy_sections, prepare_policy, validate_policy_drivers,
-};
-pub use terminal_creation::{TerminalCreationAuthority, TerminalCreationOrigin};
-pub(crate) use workspace::physical as workspace_physical;
-pub(crate) use workspace::snapshots as snapshot_origin;
-pub use workspace::{
-    FileCopyCommand, FileCopyInput, FileCopySource, FileMkdirCommand, FileMkdirInput,
-    FileMkdirSource, SnapshotCommand, SnapshotCreateSource, SnapshotMeasureInput,
-    SnapshotMeasureSource, SnapshotRequest, WorkspaceCommand,
-};
 
 use async_trait::async_trait;
 use orch_link_contract::commands::{CommandBody, CommandError, CommandKind, SerialKey};
@@ -46,9 +21,6 @@ pub(crate) const BUSY_RETRY_PAUSE: std::time::Duration = std::time::Duration::fr
 /// Why a command could not be sent, or its end not learned.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandsError {
-    /// The actual issuing writer's check failed immediately before its first queue insert.
-    #[error("the command's current issuing boundary has ended: {0}")]
-    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// The system does not know the machine, or it was deleted.
     #[error("the system does not know that machine")]
     UnknownMachine,
@@ -70,10 +42,6 @@ pub enum CommandsError {
     #[error("{0}")]
     Other(String),
 }
-
-/// A native writer's once-only check, after queue preparation and before its first insert.
-pub type BeforeCommand<'a> =
-    Box<dyn FnOnce() -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send + 'a>;
 
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -112,7 +80,7 @@ pub struct Outgoing {
     content = "value",
     rename_all = "snake_case"
 )]
-pub(crate) enum RetainedKey {
+enum RetainedKey {
     None,
     Machine,
     Thread(Id),
@@ -335,27 +303,9 @@ pub trait Commands: Send + Sync {
         ))
     }
 
-    /// Stores a command and hands it to the machine's link. Existing callers have no new check.
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
-        self.issue_prepared(command, None).await
-    }
-
-    /// The native writer's once-only check reaches the implementation's actual first mutation.
-    async fn issue_before(
-        &self,
-        command: Outgoing,
-        before: BeforeCommand<'_>,
-    ) -> Result<(), CommandsError> {
-        self.issue_prepared(command, Some(before)).await
-    }
-
-    /// Implementors must place a supplied check after awaited preparation and before first effect;
-    /// delegating ports pass it through rather than checking above another writer's waits.
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<BeforeCommand<'_>>,
-    ) -> Result<(), CommandsError>;
+    /// Stores a command and hands it to the machine's link. Asked again
+    /// under an identifier that exists, it does nothing.
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError>;
 
     /// The retained protected body of a command, including an expired tool-result delivery.
     async fn retained_body(&self, _id: Id) -> Result<Option<Json>, CommandsError> {
@@ -414,11 +364,7 @@ mod tests {
 
     #[async_trait]
     impl Commands for ReportedStatus {
-        async fn issue_prepared(
-            &self,
-            _: Outgoing,
-            _before: Option<BeforeCommand<'_>>,
-        ) -> Result<(), CommandsError> {
+        async fn issue(&self, _: Outgoing) -> Result<(), CommandsError> {
             Err(CommandsError::Stopping)
         }
         async fn status(&self, _: Id) -> Result<Option<Info>, CommandsError> {

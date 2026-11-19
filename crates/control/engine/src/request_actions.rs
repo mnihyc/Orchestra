@@ -325,46 +325,13 @@ impl Engine {
     /// Accepts a stop in the caller's guarded transaction before interrupting turns or returning credentials.
     pub async fn stop_environment_in(
         &self,
-        tx: Tx,
+        mut tx: Tx,
         principal: &Principal,
         origin: &Origin,
         environment: Id,
         interrupt: bool,
         reason: StopReason,
     ) -> Result<(), StopError> {
-        let accepted = self
-            .accept_environment_stop_in(
-                tx,
-                principal,
-                origin,
-                crate::environments::StopRequest {
-                    environment,
-                    interrupt,
-                    reason,
-                },
-                || Ok(()),
-                || Ok(()),
-            )
-            .await?;
-        self.finish_accepted_environment_stop(accepted).await
-    }
-
-    /// Commit the native decision only after its actual preparation and last rollbackable wait.
-    pub async fn accept_environment_stop_in<F, G>(
-        &self,
-        mut tx: Tx,
-        principal: &Principal,
-        origin: &Origin,
-        request: crate::environments::StopRequest,
-        before: F,
-        before_commit: G,
-    ) -> Result<crate::environments::AcceptedStop, StopError>
-    where
-        F: FnOnce() -> Result<(), EngineError>,
-        G: FnOnce() -> Result<(), EngineError>,
-    {
-        let environment = request.environment;
-        let interrupt = request.interrupt;
         let state = environments::environment(&mut tx, environment)
             .await?
             .filter(|state| state.deleted_at.is_none())
@@ -395,18 +362,8 @@ impl Engine {
         entry.environment_id = Some(environment);
         entry.details =
             json!({"environment": environment, "interrupt": interrupt, "decision": "accepted"});
-        let runtime = environments::live_runtime(&mut tx, environment).await?;
-        before()?;
         audit::append(&mut tx, &entry, origin, principal.now().get()).await?;
-        before_commit()?;
         tx.commit().await.map_err(DbError::from)?;
-        Ok(crate::environments::AcceptedStop {
-            request,
-            owner: state.owner_id,
-            home: state.home_node_id,
-            machine: state.machine_id,
-            generation: state.generation,
-            runtime: runtime.map(|runtime| runtime.id),
-        })
+        self.stop_environment(environment, interrupt, reason).await
     }
 }

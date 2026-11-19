@@ -32,11 +32,7 @@ struct AdmissionGap {
 
 #[async_trait::async_trait]
 impl Commands for AdmissionGap {
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<orch_engine::commands::BeforeCommand<'_>>,
-    ) -> Result<(), CommandsError> {
+    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
         if matches!(
             command.kind,
             CommandKind::TurnStart | CommandKind::TurnStartFenced
@@ -45,7 +41,7 @@ impl Commands for AdmissionGap {
             self.attempts.fetch_add(1, Ordering::SeqCst);
             return Err(CommandsError::Stopping);
         }
-        self.inner.issue_prepared(command, before).await
+        self.inner.issue(command).await
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
@@ -141,22 +137,8 @@ async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reaso
             ),
         )
         .await;
-    world.wait_turn(turn.turn_id, "failed").await;
-    let continued = world.turn_start(thread, 1).await;
-    assert_eq!(
-        turns_of(&world, thread).await,
-        [(1, "failed".to_owned()), (2, "starting".to_owned())]
-    );
-    let content: orch_types::Json = world
-        .scalar(
-            "SELECT i.content FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1",
-            continued.turn_id,
-        )
-        .await;
-    assert_eq!(
-        content,
-        serde_json::json!([{"type":"text","text":"Continue"}])
-    );
+    world.wait_state(thread, "idle").await;
+    assert_eq!(turns_of(&world, thread).await, [(1, "failed".to_owned())]);
     assert_eq!(world.input_state(input.input.id).await.0, "delivered");
     let message: String = world
         .scalar(

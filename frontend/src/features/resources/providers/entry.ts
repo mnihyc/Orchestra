@@ -115,7 +115,7 @@ export function formOf(parameters: ModelParameters, groups: readonly string[] = 
   };
 }
 
-export function requestOptions(text: string): ModelParameters['request_options'] | undefined {
+function requestOptions(text: string): ModelParameters['request_options'] | undefined {
   if (text.trim() === '') return undefined;
   try {
     const value: unknown = JSON.parse(text);
@@ -138,7 +138,7 @@ export function groupFault(name: string, t: TFunction): string | null {
 }
 
 /** What is wrong with the form, in words, field by field: what the server would refuse, said before it is asked. */
-export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US', maximumGroups = GROUPS_MOST, existingGroups: readonly string[] = []): Faults {
+export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US'): Faults {
   const found: Faults = {};
   if (form.requestOptions.trim() !== '' && requestOptions(form.requestOptions) === undefined) found.requestOptions = t('providerOptions.invalidSchema');
   const window = readTokens(form.window);
@@ -167,7 +167,7 @@ export function faultsOf(form: EntryForm, t: TFunction, locale = 'en-US', maximu
 
   const bad = form.groups.find((name) => !isGroupName(name));
   if (bad !== undefined) found.groups = groupFault(bad, t) ?? undefined;
-  else if (form.groups.length > maximumGroups && form.groups.some((group) => !existingGroups.includes(group))) found.groups = t('models.fault.groupsMost', { most: formatNumber(maximumGroups, locale) });
+  else if (form.groups.length > GROUPS_MOST) found.groups = t('models.fault.groupsMost', { most: GROUPS_MOST });
   return found;
 }
 

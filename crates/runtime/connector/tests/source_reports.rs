@@ -120,30 +120,6 @@ fn an_ended_cached_denial_does_not_hold_work_but_a_new_denial_does() {
 }
 
 #[test]
-fn model_origins_survive_normalization_without_turning_unknown_or_invalid_annotations_into_facts() {
-    let result = reports::models(
-        &json!([
-            {"model_name":"reported","parameters":{"input_images":false},"origins":{
-                "/model_name":"vendor","/parameters/input_images":"vendor",
-                "/future":"future-source", "not-a-pointer":"vendor", "/invalid":{"unknown":true}
-            }},
-            {"model_name":"legacy","origins":false}
-        ]),
-        &[],
-    )
-    .unwrap();
-    let models = result.models.unwrap();
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[0].origins["/parameters/input_images"], "vendor");
-    assert_eq!(models[0].parameters.input_images, Some(false));
-    assert_eq!(models[0].origins["/future"], "future-source");
-    assert!(!models[0].origins.contains_key("/invalid"));
-    assert!(!models[0].origins.contains_key("not-a-pointer"));
-    assert!(models[1].origins.is_empty());
-    assert!(result.notes.is_empty());
-}
-
-#[test]
 fn models_are_nullable_and_empty_and_optional_suggestion_fields_do_not_accept_a_model() {
     assert!(reports::models(&json!(null), &[]).unwrap().models.is_none());
     assert_eq!(

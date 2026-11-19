@@ -64,7 +64,7 @@ impl Discovery {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn with_test_search(
         registry: Arc<crate::harnesses::AdapterRegistry>,
         directory: PathBuf,
@@ -895,7 +895,11 @@ mod tests {
                 },
                 crate::facts::FactsDraft::default(),
                 Some(policy),
-                orch_link_contract::session::MachineFactsRates::default(),
+                orch_link_contract::session::MachineFactsRates {
+                    up_bps: 0,
+                    down_bps: 0,
+                    round_trip_ms: 0,
+                },
                 0,
             )
         };

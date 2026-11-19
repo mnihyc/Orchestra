@@ -58,21 +58,14 @@ struct RecoveredCommands {
 
 #[async_trait]
 impl crate::commands::Commands for RecoveredCommands {
-    async fn issue_prepared(
-        &self,
-        command: Outgoing,
-        before: Option<crate::commands::BeforeCommand<'_>>,
-    ) -> Result<(), crate::commands::CommandsError> {
+    async fn issue(&self, command: Outgoing) -> Result<(), crate::commands::CommandsError> {
         if command.id != self.expected.id {
-            return self.inner.issue_prepared(command, before).await;
+            return self.inner.issue(command).await;
         }
         if command != self.expected {
             return Err(crate::commands::CommandsError::Body(
                 "The recovered command identity/body/key/machine changed.".into(),
             ));
-        }
-        if let Some(check) = before {
-            check().map_err(crate::commands::CommandsError::BeforeEffect)?;
         }
         *self.issued.lock().unwrap_or_else(PoisonError::into_inner) = Some(command);
         self.server.on_cmd(self.command.clone()).await;
@@ -724,8 +717,6 @@ impl Fixture {
             thread_id: self.thread,
             actor_id: self.world.ada,
             authorization_token: None,
-            operation_origin: None,
-            byte_sources: Vec::new(),
             authorization_scope: None,
             request_hash: recipe::request_hash(&request)?,
             request,

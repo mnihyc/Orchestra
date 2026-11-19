@@ -20,8 +20,7 @@ import { ShareConsequences } from '@/features/access/ShareConsequences';
 import { ApiError, api, ok, ReceiptAcknowledged } from '@/api/client';
 import { ThreadIdentity } from '@/features/people/ThreadIdentity';
 import { namesQuery } from '@/api/search';
-import { beginShareAttempt, shareWithAgents, type ShareAttempt } from '@/api/share';
-import { sameLibraryReader } from '@/api/resourceLibrary';
+import { shareWithAgents } from '@/api/share';
 import { settingsQuery } from '@/api/settings';
 import type { AgentLevel, NameHit, PermissionPage, ShareParts, ShareWithAgents } from '@/generated/api-types';
 import { Hint } from '@/features/help/Hint';
@@ -193,7 +192,6 @@ function Refused({ error, onRaise, raising }: { error: unknown; onRaise: ((scope
 export function ShareWithAgentsDialog({ target, page, open, onClose, initialRecipient }: { target: AccessTarget; page: PermissionPage; open: boolean; onClose: () => void; initialRecipient?: { id: string; name: string } }) {
   const { t } = useTranslation();
   const actKey = useActKey();
-  const sending=useRef<{clientId:string;attempt:ShareAttempt}|null>(null);
   const available = agentGivingParts(page);
   const place: PlaceKind | null = isPlaceKind(target.kind) ? target.kind : null;
 
@@ -249,14 +247,8 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
   const share = useMutation({
     mutationFn: async () => {
       if (review.data === undefined || !review.data.preview.allowed || review.isFetching || review.isError) throw new Error(t('placeReview.newReviewRequired'));
-      const confirmation=review.data.preview.owner_reads?.confirmation;
-      let sent=sending.current;
-      if(sent?.clientId!==review.data.body.client_id || !sameLibraryReader(sent.attempt.reader)) {
-        sent={clientId:review.data.body.client_id,attempt:beginShareAttempt(review.data.body.client_id,confirmation)};
-        sending.current=sent;
-      }
       try {
-        return await shareWithAgents(review.data.body, sent.attempt, confirmation);
+        return await shareWithAgents(review.data.body);
       } catch (error) {
         // The existing success handler only acknowledges and closes; it needs no full share content.
         if (error instanceof ReceiptAcknowledged) return;
@@ -282,10 +274,7 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
       const bytes = failure instanceof ApiError ? ((failure.problem as unknown as { bytes?: number }).bytes ?? 0) : 0;
       await ok(api.PUT('/nodes/{id}/settings/{key}', { params: { path: { id: scopeId, key: 'sharing.snapshot_max_bytes' } }, body: { value: bytes } }));
     },
-    onSuccess: async () => {
-      share.reset();
-      await review.refetch();
-    },
+    onSuccess: () => share.reset(),
   });
 
   const levelOff = (entry: AgentLevel) => !mayGiveParts(partsOfLevel(entry, areas), available) || (copy && entry !== 'view');
@@ -337,21 +326,18 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
             </Button>
           </div>
           {byArea && (
-            <div role="group" aria-label={t('access.agents.dialog.byAreaLabel')} className="min-w-0">
-              <ul className="flex flex-wrap gap-x-4 gap-y-2">
-                {areas.map((area) => (
-                  <li key={area} className="min-w-[9rem] flex-[1_1_9rem]">
-                    <Select<string>
-                      label={t(AREA_WORDS[area])}
-                      size="sm"
-                      value={String(stepOf(area, parts))}
-                      onValueChange={(next) => setChosen(withStep(parts, area, Number(next)))}
-                      fieldClassName="min-w-0"
-                      options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: stepOff(area, step) || (copy && step > 1) }))}
-                    />
-                  </li>
-                ))}
-              </ul>
+            <div role="group" aria-label={t('access.agents.dialog.byAreaLabel')} className="flex flex-wrap gap-x-4 gap-y-2">
+              {areas.map((area) => (
+                <Select<string>
+                  key={area}
+                  label={t(AREA_WORDS[area])}
+                  size="sm"
+                  value={String(stepOf(area, parts))}
+                  onValueChange={(next) => setChosen(withStep(parts, area, Number(next)))}
+                  fieldClassName="min-w-[9rem] flex-[1_1_9rem]"
+                  options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: stepOff(area, step) || (copy && step > 1) }))}
+                />
+              ))}
             </div>
           )}
           {byArea && areas.includes('timeline') && !copy && <AgentAdvancedRows parts={parts} available={available} onChange={(next) => setChosen(next)} />}
@@ -359,7 +345,6 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
         </div>
 
         <RadioGroup<'live' | 'snapshot'>
-          presentation="compact"
           label={t('access.agents.dialog.kind')}
           value={mode}
           onValueChange={setMode}
@@ -390,10 +375,10 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
         {viewerEligible && <Checkbox label={t('agentContributions.viewerChoice')} hint={t('agentContributions.viewerHint')} checked={viewersRead} onCheckedChange={setViewersRead} />}
 
         <div className="flex flex-col gap-1 text-sm text-text-muted">
-          {parts.documents !== null && parts.documents !== undefined && <Checkbox presentation="compact" label={t('people.readFirst')} hint={t('people.readFirstHint')} checked={readFirst} onCheckedChange={setReadFirst} />}
+          {parts.documents !== null && parts.documents !== undefined && <Checkbox label={t('people.readFirst')} hint={t('people.readFirstHint')} checked={readFirst} onCheckedChange={setReadFirst} />}
         </div>
 
-        {whose.length > 0 && !nothing && (review.isPending || review.isFetching ? <SkeletonRows read={review} rows={3} /> : review.isError ? <Button onClick={() => void review.refetch()}>{t('actions.refresh.label')}</Button> : <ShareConsequences preview={review.data.preview} target={target} />)}
+        {whose.length > 0 && !nothing && (review.isPending || review.isFetching ? <SkeletonRows rows={3} /> : review.isError ? <Button onClick={() => void review.refetch()}>{t('actions.refresh.label')}</Button> : <ShareConsequences preview={review.data.preview} target={target} />)}
         {failure !== null && (
           <div ref={refusal}>
             <Refused error={failure} onRaise={writable ? (scopeId) => raise.mutate(scopeId) : null} raising={raise.isPending} />

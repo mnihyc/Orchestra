@@ -270,7 +270,7 @@ pub(crate) async fn ask(
         call,
         workflow: goal.id,
         task: "goal_check",
-        resource: None,
+        document: None,
     };
     let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
     let answered = match host.complete(thread, request).await {

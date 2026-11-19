@@ -18,8 +18,7 @@ import { PlaceInbox } from './away/Grouped';
 import { GroupingControl, useInboxGrouping } from './away/Grouping';
 import { PauseControls } from '@/features/settings/personal/away/Pause';
 import { useAwayLive } from '@/features/settings/personal/away/live';
-import { dayKey, FILTERS, filterRows, groupByDay, groupByKind, type InboxFilter, previousDay, writeDay } from '@/features/inbox/model';
-import { lookOf } from '@/features/inbox/kinds';
+import { dayKey, FILTERS, filterRows, groupByDay, type InboxFilter, previousDay, writeDay } from '@/features/inbox/model';
 import { markNotificationsRead } from '@/features/inbox/read';
 import { useAppearance } from '@/lib/appearance';
 import { useNow } from '@/lib/time';
@@ -70,7 +69,7 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
 
   const rows = useMemo(() => filterRows(held, filter, { edge, reachedEnd }), [held, filter, edge, reachedEnd]);
   const labels = useNotificationLabels(rows);
-  const groups = useMemo(() => grouping.value === 'kind' ? groupByKind(rows) : groupByDay(rows, timeZone), [rows, timeZone, grouping.value]);
+  const groups = useMemo(() => groupByDay(rows, timeZone), [rows, timeZone]);
   const today = dayKey(now, timeZone);
   const yesterday = previousDay(today);
 
@@ -93,7 +92,7 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
     queryFn: ({ pageParam, signal }) => fetchNotifications({ unread: true, cursor: pageParam }, signal),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor,
-    enabled: grouping.value !== 'place' && filter === 'unread' && loaded && !reachedEnd,
+    enabled: grouping.value === 'day' && filter === 'unread' && loaded && !reachedEnd,
   });
   useEffect(() => {
     for (const page of unreadPages.data?.pages ?? []) userWriter.found(page.items);
@@ -106,11 +105,6 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
   const more = () => (onUnread ? void unreadPages.fetchNextPage() : loadOlder());
 
   const dayLabel = (key: string) => (key === today ? t('inbox.today') : key === yesterday ? t('inbox.yesterday') : writeDay(key, today, locale));
-  const groupLabel = (key: string) => {
-    if (grouping.value !== 'kind') return dayLabel(key);
-    const label = lookOf(key).label;
-    return label === null ? t('inbox.otherKinds') : t(label);
-  };
   const filters = FILTERS.map((value) => ({
     value,
     name: value === 'unread' && unread > 0 ? t('inbox.filter.unreadWithCount', { count: unread }) : t(`inbox.filter.${value}`),
@@ -129,14 +123,14 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
         help={<Hint id="inbox" popover />}
         actions={
           <>
-            <GroupingControl value={grouping.value} onChange={grouping.choose} onRetry={grouping.retry} disabled={grouping.loading || grouping.saving} error={grouping.error} />
+            <GroupingControl value={grouping.value} onChange={grouping.choose} disabled={grouping.loading || grouping.saving} error={grouping.error} />
             <SegmentedControl
               label={t('inbox.filter.label')}
               value={filter}
               onValueChange={onFilter}
               segments={filters}
             />
-            <Button icon={<CheckCheck aria-hidden />} disabled={unread === 0} reason={unread === 0 ? loaded ? t('ui.unavailable.noUnread') : t('common.loading') : undefined} onClick={() => void markNotificationsRead({ all: true })}>
+            <Button icon={<CheckCheck aria-hidden />} disabled={unread === 0} onClick={() => void markNotificationsRead({ all: true })}>
               {t('inbox.markAllRead')}
             </Button>
             <PauseControls />
@@ -157,9 +151,9 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
       ) : (
         <div className="flex flex-col gap-4">
           {groups.map((group) => (
-            <section key={group.key} aria-labelledby={`inbox-${grouping.value}-${group.key}`} className="flex flex-col gap-2">
-              <h2 id={`inbox-${grouping.value}-${group.key}`} className="px-1 text-sm font-medium text-text-muted">
-                {groupLabel(group.key)}
+            <section key={group.key} aria-labelledby={`inbox-day-${group.key}`} className="flex flex-col gap-2">
+              <h2 id={`inbox-day-${group.key}`} className="px-1 text-sm font-medium text-text-muted">
+                {dayLabel(group.key)}
               </h2>
               <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface">
                 {group.rows.map((row) => (

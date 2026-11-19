@@ -9,7 +9,6 @@ import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@
 import { programNameIn } from '@/features/resources/programNames';
 import { i18n } from '@/i18n';
 import { tierId, tierLabel } from './tier';
-import {purposeLabel} from './words';
 
 import type { NodeRef, UsageDimension, UsageKey } from '@/generated/api-types';
 import { FILTER_DIMENSION, type FilterName } from '@/features/usage/search';
@@ -17,7 +16,6 @@ import { FILTER_DIMENSION, type FilterName } from '@/features/usage/search';
 /** Whether a key is the one that stands for every member beyond the largest: it names nothing in any dimension. */
 export function isRest(key: UsageKey): boolean {
   return (
-    key.offering===undefined && key.purpose===undefined &&
     key.person === undefined &&
     key.model === undefined &&
     key.provider === undefined &&
@@ -55,8 +53,6 @@ export function keyId(dimension: UsageDimension, key: UsageKey): string {
   switch (dimension) {
     case 'person':
       return key.person?.id ?? 'nobody';
-    case 'offering':return key.offering===undefined || key.offering===null?'unknown':JSON.stringify([key.offering.kind,key.offering.name]);
-    case 'purpose':return key.purpose??'unknown';
     case 'model':
       return key.model ?? 'unknown';
     case 'provider':
@@ -84,8 +80,6 @@ export function keyLabel(dimension: UsageDimension, key: UsageKey, t: TFunction)
   switch (dimension) {
     case 'person':
       return key.person === null || key.person === undefined ? t('usage.key.nobody') : key.person.display_name;
-    case 'offering':return key.offering?.name??t('usage.key.unknown');
-    case 'purpose':return key.purpose===undefined || key.purpose===null?t('usage.key.unknown'):purposeLabel(key.purpose,t);
     case 'model':
       return key.model === null || key.model === undefined ? t('usage.key.unknown') : modelDisplayName(key.model_display, t);
     case 'provider':
@@ -125,8 +119,6 @@ export function filterValue(dimension: UsageDimension, key: UsageKey): string | 
   switch (dimension) {
     case 'person':
       return key.person?.id ?? null;
-    case 'offering':return key.offering?.kind==='model' || key.offering?.kind==='service'?key.offering.name:null;
-    case 'purpose':return key.purpose??null;
     case 'model':
       return key.model ?? null;
     case 'effort': return key.effort ?? 'none';

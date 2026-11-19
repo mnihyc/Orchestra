@@ -179,14 +179,7 @@ impl crate::engine::Engine {
     /// one that does: a copy of the credential (`shared`), or the login itself (`handover`). The lease is
     /// opened here, once the machine where the harness runs is known: it is the one a copy may be issued
     /// to. A turn on any other path is left as it is.
-    pub(crate) fn give_credential<'a>(
-        &'a self,
-        snap: &'a crate::sessions::StartSnapshot,
-    ) -> futures::future::BoxFuture<'a, Result<Given, crate::error::EngineError>> {
-        Box::pin(self.give_credential_inner(snap))
-    }
-
-    async fn give_credential_inner(
+    pub(crate) async fn give_credential(
         &self,
         snap: &crate::sessions::StartSnapshot,
     ) -> Result<Given, crate::error::EngineError> {

@@ -28,34 +28,7 @@ impl Givers {
         clippy::too_many_arguments,
         reason = "one prepared target and contribution batch"
     )]
-    pub(super) fn load(
-        conn: &mut Conn,
-        agent: &Agent,
-        graph: &Graph,
-        store: &Store,
-        pages: &[PageRef],
-        sites: &[Site],
-        people_chats: &[orch_db::queries::chats::ChatRow],
-        now: Time,
-    ) -> impl std::future::Future<Output = Result<Self, Error>> {
-        // A projection's giver batch must not embed every ordinary account frame.
-        Box::pin(Self::prepare(
-            conn,
-            agent,
-            graph,
-            store,
-            pages,
-            sites,
-            people_chats,
-            now,
-        ))
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one prepared target and contribution batch"
-    )]
-    async fn prepare(
+    pub(super) async fn load(
         conn: &mut Conn,
         agent: &Agent,
         graph: &Graph,
@@ -90,7 +63,7 @@ impl Givers {
         nodes.extend(
             people_chats
                 .iter()
-                .filter_map(|chat| graph.site_of(chat.home()).map(|site| site.id)),
+                .filter_map(|chat| graph.site_of(chat.org_id).map(|site| site.id)),
         );
         let nodes: Vec<_> = nodes.into_iter().collect();
         let holders =
@@ -164,18 +137,18 @@ impl Givers {
             if !chat_ids.is_empty() {
                 let members =
                     orch_db::queries::search::participant_chats(conn, giver, &chat_ids).await?;
-                for chat in people_chats {
-                    let Some(root) = graph.site_of(chat.home()) else {
+                for member in members {
+                    let Some(root) = graph.site_of(member.org_id) else {
                         continue;
                     };
-                    let member = members.iter().find(|member| member.id == chat.id);
-                    let administration = chat.kind == orch_db::queries::chats::KIND_GROUP
-                        && !frame.ways(&root, Permission::ChatManage).is_empty();
+                    let Some(chat) = people_chats.iter().find(|chat| chat.id == member.id) else {
+                        continue;
+                    };
                     let can_name = agent.root == chat.org_id
                         || !frame.ways(&root, Permission::AccessExternal).is_empty()
-                        || (member.is_some_and(|member| member.manager)
+                        || (chat.created_by == Some(giver)
                             && external
-                                .get(&chat.home())
+                                .get(&chat.org_id)
                                 .copied()
                                 .flatten()
                                 .unwrap_or(true));
@@ -183,25 +156,19 @@ impl Givers {
                         Permission::ChatView,
                         Permission::ChatInteract,
                         Permission::ChatExport,
-                        Permission::ChatManage,
                     ]
                     .into_iter()
                     .filter(|permission| {
                         can_name
-                            && (*permission != Permission::ChatManage
-                                || administration
-                                || member.is_some_and(|member| member.manager))
-                            && member.is_some_and(|member| {
-                                crate::chats::ordinary_participant(
-                                    &principal,
-                                    &root,
-                                    member,
-                                    *permission,
-                                )
-                            })
+                            && crate::chats::ordinary_participant(
+                                &principal,
+                                &root,
+                                &member,
+                                *permission,
+                            )
                     })
                     .collect();
-                    prepared.chats.insert((giver, chat.id), held);
+                    prepared.chats.insert((giver, member.id), held);
                 }
             }
         }

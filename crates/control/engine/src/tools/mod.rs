@@ -38,7 +38,6 @@
 pub mod announce;
 pub mod browser;
 pub mod browser_definition;
-pub mod capability_service;
 pub mod chat_message;
 pub mod definitions;
 pub mod display;
@@ -48,17 +47,13 @@ pub mod edit;
 mod edit_import;
 mod edit_source;
 pub mod goal;
-pub(crate) mod image_generation;
 pub mod manage;
 mod message;
 pub mod ports;
 pub mod read;
-pub mod read_tools;
 pub mod references;
 pub mod request_capability;
-pub mod schedule;
 pub mod search;
-pub mod search_budgets;
 pub mod shared;
 pub mod source;
 pub mod texts;
@@ -71,7 +66,6 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::ids;
 use definitions::{Code, Refusal};
-use futures::future::BoxFuture;
 use orch_agent_contract::events::OrchTool;
 use orch_db::Conn;
 use orch_db::queries::threads::ThreadRow;
@@ -114,8 +108,6 @@ pub struct ToolSettings {
     pub calls_per_minute: i64,
     /// The resolved `agent.messages`.
     pub messages: BTreeMap<String, String>,
-    /// One snapshot for shared search's schema and execution.
-    pub search_budgets: search_budgets::SearchBudgets,
 }
 
 /// One setting of a snapshot as the type the caller knows it to be.
@@ -143,19 +135,17 @@ pub(crate) fn definition_of(key: &str) -> Result<&'static SettingDef, EngineErro
 impl ToolSettings {
     /// Reads them for a thread.
     pub async fn load(conn: &mut Conn, thread: Id) -> Result<Self, EngineError> {
-        let mut wanted = vec![
+        let wanted = [
             definition_of(keys::ORCH_TOOLS_ENABLED)?,
             definition_of(keys::ORCH_TOOLS_CALLS_PER_MINUTE)?,
             definition_of(keys::AGENT_MESSAGES)?,
         ];
-        wanted.extend(search_budgets::SearchBudgets::definitions()?);
         let snapshot = Snapshot::load(conn, Place::Node(thread), Wanted::Keys(&wanted)).await?;
         Ok(Self {
             enabled: setting(&snapshot, keys::ORCH_TOOLS_ENABLED)?.unwrap_or_default(),
             calls_per_minute: setting(&snapshot, keys::ORCH_TOOLS_CALLS_PER_MINUTE)?
                 .unwrap_or_default(),
             messages: setting(&snapshot, keys::AGENT_MESSAGES)?.unwrap_or_default(),
-            search_budgets: search_budgets::SearchBudgets::resolve(&snapshot)?,
         })
     }
 }
@@ -184,15 +174,19 @@ pub async fn offered_for_session(
     harness_takes_mcp: bool,
     now: orch_types::Time,
 ) -> Result<Vec<OrchTool>, EngineError> {
-    if session_tool_blocker(conn, thread, harness_takes_mcp)
-        .await?
-        .is_some()
-    {
+    if !harness_takes_mcp {
         return Ok(Vec::new());
+    }
+    if let Some(environment) = thread.environment_id {
+        let wanted = [definition_of(keys::EXEC_ORCH_TOOLS)?];
+        let snapshot =
+            Snapshot::load(conn, Place::Environment(environment), Wanted::Keys(&wanted)).await?;
+        if setting::<bool>(&snapshot, keys::EXEC_ORCH_TOOLS)? == Some(false) {
+            return Ok(Vec::new());
+        }
     }
     let settings = ToolSettings::load(conn, thread.node_id).await?;
     let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
-    read_tools::append_offered(conn, thread, &mut offered).await?;
     if !browser::offered(conn, thread.environment_id).await? {
         offered.retain(|tool| *tool != OrchTool::UseBrowser);
     }
@@ -204,108 +198,11 @@ pub async fn offered_for_session(
     if thread.side_of.is_none() && crate::goals::offers_tool(conn, thread.node_id).await? {
         offered.push(OrchTool::Goal);
     }
-    if schedule::offered(conn, thread).await? {
-        offered.push(OrchTool::Schedule);
-    }
     Ok(offered)
 }
 
-async fn session_tool_blocker(
-    conn: &mut Conn,
-    thread: &ThreadRow,
-    harness_takes_mcp: bool,
-) -> Result<Option<orch_api_contract::ports::PortToolInactiveReason>, EngineError> {
-    use orch_api_contract::ports::PortToolInactiveReason;
-    if !harness_takes_mcp {
-        return Ok(Some(PortToolInactiveReason::ProgramUnsupported));
-    }
-    if let Some(environment) = thread.environment_id {
-        let wanted = [definition_of(keys::EXEC_ORCH_TOOLS)?];
-        let snapshot =
-            Snapshot::load(conn, Place::Environment(environment), Wanted::Keys(&wanted)).await?;
-        if setting::<bool>(&snapshot, keys::EXEC_ORCH_TOOLS)? == Some(false) {
-            return Ok(Some(PortToolInactiveReason::EnvironmentToolsOff));
-        }
-    }
-    Ok(None)
-}
-
-/// The inspector names only requested port tools and the same current native gate that narrows them.
-pub async fn port_tools_for_session(
-    conn: &mut Conn,
-    thread: &ThreadRow,
-    harness_takes_mcp: bool,
-    now: orch_types::Time,
-) -> Result<orch_api_contract::ports::ThreadPortTools, EngineError> {
-    use orch_api_contract::ports::{InactivePortTool, PortToolInactiveReason, ThreadPortTools};
-    let settings = ToolSettings::load(conn, thread.node_id).await?;
-    let requested = OrchTool::ALL
-        .iter()
-        .copied()
-        .filter(|tool| {
-            matches!(
-                tool,
-                OrchTool::ListPorts
-                    | OrchTool::OpenPort
-                    | OrchTool::ClosePort
-                    | OrchTool::ListPortConnections
-            ) && settings.enabled.iter().any(|name| name == tool.name())
-        })
-        .collect::<Vec<_>>();
-    let blocker = session_tool_blocker(conn, thread, harness_takes_mcp).await?;
-    let selected = definitions::offered(&settings.enabled, side_reading(thread));
-    let mut effective = if blocker.is_some() {
-        Vec::new()
-    } else {
-        selected.clone()
-    };
-    let availability = if blocker.is_none() && !requested.is_empty() {
-        let value = ports::availability(conn, thread, now).await?;
-        ports::narrow(&mut effective, value.offer);
-        Some(value)
-    } else {
-        None
-    };
-    let inactive = requested
-        .iter()
-        .filter(|tool| !effective.contains(tool))
-        .map(|tool| {
-            let reason = if let Some(blocker) = blocker {
-                blocker
-            } else if !selected.contains(tool) {
-                PortToolInactiveReason::ContinuationRestricted
-            } else {
-                availability
-                    .and_then(|value| {
-                        if *tool == OrchTool::OpenPort {
-                            value.open_reason
-                        } else {
-                            value.read_reason
-                        }
-                    })
-                    .ok_or_else(|| {
-                        EngineError::unreadable("a native port tool lost its availability cause")
-                    })?
-            };
-            Ok(InactivePortTool {
-                tool: tool.name().into(),
-                reason,
-            })
-        })
-        .collect::<Result<Vec<_>, EngineError>>()?;
-    Ok(ThreadPortTools {
-        requested: requested.iter().map(|tool| tool.name().into()).collect(),
-        effective: requested
-            .iter()
-            .filter(|tool| effective.contains(tool))
-            .map(|tool| tool.name().into())
-            .collect(),
-        inactive,
-    })
-}
-
 /// What a call needs to be answered.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CallContext {
     /// The machine the call came from, and the answer goes back to.
     pub machine: Id,
@@ -360,7 +257,6 @@ impl Engine {
             arguments: call.arguments.clone(),
         };
         let engine = self.clone();
-        let deadline = call.deadline;
         let grace = self.inner.config.post_commit_grace;
         #[cfg(test)]
         let task_identity = (context.thread, context.call_ref.clone());
@@ -369,9 +265,7 @@ impl Engine {
             if engine.is_stopped() {
                 return;
             }
-            if let Err(error) =
-                source::within_reply_deadline(deadline, engine.answer_tool_call(&context)).await
-            {
+            if let Err(error) = engine.answer_tool_call(&context).await {
                 tracing::warn!(%error, thread = %context.thread, call = %context.call_ref, "a call of an orch tool could not be answered");
             }
         });
@@ -416,18 +310,10 @@ impl Engine {
         .await
         {
             Ok(answer) => answer,
-            Err(EngineError::Capability(failure)) => Answer::Done(failure.reply()),
-            Err(EngineError::CapabilityPaused(pause)) => Answer::Done(pause.reply()),
             Err(error @ (EngineError::StaleToolSource | EngineError::ToolCallIdentity)) => {
                 Answer::Refused(Refusal::new(Code::Changed, error.to_string()))
             }
             Err(error) => {
-                #[cfg(test)]
-                if call.tool == OrchTool::ImageGeneration
-                    && std::env::var_os("ORCH_TEST_SERVICE_TRACE").is_some()
-                {
-                    eprintln!("image_service_failure: {error}");
-                }
                 // A failed database step is an internal failure too: settle the native waiter
                 // with the same safe refusal rather than leaving it waiting for its deadline.
                 tracing::warn!(%error, thread = %call.thread, "a call of an orch tool failed");
@@ -513,75 +399,62 @@ impl Engine {
     }
 
     /// What a call comes to, the checks first and the tool after.
-    fn decide_tool_call<'a>(
-        &'a self,
-        call: &'a CallContext,
-    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
-        Box::pin(async move {
-            let (source, thread) = {
-                let mut tx = self.inner.db.begin().await?;
-                let admitted = source::Source::load(&mut tx, call).await?;
-                tx.commit().await.map_err(orch_db::DbError::from)?;
-                admitted
-            };
-            source
-                // The captured-source scope is another owner of the operation
-                // future; keep its task-local poll frames independent of its size.
-                .scope(Box::pin(async {
-                    let answer = self.decide_admitted_tool_call(call, &thread).await?;
-                    // Reads may perform several bounded metadata/blob/native observations. If selection
-                    // changed between them, none of that newer projection becomes this old call's answer.
-                    if reading_call(call) && matches!(&answer, Answer::Done(_)) {
-                        #[cfg(test)]
-                        source::tests::pause(call, source::tests::Point::Read).await;
-                        let mut tx = self.inner.db.begin().await?;
-                        source::check(&mut tx).await?;
-                        tx.commit().await.map_err(orch_db::DbError::from)?;
-                    }
-                    Ok(answer)
-                }))
-                .await
-        })
+    async fn decide_tool_call(&self, call: &CallContext) -> Result<Answer, EngineError> {
+        let (source, thread) = {
+            let mut tx = self.inner.db.begin().await?;
+            let admitted = source::Source::load(&mut tx, call).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            admitted
+        };
+        source
+            // The captured-source scope is another owner of the operation
+            // future; keep its task-local poll frames independent of its size.
+            .scope(Box::pin(async {
+                let answer = self.decide_admitted_tool_call(call, &thread).await?;
+                // Reads may perform several bounded metadata/blob/native observations. If selection
+                // changed between them, none of that newer projection becomes this old call's answer.
+                if reading_call(call) && matches!(&answer, Answer::Done(_)) {
+                    #[cfg(test)]
+                    source::tests::pause(call, source::tests::Point::Read).await;
+                    let mut tx = self.inner.db.begin().await?;
+                    source::check(&mut tx).await?;
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
+                }
+                Ok(answer)
+            }))
+            .await
     }
 
-    fn decide_admitted_tool_call<'a>(
-        &'a self,
-        call: &'a CallContext,
-        thread: &'a ThreadRow,
-    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
-        Box::pin(async move {
-            let settings = {
-                let mut conn = self.inner.db.acquire().await?;
-                ToolSettings::load(&mut conn, call.thread).await?
-            };
-            let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
+    async fn decide_admitted_tool_call(
+        &self,
+        call: &CallContext,
+        thread: &ThreadRow,
+    ) -> Result<Answer, EngineError> {
+        let settings = {
             let mut conn = self.inner.db.acquire().await?;
-            read_tools::append_offered(&mut conn, thread, &mut offered).await?;
-            ports::narrow(
-                &mut offered,
-                ports::offered(&mut conn, thread, self.inner.clock.time()).await?,
-            );
-            if thread.side_of.is_none() && crate::goals::offers_tool(&mut conn, call.thread).await?
-            {
-                offered.push(OrchTool::Goal);
-            }
-            if schedule::offered(&mut conn, thread).await? {
-                offered.push(OrchTool::Schedule);
-            }
-            self.append_web_service_tools(&mut conn, thread, &mut offered)
-                .await?;
-            drop(conn);
-            if !offered.contains(&call.tool) {
-                return Ok(Refusal::invalid(not_offered(call.tool, &offered)).into());
-            }
-            let admitted = crate::engine::lock(&self.inner.call_rate).admit(
-                call.thread,
-                &call.call_ref,
-                self.inner.clock.now(),
-                settings.calls_per_minute,
-            );
-            if let Err(seconds) = admitted {
-                return Ok(Refusal::new(
+            ToolSettings::load(&mut conn, call.thread).await?
+        };
+        let mut offered = definitions::offered(&settings.enabled, side_reading(thread));
+        let mut conn = self.inner.db.acquire().await?;
+        ports::narrow(
+            &mut offered,
+            ports::offered(&mut conn, thread, self.inner.clock.time()).await?,
+        );
+        if thread.side_of.is_none() && crate::goals::offers_tool(&mut conn, call.thread).await? {
+            offered.push(OrchTool::Goal);
+        }
+        drop(conn);
+        if !offered.contains(&call.tool) {
+            return Ok(Refusal::invalid(not_offered(call.tool, &offered)).into());
+        }
+        let admitted = crate::engine::lock(&self.inner.call_rate).admit(
+            call.thread,
+            &call.call_ref,
+            self.inner.clock.now(),
+            settings.calls_per_minute,
+        );
+        if let Err(seconds) = admitted {
+            return Ok(Refusal::new(
                 Code::RateLimited,
                 format!(
                     "You have made more calls of these tools than a minute allows ({}). Wait {seconds} seconds, and try again.",
@@ -589,28 +462,23 @@ impl Engine {
                 ),
             )
             .into());
-            }
-            if let Err(refusal) = definitions::check_arguments_with_search_budgets(
-                call.tool,
-                &call.arguments,
-                &settings.search_budgets,
-            ) {
-                return Ok(refusal.into());
-            }
-            source::admit(self, call).await?;
-            // Each tool's future is boxed: the dispatcher's own state and poll frame stay the size of a pointer
-            // per tool rather than of the largest tool (debug builds copy that state through the stack).
-            match call.tool {
-            OrchTool::OrchDocs | OrchTool::Open | OrchTool::Search | OrchTool::FindOperation | OrchTool::Read => Box::pin(self.read_tool_call(call, thread)).await,
+        }
+        if let Err(refusal) = definitions::check_arguments(call.tool, &call.arguments) {
+            return Ok(refusal.into());
+        }
+        source::admit(self, call).await?;
+        // Each tool's future is boxed: the dispatcher's own state and poll frame stay the size of a pointer
+        // per tool rather than of the largest tool (debug builds copy that state through the stack).
+        match call.tool {
             OrchTool::UseBrowser => Box::pin(self.use_browser_call(call, thread)).await,
             OrchTool::UseDisplay => Box::pin(self.use_display_call(call,thread)).await,
-            OrchTool::ListShared => self.list_shared_call(call, thread).await,
-            OrchTool::ReadShared => self.read_shared_call(call, thread).await,
-            OrchTool::SearchShared => Box::pin(self.search_shared_call(call, thread, &settings.search_budgets)).await,
+            OrchTool::ListShared => Box::pin(self.list_shared_call(call, thread)).await,
+            OrchTool::ReadShared => Box::pin(self.read_shared_call(call, thread)).await,
+            OrchTool::SearchShared => Box::pin(self.search_shared_call(call, thread)).await,
             OrchTool::DownloadShared => Box::pin(self.download_shared_call(call, thread)).await,
             OrchTool::SendMessage => Box::pin(self.send_message_call(call, thread, &settings)).await,
-            OrchTool::EditDocument => self.edit_document_call(call, thread).await,
-            OrchTool::ManageShared => self.manage_shared_call(call, thread).await,
+            OrchTool::EditDocument => Box::pin(self.edit_document_call(call, thread)).await,
+            OrchTool::ManageShared => Box::pin(self.manage_shared_call(call, thread)).await,
             OrchTool::Announce => Box::pin(self.announce_call(call, thread, &settings)).await,
             OrchTool::SendChatMessage | OrchTool::SendThreadMessage => {
                 Ok(Refusal::invalid("Use send_message with target.kind and target.path. The old message names are retained only in conversation history.").into())
@@ -619,9 +487,6 @@ impl Engine {
                 Box::pin(self.request_capability_call(call, thread, &settings)).await
             }
             OrchTool::Goal => Box::pin(self.goal_call(call, thread)).await,
-            OrchTool::Schedule => Box::pin(self.schedule_call(call, thread)).await,
-            OrchTool::WebSearch | OrchTool::WebFetch => Box::pin(self.web_service_call(call)).await,
-            OrchTool::ImageGeneration => self.image_generation_call(call).await,
             // What these do is the API's, reached through the hook it attaches (`ports`); a thread is offered them
             // only once they are in `definitions::BUILT`.
             OrchTool::ListPorts
@@ -629,21 +494,13 @@ impl Engine {
             | OrchTool::ClosePort
             | OrchTool::ListPortConnections => Box::pin(self.port_tool_call(call, thread)).await,
         }
-        })
     }
 }
 
 fn reading_call(call: &CallContext) -> bool {
     matches!(
         call.tool,
-        OrchTool::OrchDocs
-            | OrchTool::Open
-            | OrchTool::Search
-            | OrchTool::FindOperation
-            | OrchTool::Read
-            | OrchTool::ListShared
-            | OrchTool::WebSearch
-            | OrchTool::WebFetch
+        OrchTool::ListShared
             | OrchTool::ReadShared
             | OrchTool::SearchShared
             | OrchTool::ListPorts

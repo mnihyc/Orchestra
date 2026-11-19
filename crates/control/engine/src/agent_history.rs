@@ -52,7 +52,7 @@ pub fn idle_due(last_turn: DateTime<Utc>, now: DateTime<Utc>, days: i64) -> bool
 impl Engine {
     /// Schedules one cache worker; a full pass also covers every pending close observation.
     pub(crate) fn schedule_agent_history(&self, full: bool) {
-        if self.is_stopped() || !self.inner.config.agent_history_sweeps {
+        if self.is_stopped() {
             return;
         }
         let mut memory = lock(&self.inner.agent_history);

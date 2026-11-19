@@ -8,7 +8,6 @@
  */
 import { Check, Circle, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { transferCleanup, type TransferFacts } from '@/features/change/environmentTransfer';
 import { Hint } from '@/features/help/Hint';
 
 import type { Job } from '@/generated/api-types';
@@ -39,7 +38,7 @@ const COPY_PHASES = new Set(['copy', 'files', 'upload', 'download', 'materialize
 const SEPARATOR = ' · ';
 
 /** The running phase and its live counters, as compact fragments. */
-export function useLine(job: Job, transfer?: TransferFacts): string {
+export function useLine(job: Job): string {
   const { t } = useTranslation();
   const format = useFormatContext();
   const { locale } = format;
@@ -55,8 +54,7 @@ export function useLine(job: Job, transfer?: TransferFacts): string {
   const measuring = progress.phase === 'measure' || job.kind === 'measurement';
   const fingerprinting = progress.phase === 'fingerprint_source' || progress.phase === 'fingerprint_target';
   const copying = !measuring && COPY_PHASES.has(progress.phase);
-  const cleanup = job.kind === 'environment_move' ? transferCleanup(progress.phase, transfer, t) : null;
-  const base = cleanup ?? (fingerprinting ? t(progress.phase === 'fingerprint_source' ? 'change.phase.fingerprint_source.doing' : 'change.phase.fingerprint_target.doing') : measuring ? t('liveWork.countingLabel') : copying ? t('liveWork.copying') : t(`change.phase.${progress.phase}.doing`, { defaultValue: progress.message ?? t('source.job.running') }));
+  const base = fingerprinting ? t(progress.phase === 'fingerprint_source' ? 'change.phase.fingerprint_source.doing' : 'change.phase.fingerprint_target.doing') : measuring ? t('liveWork.countingLabel') : copying ? t('liveWork.copying') : t(`change.phase.${progress.phase}.doing`, { defaultValue: progress.message ?? t('source.job.running') });
   const parts = [base];
   if (job.kind === 'document_notices' && /^\d+$/.test(progress.message ?? '')) {
     const checked = Number(progress.message);
@@ -76,10 +74,10 @@ export function useLine(job: Job, transfer?: TransferFacts): string {
 }
 
 /** One live line for counters, elapsed time and a dated waiting fragment. */
-export function JobActivityLine({ job, transfer }: { job: Job; transfer?: TransferFacts | undefined }) {
+export function JobActivityLine({ job }: { job: Job }) {
   const { t } = useTranslation();
   const format = useFormatContext();
-  const line = useLine(job, transfer);
+  const line = useLine(job);
   const active = job.state === 'queued' || job.state === 'running';
   const now = useRunningClock(active);
   const updated = job.progress.activity?.updated_at ?? job.started_at ?? job.created_at;
@@ -115,10 +113,9 @@ export interface ProgressProps {
   className?: string;
   /** Resource-specific phases keep the same ticks with their ordinary short words. */
   phaseLabel?: (name: string) => string;
-  transfer?: TransferFacts | undefined;
 }
 
-export function JobProgress({ job, heading, reconnecting, className, phaseLabel, transfer }: ProgressProps) {
+export function JobProgress({ job, heading, reconnecting, className, phaseLabel }: ProgressProps) {
   const { t } = useTranslation();
   const checks = checksOf(job);
   const verifying = job.progress.phase === 'verify' && job.state === 'running';
@@ -131,12 +128,12 @@ export function JobProgress({ job, heading, reconnecting, className, phaseLabel,
         </span>
       </div>
       <Meter look="progress" value={job.progress.percent} label={heading} />
-      <JobActivityLine job={job} transfer={transfer} />
+      <JobActivityLine job={job} />
       <ol aria-label={t('change.progress.phases')} className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
         {job.progress.phases.map((phase) => (
           <li key={phase.name} aria-current={phase.state === 'running' ? 'step' : undefined} data-phase={phase.name} data-phase-state={phase.state} className={cx('flex items-center gap-1', phase.state === 'pending' ? 'text-text-subtle' : phase.state === 'running' ? 'font-medium text-text' : 'text-text-muted')}>
             <Tick state={phase.state} />
-            <span>{(job.kind === 'environment_move' ? transferCleanup(phase.name, transfer, t) : null) ?? phaseLabel?.(phase.name) ?? t(`change.phase.${phase.name}.short`, { defaultValue: phase.name })}</span>
+            <span>{phaseLabel?.(phase.name) ?? t(`change.phase.${phase.name}.short`, { defaultValue: phase.name })}</span>
             <span className="sr-only">{t(`change.progress.state.${phase.state}`)}</span>
           </li>
         ))}

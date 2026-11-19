@@ -5,56 +5,11 @@ import { describe, expect, it } from 'vitest';
 import { type Mode, NEW_ENVIRONMENT, NO_PICKS, type Picks, resolve, settingsToKeep } from '@/features/start/choices';
 import type { Arrangement } from '@/generated/api-types';
 
-import { agent, arrangement, environment, host, model, options, provider } from './start-fixtures';
+import { agent, arrangement, environment, model, options, provider } from './start-fixtures';
 
 const starter: Mode = { suggest: false };
 const dialog: Mode = { suggest: true };
 const picked = (more: Partial<Picks>): Picks => ({ ...NO_PICKS, ...more });
-
-describe('a feasible first suggestion', () => {
-  it('suggests the first usable existing environment when a fresh default has no usable host', () => {
-    for (const hosts of [[], [host('closed', 'Closed host', { usable: false })]]) {
-      const answer = options({ environment_default: 'fresh', hosts });
-      const resolved = resolve(answer, NO_PICKS, dialog);
-      expect(resolved.fresh).toBe(false); expect(resolved.environment?.environment.id).toBe('e1');
-    }
-  });
-  it('keeps feasible New and refuses an impossible explicit New without substituting another location', () => {
-    expect(resolve(options({ environment_default: 'fresh' }), NO_PICKS, dialog).fresh).toBe(true);
-    const explicit = resolve(options({ environment_default: 'fresh', hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(explicit.fresh).toBe(false); expect(explicit.environment).toBeNull();
-    expect(explicit.missing).toContainEqual({ kind: 'environment' });
-    expect(resolve(options({ environment_default: 'fresh' }), picked({ environment: NEW_ENVIRONMENT }), dialog).fresh).toBe(true);
-  });
-  it('gives the inline suggestion the same feasible existing fallback when New has no host', () => {
-    const answer = options({ environment_default: 'fresh', hosts: [] });
-    const resolved = resolve(answer, NO_PICKS, { suggest: true, respectDefaults: true });
-    expect(resolved.fresh).toBe(false); expect(resolved.environment?.environment.id).toBe('e1');
-  });
-});
-
-describe('reported program failures', () => {
-  const failed = () => ({ ...agent('a1', { reason: 'harness_error' }), program_report: { status: 'error' as const, detail: 'The executable was not found.' } });
-  it('keeps a failed default as an actionable refusal even while another program has not reported', () => {
-    const answer = options({ providers: [provider('p1', { agents: [failed(), agent('a2', { reason: 'harness_unreported' })] })] });
-    const resolved = resolve(answer, NO_PICKS, { suggest: true, respectDefaults: true });
-    expect(resolved.agent).toBeNull(); expect(resolved.waiting).toBe(false);
-    expect(resolved.missing[0]).toMatchObject({ kind: 'agent', unreported: false, unusable: { id: 'a1' } });
-  });
-  it('lets the person deliberately choose another usable program without replacing a failed default silently', () => {
-    const answer = options({ providers: [provider('p1', { agents: [failed(), agent('a2')] })] });
-    expect(resolve(answer, NO_PICKS, { suggest: true, respectDefaults: true }).agent).toBeNull();
-    const resolved = resolve(answer, picked({ agent: 'a2' }), { suggest: true, respectDefaults: true });
-    expect(resolved.agent?.id).toBe('a2'); expect(resolved.missing).toEqual([]);
-  });
-  it('waits for a genuinely absent report but does not turn a known error into waiting on an older reason code', () => {
-    const absent = options({ providers: [provider('p1', { agents: [agent('a1', { reason: 'harness_unreported' })] })] });
-    expect(resolve(absent, NO_PICKS, starter).waiting).toBe(true);
-    const reported = failed(); reported.reason = 'harness_unreported';
-    const resolved = resolve(options({ providers: [provider('p1', { agents: [reported] })] }), NO_PICKS, starter);
-    expect(resolved.waiting).toBe(false);
-  });
-});
 
 describe('failed environments are never a default or an implicit replacement', () => {
   const failed = () => { const row = environment('failed', { isDefault: true }); row.environment.status = 'failed'; return row; };
@@ -74,30 +29,6 @@ describe('failed environments are never a default or an implicit replacement', (
     const resolved = resolve(options({ environments: [failed(), environment('elsewhere')], can_create: { allowed: false, missing: [] } }), NO_PICKS, { suggest: true, respectDefaults: true }, picked({ environment: 'failed' }));
     expect(resolved.environment).toBeNull();
     expect(resolved.fresh).toBe(false);
-    expect(resolved.missing).toContainEqual({ kind: 'environment' });
-  });
-});
-
-describe('a new default still needs a usable host', () => {
-  it('falls back to an actually usable existing environment in the inline and full starters', () => {
-    const offered = options({ environment_default: 'fresh', hosts: [] });
-    for (const mode of [starter, dialog]) {
-      const resolved = resolve(offered, NO_PICKS, mode);
-      expect(resolved.fresh).toBe(false);
-      expect(resolved.environment?.environment.id).toBe('e1');
-    }
-  });
-
-  it('keeps an explicit new choice unavailable rather than silently using a different environment', () => {
-    const resolved = resolve(options({ hosts: [] }), picked({ environment: NEW_ENVIRONMENT }), dialog);
-    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
-    expect(resolved.missing).toContainEqual({ kind: 'environment' });
-  });
-
-  it('does not turn a failed or unusable existing environment into the host fallback', () => {
-    const failed = environment('failed', { isDefault: true }); failed.environment.status = 'failed';
-    const resolved = resolve(options({ hosts: [], environments: [failed, environment('closed', { usable: false })] }), NO_PICKS, dialog);
-    expect(resolved.fresh).toBe(false); expect(resolved.environment).toBeNull();
     expect(resolved.missing).toContainEqual({ kind: 'environment' });
   });
 });

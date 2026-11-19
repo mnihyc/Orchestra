@@ -171,10 +171,6 @@ pub struct EverythingTakes {
 /// One visible thing, or a deliberately minimal path step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EverythingRow {
-    /// Existing resource home, origin and per-machine native judgements.
-    /// Absent for non-resource/path-only rows; an empty judgement list grants no availability.
-    #[serde(default, flatten)]
-    pub grouping: Option<crate::resource_groups::ResourceGrouping>,
     /// Batched current giving and reported use, supplied with readable resource list rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<crate::resource_facts::ResourceFacts>,

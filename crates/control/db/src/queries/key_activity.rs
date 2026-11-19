@@ -77,24 +77,21 @@ pub struct Row {
     pub ip: Option<String>,
 }
 
-/// Appends once and trims this key atomically. Appends serialize independently of credential
-/// policy changes; a shared key-lifetime fence preserves the actual owner/foreign-key relation.
+/// Appends once and trims this key atomically. A short lock on the existing key makes the
+/// hundred-row bound exact across concurrent completed calls; no business transaction is held.
 pub async fn append(
     conn: &mut Conn,
     call: &NewCall<'_>,
     now: DateTime<Utc>,
 ) -> Result<bool, DbError> {
     let mut tx = conn.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!("api_token_activity:{}", call.token))
-        .execute(&mut *tx)
-        .await?;
-    let key: Option<Id> =
-        sqlx::query_scalar("SELECT id FROM api_tokens WHERE id=$1 AND user_id=$2 FOR KEY SHARE")
-            .bind(call.token)
-            .bind(call.account)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let key: Option<Id> = sqlx::query_scalar(
+        "SELECT id FROM api_tokens WHERE id=$1 AND user_id=$2 FOR NO KEY UPDATE",
+    )
+    .bind(call.token)
+    .bind(call.account)
+    .fetch_optional(&mut *tx)
+    .await?;
     if key.is_none() {
         tx.rollback().await?;
         return Ok(false);

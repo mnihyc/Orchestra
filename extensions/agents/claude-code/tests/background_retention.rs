@@ -9,11 +9,8 @@ mod common;
 use orch_agent_contract::adapter::AgentAdapter;
 use orch_agent_contract::background::BackgroundEndState;
 use orch_agent_contract::descriptor::ApprovalMode;
-use orch_agent_contract::events::{
-    ItemContent, ItemStatus, SessionEvent, ToolCallPayload, ToolPayload,
-};
+use orch_agent_contract::events::ToolPayload;
 use serde_json::json;
-use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -74,45 +71,10 @@ async fn two_inputs_preserve_the_actual_earlier_command_and_one_native_process()
     second.approval_mode = ApprovalMode::Bypass;
     rig.adapter.start_turn(second).await.unwrap();
     let events = rig.until_the_turn_ends().await;
-    let started: HashSet<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            SessionEvent::ItemStarted(started)
-                if matches!(&started.content, ItemContent::ToolCall(_)) =>
-            {
-                Some(started.native_ref.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    let (completed, payload) = events
-        .iter()
-        .find_map(|event| match event {
-            SessionEvent::ItemCompleted(done) if started.contains(done.native_ref.as_str()) => {
-                let payload: ToolCallPayload = serde_json::from_value(done.payload.clone())
-                    .expect("a completed native tool has its typed payload");
-                if matches!(&payload.tool, ToolPayload::Command { command, .. } if command == &check) {
-                    Some((done, payload))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .expect("the real next-turn shell starts and completes the exact process check");
-    assert_eq!(completed.status, ItemStatus::Completed);
-    let ToolPayload::Command {
-        command,
-        exit_code,
-        output,
-        ..
-    } = payload.tool
-    else {
-        panic!("the exact native process check is a command");
-    };
-    assert_eq!(command, check);
-    assert_eq!(exit_code, Some(0), "the native process check succeeds");
-    let actual = output.inline;
+    let actual=common::tool_calls(&events).into_iter().find_map(|call|match &call.tool {
+        ToolPayload::Command {command,exit_code:Some(0),output,..} if command.contains(&pid.display().to_string())=>Some(output.inline.clone()),
+        _=>None,
+    }).expect("the real next-turn shell reads the earlier process, independently of the model's words");
     assert_eq!(
         identity(actual.trim()),
         identity(old.trim()),

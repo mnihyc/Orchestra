@@ -2,15 +2,6 @@
 
 use crate::Json;
 use jsonschema::{PatternOptions, Retrieve, Uri, Validator};
-use std::sync::OnceLock;
-
-mod cache;
-pub use cache::{CacheLimits, ValidatorCache};
-
-fn default_cache() -> &'static ValidatorCache {
-    static CACHE: OnceLock<ValidatorCache> = OnceLock::new();
-    CACHE.get_or_init(ValidatorCache::default)
-}
 
 /// Keeps a malformed large form's refusal bounded while refusing the entire configuration.
 pub const MAX_FAULTS: usize = 64;
@@ -54,39 +45,38 @@ impl Retrieve for LocalOnly {
     }
 }
 
-fn compile(schema: &Json, pointer: Option<&str>) -> Result<Validator, Error> {
-    let options = jsonschema::options()
+fn compile(schema: &Json) -> Result<Validator, Error> {
+    jsonschema::options()
         .with_retriever(LocalOnly)
         // Linear matching gives a supplied pattern no unbounded backtracking work.
         .with_pattern_options(PatternOptions::regex())
-        .should_validate_formats(true);
-    let compiled = if let Some(pointer) = pointer {
-        let resource =
-            jsonschema::Resource::from_contents(schema.clone()).map_err(|_| Error::Schema {
-                path: pointer.to_owned(),
-            })?;
-        let reference = serde_json::json!({"$ref":format!("urn:orch:option-schema#{pointer}")});
-        options
-            .with_resource("urn:orch:option-schema", resource)
-            .build(&reference)
-    } else {
-        options.build(schema)
-    };
-    compiled.map_err(|error| Error::Schema {
-        path: error.instance_path.to_string(),
-    })
+        .should_validate_formats(true)
+        .build(schema)
+        .map_err(|error| Error::Schema {
+            path: error.instance_path.to_string(),
+        })
 }
 
 /// Checks a declaration before accepting an extension or saving a configuration that uses it.
 pub fn check(schema: &Json) -> Result<(), Error> {
-    default_cache().check(schema)
+    compile(schema).map(|_| ())
 }
 
 /// Test an actual candidate at a local rule while preserving references to the original document.
 /// This is projection of finite declared choices, not schema implication or a second validator.
 #[must_use]
 pub fn allows_at(schema: &Json, pointer: &str, value: &Json) -> bool {
-    default_cache().allows_at(schema, pointer, value)
+    let Ok(resource) = jsonschema::Resource::from_contents(schema.clone()) else {
+        return false;
+    };
+    let reference = serde_json::json!({"$ref":format!("urn:orch:option-schema#{pointer}")});
+    jsonschema::options()
+        .with_retriever(LocalOnly)
+        .with_pattern_options(PatternOptions::regex())
+        .should_validate_formats(true)
+        .with_resource("urn:orch:option-schema", resource)
+        .build(&reference)
+        .is_ok_and(|validator| validator.is_valid(value))
 }
 
 /// A missing required member belongs at the member's own JSON pointer.
@@ -103,10 +93,7 @@ fn instance_path(error: &jsonschema::ValidationError<'_>) -> String {
 
 /// Refuses the whole value on any nested rule failure. Nothing is applied or coerced.
 pub fn validate(schema: &Json, value: &Json) -> Result<(), Error> {
-    default_cache().validate(schema, value)
-}
-
-fn validate_compiled(validator: &Validator, value: &Json) -> Result<(), Error> {
+    let validator = compile(schema)?;
     let faults: Vec<_> = validator
         .iter_errors(value)
         .take(MAX_FAULTS)

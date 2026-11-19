@@ -163,12 +163,11 @@ impl From<WriteError> for SecretError {
             WriteError::SideThread => Self::SideThread,
             WriteError::Locked { by } => Self::Locked { by },
             WriteError::Invalid(Invalid::WrongScope { .. }) => Self::NotHere,
-            WriteError::OperationRefused
-            | WriteError::Invalid(_)
-            | WriteError::Lock(_)
-            | WriteError::Stale { .. } => Self::Unreadable {
-                what: "a list of names",
-            },
+            WriteError::Invalid(_) | WriteError::Lock(_) | WriteError::Stale { .. } => {
+                Self::Unreadable {
+                    what: "a list of names",
+                }
+            }
             WriteError::Unreadable { what } => Self::Unreadable { what },
         }
     }

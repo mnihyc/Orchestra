@@ -194,9 +194,7 @@ async fn every_shipped_template_matches_its_driver_schema_and_can_be_used() {
                 .body(&body)
                 .send()
                 .await
-                .ok()
-                .into_full()
-                .expect("this native creation control requires its full response");
+                .ok();
             assert_eq!(saved.spec, spec);
         }
     }

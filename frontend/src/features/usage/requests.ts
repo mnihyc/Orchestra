@@ -46,7 +46,7 @@ export function requestLog(state: RequestLog, action: LogAction): RequestLog {
 export function matchesRequest(row: UsageEvent, filters: UsageFilters): boolean {
   const same = (asked: string | undefined, value: string | null | undefined) => asked === undefined || (asked === 'none' ? value === null || value === undefined : asked === value);
   const outcome = row.running ? 'running' : row.timing?.outcome.state === 'told' ? row.timing.outcome.value : 'not_measured';
-  return same(filters.service,row.timing?.service_usage?.offering) && same(filters.purpose,row.purpose) && same(filters.user_id, row.user?.id) && same(filters.model, row.model) && same(filters.provider_id, row.provider.id)
+  return same(filters.user_id, row.user?.id) && same(filters.model, row.model) && same(filters.provider_id, row.provider.id)
     && same(filters.harness_kind, row.harness_kind) && same(filters.environment_kind, row.environment_kind)
     && same(filters.project_id, row.project.id) && same(filters.topic_id, row.topic.id) && same(filters.thread_id, row.thread?.id)
     && same(filters.effort, row.effort) && matchesTier(row, filters) && same(filters.program, row.access_program)

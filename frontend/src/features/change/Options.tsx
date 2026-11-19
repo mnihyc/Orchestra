@@ -9,12 +9,13 @@ import { RotateCcw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { type Choices, type OptionChoices, type PageChoice } from '@/features/change/choices';
+import { type Choices, type OptionChoices } from '@/features/change/choices';
 import type { AppliedChangeOptions, ForkPlan } from '@/generated/api-types';
 import { IconButton } from '@/ui/IconButton';
 import { Checkbox } from '@/ui/Checkbox';
 import { useFocusFirst } from '@/features/change/Sentence';
 import { Input } from '@/ui/Input';
+import { RadioGroup } from '@/ui/RadioGroup';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 import { ChoiceFieldHelp } from '@/ui/ChoiceField';
 
@@ -44,11 +45,9 @@ export interface OptionsProps {
   plan: ForkPlan | null;
   /** The topic whose access defaults a fork may follow. */
   topic: string;
-  /** The source's creation default; built-in forks begin Private. */
-  defaultPage?: PageChoice;
 }
 
-export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original' }: OptionsProps) {
+export function Options({ choices, onChange, applied, plan, topic }: OptionsProps) {
   const { t } = useTranslation();
   const start = applied ?? SHIPPED;
   const set = (patch: Partial<OptionChoices>) => onChange({ options: { ...choices.options, ...patch } });
@@ -118,21 +117,23 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
           changed={o.keepPrevious !== null}
           onReset={() => set({ keepPrevious: null })}
         >
-            <SegmentedControl
+            <RadioGroup
+              variant="list"
               label={t('change.options.oldSide')}
               value={(o.keepPrevious ?? start.keep_previous) ? 'keep' : 'remove'}
               onValueChange={(next) => set({ keepPrevious: next === 'keep' })}
-              segments={oldOptions}
+              options={oldOptions}
             />
         </Row>
       )}
       {!fork && othersStay && (
         <Row title={t('change.options.processes')} resetLabel={t('changeCompact.reset.processes')} changed={o.stopProcesses !== null} onReset={() => set({ stopProcesses: null })}>
-          <SegmentedControl
+          <RadioGroup
+            variant="list"
             label={t('change.options.processes')}
             value={(o.stopProcesses ?? start.stop_processes) ? 'end' : 'leave'}
             onValueChange={(next) => set({ stopProcesses: next === 'end' })}
-            segments={[
+            options={[
               { value: 'end', name: t('changeCompact.processes.end') },
               { value: 'leave', name: t('changeCompact.processes.leave') },
             ]}
@@ -144,14 +145,15 @@ export function Options({ choices, onChange, applied, plan, topic, defaultPage =
           title={t('fork.page.title')}
           help={<ChoiceFieldHelp label={t('fork.page.title')} options={accessOptions} />}
           resetLabel={t('changeCompact.reset.access')}
-          changed={choices.page !== defaultPage}
-          onReset={() => onChange({ page: defaultPage })}
+          changed={choices.page !== 'original'}
+          onReset={() => onChange({ page: 'original' })}
         >
-            <SegmentedControl
+            <RadioGroup
+              variant="list"
               label={t('fork.page.title')}
               value={choices.page}
               onValueChange={(page) => onChange({ page })}
-              segments={accessOptions}
+              options={accessOptions}
             />
         </Row>
       )}

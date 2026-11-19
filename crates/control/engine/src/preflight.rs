@@ -47,7 +47,7 @@
 //! is left out. Held inputs are looked at again each time and released when room
 //! is made, in their order.
 
-use crate::access::{Answer, ProviderUse, RunsIn};
+use crate::access::{Answer, ProviderUse};
 use crate::binding::{self, Facts};
 use crate::caps::{self, Ask, CapCheck, Verdict};
 use crate::engine::Engine;
@@ -183,13 +183,6 @@ enum Person {
     Setup,
 }
 
-type PersonVerdicts = Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)>;
-
-struct RequestedPerson<'a> {
-    id: Option<Id>,
-    authority: Option<&'a Json>,
-}
-
 /// Everything a turn is set up from, once the checks have passed.
 struct Plan {
     agent: AgentRow,
@@ -217,15 +210,6 @@ fn parse_arrangement(word: Option<&str>) -> Option<ArrangementType> {
 }
 
 impl Engine {
-    // Keep concrete child construction outside the preflight poll frame.
-    #[inline(never)]
-    fn preflight_phase<'a, F>(make: impl FnOnce() -> F) -> futures::future::BoxFuture<'a, F::Output>
-    where
-        F: std::future::Future + Send + 'a,
-    {
-        Box::pin(make())
-    }
-
     /// Runs pre-flight for a thread in a transaction of its own, and sees
     /// that what follows a started turn is taken up.
     pub async fn preflight(&self, thread: Id) -> Result<Outcome, EngineError> {
@@ -255,16 +239,12 @@ impl Engine {
         thread_id: Id,
     ) -> Result<Outcome, EngineError> {
         let outcome = Box::pin(self.preflight_inner(unit, thread_id)).await?;
-        // Preparation has not refused the parked native continuation. Its decision follows
-        // when the retained input material is ready, before the adapter releases output.
-        if !matches!(
-            outcome,
-            Outcome::Started(_) | Outcome::Busy | Outcome::Preparing { .. }
-        ) && let Some(thread) = threads::thread(unit.conn, thread_id).await?
-        {
-            for input in threads::pending_inputs(unit.conn, thread_id).await? {
-                if crate::background_wake::is_wake(&input) {
-                    self.refuse_background_wake(unit, &thread, &input).await?;
+        if !matches!(outcome, Outcome::Started(_) | Outcome::Busy) {
+            if let Some(thread) = threads::thread(unit.conn, thread_id).await? {
+                for input in threads::pending_inputs(unit.conn, thread_id).await? {
+                    if crate::background_wake::is_wake(&input) {
+                        self.refuse_background_wake(unit, &thread, &input).await?;
+                    }
                 }
             }
         }
@@ -276,35 +256,23 @@ impl Engine {
         unit: &mut Unit<'_>,
         thread_id: Id,
     ) -> Result<Outcome, EngineError> {
-        let Some(thread) =
-            Self::preflight_phase(|| threads::lock(&mut *unit.conn, thread_id)).await?
-        else {
+        let Some(thread) = threads::lock(&mut *unit.conn, thread_id).await? else {
             return Ok(Outcome::Gone);
         };
-        if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
-            .await?
-            .is_some()
-        {
-            return Ok(Outcome::Dormant);
-        }
         if thread.deleted_at.is_some() || thread.archived_at.is_some() {
             return Ok(Outcome::Dormant);
         }
-        if Self::preflight_phase(|| orch_db::queries::agent_history::removing(unit.conn, thread_id))
-            .await?
-        {
+        if orch_db::queries::agent_history::removing(unit.conn, thread_id).await? {
             let blocked = Blocked::new(
                 "error",
                 "Its agent history is being removed. The next session carries the conversation in.",
             );
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
         // An ended turn's retained accounting is part of admission, including direct input
         // requests which can arrive before its ordinary supervisor wake is processed.
-        if Self::preflight_phase(|| threads::turn_end_work_pending(&mut *unit.conn, thread_id))
-            .await?
-        {
+        if threads::turn_end_work_pending(&mut *unit.conn, thread_id).await? {
             unit.wake(thread_id);
             if thread.state == thread_state::BLOCKED
                 && thread.blocked_reason.as_deref() == Some("error")
@@ -321,29 +289,21 @@ impl Engine {
             if thread.state == thread_state::BLOCKED
                 && thread.blocked_reason.as_deref() == Some("error")
                 && thread.current_turn_id.is_none()
-                && Self::preflight_phase(|| {
-                    threads::count_pending_inputs(&mut *unit.conn, thread_id)
-                })
-                .await?
-                    > 0
+                && threads::count_pending_inputs(&mut *unit.conn, thread_id).await? > 0
             {
-                Self::preflight_phase(|| {
-                    self.settle(unit, &thread, StateChange::plain(thread_state::IDLE))
-                })
-                .await?;
+                self.settle(unit, &thread, StateChange::plain(thread_state::IDLE))
+                    .await?;
             }
             return Ok(Outcome::Busy);
         }
-        if Self::preflight_phase(|| crate::calls::maybe_return_in(unit, &thread)).await? {
+        if crate::calls::maybe_return_in(unit, &thread).await? {
             return Ok(Outcome::Busy);
         }
-        if let Some(recovery) = Self::preflight_phase(|| {
-            crate::calls::read(
-                unit.conn,
-                thread_id,
-                orch_provider_contract::calls::Purpose::Agent,
-            )
-        })
+        if let Some(recovery) = crate::calls::read(
+            unit.conn,
+            thread_id,
+            orch_provider_contract::calls::Purpose::Agent,
+        )
         .await?
             && matches!(
                 recovery.state.as_str(),
@@ -352,49 +312,39 @@ impl Engine {
         {
             return Ok(Outcome::Blocked(Blocked::new("error", "call_recovery")));
         }
-        if Self::preflight_phase(|| {
-            orch_db::queries::lifecycle::closing(&mut *unit.conn, thread_id)
-        })
-        .await?
-        {
+        if orch_db::queries::lifecycle::closing(&mut *unit.conn, thread_id).await? {
             let blocked = Blocked::new("error", "Its previous session is being closed.");
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
         if thread.environment_id.is_none() {
             let blocked = Blocked::new("unbound", "Choose an environment before starting work.");
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
         if !matches!(
             thread.state.as_str(),
             thread_state::IDLE | thread_state::BLOCKED
-        ) || Self::preflight_phase(|| threads::active_turn(&mut *unit.conn, thread_id))
+        ) || threads::active_turn(&mut *unit.conn, thread_id)
             .await?
             .is_some()
         {
             return Ok(Outcome::Busy);
         }
         // A forced Stop preserves earlier retained commands and waits for actual native idle.
-        if Self::preflight_phase(|| crate::background::native_busy(&mut *unit.conn, thread_id))
-            .await?
-        {
+        if crate::background::native_busy(&mut *unit.conn, thread_id).await? {
             let blocked = Blocked {
                 reason: "error",
                 detail: Some(crate::background::NATIVE_BUSY.to_owned()),
             };
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
 
-        if Self::preflight_phase(|| crate::background_wake::awaiting_native(unit.conn, thread_id))
-            .await?
-        {
+        if crate::background_wake::awaiting_native(unit.conn, thread_id).await? {
             let mut announced = false;
-            for input in
-                Self::preflight_phase(|| threads::pending_inputs(unit.conn, thread_id)).await?
-            {
-                if Self::preflight_phase(|| crate::background_wake::of_input(unit.conn, &input))
+            for input in threads::pending_inputs(unit.conn, thread_id).await? {
+                if crate::background_wake::of_input(unit.conn, &input)
                     .await?
                     .is_some_and(|wake| wake.native_wake.is_some())
                 {
@@ -408,11 +358,8 @@ impl Engine {
         }
         // The part that forks and switches: a thread that a switch holds, or that a fork is still making,
         // starts no turn and takes what is sent to it into its queue until the job lets go.
-        if let Some(blocked) =
-            Self::preflight_phase(|| crate::locks::blocked_while_held(&mut *unit.conn, thread_id))
-                .await?
-        {
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+        if let Some(blocked) = crate::locks::blocked_while_held(&mut *unit.conn, thread_id).await? {
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
         // A failed full-history preparation cannot turn a retained target's
@@ -431,104 +378,94 @@ impl Engine {
                 "error",
                 "Its confirmed history is not ready. Retry the retained preparation before running queued words.",
             );
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
         if thread.side_of.is_some()
             && let Some(segment) = thread.current_segment_id
-            && Self::preflight_phase(|| threads::segment(unit.conn, segment))
+            && threads::segment(unit.conn, segment)
                 .await?
                 .is_some_and(|segment| segment.native_session_ref.is_none())
         {
             let at = unit.now();
-            match Self::preflight_phase(|| {
-                crate::side_threads::history::authorize(self, unit.conn, &thread, at)
-            })
-            .await
-            {
+            match crate::side_threads::history::authorize(self, unit.conn, &thread, at).await {
                 Ok(_) => {}
                 Err(EngineError::Unreadable(detail)) => {
                     let blocked = Blocked::new("error", detail);
-                    Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                    self.block(unit, &thread, &blocked).await?;
                     return Ok(Outcome::Blocked(blocked));
                 }
                 Err(error) => return Err(error),
             }
         }
-        let settings = Self::preflight_phase(|| resolved::load(&mut *unit.conn, thread_id)).await?;
-        if let Some(blocked) =
-            Self::preflight_phase(|| crate::network::blocked_thread(&mut *unit.conn, thread_id))
-                .await?
-        {
-            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+        let settings = resolved::load(&mut *unit.conn, thread_id).await?;
+        if let Some(blocked) = crate::network::blocked_thread(&mut *unit.conn, thread_id).await? {
+            self.block(unit, &thread, &blocked).await?;
             return Ok(Outcome::Blocked(blocked));
         }
 
         // Everybody who waits is asked whether they may still be served: a person who may no longer drive the
         // thread is cancelled; an input without an author is held or released by what its owner may do; a writer
         // who may not use the thread's model is served as the place says, and never cancelled for it.
-        let without_model = Self::preflight_phase(|| {
-            setting::<String>(
-                &mut *unit.conn,
-                Place::Node(thread_id),
-                setting_keys::THREAD_INPUTS_WITHOUT_USE,
-            )
-        })
+        let without_model = Box::pin(setting::<String>(
+            &mut *unit.conn,
+            Place::Node(thread_id),
+            setting_keys::THREAD_INPUTS_WITHOUT_USE,
+        ))
         .await?
         .unwrap_or_else(|| WITHOUT_MODEL_HELD.to_owned());
-        let mut verdicts: PersonVerdicts = Vec::new();
-        for input in
-            Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id)).await?
-        {
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+        let mut verdicts: Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)> = Vec::new();
+        for input in threads::pending_inputs(&mut *unit.conn, thread_id).await? {
+            let actual_settings =
+                crate::background_wake::settings_for(unit.conn, &input, &settings).await?;
             let settings = &actual_settings;
             let background = crate::background_wake::is_wake(&input);
             if background && !settings.background_wake {
-                let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                Self::preflight_phase(|| {
-                    threads::hold_input(unit.conn, input.id, Some(crate::background_wake::OFF), seq)
-                })
-                .await?;
-                Self::preflight_phase(|| self.refuse_background_wake(unit, &thread, &input))
+                let seq = unit.stamp(thread_id).await?;
+                threads::hold_input(unit.conn, input.id, Some(crate::background_wake::OFF), seq)
                     .await?;
+                self.refuse_background_wake(unit, &thread, &input).await?;
                 continue;
             }
-            let person =
-                if input.author_id.is_none() && !crate::inputs::input_is_authorless(&input)? {
-                    Person::Lost
-                } else {
-                    Self::preflight_phase(|| {
-                        self.person_of(
-                            unit,
-                            &thread,
-                            &input,
-                            RequestedPerson {
-                                id: input.author_id,
-                                authority: input.submission_authority.as_ref(),
-                            },
-                            settings,
-                            &mut verdicts,
-                        )
-                    })
-                    .await?
-                };
+            let person = if input.author_id.is_none() && !input.is_authorless() {
+                Person::Lost
+            } else {
+                Box::pin(self.person_of(
+                    unit,
+                    &thread,
+                    &input,
+                    input.author_id,
+                    input.submission_authority.as_ref(),
+                    &settings,
+                    &mut verdicts,
+                ))
+                .await?
+            };
             match person {
                 Person::Dormant => return Ok(Outcome::Dormant),
                 Person::Fine => {
-                    if input.state_detail.as_deref() == Some("background_refresh")
-                        && !Self::preflight_phase(|| {
-                            crate::background_wake::running(unit.conn, Some(thread_id), None, None)
-                        })
-                        .await?
+                    if let Some((_, _)) =
+                        crate::background_wake::other_author(unit.conn, thread_id, input.answers())
+                            .await?
                     {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(unit.conn, input.id, None, seq)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(unit.conn, input.id, Some("background_author"), seq)
+                            .await?;
+                        self.refuse_background_wake(unit, &thread, &input).await?;
+                        continue;
+                    }
+                    if input.state_detail.as_deref() == Some("background_author")
+                        || input.state_detail.as_deref() == Some("background_refresh")
+                            && !crate::background_wake::running(
+                                unit.conn,
+                                Some(thread_id),
+                                None,
+                                None,
+                            )
+                            .await?
+                    {
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(unit.conn, input.id, None, seq).await?;
                     }
                     if background
                         && matches!(
@@ -536,142 +473,104 @@ impl Engine {
                             Some(crate::background_wake::OFF | AUTHOR_LOST_ACCESS)
                         )
                     {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(unit.conn, input.id, None, seq)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(unit.conn, input.id, None, seq).await?;
                     }
                     // The author may serve themself: they answer for it again, and what it waited for is over.
                     if input.run_as.is_some() {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::set_input_run_as(&mut *unit.conn, input.id, None, None, seq)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::set_input_run_as(&mut *unit.conn, input.id, None, None, seq)
+                            .await?;
                     }
                     if matches!(
                         input.state_detail.as_deref(),
                         Some(HELD_OWNER_LACKS_ACCESS | HELD_SECOND_STEP | HELD_MODEL_USE)
                     ) {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(&mut *unit.conn, input.id, None, seq)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(&mut *unit.conn, input.id, None, seq).await?;
                         if input.state_detail.as_deref() == Some(HELD_MODEL_USE) {
-                            Self::preflight_phase(|| {
-                                self.cancel_source_request(
-                                    unit,
-                                    orch_db::queries::notifications::inbox::RequestSource::Input(
-                                        input.id,
-                                    ),
-                                    None,
-                                )
-                            })
+                            self.cancel_source_request(
+                                unit,
+                                orch_db::queries::notifications::inbox::RequestSource::Input(
+                                    input.id,
+                                ),
+                                None,
+                            )
                             .await?;
                         }
                     }
                 }
                 Person::Setup => {
                     if input.state_detail.as_deref() != Some(HELD_SECOND_STEP) {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(
-                                &mut *unit.conn,
-                                input.id,
-                                Some(HELD_SECOND_STEP),
-                                seq,
-                            )
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(&mut *unit.conn, input.id, Some(HELD_SECOND_STEP), seq)
+                            .await?;
                     }
                 }
                 Person::Held => {
                     if input.state_detail.as_deref() != Some(HELD_OWNER_LACKS_ACCESS) {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(
-                                &mut *unit.conn,
-                                input.id,
-                                Some(HELD_OWNER_LACKS_ACCESS),
-                                seq,
-                            )
-                        })
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(
+                            &mut *unit.conn,
+                            input.id,
+                            Some(HELD_OWNER_LACKS_ACCESS),
+                            seq,
+                        )
                         .await?;
                     }
                 }
                 Person::NeedsModel => {
                     if background {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(unit.conn, input.id, Some(HELD_MODEL_USE), seq)
-                        })
-                        .await?;
-                        Self::preflight_phase(|| {
-                            self.refuse_background_wake(unit, &thread, &input)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(unit.conn, input.id, Some(HELD_MODEL_USE), seq).await?;
+                        self.refuse_background_wake(unit, &thread, &input).await?;
                         continue;
                     }
-                    Self::preflight_phase(|| {
-                        self.serve_without_model(
-                            unit,
-                            &thread,
-                            &input,
-                            &without_model,
-                            settings,
-                            &mut verdicts,
-                        )
-                    })
+                    Box::pin(self.serve_without_model(
+                        unit,
+                        &thread,
+                        &input,
+                        &without_model,
+                        &settings,
+                        &mut verdicts,
+                    ))
                     .await?;
                 }
                 Person::Lost => {
                     if background {
-                        let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                        Self::preflight_phase(|| {
-                            threads::hold_input(unit.conn, input.id, Some(AUTHOR_LOST_ACCESS), seq)
-                        })
-                        .await?;
-                        Self::preflight_phase(|| {
-                            self.refuse_background_wake(unit, &thread, &input)
-                        })
-                        .await?;
+                        let seq = unit.stamp(thread_id).await?;
+                        threads::hold_input(unit.conn, input.id, Some(AUTHOR_LOST_ACCESS), seq)
+                            .await?;
+                        self.refuse_background_wake(unit, &thread, &input).await?;
                         continue;
                     }
-                    let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                    let change = InputChange {
-                        state: input_state::CANCELLED,
-                        detail: Some(AUTHOR_LOST_ACCESS),
-                        ..InputChange::default()
-                    };
-                    Self::preflight_phase(|| {
-                        threads::change_input(
-                            &mut *unit.conn,
-                            input.id,
-                            &[input_state::PENDING],
-                            &change,
-                            seq,
-                        )
-                    })
+                    let seq = unit.stamp(thread_id).await?;
+                    threads::change_input(
+                        &mut *unit.conn,
+                        input.id,
+                        &[input_state::PENDING],
+                        &InputChange {
+                            state: input_state::CANCELLED,
+                            detail: Some(AUTHOR_LOST_ACCESS),
+                            ..InputChange::default()
+                        },
+                        seq,
+                    )
                     .await?;
                 }
             }
         }
 
-        let mut pending =
-            Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id)).await?;
+        let mut pending = threads::pending_inputs(&mut *unit.conn, thread_id).await?;
         // Inputs held for their author's own cap are looked at again: room made, or somebody who holds the
         // row letting the input past, releases them in their place.
         if pending
             .iter()
             .any(|input| input.state_detail.as_deref() == Some(HELD_CAP_REACHED))
-            && let Some(ask) =
-                Self::preflight_phase(|| self.ask_of_thread(unit, &thread, &settings)).await?
-            && Self::preflight_phase(|| self.release_held_inputs(unit, &ask, &pending)).await?
+            && let Some(ask) = self.ask_of_thread(unit, &thread, &settings).await?
+            && self.release_held_inputs(unit, &ask, &pending).await?
         {
-            pending = Self::preflight_phase(|| threads::pending_inputs(&mut *unit.conn, thread_id))
-                .await?;
+            pending = threads::pending_inputs(&mut *unit.conn, thread_id).await?;
         }
         let mut held_for: Option<String> = None;
         loop {
@@ -686,10 +585,9 @@ impl Engine {
                     // A cause that is the thread's own stays in view though nothing waits any more: the thread
                     // is idle once, when the cause is mended, and not because its queue emptied.
                     if let Some(blocked) =
-                        Self::preflight_phase(|| self.cause_of_the_thread(unit, &thread, &settings))
-                            .await?
+                        self.cause_of_the_thread(unit, &thread, &settings).await?
                     {
-                        Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                        self.block(unit, &thread, &blocked).await?;
                         return Ok(Outcome::Blocked(blocked));
                     }
                     // Only inputs whose files cannot reach the agent wait: the thread says so, without a turn,
@@ -704,7 +602,7 @@ impl Engine {
                                 "{count} message(s) wait for files that cannot reach the agent"
                             ),
                         );
-                        Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                        self.block(unit, &thread, &blocked).await?;
                         return Ok(Outcome::Blocked(blocked));
                     }
                     if pending.iter().any(|input| {
@@ -714,13 +612,11 @@ impl Engine {
                             .is_some_and(|detail| detail.starts_with("native_action."))
                     }) {
                         let blocked=Blocked::new("error","A selected command changed or is unavailable; refresh or remove that selection".to_owned());
-                        Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                        self.block(unit, &thread, &blocked).await?;
                         return Ok(Outcome::Blocked(blocked));
                     }
-                    Self::preflight_phase(|| {
-                        self.settle(unit, &thread, StateChange::plain(thread_state::IDLE))
-                    })
-                    .await?;
+                    self.settle(unit, &thread, StateChange::plain(thread_state::IDLE))
+                        .await?;
                     return Ok(Outcome::Idle);
                 }
                 let blocked = if waiting
@@ -744,23 +640,19 @@ impl Engine {
                             .unwrap_or_else(|| HELD_CAP_REACHED.to_owned()),
                     )
                 };
-                Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                self.block(unit, &thread, &blocked).await?;
                 return Ok(Outcome::Blocked(blocked));
             };
 
-            let actual_settings = Self::preflight_phase(|| {
-                crate::background_wake::settings_for(unit.conn, &input, &settings)
-            })
-            .await?;
+            let actual_settings =
+                crate::background_wake::settings_for(unit.conn, &input, &settings).await?;
             let settings = &actual_settings;
-            if Self::preflight_phase(|| {
-                crate::native_actions::hold_invalid(
-                    unit,
-                    thread_id,
-                    &input,
-                    self.inner.clock.as_ref(),
-                )
-            })
+            if crate::native_actions::hold_invalid(
+                unit,
+                thread_id,
+                &input,
+                self.inner.clock.as_ref(),
+            )
             .await?
             {
                 if let Some(row) = pending.iter_mut().find(|row| row.id == input.id) {
@@ -768,23 +660,18 @@ impl Engine {
                 }
                 continue;
             }
-            let mut plan = match Self::preflight_phase(|| {
-                self.check_binding(unit, &thread, Some(&input), settings)
-            })
-            .await?
+            let mut plan = match self
+                .check_binding(unit, &thread, Some(&input), &settings)
+                .await?
             {
                 Err(blocked) => {
-                    Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                    self.block(unit, &thread, &blocked).await?;
                     return Ok(Outcome::Blocked(blocked));
                 }
                 Ok(plan) => plan,
             };
-            if Self::preflight_phase(|| {
-                crate::background_wake::running(unit.conn, Some(thread_id), None, None)
-            })
-            .await?
-                && let Some(lease) =
-                    Self::preflight_phase(|| threads::open_lease_of(unit.conn, thread_id)).await?
+            if crate::background_wake::running(unit.conn, Some(thread_id), None, None).await?
+                && let Some(lease) = threads::open_lease_of(unit.conn, thread_id).await?
                 && (lease.provider_id != plan.provider.id
                     || leases::mode_of(plan.path).is_none_or(|mode| match mode {
                         orch_link_contract::commands::LeaseMode::Forwarded => {
@@ -799,43 +686,33 @@ impl Engine {
                         .iter()
                         .any(|model| !lease.allowed_models.contains(model)))
             {
-                let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                Self::preflight_phase(|| {
-                    threads::hold_input(unit.conn, input.id, Some("background_refresh"), seq)
-                })
-                .await?;
-                pending =
-                    Self::preflight_phase(|| threads::pending_inputs(unit.conn, thread_id)).await?;
+                let seq = unit.stamp(thread_id).await?;
+                threads::hold_input(unit.conn, input.id, Some("background_refresh"), seq).await?;
+                pending = threads::pending_inputs(unit.conn, thread_id).await?;
                 continue;
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
                 let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
-                Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                self.block(unit, &thread, &blocked).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
             // 12
-            let billing = Self::preflight_phase(|| {
-                crate::background_wake::overlap_owner(unit.conn, &thread, input.answers())
-            })
-            .await?;
             let ask = Ask {
                 thread: thread_id,
-                path: Self::preflight_phase(|| nodes_path(&mut *unit.conn, thread_id)).await?,
+                path: nodes_path(&mut *unit.conn, thread_id).await?,
                 provider: plan.provider.id,
                 model: plan.model.clone(),
                 tier: plan.tier.clone(),
                 harness_kind: Some(plan.agent.harness_kind.clone()),
-                person: billing.unwrap_or(input.answers()),
+                person: input.answers(),
                 metering: Some(plan.metering),
             };
-            let check = Self::preflight_phase(|| self.check_caps(unit, &input, &ask)).await?;
+            let check = self.check_caps(unit, &input, &ask).await?;
             match &check.verdict {
                 Verdict::Clear => {
                     // Files are written before anything opens for the turn, with the thread starting and no turn yet.
-                    match Self::preflight_phase(|| self.files_gate(unit, &thread, &mut input))
-                        .await?
-                    {
+                    match self.files_gate(unit, &thread, &mut input).await? {
                         crate::preparation::Gate::Pass => {}
                         crate::preparation::Gate::Preparing => {
                             return Ok(Outcome::Preparing {
@@ -844,76 +721,62 @@ impl Engine {
                             });
                         }
                     }
-                    plan.allowance = Self::preflight_phase(|| {
-                        self.allowance_of(&mut *unit.conn, &check.room, &ask)
-                    })
-                    .await?;
+                    plan.allowance = self
+                        .allowance_of(&mut *unit.conn, &check.room, &ask)
+                        .await?;
                     plan.bypass = check.bypass.clone();
                     plan.passed = check.passed.clone();
                     // The login is taken for the thread's environment in the transaction that starts the
                     // turn, in one compare-and-set; a thread that lost the race waits as the others do.
                     if plan.path == CredentialPath::Handover
                         && plan.provider.held_by_environment_id.is_none()
-                        && !Self::preflight_phase(|| {
-                            self.take_credential(
+                        && !self
+                            .take_credential(
                                 unit,
                                 &plan.provider,
                                 &plan.environment,
                                 thread_id,
                                 input.answers(),
                             )
-                        })
-                        .await?
+                            .await?
                     {
                         // Somebody took it between the look and the compare-and-set: if that was a thread
                         // of this very environment, the credential is where this turn needs it.
-                        let holder = Self::preflight_phase(|| {
-                            orch_db::queries::resources::provider_runtime::state(
-                                &mut *unit.conn,
-                                plan.provider.id,
-                            )
-                        })
+                        let holder = orch_db::queries::resources::provider_runtime::state(
+                            &mut *unit.conn,
+                            plan.provider.id,
+                        )
                         .await?
                         .and_then(|state| state.held_by_environment_id);
                         if holder != Some(plan.environment.id) {
                             let blocked = Blocked::new("provider_unavailable", "handed_over");
-                            Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                            self.block(unit, &thread, &blocked).await?;
                             return Ok(Outcome::Blocked(blocked));
                         }
                     }
                     return Ok(Outcome::Started(
-                        Self::preflight_phase(|| self.make_turn(unit, &thread, &input, plan))
-                            .await?,
+                        self.make_turn(unit, &thread, &input, plan).await?,
                     ));
                 }
                 Verdict::Blocked(detail) => {
                     if let Some(cap) = check.blocked_by {
                         self.note_waiting_for(thread_id, cap);
                     }
-                    Self::preflight_phase(|| {
-                        self.forget_stale_bypass(unit, &thread, &input, &check)
-                    })
-                    .await?;
+                    self.forget_stale_bypass(unit, &thread, &input, &check)
+                        .await?;
                     let blocked = Blocked::new("quota_exceeded", detail.clone());
-                    Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
+                    self.block(unit, &thread, &blocked).await?;
                     return Ok(Outcome::Blocked(blocked));
                 }
                 Verdict::Held(detail) => {
                     // The author's own allowance is used up: their input waits in its place, and the next goes ahead.
-                    Self::preflight_phase(|| {
-                        self.forget_stale_bypass(unit, &thread, &input, &check)
-                    })
-                    .await?;
-                    let seq = Self::preflight_phase(|| unit.stamp(thread_id)).await?;
-                    Self::preflight_phase(|| {
-                        threads::hold_input(&mut *unit.conn, input.id, Some(HELD_CAP_REACHED), seq)
-                    })
-                    .await?;
+                    self.forget_stale_bypass(unit, &thread, &input, &check)
+                        .await?;
+                    let seq = unit.stamp(thread_id).await?;
+                    threads::hold_input(&mut *unit.conn, input.id, Some(HELD_CAP_REACHED), seq)
+                        .await?;
                     held_for = Some(detail.clone());
-                    pending = Self::preflight_phase(|| {
-                        threads::pending_inputs(&mut *unit.conn, thread_id)
-                    })
-                    .await?;
+                    pending = threads::pending_inputs(&mut *unit.conn, thread_id).await?;
                 }
             }
         }
@@ -1030,17 +893,6 @@ impl Engine {
         authority: Option<&InputAuthority>,
         settings: &Resolved,
     ) -> Result<Person, EngineError> {
-        if let Some(parent) = authority.and_then(InputAuthority::capability_parent)
-            && !parent
-                .current_use(
-                    unit.conn,
-                    self.inner.clock.as_ref(),
-                    self.inner.access.as_ref(),
-                )
-                .await?
-        {
-            return Ok(Person::Lost);
-        }
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
             person,
@@ -1048,7 +900,6 @@ impl Engine {
             provider: thread.provider_id.unwrap_or_else(Id::nil),
             model: settings.model.as_deref(),
             effort: settings.effort.as_deref(),
-            runs_in: RunsIn::of(thread.environment_id),
         };
         let Some(author) = author else {
             // An input nobody sent runs on what the thread's first owner may
@@ -1155,67 +1006,17 @@ impl Engine {
         })
     }
 
-    /// Read the ordinary input's current Use answer for capability metadata. This has no
-    /// effect and creates no substitute caller; admission still rechecks the complete work.
-    pub(crate) async fn native_model_use_preview(
-        &self,
-        conn: &mut orch_db::Conn,
-        snapshot: &crate::sessions::StartSnapshot,
-    ) -> Result<bool, EngineError> {
-        let input = &snapshot.input;
-        if input.author_id.is_none() && !crate::inputs::input_is_authorless(input)? {
-            return Ok(false);
-        }
-        let mut settings = snapshot.settings.clone();
-        settings.model = Some(snapshot.turn.model.clone());
-        settings.effort.clone_from(&snapshot.turn.effort);
-        let mut unit = Unit::new(conn, self.inner.clock.now());
-        let authority = saved_authority(input.submission_authority.as_ref())?;
-        let person = Box::pin(self.check_person(
-            &mut unit,
-            &snapshot.thread,
-            input,
-            input.author_id,
-            authority.as_ref(),
-            &settings,
-        ))
-        .await?;
-        match person {
-            Person::Fine => Ok(true),
-            Person::NeedsModel => {
-                let Some(runner) = input.run_as else {
-                    return Ok(false);
-                };
-                let authority = saved_authority(input.run_as_authority.as_ref())?;
-                Ok(Box::pin(self.check_person(
-                    &mut unit,
-                    &snapshot.thread,
-                    input,
-                    Some(runner),
-                    authority.as_ref(),
-                    &settings,
-                ))
-                .await?
-                    == Person::Fine)
-            }
-            _ => Ok(false),
-        }
-    }
-
     /// What a person is to the thread now, asked once per pre-flight.
     async fn person_of(
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         input: &InputRow,
-        person: RequestedPerson<'_>,
+        person: Option<Id>,
+        authority: Option<&Json>,
         settings: &Resolved,
-        verdicts: &mut PersonVerdicts,
+        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)>,
     ) -> Result<Person, EngineError> {
-        let RequestedPerson {
-            id: person,
-            authority,
-        } = person;
         let authority = saved_authority(authority)?;
         if let Some((_, _, _, _, known)) =
             verdicts.iter().find(|(asked, saved, row, revision, _)| {
@@ -1244,7 +1045,7 @@ impl Engine {
         input: &InputRow,
         policy: &str,
         settings: &Resolved,
-        verdicts: &mut PersonVerdicts,
+        verdicts: &mut Vec<(Option<Id>, Option<InputAuthority>, Id, i64, Person)>,
     ) -> Result<(), EngineError> {
         let thread_id = thread.node_id;
         let owner_authority =
@@ -1261,10 +1062,8 @@ impl Engine {
                 unit,
                 thread,
                 input,
-                RequestedPerson {
-                    id: Some(runner),
-                    authority,
-                },
+                Some(runner),
+                authority,
                 settings,
                 verdicts,
             ))
@@ -1471,18 +1270,6 @@ impl Engine {
         // it cannot decide whether the vendor admits this new request.
         // 8, 9, 10, 11 need the environment and the descriptor.
         let descriptor = harnesses::descriptor_of(&agent)?;
-        if descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.prompt_cache_ttl)
-            && settings
-                .prompt_cache_ttl
-                .is_some_and(|ttl| !parameters.cache_lifetime_enabled(ttl.as_str()))
-        {
-            return Ok(Err(Blocked::new(
-                "model_not_allowed",
-                "the provider has not enabled the selected prompt-cache lifetime on this model",
-            )));
-        }
         if let Some(descriptor) = &descriptor {
             if !settings.allowed_modes.contains(&settings.approval_mode) {
                 return Ok(Err(Blocked::new(
@@ -1567,6 +1354,25 @@ impl Engine {
         {
             return Ok(Err(Blocked::new("binding_invalid", why)));
         }
+        if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
+            let models = self
+                .review_models(
+                    conn,
+                    thread,
+                    provider.id,
+                    input.and_then(InputRow::answers),
+                    settings,
+                )
+                .await?;
+            let declared = crate::harnesses::descriptor_of(&agent)?;
+            if let Err(why) = crate::approval_review::reviewer_allowed(
+                settings.approval_mode,
+                declared.as_ref(),
+                &models,
+            ) {
+                return Ok(Err(Blocked::new("model_not_allowed", why)));
+            }
+        }
         if let Some(blocked) =
             environment_unavailable(&environment, machine_of_environment.as_ref())
         {
@@ -1586,17 +1392,11 @@ impl Engine {
         let facts = Facts {
             descriptor: &descriptor,
             provider: &provider,
-            environment: Some(&environment),
+            environment: &environment,
             offers,
             settings,
             entry: self
-                .entry_arrangements(
-                    unit,
-                    thread,
-                    input.and_then(InputRow::answers),
-                    &provider,
-                    settings,
-                )
+                .entry_arrangements(unit, thread, input.and_then(InputRow::answers), &provider)
                 .await?,
             colocated,
             runtime,
@@ -1653,27 +1453,6 @@ impl Engine {
             }
         };
         let path = binding::selected_path(&arrangement, &provider, &agent);
-        if settings.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Auto {
-            let models = self
-                .review_models(
-                    conn,
-                    thread,
-                    provider.id,
-                    input.and_then(InputRow::answers),
-                    settings,
-                )
-                .await?;
-            let declared = crate::harnesses::descriptor_of(&agent)?;
-            if let Err(why) = crate::approval_review::reviewer_allowed_for(
-                settings.approval_mode,
-                declared.as_ref(),
-                &models,
-                path,
-                &model,
-            ) {
-                return Ok(Err(Blocked::new("model_not_allowed", why)));
-            }
-        }
         // A credential that leaves the provider (the part that keeps providers): the arrangement names
         // the form that leaves, and the login is handed over to one environment at a time, and not
         // while turns of other environments run on the provider.
@@ -1736,8 +1515,6 @@ impl Engine {
             }
         }
         // 12 is asked of the caps by `preflight_in`, once the binding holds.
-        let parameters =
-            binding::model_parameters_for(&model_row, arrangement.protocol.as_deref())?;
         let params = match sessions_params(
             &descriptor,
             &arrangement,
@@ -1747,11 +1524,9 @@ impl Engine {
             &parameters,
             settings,
             path,
-            self.inner.config.interrupt_force,
         ) {
             Ok(params) => params,
-            // Options the agent's setup gives that the model's admitted constraints refuse: the setup needs attention.
-            Err(reason) => return Ok(Err(Blocked::new("binding_invalid", reason))),
+            Err(reason) => return Ok(Err(Blocked::new("provider_options", reason))),
         };
         let metering = metering(path, descriptor.capabilities.usage_tokens);
         let tier = crate::providers::service_tier(&descriptor.parameters, &params);
@@ -1772,16 +1547,14 @@ impl Engine {
         }))
     }
 
-    /// The arrangement types the entries that let the input's author run this turn allow, which
-    /// only narrow what the provider's owner allows: the entries that allow the thread's model and
-    /// effort in the thread's environment together, since an entry is one grant.
+    /// The arrangement types the entry the input's author uses the provider
+    /// through names, which only narrow what the provider's owner allows.
     async fn entry_arrangements(
         &self,
         unit: &mut Unit<'_>,
         thread: &ThreadRow,
         author: Option<Id>,
         provider: &ProviderRow,
-        settings: &Resolved,
     ) -> Result<Option<Vec<ArrangementType>>, EngineError> {
         let person = author.unwrap_or(thread.owner_id);
         let answer = self
@@ -1793,17 +1566,14 @@ impl Engine {
                     person,
                     node: thread.node_id,
                     provider: provider.id,
-                    model: settings.model.as_deref(),
-                    effort: settings.effort.as_deref(),
-                    runs_in: RunsIn::of(thread.environment_id),
+                    model: None,
+                    effort: None,
                 },
             )
             .await?;
         Ok(match answer {
             Answer::Allowed { arrangements } => arrangements,
-            // Nothing says what the entries allow: the types in which the credential stays, and a
-            // binding that was made in another type is blocked as one that no entry names.
-            Answer::Refused(_) => Some(crate::access::staying_types()),
+            Answer::Refused(_) => None,
         })
     }
 
@@ -1887,7 +1657,6 @@ impl Engine {
             seq,
         )
         .await?;
-        crate::background_wake::record_overlap(unit, thread, input.answers(), turn.id).await?;
         crate::background_wake::bind_turn(unit, input, turn.id).await?;
         self.bind_before(unit, thread, input, &plan.environment, &turn)
             .await?;
@@ -2087,7 +1856,7 @@ fn key_place_unavailable(
 }
 
 /// Check 11 on its own: can the machine where the harness runs run it now?
-pub(crate) fn machine_unavailable(machine: Option<&resources::MachinePlace>) -> Option<Blocked> {
+fn machine_unavailable(machine: Option<&resources::MachinePlace>) -> Option<Blocked> {
     match machine {
         None => Some(Blocked::new(
             "agent_offline",
@@ -2163,25 +1932,6 @@ impl Engine {
     }
 }
 
-/// The options of the profile that hold back the end of a turn, as the program declares them; none where it declares
-/// none, or its declaration is of a version this engine does not read or cannot be read: such a declaration declares
-/// nothing, and the engine says so in its log, once.
-pub(crate) fn declared_turn_end_delays(
-    descriptor: &AgentDescriptor,
-) -> Option<orch_agent_contract::turn_end_delays::TurnEndDelays> {
-    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let declared = descriptor
-        .extensions
-        .get(orch_agent_contract::turn_end_delays::EXTENSION)?;
-    let read = orch_agent_contract::turn_end_delays::TurnEndDelays::read(declared);
-    if read.is_none() && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::warn!(
-            "a program's declaration of the options that hold back the end of a turn cannot be read or is of another version: it is taken for none"
-        );
-    }
-    read
-}
-
 /// The parameters of the adapter that a turn is sent with.
 #[allow(
     clippy::too_many_arguments,
@@ -2191,24 +1941,15 @@ pub(crate) fn sessions_params(
     descriptor: &AgentDescriptor,
     arrangement: &Arrangement,
     provider: &ProviderRow,
-    agent: &AgentRow,
+    _agent: &AgentRow,
     environment: &EnvironmentRow,
     parameters: &ModelParameters,
     settings: &Resolved,
     path: CredentialPath,
-    interrupt_force: std::time::Duration,
-) -> Result<Json, String> {
+) -> Result<Json, &'static str> {
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
-    // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
-    // given: the program declares which they are, and the engine knows the time.
-    if let Some(delays) = declared_turn_end_delays(descriptor) {
-        delays.fit(
-            &mut agent.profile.get("config").cloned().unwrap_or(Json::Null),
-            interrupt_force,
-        )?;
-    }
     let context = Eligibility {
         credential_path: path,
         provider_kind: binding::provider_kind(provider),
@@ -2232,30 +1973,11 @@ pub(crate) fn sessions_params(
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
-    let profile_values = if let Some(declared) = descriptor
-        .extensions
-        .get(orch_agent_contract::profile_parameters::EXTENSION)
-    {
-        let bindings: orch_agent_contract::profile_parameters::ProfileParameters =
-            serde_json::from_value(declared.clone())
-                .map_err(|_| "the program's native profile parameter mapping is unreadable")?;
-        bindings.validate(
-            agent.profile.get("config").unwrap_or(&Json::Null),
-            parameters,
-            &settings.features,
-        )?
-    } else {
-        std::collections::BTreeMap::new()
-    };
     if let Some(schema) = parameters.option_schema("native") {
         let mut checked = params.clone();
         let object = checked
             .as_object_mut()
             .ok_or("native parameters must be an object")?;
-        for (key, value) in &profile_values {
-            // The managed turn choice wins; a valid startup default can supply an omitted field.
-            object.entry(key.clone()).or_insert_with(|| value.clone());
-        }
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
@@ -2272,23 +1994,12 @@ pub(crate) fn sessions_params(
                     .is_some_and(|rule| rule.get("const").is_some())
                     && !object.contains_key(key)
                 {
-                    return Err(
-                        "a provider-fixed native option is unavailable on this binding".to_owned(),
-                    );
+                    return Err("a provider-fixed native option is unavailable on this binding");
                 }
             }
         }
         orch_types::schema::validate(schema, &checked)
             .map_err(|_| "native parameters exceed the provider's allowed values")?;
-        if !profile_values.is_empty() {
-            let object = checked
-                .as_object_mut()
-                .ok_or("native parameters must be an object")?;
-            object.extend(profile_values);
-            orch_types::schema::validate(schema, &checked).map_err(
-                |_| "the agent profile's native parameters exceed the provider's allowed values",
-            )?;
-        }
     }
     Ok(params)
 }
@@ -2309,7 +2020,6 @@ mod tests {
             workspace_root: "/workspace".into(),
             config: Json::Null,
             machine_id: Some(new_id()),
-            template_id: None,
             generation: 1,
             status: status.into(),
             status_detail: None,

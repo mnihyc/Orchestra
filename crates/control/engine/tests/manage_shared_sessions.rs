@@ -241,14 +241,6 @@ async fn chat_moderation_names_its_row_confirms_and_never_borrows_the_givers_ide
             .1
             .contains("chat.manage")
     );
-    // An expired row still occupies the active contribution slot. Retire it before
-    // installing the fresh grant this confirmation premise calls for.
-    sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
-        .bind(grant)
-        .bind(world.clock.now())
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
     share(&world, "node", target, "live", "chat.manage", "any", agent).await;
     assert_eq!(confirm(&world, agent, body).await["done"], true);
     let tombstone: (Json, Option<Id>) =

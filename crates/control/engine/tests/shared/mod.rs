@@ -15,7 +15,6 @@ use orch_db::queries::hierarchy::testing::insert_node;
 use orch_link_contract::commands::{OrchTool, OrchToolResult};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
-use std::time::Duration;
 
 /// A world whose agent takes an MCP server, so that the tools are offered.
 pub async fn a_world_whose_agent_takes_tools() -> World {
@@ -43,25 +42,6 @@ pub async fn call(world: &World, thread: Id, tool: OrchTool, arguments: Json) ->
     call_as(world, thread, tool, arguments, &new_id().to_string()).await
 }
 
-/// Keep the ordinary native ingress; only completion of known scale work has its own budget.
-pub async fn call_with_result_budget(
-    world: &World,
-    thread: Id,
-    tool: OrchTool,
-    arguments: Json,
-    budget: Duration,
-) -> OrchToolResult {
-    call_as_with_result_budget(
-        world,
-        thread,
-        tool,
-        arguments,
-        &new_id().to_string(),
-        budget,
-    )
-    .await
-}
-
 /// Prepare the asking agent before a test fixes ordering metadata or native handlers.
 /// This authors one baseline input if needed, and leaves its actual turn active.
 pub async fn prepare_call_turn(world: &World, thread: Id) -> Id {
@@ -76,28 +56,9 @@ pub async fn call_as(
     arguments: Json,
     call_ref: &str,
 ) -> OrchToolResult {
-    call_as_with_result_budget(
-        world,
-        thread,
-        tool,
-        arguments,
-        call_ref,
-        crate::common::PATIENCE,
-    )
-    .await
-}
-
-async fn call_as_with_result_budget(
-    world: &World,
-    thread: Id,
-    tool: OrchTool,
-    arguments: Json,
-    call_ref: &str,
-    budget: Duration,
-) -> OrchToolResult {
     let turn = prepare_call_turn(world, thread).await;
     native_tools::send(world, thread, turn, call_ref, tool, arguments).await;
-    native_tools::answer_with_budget(world, thread, call_ref, budget).await
+    answer_to(world, thread, call_ref).await
 }
 
 /// Waits for the answer to a call.
@@ -563,18 +524,6 @@ impl orch_engine::sharing::Parcels for MemoryParcels {
         copy: &orch_db::queries::shares::CopyRow,
     ) -> Result<(), orch_engine::sharing::ParcelFault> {
         self.withdrawn.lock().unwrap().push(copy.id);
-        Ok(())
-    }
-
-    async fn withdraw_before(
-        &self,
-        _conn: &mut orch_db::Conn,
-        copy: &orch_db::queries::shares::CopyRow,
-        before: orch_engine::sharing::BeforeParcel<'_>,
-    ) -> Result<(), orch_engine::sharing::ParcelFailure> {
-        let mut withdrawn = self.withdrawn.lock().unwrap();
-        before().map_err(orch_authz::pages::EffectFailure::BeforeEffect)?;
-        withdrawn.push(copy.id);
         Ok(())
     }
 

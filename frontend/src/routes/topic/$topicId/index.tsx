@@ -8,12 +8,13 @@ import { TOPIC_TABS, useTopicView } from '@/features/navigation/topicView';
 import { createFileRoute } from '@tanstack/react-router';
 
 import { traceSearch, type TraceSearch } from '@/features/trace/params';
+import { isTopicSection, type TopicSection } from '@/features/settings/sections';
 import { Topic, type TopicTab } from '@/features/topic/Topic';
 
 interface TopicSearch extends TraceSearch {
   tab?: TopicTab;
   /** The section of the Settings tab, when it is not the first. */
-  section?: string;
+  section?: TopicSection;
   /** The setting the finder led here for. */
   setting?: string;
 }
@@ -27,7 +28,7 @@ export const Route = createFileRoute('/topic/$topicId/')({
     return {
       tab,
       ...traceSearch(search),
-      ...(typeof search.section === 'string' && search.section !== '' && search.section !== 'general' ? { section: search.section } : {}),
+      ...(isTopicSection(search.section) && search.section !== 'general' ? { section: search.section } : {}),
       ...(typeof search.setting === 'string' ? { setting: search.setting } : {}),
     };
   },
@@ -39,8 +40,8 @@ function TopicRoute() {
   const { tab, section, setting } = usePageSearch(Route);
   const navigate = usePageNavigate(Route);
   const [picked, choose] = useTopicView(tab);
-  // A setting locator opens Defaults when no section is addressed.
-  const shown = section ?? (setting === undefined ? 'general' : 'defaults');
+  // A setting is at home among the policies.
+  const shown: TopicSection = section ?? (setting === undefined ? 'general' : 'policies');
   return (
     <Topic
       topicId={topicId}

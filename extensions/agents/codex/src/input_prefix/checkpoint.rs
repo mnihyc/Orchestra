@@ -128,10 +128,7 @@ pub(super) fn segment(
             "A retained native range belongs to another session.",
         ));
     }
-    if !header["payload"]["cli_version"]
-        .as_str()
-        .is_some_and(|version| version == "0.165.0" || crate::descriptor::is_pinned_build(version))
-    {
+    if header["payload"]["cli_version"] != "0.165.0" {
         return Err(unsupported(
             "The retained history was created by a different Codex version.",
         ));

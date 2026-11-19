@@ -1,5 +1,4 @@
 /** Enrollment is explicit, scoped to the consented choices, and honest about the installation. */
-import type * as GatewayApi from '@/api/gateways';
 import { act,screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -14,7 +13,7 @@ import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 
 const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',configure:undefined as string|undefined}));
-vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
+vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof import('@/api/gateways')>(),
   gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [{ id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test', trust: 'pinned' as const }] }] }) },
 }));
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
@@ -56,7 +55,6 @@ for(const locale of ['en','zh-CN'] as const) it(`names roles once and mints only
     }
     expect(screen.getByText(locale==='en'?'Work in folders on Linux':'在 Linux 的文件夹中工作')).toBeVisible();
     await waitFor(()=>expect(screen.getByRole('button',{name:i18n.t('machineInstallation.showCommand')})).toBeEnabled());
-    expect(screen.getByRole('button',{name:i18n.t('machineInstallation.showCommand')}).querySelector('[data-action-icon="show"].lucide-eye')).toBeInTheDocument();
     expect(createMachineToken).not.toHaveBeenCalled();expect(createHostToken).not.toHaveBeenCalled();
     await user.click(screen.getByRole('checkbox',{name:i18n.t('machines.add.roleChoices.provider.name')}));
     expect(createMachineToken).not.toHaveBeenCalled();
@@ -199,7 +197,7 @@ it('changes the gateway flag of the displayed installer without minting another 
   await showCommand();
   expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway automatic")).toBeVisible();
   await userEvent.click(screen.getByRole('combobox', { name: i18n.t('regionalGateways.gateway') }));
-  await userEvent.click(screen.getByRole('option', { name: 'Asia tools' }));
+  await userEvent.click(screen.getByRole('option', { name: 'Asia tools', exact: true }));
   expect(await screen.findByText("install.sh --roles 'environment,agent' --delegate '' --gateway asia")).toBeVisible();
   expect(createMachineToken).toHaveBeenCalledTimes(1);
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });

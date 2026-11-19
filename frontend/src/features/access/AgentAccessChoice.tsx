@@ -79,13 +79,11 @@ export function AgentAccessControl({ value, onChange, disabled = false, availabl
               ...(level === null ? [{ value: 'custom' as const, name: choiceOption(t, 'generalAccess.custom').name, disabled: true }] : [])]} />
           <Button size="sm" variant="ghost" disabled={disabled} aria-pressed={byArea} onClick={() => setByArea((before) => !before)}>{t('access.agents.dialog.byArea')}</Button>
         </div>
-        {byArea && <div role="group" aria-label={t('access.agents.dialog.byAreaLabel')} className="min-w-0">
-          <ul className="flex flex-wrap gap-x-4 gap-y-2">
-          {areas.map((area) => <li key={area} className="min-w-[9rem] flex-[1_1_9rem]"><Select<string> size="sm" label={t(AREA_WORDS[area])} value={String(stepOf(area, draft.parts))}
-            fieldClassName="min-w-0" disabled={disabled}
+        {byArea && <div role="group" aria-label={t('access.agents.dialog.byAreaLabel')} className="flex flex-wrap gap-x-4 gap-y-2">
+          {areas.map((area) => <Select<string> key={area} size="sm" label={t(AREA_WORDS[area])} value={String(stepOf(area, draft.parts))}
+            fieldClassName="min-w-[9rem] flex-[1_1_9rem]" disabled={disabled}
             onValueChange={(step) => setDraft({ ...draft, parts: withStep(draft.parts, area, Number(step)) })}
-            options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: step > 0 && !mayChoose(withStep({}, area, step)) }))} /></li>)}
-          </ul>
+            options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: step > 0 && !mayChoose(withStep({}, area, step)) }))} />)}
         </div>}
         {byArea && areas.includes('timeline') && <AgentAdvancedRows parts={draft.parts} available={available === undefined ? { timeline: 'manage' } : available(draft.where) ?? {}} disabled={disabled}
           onChange={(parts) => setDraft({ ...draft, parts })} />}

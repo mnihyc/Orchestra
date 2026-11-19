@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::access::Role;
 use crate::access::{Holder, HolderInput};
 use crate::auth::{ApiTokenCreateBody, ApiTokenInfo, TokenCreateResponse};
-use crate::common::{Page, Revision};
+use crate::common::Page;
 use crate::nodes::{NodeRef, Tag};
 use crate::routes::Access::{Permission, Rule};
 use crate::users::UserRef;
@@ -29,8 +29,6 @@ use crate::users::UserRef;
 pub struct Group {
     /// The group's identifier.
     pub id: Id,
-    /// Its current revision, including changes to its direct holders.
-    pub revision: Revision,
     /// The org that keeps it.
     pub org_id: Id,
     /// The visible path of the org that keeps it.
@@ -42,39 +40,6 @@ pub struct Group {
     pub description: String,
     /// How many people are in it.
     pub member_count: i64,
-}
-
-/// Adds one direct holder, optionally guarding the group snapshot that was edited.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GroupHolderAddBody {
-    /// The same flat holder fields accepted by earlier clients.
-    #[serde(flatten)]
-    pub holder: HolderInput,
-    /// Refuses an outdated group snapshot; omitted preserves the existing behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<Revision>,
-}
-
-impl<'de> Deserialize<'de> for GroupHolderAddBody {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut value = serde_json::Value::deserialize(deserializer)?;
-        let fields = value.as_object_mut().ok_or_else(|| {
-            <D::Error as serde::de::Error>::custom("a holder change is an object")
-        })?;
-        let expected_revision = fields
-            .remove("expected_revision")
-            .map(serde_json::from_value::<Option<Revision>>)
-            .transpose()
-            .map_err(<D::Error as serde::de::Error>::custom)?
-            .flatten();
-        let holder =
-            serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
-        Ok(Self {
-            holder,
-            expected_revision,
-        })
-    }
 }
 
 /// A member of a tree of orgs.
@@ -92,12 +57,6 @@ pub struct Member {
     pub is_owner: bool,
     /// Since when they have been a member.
     pub since: Option<Time>,
-    /// SHA-256 of the joining terms they accepted; shown only to member managers.
-    #[serde(default)]
-    pub terms_hash: Option<String>,
-    /// When they accepted those terms; `null` if no terms were required or not disclosed.
-    #[serde(default)]
-    pub terms_accepted_at: Option<Time>,
     /// How many roles they hold by name in the rest of the tree, apart from the one at their
     /// domain.
     pub also: i64,
@@ -204,26 +163,6 @@ pub struct OrgGroupCreateBody {
     pub description: Option<String>,
 }
 
-/// An accepted Group creation without stored Group content or its keeping-org name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct GroupCreateReceipt {
-    /// Restricted response marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual newly stored Group.
-    pub group_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// The ordinary created Group or its truthful restricted acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum GroupCreateResponse {
-        /// Native existing content admitted by this operation's Read.
-        Full(Group),
-        /// The creation succeeded without stored content disclosure.
-        Receipt(GroupCreateReceipt),
-    }
-}
-
 /// Changes a group.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -266,26 +205,6 @@ pub struct OrgServiceAccountCreateBody {
     pub display_name: String,
 }
 
-/// An accepted service Account creation without stored account metadata or token counts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ServiceAccountCreateReceipt {
-    /// Restricted response marker.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual newly stored service Account.
-    pub service_account_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// The ordinary created service Account or its truthful restricted acknowledgement.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum ServiceAccountCreateResponse {
-        /// Native account content admitted by this operation's Read.
-        Full(ServiceAccount),
-        /// The creation succeeded without stored content disclosure.
-        Receipt(ServiceAccountCreateReceipt),
-    }
-}
-
 /// Makes a tag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -308,20 +227,6 @@ pub struct TagUpdateBody {
     /// A new colour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<u32>,
-}
-
-/// Accepted tag identity with no stored tag or defining-node metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TagCreateReceipt {
-    /// Restricted acknowledgement.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual accepted tag.
-    pub tag_id: Id,
-}
-crate::common::full_or_receipt! {
-    /// The ordinary tag or its content-free creation identity.
-    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
-    pub enum TagCreateResponse {Full(Tag),Receipt(TagCreateReceipt),}
 }
 
 /// An accepted tag change without stored tag content.
@@ -572,8 +477,11 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("listed_group_threads")),
         ]);
     /// Makes a group in an org.
-    OrgGroupCreate: POST "/orgs/{id}/groups", Permission("members.manage"), none, json OrgGroupCreateBody, json GroupCreateResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::directory_sources::GROUP_CREATE_FACETS));
+    OrgGroupCreate: POST "/orgs/{id}/groups", Permission("members.manage"), none, json OrgGroupCreateBody, json Group, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Group)], Target::PermissionObject),
+            Facet::response_content(&[Identity(I::Group)], Target::Resolved("created_resource")),
+        ]);
     /// Renames a group or changes what it is for.
     GroupUpdate: PATCH "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, json GroupUpdateBody, json GroupUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -601,7 +509,7 @@ crate::endpoints! {
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("group_names_threads")),
         ]);
     /// Adds a holder; nested group cycles and paths deeper than five groups are refused.
-    GroupHolderAdd: PUT "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json GroupHolderAddBody, none, 204,
+    GroupHolderAdd: PUT "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json HolderInput, none, 204,
         operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Removes only the named direct member, preserving every other path.
     GroupHolderRemove: DELETE "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json HolderInput, none, 204,
@@ -620,8 +528,14 @@ crate::endpoints! {
             Target::ResolvedCollection("org_service_accounts"),
         );
     /// Makes a service identity in an org.
-    OrgServiceAccountCreate: POST "/orgs/{id}/service-accounts", Permission("members.manage"), none, json OrgServiceAccountCreateBody, json ServiceAccountCreateResponse, 200,
-        operation Op::receipt(&Op::facets(&crate::directory_sources::SERVICE_CREATE_FACETS));
+    OrgServiceAccountCreate: POST "/orgs/{id}/service-accounts", Permission("members.manage"), none, json OrgServiceAccountCreateBody, json ServiceAccount, 200,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Account)], Target::PermissionObject),
+            Facet::response_content(
+                &[Identity(I::Account)],
+                Target::Resolved("created_resource"),
+            ),
+        ]);
     /// Disables a service identity, revokes its tokens, and removes its roles and every entry
     /// naming it.
     ServiceAccountDelete: DELETE "/service-accounts/{id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204,
@@ -646,8 +560,7 @@ crate::endpoints! {
     /// Lists the tags of an org or a project and of the orgs above it.
     NodeTagList: GET "/nodes/{id}/tags", Permission("node.view"), none, none, json Vec<Tag>, 200;
     /// Defines a tag on an org or a project.
-    NodeTagCreate: POST "/nodes/{id}/tags", Permission("node.manage"), none, json NodeTagCreateBody, json TagCreateResponse, 200,
-        operation Op::receipt(&Op::returning(Manage,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::Path("id")));
+    NodeTagCreate: POST "/nodes/{id}/tags", Permission("node.manage"), none, json NodeTagCreateBody, json Tag, 200;
     /// Renames a tag or changes its colour.
     TagUpdate: PATCH "/tags/{id}", Rule("node.manage on the tag's defining node"), none, json TagUpdateBody, json TagUpdateResponse, 200,
         operation Op::receipt(&Op::returning(
@@ -681,8 +594,6 @@ mod tests {
             "role": "developer",
             "is_owner": false,
             "since": null,
-            "terms_hash": null,
-            "terms_accepted_at": null,
             "also": 1,
             "suspended": false,
             "second_step": "sso",
@@ -718,38 +629,5 @@ mod tests {
         let rename: GroupUpdateBody =
             serde_json::from_value(json!({ "name": "Reviewers" })).unwrap();
         assert_eq!(rename.description, None);
-    }
-}
-
-#[cfg(test)]
-mod holder_revision_tests {
-    #![allow(clippy::unwrap_used, reason = "a failed contract control panics")]
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn a_holder_write_keeps_its_flat_legacy_shape_and_can_guard_the_group_revision() {
-        let id = orch_types::new_id();
-        let original = json!({"kind":"user","id":id});
-        let legacy: GroupHolderAddBody = serde_json::from_value(original.clone()).unwrap();
-        assert_eq!(legacy.expected_revision, None);
-        assert_eq!(legacy.holder, HolderInput::User { id });
-        assert_eq!(serde_json::to_value(&legacy).unwrap(), original);
-        let guarded: GroupHolderAddBody =
-            serde_json::from_value(json!({"kind":"user","id":id,"expected_revision":4})).unwrap();
-        assert_eq!(guarded.expected_revision, Some(4));
-        assert_eq!(guarded.holder, legacy.holder);
-        assert!(
-            serde_json::from_value::<GroupHolderAddBody>(
-                json!({"kind":"user","id":id,"expected_revision":"4"})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<GroupHolderAddBody>(
-                json!({"kind":"user","id":id,"unexpected":true})
-            )
-            .is_err()
-        );
     }
 }

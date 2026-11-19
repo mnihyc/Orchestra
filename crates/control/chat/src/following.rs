@@ -26,13 +26,11 @@ use orch_db::queries::chats::{self as rows, ChatRow, StateRow};
 use orch_db::queries::{storage, uploads};
 use orch_realtime_contract::feeds::UserEvent;
 use orch_types::{Hash, Id, Seq, Time};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashSet;
 
 /// A possible or selected source of supplied bytes. The identity alone grants no authority;
 /// a content hash is never an object identifier, and candidates may not be readable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlobOrigin {
     /// The person already retained the bytes through an upload or authorized copy.
     RetainedByCaller,
@@ -328,16 +326,12 @@ pub fn effective_level(
 
 /// A person's state in a chat as the API has it.
 #[must_use]
-pub fn state_view(chat: &ChatRow, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
+pub fn state_view(chat: Id, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
     ChatState {
         read_revision: state.map_or(0, |state| state.read_revision),
         default_level: None,
         default_reason: None,
-        chat_id: chat.id,
-        org_id: state.map_or(chat.org_id, |state| state.org_id),
-        last_message_seq: state.map_or(chat.last_message_seq, |state| {
-            state.last_message_seq.max(chat.last_message_seq)
-        }),
+        chat_id: chat,
         level: state
             .and_then(|state| state.level.as_deref())
             .and_then(parse_level),
@@ -347,35 +341,6 @@ pub fn state_view(chat: &ChatRow, state: Option<&StateRow>, effective: ChatLevel
         mentions_unread: state.map_or(0, |state| i64::from(state.mentions_unread)),
         hidden: state.is_some_and(|state| state.hidden),
     }
-}
-
-/// Personal state for a current readable audience of a direct or group chat, including new members
-/// without a stored state. Both supporting reads are batched across that audience.
-pub(crate) async fn member_states(
-    conn: &mut Conn,
-    chat: &ChatRow,
-    users: &[Id],
-) -> Result<Vec<(Id, ChatState)>, Error> {
-    if !chat.is_people_chat() || users.is_empty() {
-        return Ok(Vec::new());
-    }
-    let states: HashMap<Id, StateRow> = rows::states_of_members(conn, chat.id, users)
-        .await?
-        .into_iter()
-        .map(|state| (state.user_id, state))
-        .collect();
-    let defaults = rows::default_levels(conn, users).await?;
-    Ok(users
-        .iter()
-        .map(|user| {
-            let state = states.get(user);
-            let defaults = Defaults::of(defaults.get(user));
-            let mut shown = state_view(chat, state, effective_level(true, true, state, defaults));
-            shown.default_level = Some(defaults.direct);
-            shown.default_reason = Some(ChatDefaultReason::Member);
-            (*user, shown)
-        })
-        .collect())
 }
 
 /// The caller's own state in a chat: always there in a direct or a group chat
@@ -420,7 +385,7 @@ pub async fn my_state(
         .and_then(|state| state.level.as_deref())
         .and_then(parse_level)
         .unwrap_or(default);
-    let mut shown = state_view(chat, state.as_ref(), level);
+    let mut shown = state_view(chat.id, state.as_ref(), level);
     shown.default_level = Some(default);
     shown.default_reason = Some(reason);
     Ok(Some(shown))
@@ -440,7 +405,7 @@ async fn tell_screens(
         act.now,
     )
     .await?
-    .unwrap_or_else(|| state_view(&loaded.row, None, ChatLevel::Off));
+    .unwrap_or_else(|| state_view(loaded.id(), None, ChatLevel::Off));
     notifications::tell_users(
         conn,
         &[act.user()],
@@ -608,7 +573,7 @@ pub async fn refresh_thread_people(
         let state = my_state(conn, user, &chat, false, now)
             .await?
             .unwrap_or_else(|| {
-                let mut state = state_view(&chat, None, ChatLevel::Off);
+                let mut state = state_view(chat.id, None, ChatLevel::Off);
                 state.default_level = Some(ChatLevel::Off);
                 state.default_reason = Some(ChatDefaultReason::Quiet);
                 state
@@ -657,90 +622,15 @@ pub async fn set_state(
     tell_screens(conn, act, loaded).await
 }
 
-/// Immutable native selection; its sequence bounds are the unread rows the act actually selected.
-#[derive(Debug, Clone)]
-pub struct AllReadSelection {
-    user: Id,
-    root: Id,
-    entries: Arc<Vec<ReadAllEntry>>,
-}
-
-impl PartialEq for AllReadSelection {
-    fn eq(&self, other: &Self) -> bool {
-        self.same_sources(other)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ReadAllEntry {
-    chat: ChatRow,
-    through: Seq,
-}
-
-impl AllReadSelection {
-    /// The native root selected from the requested org's actual current ancestry.
-    #[must_use]
-    pub fn root(&self) -> Id {
-        self.root
-    }
-
-    /// Actual source rows for a factual operation binder.
-    pub fn chats(&self) -> impl Iterator<Item = &ChatRow> {
-        self.entries.iter().map(|entry| &entry.chat)
-    }
-
-    /// Whether a current native source frame still names these exact original operands.
-    #[must_use]
-    pub fn same_sources(&self, other: &Self) -> bool {
-        self.user == other.user
-            && self.root == other.root
-            && self.entries.len() == other.entries.len()
-            && self
-                .entries
-                .iter()
-                .zip(other.entries.iter())
-                .all(|(left, right)| {
-                    left.chat.id == right.chat.id
-                        && left.chat.org_id == right.chat.org_id
-                        && left.chat.kind == right.chat.kind
-                        && left.chat.node_id == right.chat.node_id
-                        && left.through == right.through
-                })
-    }
-}
-
-/// The native state rows are inserted and locked on the caller's action connection.
-/// A caller must refresh its authority after this rollbackable prefix and before apply.
-pub struct ReadyAllRead {
-    selection: AllReadSelection,
-    states: Vec<ReadCounter>,
-}
-
-struct ReadCounter {
-    last_read_seq: Seq,
-    read_revision: i64,
-}
-
-impl ReadyAllRead {
-    /// Real source association, not retained permission or reusable admission.
-    #[must_use]
-    pub fn matches(&self, current: &AllReadSelection) -> bool {
-        self.selection.same_sources(current)
-    }
-}
-
-/// The ordinary unread/readable/followed selector, without changing a state or notification.
-pub async fn select_all_read(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    root: Id,
-) -> Result<AllReadSelection, Error> {
+/// Marks as read, up to now, every chat of a root org that the caller follows
+/// and has something unread in. The chats it marked.
+pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<Vec<Id>, Error> {
     use orch_access_contract::permissions::{Permission, PermissionName};
     use orch_authz::{Act, Policy, nodes};
     let unread = rows::unread_in_org(conn, act.user(), root).await?;
     let node_ids: Vec<Id> = unread.iter().filter_map(|(chat, _)| chat.node_id).collect();
-    let readable: HashSet<Id> = if node_ids.is_empty() {
-        HashSet::new()
+    let readable: Vec<Id> = if node_ids.is_empty() {
+        Vec::new()
     } else {
         nodes::holding(
             conn,
@@ -755,7 +645,7 @@ pub async fn select_all_read(
         .map(|listed| listed.id)
         .collect()
     };
-    let mut entries = Vec::new();
+    let mut marked = Vec::new();
     for (chat, _) in unread {
         let people = chat.is_people_chat();
         if chat.node_id.is_some_and(|node| !readable.contains(&node)) {
@@ -767,182 +657,22 @@ pub async fn select_all_read(
         {
             continue;
         }
-        entries.push(ReadAllEntry {
-            through: chat.last_message_seq,
-            chat,
-        });
-    }
-    Ok(AllReadSelection {
-        user: act.user(),
-        root,
-        entries: Arc::new(entries),
-    })
-}
-
-/// Recheck the same selected identities under current ordinary visibility and following.
-/// New unread chats and newer messages cannot silently replace the act's original operands.
-pub async fn refresh_all_read(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    selected: &AllReadSelection,
-) -> Result<AllReadSelection, Error> {
-    if selected.user != act.user() {
-        return Err(Error::NotFound);
-    }
-    let node_ids: Vec<_> = selected
-        .entries
-        .iter()
-        .filter_map(|entry| entry.chat.node_id)
-        .collect();
-    let readable: HashSet<Id> = if node_ids.is_empty() {
-        HashSet::new()
-    } else {
-        nodes::holding(
-            conn,
-            act.principal,
-            &node_ids,
-            orch_access_contract::permissions::PermissionName::Exact(Permission::ChatView),
-            Act::Use,
-            Policy::default(),
-        )
-        .await?
-        .into_iter()
-        .map(|node| node.id)
-        .collect()
-    };
-    let mut entries = Vec::with_capacity(selected.entries.len());
-    for entry in selected.entries.iter() {
-        let chat = rows::chat(conn, entry.chat.id)
-            .await?
-            .ok_or(Error::NotFound)?;
-        // Keep the original unread selector's node-view or stored-membership gate.
-        // Personal bookkeeping does not introduce a new content-read prerequisite.
-        let belongs = match chat.node_id {
-            Some(node) => readable.contains(&node),
-            None => rows::members(conn, chat.id)
-                .await?
-                .iter()
-                .any(|member| member.user_id == act.user() && member.left_at.is_none()),
-        };
-        if !belongs
-            || chat.org_id != selected.root
-            || chat.kind != entry.chat.kind
-            || chat.node_id != entry.chat.node_id
-            || my_state(conn, act.user(), &chat, chat.is_people_chat(), act.now)
-                .await?
-                .is_none_or(|state| state.effective_level == ChatLevel::Off)
-        {
-            return Err(Error::NotFound);
-        }
-        entries.push(ReadAllEntry {
-            chat,
-            through: entry.through,
-        });
-    }
-    Ok(AllReadSelection {
-        user: selected.user,
-        root: selected.root,
-        entries: Arc::new(entries),
-    })
-}
-
-/// The existing missing-state INSERT/row-lock prefix, isolated from read-position effects.
-/// All locks survive until the caller commits or rolls the whole action back.
-pub async fn stage_all_read(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    selected: &AllReadSelection,
-) -> Result<ReadyAllRead, Error> {
-    if selected.user != act.user() {
-        return Err(Error::NotFound);
-    }
-    let mut order: Vec<_> = selected.chats().map(|chat| chat.id).collect();
-    order.sort_unstable();
-    if !order.is_empty() {
-        // The native INSERT/UPDATE already needs this mode. Take it before any row wait.
-        rows::lock_state_writes(conn).await?;
-    }
-    for id in &order {
-        let row = rows::lock_for_state(conn, *id)
-            .await?
-            .ok_or(Error::NotFound)?;
-        if row.org_id != selected.root {
-            return Err(Error::NotFound);
-        }
-    }
-    let current = refresh_all_read(conn, act, selected).await?;
-    let mut states = std::collections::HashMap::new();
-    for id in order {
-        let state = rows::following::locked(conn, act.user(), id).await?;
-        states.insert(
-            id,
-            ReadCounter {
-                last_read_seq: state.last_read_seq,
-                read_revision: state.read_revision,
-            },
-        );
-    }
-    let states = current
-        .chats()
-        .map(|chat| states.remove(&chat.id).ok_or(Error::NotFound))
-        .collect::<Result<Vec<_>, Error>>()?;
-    Ok(ReadyAllRead {
-        selection: current,
-        states,
-    })
-}
-
-/// The native first await updates a state already held by the rollbackable prefix.
-/// Check the current guard/deadline on this same connection immediately before calling.
-pub async fn apply_all_read(
-    conn: &mut Conn,
-    act: &Acting<'_>,
-    ready: &ReadyAllRead,
-    current: &AllReadSelection,
-) -> Result<Vec<Id>, Error> {
-    if act.user() != current.user || !ready.matches(current) {
-        return Err(Error::NotFound);
-    }
-    let mut marked = Vec::with_capacity(current.entries.len());
-    for (entry, state) in current.entries.iter().zip(&ready.states) {
-        rows::following::put_read(
-            conn,
-            act.user(),
-            entry.chat.id,
-            entry.through.max(state.last_read_seq),
-            state.read_revision.saturating_add(1),
-        )
-        .await?;
+        rows::mark_read(conn, act.user(), chat.id, chat.last_message_seq).await?;
         rows::read_notices_through(
             conn,
             act.user(),
-            entry.chat.id,
-            Some(entry.through),
+            chat.id,
+            Some(chat.last_message_seq),
             act.now,
         )
         .await?;
-        if let Some(state) = my_state(
-            conn,
-            act.user(),
-            &entry.chat,
-            entry.chat.is_people_chat(),
-            act.now,
-        )
-        .await?
-        {
+        let state = my_state(conn, act.user(), &chat, people, act.now).await?;
+        if let Some(state) = state {
             notifications::tell_users(conn, &[act.user()], &UserEvent::ChatState { state }).await?;
         }
-        marked.push(entry.chat.id);
+        marked.push(chat.id);
     }
     Ok(marked)
-}
-
-/// Marks precisely the ordinary selected set; callers retain their existing transaction/authority boundary.
-pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<Vec<Id>, Error> {
-    let selected = select_all_read(conn, act, root).await?;
-    let ready = stage_all_read(conn, act, &selected).await?;
-    let current = refresh_all_read(conn, act, &selected).await?;
-    apply_all_read(conn, act, &ready, &current).await
 }
 
 // ------------------------------------------------------------------ drafts
@@ -1128,8 +858,6 @@ mod tests {
             read_revision: 0,
             user_id: new_id(),
             chat_id: new_id(),
-            org_id: new_id(),
-            last_message_seq: 0,
             level: level.map(str::to_owned),
             engaged,
             last_read_seq: 0,

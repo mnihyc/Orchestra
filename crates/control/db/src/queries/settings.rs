@@ -18,21 +18,6 @@ use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Json};
 
-/// Pin a joining text, including an absent row. Its native writer and database trigger use
-/// the same source lock, so an insertion, edit or reset cannot pass an accepted-text check.
-pub async fn lock_org_terms(
-    conn: &mut Conn,
-    node: Option<Id>,
-    writing: bool,
-) -> Result<(), DbError> {
-    sqlx::query("SELECT orch_lock_org_terms($1,$2)")
-        .bind(node)
-        .bind(writing)
-        .execute(conn)
-        .await?;
-    Ok(())
-}
-
 /// One setting-reach read's subtree and ancestors, or every tree for a system read.
 /// Deleted ancestors are retained so the caller can exclude their entire branch without another query.
 pub async fn reach_nodes(
@@ -576,15 +561,15 @@ pub async fn machine_exec_offers(
 }
 
 /// What the provider of the thread `thread` lists of the model `model`: its
-/// effective parameters, including endpoint and existing named-group option layers. None
+/// parameters (efforts, default effort, …) as a manager entered them. None
 /// while the thread has no provider or the provider does not list the model.
 pub async fn thread_model_parameters(
     conn: &mut Conn,
     thread: Id,
     model: &str,
 ) -> Result<Option<Json>, DbError> {
-    let row: Option<(Json, Vec<String>, Json)> = sqlx::query_as(
-        "SELECT pm.parameters, pm.groups, provider_option_layers(pm.provider_id, pm.groups)
+    Ok(sqlx::query_scalar(
+        "SELECT pm.parameters
            FROM threads th
            JOIN provider_models pm ON pm.provider_id = th.provider_id AND pm.model_name = $2
           WHERE th.node_id = $1",
@@ -592,19 +577,7 @@ pub async fn thread_model_parameters(
     .bind(thread)
     .bind(model)
     .fetch_optional(conn)
-    .await?;
-    row.map(|(parameters, groups, layers)| {
-        let value = orch_provider_contract::models::composed_model_parameters(
-            &parameters,
-            &groups,
-            &layers,
-            None,
-        )
-        .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
-        serde_json::to_value(value)
-            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
-    })
-    .transpose()
+    .await?)
 }
 
 /// Whether the system has a mail server of its own that is switched on.

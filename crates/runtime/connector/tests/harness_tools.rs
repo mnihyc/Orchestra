@@ -154,7 +154,6 @@ async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_
 
     // A turn that runs in a stricter sandbox is held to it in the tools: the mode follows the turn.
     let turn = orch_link_contract::commands::TurnStart {
-        native_model: None,
         native_wake: None,
         plan: false,
         thread_id: thread,
@@ -267,7 +266,6 @@ async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     rig.send_as(
         command,
         &McpStart::Given(Box::new(McpStartGiven {
-            preset: false,
             server_id: None,
             environment_id: rig.environment,
             name: "files".to_owned(),
@@ -419,7 +417,6 @@ async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
             .send_as(
                 command,
                 &McpStart::Given(Box::new(McpStartGiven {
-                    preset: false,
                     server_id: None,
                     environment_id: rig.environment,
                     name: name.to_owned(),

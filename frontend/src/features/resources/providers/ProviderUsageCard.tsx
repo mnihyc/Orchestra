@@ -1,7 +1,6 @@
 /** The source's members and states rendered alike on the page, thread Usage and compact provider choices. */
 import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
-import type { TFunction } from 'i18next';
 import { Link } from '@tanstack/react-router';
 import { ForecastLine } from '@/features/usage/ForecastLine';
 import { useTranslation } from 'react-i18next';
@@ -21,7 +20,7 @@ import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 
 import type { PlanProvider, PlanWindow } from './plan';
 import { observedAt, privateProvider, resetState,planSectionId } from './plan';
-import { amountText, detailFieldVisible, detailState, unavailableReason, scaledAmountText, endpointsNeedNoKey, FACT_MEMBERS, factsSource, reportedList, windowName, type Balance, type DetailMember, type Spend } from './details';
+import { amountText, detailFieldVisible, detailState, scaledAmountText, endpointsNeedNoKey, FACT_MEMBERS, factsSource, reportedList, windowName, type Balance, type DetailMember, type Spend } from './details';
 
 /** Idle sources refresh hourly; an older observation is explicitly stale, never silently zeroed. */
 const STALE_AFTER_MS = HOUR_MS;
@@ -89,37 +88,18 @@ const EMPTY_LABELS = {
 } as const;
 const PERIOD_LABELS = { day:'providerDetails.period.day', week:'providerDetails.period.week', month:'providerDetails.period.month', total:'providerDetails.period.total', window:'providerDetails.period.window' } as const;
 
-function factsSourceTitle(provider: PlanProvider, t: TFunction): string {
-  const source = factsSource(provider);
-  const noSource = source.by === 'none' || source.by === 'default' && source.name === null && source.descriptor === null;
-  return noSource ? t('providerDetails.keeperSource') : source.descriptor?.title ?? t(source.by === 'address' ? 'providerSources.address' : 'providerSources.program');
-}
-
-/** Missing members retain their actual source and cause without displaying an older value or clock. */
-function MissingMember({ member, provider, showSource = true }: { member: DetailMember; provider: PlanProvider; showSource?: boolean }) {
-  const { t } = useTranslation();
-  const state = detailState(provider, member);
-  const label = state === 'not_read_yet' ? 'providerDetails.notReadOnce'
-    : unavailableReason(provider, member) === 'needs_admin_key' ? 'providerSources.needsAdminKey' : 'providerDetails.notSupplied';
-  return <p className="text-sm wrap-anywhere text-text-muted"><span>{t(label)}</span>{showSource && <>{' · '}<span data-fact-source>{factsSourceTitle(provider, t)}</span></>}</p>;
-}
-
-/** Supplied and unread members retain their rows; unsupported members share the card's summary.
- * Each named group owns a complete definition list so its role cannot interrupt term/definition relationships. */
-export function DetailBlock({ member, provider, children, reading = false }: { member: DetailMember; provider: PlanProvider; reading?: boolean; children: ReactNode }) {
+/** Each member owns its state and observation time; unsupported members have no detail row. */
+export function DetailBlock({ member, provider, children }: { member: DetailMember; provider: PlanProvider; reading?: boolean; children: ReactNode }) {
   const { t } = useTranslation();
   const state = detailState(provider,member);
-  const missing = state === 'unsupported' || state === 'not_read_yet';
-  if (privateProvider(provider) || state === 'unsupported') return null;
-  return <div role="group" className="min-w-0 border-b border-border py-2 last:border-b-0" aria-label={t(MEMBER_LABELS[member])} aria-busy={state === 'not_read_yet' && reading || undefined} data-fact-member={member} data-fact-state={state}>
-    <dl className="grid min-w-0 gap-x-3 gap-y-1 sm:grid-cols-[minmax(7rem,1fr)_minmax(0,3fr)]">
+  if (state === 'unsupported' || state === 'not_read_yet') return null;
+  return <div role="group" className="grid min-w-0 gap-x-3 gap-y-1 border-b border-border py-2 last:border-b-0 sm:grid-cols-[minmax(7rem,1fr)_minmax(0,3fr)]" aria-label={t(MEMBER_LABELS[member])} data-fact-member={member} data-fact-state={state}>
     <dt className="flex flex-wrap items-baseline justify-between gap-2 text-sm font-medium text-text"><span>{t(MEMBER_LABELS[member])}{':'}</span>{(member==='windows' || member==='balances' || member==='spend' || member==='extra_usage') && state==='told' && <Link to="/resources/providers/$id" params={{id:provider.id}} search={{tab:'usage',view:'usage',plan:member==='windows' ? 'current' : 'history',plan_metric:member==='windows' ? 'subscription' : 'credits'}} hash={planSectionId(provider.id)} className="text-sm font-normal text-accent-text hover:underline">{t('planUsage.overTime')}</Link>}</dt>
     <dd className="flex min-w-0 flex-col gap-1 wrap-anywhere">
-    {missing ? <MissingMember member={member} provider={provider} showSource={false} /> : state === 'empty' ? <p className="text-sm text-text-muted">{t(EMPTY_LABELS[member])}</p> : children}
-    {!missing && member !== 'windows' && member !== 'balances' && member !== 'spend' && <SourceLine provider={provider} field={member} />}
+    {state === 'empty' ? <p className="text-sm text-text-muted">{t(EMPTY_LABELS[member])}</p> : children}
+    {member !== 'windows' && member !== 'balances' && member !== 'spend' && <SourceLine provider={provider} field={member} />}
     {state === 'empty' && (member === 'windows' || member === 'balances' || member === 'spend') && <SourceLine provider={provider} field={member} />}
     </dd>
-    </dl>
   </div>;
 }
 
@@ -171,14 +151,12 @@ export function ProviderUsageSummary({provider,windows=provider.facts.windows}:{
   const {t}=useTranslation();
   const format=useFormatContext();
   const members=['windows','balances','spend','extra_usage'] as const;
-  if (privateProvider(provider)) return null;
   return <dl className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2" data-provider-current>
-    {members.map((member)=>{
+    {members.filter((member)=>detailState(provider,member)!=='unsupported').map((member)=>{
       const state=detailState(provider,member);
-      if (state === 'unsupported' || state === 'not_read_yet') return <div key={member} className="min-w-0" data-current-member={member} data-fact-state={state}><dt className="text-sm font-medium text-text">{t(MEMBER_LABELS[member])}</dt><dd><MissingMember member={member} provider={provider} /></dd></div>;
       return <div key={member} className="flex min-w-0 flex-col gap-1" data-current-member={member}>
         <dt className="text-sm font-medium text-text">{t(MEMBER_LABELS[member])}</dt>
-        <dd className="min-w-0 text-sm text-text-muted">{state==='empty' ? <p>{t(EMPTY_LABELS[member])}</p> : member==='windows' ? <ul className="flex flex-col gap-2">{windows.map((window)=><li key={window.id}><p>{t('providerPlan.roomUsed',{label:windowName(window),percent:formatNumber(window.used_percent,format.locale,{maximumFractionDigits:2})})}{window.resets_at!==null && <> · {t('providerDetails.resets')} <RelativeTime at={window.resets_at} /></>}</p><SourceLine provider={provider} field={`windows.${window.id}`} /></li>)}</ul> : member==='balances' ? <ul className="flex flex-col gap-2">{provider.facts.balances.map((entry)=><BalanceRow key={entry.id} balance={entry} provider={provider} />)}</ul> : member==='spend' ? <ul className="flex flex-col gap-2">{provider.facts.spend.map((entry)=><SpendRow key={entry.id} spend={entry} provider={provider} />)}</ul> : <ExtraUsageRow provider={provider} />}
+        <dd className="min-w-0 text-sm text-text-muted">{state==='not_read_yet' ? <p>{t('providerDetails.notReadOnce')}</p> : state==='empty' ? <p>{t(EMPTY_LABELS[member])}</p> : member==='windows' ? <ul className="flex flex-col gap-2">{windows.map((window)=><li key={window.id}><p>{t('providerPlan.roomUsed',{label:windowName(window),percent:formatNumber(window.used_percent,format.locale,{maximumFractionDigits:2})})}{window.resets_at!==null && <> · {t('providerDetails.resets')} <RelativeTime at={window.resets_at} /></>}</p><SourceLine provider={provider} field={`windows.${window.id}`} /></li>)}</ul> : member==='balances' ? <ul className="flex flex-col gap-2">{provider.facts.balances.map((entry)=><BalanceRow key={entry.id} balance={entry} provider={provider} />)}</ul> : member==='spend' ? <ul className="flex flex-col gap-2">{provider.facts.spend.map((entry)=><SpendRow key={entry.id} spend={entry} provider={provider} />)}</ul> : <ExtraUsageRow provider={provider} />}
         {(state!=='told' || member==='extra_usage') && <SourceLine provider={provider} field={member} />}</dd>
       </div>;
     })}
@@ -196,14 +174,14 @@ export function ProviderUsageCard({ provider, compact = false, allWindows = fals
   const { facts } = provider;
   const source = factsSource(provider);
   const descriptor = source.descriptor;
-  const sourceTitle = factsSourceTitle(provider, t);
+  const noSource=source.by === 'none' || source.by === 'default' && source.name === null && descriptor === null;
+  const sourceTitle = noSource ? t('providerDetails.keeperSource') : descriptor?.title ?? t(source.by === 'address' ? 'providerSources.address' : 'providerSources.program');
   const sourceError = source.last_error;
   const windows = reportedList(facts.windows).filter((window) => Number.isFinite(window.used_percent));
   const binding = windows.filter((window) => window.is_active === true);
   const compactWindows = !allWindows && windows.some((window) => window.is_active !== null) ? binding : windows;
   const balance = detailState(provider,'balances') === 'told' ? reportedList(facts.balances)[0] : undefined;
   const spend = detailState(provider,'spend') === 'told' ? reportedList(facts.spend)[0] : undefined;
-  const needsAdmin = FACT_MEMBERS.some((member)=>unavailableReason(provider,member)==='needs_admin_key');
   if (compact) return <span className="flex min-w-0 flex-col gap-2" data-provider-usage="compact">
     <AsAdminMark of={administrative?.place} />
     {detailState(provider,'windows') === 'told' && compactWindows.length > 0 ? <>
@@ -211,14 +189,10 @@ export function ProviderUsageCard({ provider, compact = false, allWindows = fals
       <SourceLine provider={provider} field="windows" />
     </> : balance !== undefined && balance.remaining !== null ? <>
       <span className="text-xs text-text-muted">{t('providerPlan.roomLeft',{ amount:amountText(balance.remaining,balance.unit,t('providerPlan.notReported')) })}</span><SourceLine provider={provider} field={'balances.' + balance.id} />
-    </> : spend !== undefined ? <><span className="text-xs text-text-muted">{t('providerDetails.compactSpend',{ amount:amountText(spend.used,spend.unit,t('providerPlan.notReported')),period:t(PERIOD_LABELS[spend.period]) })}</span><SourceLine provider={provider} field={'spend.' + spend.id} /></> : <span className="text-xs text-text-muted">{t(needsAdmin ? 'providerSources.needsAdminKey' : 'providerPlan.notReported')}</span>}
+    </> : spend !== undefined ? <><span className="text-xs text-text-muted">{t('providerDetails.compactSpend',{ amount:amountText(spend.used,spend.unit,t('providerPlan.notReported')),period:t(PERIOD_LABELS[spend.period]) })}</span><SourceLine provider={provider} field={'spend.' + spend.id} /></> : <span className="text-xs text-text-muted">{t('providerPlan.notReported')}</span>}
     {sourceError !== null && <span className="text-xs text-warning">{t('providerDetails.lastReadFailed')}</span>}
   </span>;
   const unread = FACT_MEMBERS.filter((member) => detailState(provider,member) === 'not_read_yet');
-  const unsupported = FACT_MEMBERS.filter((member) => detailState(provider,member) === 'unsupported');
-  const notSupplied = unsupported.filter((member) => unavailableReason(provider,member) !== 'needs_admin_key');
-  const needsAdminMembers = unsupported.filter((member) => unavailableReason(provider,member) === 'needs_admin_key');
-  const memberNames = (members: readonly DetailMember[]) => new Intl.ListFormat(format.locale, { type: 'unit' }).format(members.map((member) => t(MEMBER_LABELS[member])));
   const plan = facts.plan;
   const planName = plan === null ? t('providerDetails.empty.plan') : descriptor?.facts?.plans[plan] ?? plan;
   const credential = facts.credential;
@@ -236,7 +210,7 @@ export function ProviderUsageCard({ provider, compact = false, allWindows = fals
     </p>}
     {error !== undefined && error !== null && <ErrorAlert error={error} />}
     {sourceError !== null && <StateLine role="alert" tone="warning" compact title={t('providerDetails.lastReadFailed')} message={<>{describe(sourceError).message}{' '}<RelativeTime at={sourceError.at} /></>} />}
-    <div className="min-w-0">
+    <dl className="min-w-0">
     <DetailBlock member="identity" provider={provider} reading={refreshing}><p className="break-words text-sm text-text-muted">{facts.identity ?? t('providerDetails.empty.identity')}</p></DetailBlock>
     <DetailBlock member="credential" provider={provider} reading={refreshing}>{credential !== null && <div className="flex flex-col gap-1 text-sm text-text-muted">
       <p>{credentialText}</p>
@@ -253,12 +227,7 @@ export function ProviderUsageCard({ provider, compact = false, allWindows = fals
     <DetailBlock member="spend" provider={provider} reading={refreshing}><ul className="flex flex-col gap-3">{reportedList(facts.spend).map((entry) => <SpendRow key={entry.id} spend={entry} provider={provider} />)}</ul></DetailBlock>
     <DetailBlock member="extra_usage" provider={provider} reading={refreshing}><ExtraUsageRow provider={provider} /></DetailBlock>
     <DetailBlock member="available_resets" provider={provider} reading={refreshing}>{facts.available_resets !== null && <><p className="text-sm text-text-muted">{t('providerPlan.resetsAvailable',{count:facts.available_resets.available_count})}</p><ul className="flex flex-col gap-2">{reportedList(facts.available_resets.credits).map((credit,index) => <li key={credit.id}><p>{credit.title ?? t('providerDetails.resetNumber', { number: index + 1 })}</p>{credit.description !== null && <p className="text-sm text-text-muted">{credit.description}</p>}{credit.expires_at !== null && <RelativeTime at={credit.expires_at} />}</li>)}</ul></>}</DetailBlock>
-    </div>
-    {unsupported.length > 0 && <p data-unsupported-members className="text-sm wrap-anywhere text-text-muted">
-      {notSupplied.length > 0 && <span>{t('providerDetails.notSuppliedMembers',{members:memberNames(notSupplied)})}</span>}
-      {notSupplied.length > 0 && needsAdminMembers.length > 0 && ' · '}
-      {needsAdminMembers.length > 0 && <span data-needs-admin-members>{t('providerDetails.needsAdminKeyMembers',{members:memberNames(needsAdminMembers)})}</span>}
-    </p>}
+    </dl>
     {actions}
   </section>;
 }

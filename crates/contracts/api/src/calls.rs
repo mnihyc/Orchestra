@@ -15,9 +15,6 @@ use serde::{Deserialize, Serialize};
 /// One durable recovery, with a known wait and the rule that caused it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CallRecovery {
-    /// A paused managed capability, without its private backend or closed request identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<String>,
     /// Scheduled, switching, running, stopped or waiting.
     pub state: String,
     /// The failure being handled.

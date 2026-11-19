@@ -126,23 +126,6 @@ pub async fn lock_person(conn: &mut Conn, user: Id) -> Result<Option<UserRow>, D
     )
 }
 
-/// Pins the current active account of native captured work and watches its team roots
-/// before permission/policy reads. This authenticates no credential: the caller separately
-/// restores every recorded original key. It creates no browser-session identity or lease.
-pub async fn lock_native_actor(conn: &mut Conn, user: Id) -> Result<Option<UserRow>, DbError> {
-    Ok(sqlx::query_as(
-        "WITH watched AS MATERIALIZED (
-            SELECT orch_authz_saw(orch_authz_epochs(
-                ARRAY(SELECT org_id FROM org_members WHERE user_id=$1))) AS saw
-         )
-         SELECT u.* FROM users u CROSS JOIN watched w
-          WHERE u.id=$1 AND u.status='active' AND w.saw FOR KEY SHARE OF u",
-    )
-    .bind(user)
-    .fetch_optional(conn)
-    .await?)
-}
-
 /// Pins an existing parent for a child/reference without serializing its other makers.
 pub async fn lock_parent(conn: &mut Conn, node: Id) -> Result<bool, DbError> {
     Ok(sqlx::query_scalar::<_, Id>(
@@ -158,23 +141,6 @@ pub async fn lock_parent(conn: &mut Conn, node: Id) -> Result<bool, DbError> {
 #[must_use]
 pub fn in_transaction(conn: &mut Conn) -> bool {
     conn.is_in_transaction()
-}
-
-/// The identifier of the transaction the connection is in, so a credential captured inside one
-/// transaction can prove later that it is still the same one.
-pub async fn current_transaction_id(conn: &mut Conn) -> Result<i64, DbError> {
-    Ok(sqlx::query_scalar("SELECT txid_current()::bigint")
-        .fetch_one(conn)
-        .await?)
-}
-
-/// Holds a machine's row against deletion and owner change for the rest of the transaction.
-pub async fn share_machine(conn: &mut Conn, machine: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR SHARE")
-        .bind(machine)
-        .fetch_optional(conn)
-        .await?;
-    Ok(())
 }
 
 /// Makes an ordinary background action's commit check the system's authorization epoch, and the

@@ -46,7 +46,7 @@ export function installScreenFixture(world: World, name: unknown): void {
     }] };
     world.threads.setEntry('screen-model', 'Screen model', { context_window: 200_000, efforts: ['low', 'medium'], default_effort: 'medium',
       offered: { web_search: ['cached', 'live'] }, web_search: ['cached', 'live'], default_web_search: 'live',
-      rate: { input_per_mtok: '2', cached_input_per_mtok: '0.2', output_per_mtok: '8', web_search_per_call: '0.01' },
+      rate: { input_per_mtok: '2', output_per_mtok: '8', web_search_per_call: '0.01' },
       request_options: {
         native: { type: 'object', additionalProperties: false, properties: { verbosity: name === 'thread-options-fixed'
           ? { const: 'normal' } : { enum: ['terse', 'normal'], default: 'normal' } } },
@@ -75,7 +75,7 @@ export function installScreenFixture(world: World, name: unknown): void {
   world.threads.emit(thread, { thread: { state: 'idle', background: wake }, background: backgroundRoster({ wake, can_end: !lost, total: items.length, items }),
     turns: [turn(origin, { ordinal: 1, state: 'completed', inputId, completedAt: '2026-11-06T10:00:00Z' })],
     items: [command(commandId, { turn: origin, command: buildLabel, output: '', exit: finished || held ? 0 : null, background: true }),
-      toolCall(childId, { kind: 'subagent', name: reviewLabel, child_stream: 'sub:auth-review', role: 'review', prompt: 'Review authentication.', state: finished || held ? 'failed' : 'running' }, { turn: origin, title: reviewLabel, status: finished || held ? 'completed' : 'in_progress' })] });
+      toolCall(childId, { kind: 'subagent', name: reviewLabel, child_stream: 'sub:auth-review', role: 'review', prompt: 'Review authentication.', state: finished || held ? 'failed' : 'running' }, { turn: origin, status: finished || held ? 'completed' : 'in_progress' })] });
   if (finished || held) {
     const wakeInput = id(0x84, 5), wakeTurn = id(0x84, 6);
     world.threads.emit(thread, {

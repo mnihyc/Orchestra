@@ -511,8 +511,7 @@ impl CommandHandler for Dispatcher {
         let cooperative = reported.is_some()
             || matches!(
                 kind,
-                CommandKind::ProviderGenerate
-                    | CommandKind::FsSnapshot
+                CommandKind::FsSnapshot
                     | CommandKind::FsMaterialize
                     | CommandKind::FsDataExport
                     | CommandKind::FsDataImport
@@ -543,7 +542,7 @@ impl CommandHandler for Dispatcher {
                     cancel.cancel();
                     // Keep owning the future until its helper, streams and blocking workers have joined.
                     let _ = operation.await;
-                    Err(CommandError::new(ErrorCode::Timeout, "the operation exceeded its configured allowance"))
+                    Err(CommandError::new(ErrorCode::Timeout, "the filesystem operation exceeded its configured allowance"))
                 }
             };
         }
@@ -615,7 +614,11 @@ mod tests {
                     &Host::detect(),
                     FactsDraft::default(),
                     facts_policy.policy(),
-                    MachineFactsRates::default(),
+                    MachineFactsRates {
+                        up_bps: 0,
+                        down_bps: 0,
+                        round_trip_ms: 0,
+                    },
                     0,
                 )
             }),

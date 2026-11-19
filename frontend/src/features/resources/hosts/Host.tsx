@@ -49,7 +49,6 @@ import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
-import { StateLine } from '@/ui/StateLine';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { HelpHint } from '@/ui/HelpHint';
@@ -57,7 +56,7 @@ import { Meter } from '@/ui/Meter';
 import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { SettingRow } from '@/ui/SettingRow';
-import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
 import { StatusDot } from '@/ui/StatusDot';
 import { type Column, Table } from '@/ui/Table';
 import { linkClasses } from '@/ui/link';
@@ -69,10 +68,10 @@ export { HOST_TABS, type HostTab };
 /** The sentinel of the "when it is full" choice that follows the system again: a radio group cannot hold nothing. */
 const FOLLOW_SYSTEM = 'system';
 
-function Skeletons(props: SkeletonReads) {
+function Skeletons() {
   return (
     <Page>
-      <SkeletonGroup {...props} className="flex flex-col gap-6">
+      <SkeletonGroup className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -123,12 +122,10 @@ function Capacity({ host }: { host: Host }) {
   );
 }
 
-export function Storages({ host }: { host: Host }) {
+function Storages({ host }: { host: Host }) {
   const { t } = useTranslation();
   const words = useAmountWords();
-  if (host.storages.length === 0) return <Section id="host-storages" title={t('hosts.storages.title')}>
-    <StateLine compact message={t(holds(host.access, 'host.view') ? 'implicitAvailability.noHostStorages' : 'implicitAvailability.detailsUnavailable')} />
-  </Section>;
+  if (host.storages.length === 0) return null;
   const columns: Column<HostStorage>[] = [
     {
       id: 'name',
@@ -165,12 +162,10 @@ export function Storages({ host }: { host: Host }) {
   );
 }
 
-export function Drivers({ host }: { host: Host }) {
+function Drivers({ host }: { host: Host }) {
   const { t } = useTranslation();
   const openHelp = useHelpOpener();
-  if (host.drivers.length === 0) return <Section id="host-drivers" title={t('hosts.drivers.title')}>
-    <StateLine compact message={t(holds(host.access, 'host.view') ? 'implicitAvailability.noHostDrivers' : 'implicitAvailability.detailsUnavailable')} />
-  </Section>;
+  if (host.drivers.length === 0) return null;
   const creates = (kinds: readonly UnitKind[]) => kinds.map((kind) => t(`templates.kinds.${kind}`)).join(', ');
   const columns: Column<HostDriver>[] = [
     {
@@ -382,7 +377,7 @@ export function HostScreen({ hostId, tab, onTab }: HostScreenProps) {
   const back = useResourceHeading('hosts', Server, query.data?.name ?? t(query.isPending ? 'common.loading' : 'access.area.host'), query.data?.id);
   const acts = useHostActs({ onSettings: () => onTab('settings'), afterDelete: () => void navigate({ to: '/resources/hosts' }) });
 
-  if (query.isPending) return <Skeletons read={query} />;
+  if (query.isPending) return <Skeletons />;
   if (query.isError) return query.error instanceof ApiError && query.error.code.startsWith('ports.')
     ? <div className="p-6"><PortFault error={query.error} onRefresh={() => void query.refetch()} /></div>
     : <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;

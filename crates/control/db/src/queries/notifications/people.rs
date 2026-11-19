@@ -307,22 +307,6 @@ pub async fn push_subscriptions_of(
     .await?)
 }
 
-/// One actual browser of its person, for validating an already prepared native delivery.
-pub async fn push_subscription(
-    conn: &mut Conn,
-    user: Id,
-    id: Id,
-) -> Result<Option<PushSubscriptionRow>, DbError> {
-    Ok(sqlx::query_as(
-        "SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_ok_at, failed_count
-           FROM push_subscriptions WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(user)
-    .fetch_optional(conn)
-    .await?)
-}
-
 /// A browser that takes push, as it is added.
 #[derive(Debug, Clone, Copy)]
 pub struct NewPushSubscription<'a> {
@@ -501,12 +485,10 @@ async fn lock_untold_receivers(
     receivers: &[Id],
     key: &str,
 ) -> Result<Vec<Id>, DbError> {
-    // Inbox sequence/absence needs a non-key writer lock. Keep it compatible with the
-    // authenticated sender's KEY SHARE when that same person is also a receiver.
     Ok(sqlx::query_scalar(
         "SELECT u.id FROM users u WHERE u.id=ANY($1)
          AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.user_id=u.id AND n.dedupe_key=$2)
-         ORDER BY u.id FOR NO KEY UPDATE OF u",
+         ORDER BY u.id FOR UPDATE OF u",
     )
     .bind(receivers)
     .bind(key)
@@ -522,25 +504,6 @@ pub async fn announce(
     new: &NewNotification<'_>,
 ) -> Result<Option<Announced>, DbError> {
     announce_with(conn, new, None::<fn() -> Result<(), DbError>>).await
-}
-
-/// A bounded delivery batch applies current kind choices once before outward dispatch.
-/// Mandatory Inbox materialization does not grant an external delivery.
-pub async fn outward_kinds(
-    conn: &mut Conn,
-    user: Id,
-    kinds: &[String],
-) -> Result<Vec<String>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT DISTINCT k.kind FROM unnest($2::text[]) AS k(kind)
-        JOIN users u ON u.id=$1 AND u.kind='human' AND u.status='active'
-        LEFT JOIN notification_prefs p ON p.user_id=u.id
-        WHERE NOT COALESCE(p.disabled_kinds ? k.kind,false)",
-    )
-    .bind(user)
-    .bind(kinds)
-    .fetch_all(conn)
-    .await?)
 }
 
 /// The same announce producer, with an opaque check after receiver and absence reads.

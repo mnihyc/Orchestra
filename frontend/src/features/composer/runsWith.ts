@@ -5,7 +5,6 @@
  * changed, including before any history exists; the thread's own choices are asked for only where a control
  * is opened, since they decide who a choice is credited to and what a change of model leaves behind.
  */
-import type { SkeletonRead } from '@/ui/Skeleton';
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { useState } from 'react';
@@ -114,7 +113,6 @@ export interface RunsWith {
   own: Record<string, unknown> | null;
   states: State[];
   pending: boolean;
-  reads?: readonly SkeletonRead[];
   failed: unknown;
   /** Who made the choice of a parameter, as far as the history that is held says. */
   chooser: (key: string) => Chooser | null;
@@ -186,7 +184,6 @@ export function useRunsWith(thread: Thread, withOwn: boolean): RunsWith {
     reset,
     own,
     states,
-    reads: withOwn ? [parameters, settings] : [parameters],
     pending: bound && (parameters.isPending || (withOwn && settings.isPending)),
     failed: parameters.error ?? settings.error,
     chooser: (key) =>

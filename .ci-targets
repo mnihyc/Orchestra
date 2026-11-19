@@ -1,0 +1,2 @@
+test -p orch-api-core --test documents
+test -p orch-api-core --test document_creation_scopes -- text_creation_publication_

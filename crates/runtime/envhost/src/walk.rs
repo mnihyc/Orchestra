@@ -253,16 +253,12 @@ mod tests {
         if let Err(error) = std::fs::write(&invalid, "x") {
             // Some hosts reject this name before the directory can contain it.
             // The walk must still exclude its temporary files there.
-            #[cfg(not(target_os = "macos"))]
-            panic!("unexpected refusal of a non-UTF-8 file name: {error}");
-            #[cfg(target_os = "macos")]
-            {
-                assert_eq!(
-                    error.raw_os_error(),
-                    Some(rustix::io::Errno::ILSEQ.raw_os_error())
-                );
-                assert!(!invalid.exists());
-            }
+            assert!(cfg!(target_os = "macos"));
+            assert_eq!(
+                error.raw_os_error(),
+                Some(rustix::io::Errno::ILSEQ.raw_os_error())
+            );
+            assert!(!invalid.exists());
         }
         let ws = workspace(root.path());
         assert_eq!(collect(&ws, None, ""), ["fine.txt"]);

@@ -6,8 +6,6 @@
 )]
 mod common;
 mod hosting;
-#[path = "trace_retention/scopes.rs"]
-mod scopes;
 use common::World;
 use orch_db::queries::{
     environments::{hosting as rows, retained},

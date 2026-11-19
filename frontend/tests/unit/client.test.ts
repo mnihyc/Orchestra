@@ -258,7 +258,7 @@ describe('a page that was just loaded', () => {
     const answers = await Promise.all([client.restore(), client.restore(), client.restore()]);
 
     expect(answers).toEqual([true, true, true]);
-    expect(paths()).toEqual(['POST /auth/session']);
+    expect(paths()).toEqual(['POST /auth/refresh']);
     expect(client.session.getState().userId).toBe('u1');
   });
 
@@ -268,27 +268,6 @@ describe('a page that was just loaded', () => {
 
     await expect(client.restore()).resolves.toBe(false);
     expect(client.session.getState().status).toBe('signed_out');
-  });
-
-  it('discovers a first visitor quietly without guessing whether an HttpOnly cookie exists', async () => {
-    const { fetch, seen, paths } = server(() => json(200, null));
-    const client = createApiClient({ baseUrl: BASE, fetch });
-    await expect(Promise.all([client.restore(), client.restore()])).resolves.toEqual([false, false]);
-    expect(paths()).toEqual(['POST /auth/session']);
-    expect(seen[0]?.headers.get('x-orch-csrf')).toBe('1');
-    expect(seen[0]?.headers.has('authorization')).toBe(false);
-    expect(client.session.getState().status).toBe('signed_out');
-    await expect(client.restore()).resolves.toBe(false); expect(seen).toHaveLength(1);
-  });
-
-  it('ignores an anonymous discovery answer after a later sign-in became current', async () => {
-    let finish: (reply: Response) => void = () => { throw new Error('The discovery was not started'); };
-    const { fetch } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
-    const client = createApiClient({ baseUrl: BASE, fetch });
-    const restoring = client.restore(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    client.adopt(grant('current-sign-in')); finish(json(200, null));
-    await expect(restoring).resolves.toBe(true);
-    expect(client.accessToken()).toBe('current-sign-in'); expect(client.session.getState().userId).toBe('u1');
   });
 });
 

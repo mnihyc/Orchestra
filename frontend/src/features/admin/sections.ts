@@ -41,7 +41,6 @@ export interface SectionDef {
 export const SECTIONS = [
   { id: 'overview', group: null, icon: Gauge },
   { id: 'users', group: 'people', icon: Users },
-  { id: 'tokens', group: 'people', icon: KeyRound },
   { id: 'orgs', group: 'people', icon: Building },
   { id: 'everything', group: 'people', icon: ListTree },
   { id: 'sign-in', group: 'people', icon: KeyRound },

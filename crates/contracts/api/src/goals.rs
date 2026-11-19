@@ -111,8 +111,7 @@ pub enum GoalCheckedBy {
     Agent,
 }
 
-/// A goal's saved limits. Omitted values follow the place; zero adds no own cap.
-/// Effective budgets still retain the place's policy bounds.
+/// A goal's own limits. A limit left out follows the setting of the place; zero is no limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GoalLimits {
@@ -219,28 +218,6 @@ pub struct ThreadGoal {
     pub last_report: Option<GoalReport>,
     /// When it ended.
     pub ended_at: Option<Time>,
-}
-
-/// A goal was accepted without reading its existing state, budgets or report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ThreadGoalReceipt {
-    /// The native acceptance has no full goal projection.
-    pub projection: crate::common::ReceiptProjection,
-    /// The actual thread that accepted it.
-    pub thread_id: Id,
-    /// The created goal.
-    pub goal_id: Id,
-}
-
-crate::common::full_or_receipt! {
-    /// The native goal reply or the same accepted goal's content-free receipt.
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-    pub enum ThreadGoalCreateResponse {
-        /// The unchanged native full goal projection.
-        Full(ThreadGoal),
-        /// The goal was accepted without stored content readback.
-        Receipt(ThreadGoalReceipt),
-    }
 }
 
 /// What the input of a goal's loop says of its goal, for the block the timeline shows in its place.
@@ -402,8 +379,8 @@ crate::endpoints! {
     ThreadGoalGet: GET "/threads/{id}/goal", Permission("thread.view"), none, none, json Option<ThreadGoal>, 200,
         operation Op::single(Read, &[Object(K::Thread)], Target::TypedPath { parameter: "id", kind: Object(K::Thread) });
     /// Sets a goal on a thread, in the caller's name: Orch then keeps the thread working on it, queuing each next input as the caller's.
-    ThreadGoalCreate: POST "/threads/{id}/goal", Rule("thread.interact on the thread, and the caller's own use of the model it runs on"), none, json ThreadGoalCreateBody, json ThreadGoalCreateResponse, 201,
-        operation Op::receipt(&Op::returning(Write, &[Object(K::Thread)], Target::Path("id")));
+    ThreadGoalCreate: POST "/threads/{id}/goal", Rule("thread.interact on the thread, and the caller's own use of the model it runs on"), none, json ThreadGoalCreateBody, json ThreadGoal, 201,
+        operation Op::returning(Write, &[Object(K::Thread)], Target::Path("id"));
     /// Edits a goal, pauses it, or sets it going again.
     ThreadGoalUpdate: PATCH "/threads/{id}/goal", Permission("thread.interact"), none, json ThreadGoalUpdateBody, json ThreadGoal, 200,
         operation Op::returning(Write, &[Object(K::Thread)], Target::PermissionObject);

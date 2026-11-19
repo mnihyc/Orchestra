@@ -97,14 +97,9 @@ test('the export, move, private, delete and share dialogs are accessible in both
   await page.keyboard.press('Escape');
 
   await open('Move to…');
-  const move = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await move.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade deps');
-  const destination = page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true });
-  await expect(destination).not.toHaveAttribute('aria-disabled', 'true');
-  await destination.click();
-  // The native folder form retains document identity within the org; its old standalone ownership sentence is gone.
-  await expect(move.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Rollout plan.md');
-  await expect(move.getByRole('button', { name: 'Move', exact: true })).toBeEnabled();
+  const move = page.getByRole('dialog', { name: 'Move “Rollout plan”' });
+  await move.getByRole('option', { name: /Upgrade deps/ }).click();
+  await expect(move.getByText('Ownership stays the same.')).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
   await page.keyboard.press('Escape');
 
@@ -114,10 +109,7 @@ test('the export, move, private, delete and share dialogs are accessible in both
   await page.keyboard.press('Escape');
 
   await open('Delete');
-  // The native deletion form names the exact file in its preview under the shared Delete heading.
-  const deleting = page.getByRole('dialog', { name: 'Delete', exact: true });
-  await expect(deleting.getByText('Rollout plan.md', { exact: true }).first()).toBeVisible();
-  await expect(deleting.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alertdialog').or(page.getByRole('dialog', { name: 'Delete “Rollout plan”?' }))).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="alertdialog"], [role="dialog"]');
   await page.keyboard.press('Escape');
 

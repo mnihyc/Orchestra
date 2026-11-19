@@ -69,7 +69,6 @@ Contract **1**.
 | `name` | `string` | required | Its name: one of a kind among the programs of a machine, and among the built-in sources. |
 | `title` | `string` | required | What it is called. |
 | `summary` | `string` | required | What it is, in one sentence. |
-| `summary_locales` | `map of string` | may be absent | Optional localized descriptions supplied by the source, with summary as the fallback. |
 | `contract` | `integer (uint32)` | required | The version of this contract it speaks. |
 | `facts` | `SourceDescriptorFacts or null` | may be absent | What it tells of the facts; `null` when it implements no facts. |
 | `models` | `SourceDescriptorModels or null` | may be absent | `null` when it lists no models. |
@@ -81,20 +80,12 @@ Contract **1**.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
-| `admin_credential` | `AdminCredential or null` | may be absent | Optional source-only administrative credential; never used for model requests. |
 | `reports` | `FactMember[]` | may be absent | The members it can tell. A member it does not list is unsupported until it tells it; a name this contract does not know is left out. |
 | `field_reports` | `map of string[]` | may be absent | Optional closed field lists for normalized credit member/item paths. Omitted paths keep legacy unknown capability; a present value still proves support independently of this list. |
 | `spends_resets` | `boolean` | may be absent | Whether it spends the resets it lists in `available_resets` (`resets.spend`). |
 | `credential` | `SourceCredential` | may be absent | Whether it wants the provider's key to read. |
 | `min_interval_secs` | `integer or null` | may be absent | The least time between two of its reads, in seconds, at least 60; `null` leaves it to Orch. |
 | `plans` | `map of string` | may be absent | The plans it may name in `plan`, by id, with the name to show for each. |
-
-**AdminCredential**
-
-| Member | JSON shape | Presence | Meaning |
-|--------|------------|----------|---------|
-| `labels` | `map of string` | required | Localized field labels; an extension can call it an admin or management key without core changes. |
-| `reports` | `FactMember[]` | required | Members unavailable while this source secret is absent. |
 
 **FactMember**
 

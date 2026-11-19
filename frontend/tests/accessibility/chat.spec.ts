@@ -11,8 +11,6 @@ const MESSAGES = '/org/acme/messages';
 
 /** The first message that says it: a reply repeats the first line of what it answers. */
 const said = (page: Page, text: string) => messageSaying(page, text).first();
-/** The open chat's own menu, which a group's acts are in. */
-const chatMenu = (page: Page) => page.getByRole('region', { name: 'Open chat' }).getByRole('group', { name: 'Chat controls' }).getByRole('button', { name: 'Actions', exact: true });
 
 test.beforeEach(async () => {
   await scenario();
@@ -23,7 +21,7 @@ test('a topic’s conversation with its replies, mentions and code, beside the t
   await signIn(page);
   await page.goto(TOPIC);
   await expect(said(page, 'Has anybody seen the session cookie')).toBeVisible();
-  await expect(said(page, 'that fits what the agent found')).toBeVisible();
+  await expect(said(page, 'Thanks @linus')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await chats('/typing', { node: 'Fix login', as: 'dora' });
@@ -73,17 +71,14 @@ test('the notifications of a chat and the messages pinned in it', async ({ page 
   await page.goto(TOPIC);
   await openMessageMenu(page, 'Please take a look');
   await page.getByRole('menuitem', { name: 'Pin' }).click();
-  // Who pinned it is a person's chip after the words.
-  await expect(said(page, 'Please take a look').getByText(/^Pinned by/).first()).toBeVisible();
-  await expect(said(page, 'Please take a look').getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
+  await expect(said(page, 'Please take a look').getByText('Pinned by Ada Lovelace')).toBeVisible();
 
-  // The chat's own notification setting, which says what it follows by default.
-  await page.getByRole('group', { name: 'Chat controls' }).getByRole('button', { name: 'Notification settings' }).first().click();
+  await page.getByRole('button', { name: /^You have not chosen here/ }).click();
   await expect(page.getByRole('menuitemradio', { name: 'All', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
-  await page.getByRole('group', { name: 'Chat controls' }).getByRole('button', { name: 'Pinned messages' }).first().click();
+  await page.getByRole('button', { name: 'Pinned messages' }).click();
   await expect(page.getByRole('dialog', { name: 'Pinned messages' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
@@ -92,7 +87,7 @@ test('a message edited in place, one that is not sent yet, and the sentence that
   await chats('/seed');
   await signIn(page);
   await page.goto(TOPIC);
-  await openMessageMenu(page, 'that fits what the agent found');
+  await openMessageMenu(page, 'Thanks @linus');
   await page.getByRole('menuitem', { name: 'Edit' }).click();
   await expect(page.getByRole('textbox', { name: 'Edit message' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -112,8 +107,7 @@ test('the Messages screen: its list, the unread counts, and a conversation open 
   await chats('/say', { chat: group.chat, as: 'linus', text: '@ada the build is green' });
   await signIn(page);
   await page.goto(MESSAGES);
-  // The list holds a section for each kind of chat, and the chats in each.
-  await expect(page.getByRole('list', { name: 'Chats' }).getByRole('list').getByRole('listitem')).toHaveCount(2);
+  await expect(page.getByRole('list', { name: 'Chats' }).getByRole('listitem')).toHaveCount(2);
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('list', { name: 'Chats' }).getByRole('link', { name: /Release crew/ }).click();
@@ -128,12 +122,12 @@ test('the menu of one chat in the list, and the menu of a group', async ({ page 
   await page.goto(`${MESSAGES}?chat=${String(group.chat)}`);
   await expect(said(page, 'the build is green')).toBeVisible();
 
-  await page.getByRole('complementary', { name: 'Chats' }).getByRole('button', { name: /^Actions for / }).first().click();
+  await page.getByRole('button', { name: /^Actions for / }).first().click();
   await expect(page.getByRole('menuitem', { name: 'Mute' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
-  await chatMenu(page).click();
-  await expect(page.getByRole('menuitem', { name: 'Members' })).toBeVisible();
+  await page.getByRole('button', { name: 'Group', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'People in this group' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -142,13 +136,13 @@ test('the people of a group, and adding somebody from outside the org as a guest
   const group = await chats('/chat', { org: ACME.org, members: ['ada', 'dora'], name: 'Release crew' });
   await signIn(page);
   await page.goto(`${MESSAGES}?chat=${String(group.chat)}`);
-  await chatMenu(page).click();
-  await page.getByRole('menuitem', { name: 'Members' }).click();
-  await expect(page.getByRole('dialog', { name: 'Members' })).toBeVisible();
+  await page.getByRole('button', { name: 'Group', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'People in this group' }).click();
+  await expect(page.getByRole('dialog', { name: 'People in this group' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
-  await chatMenu(page).click();
+  await page.getByRole('button', { name: 'Group', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Add people…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Add people', exact: true });
   await dialog.getByRole('searchbox', { name: 'Search people' }).fill('gus');
@@ -170,7 +164,7 @@ test('New message: choosing people for a direct chat, and for a group with its n
   await expect(dialog.getByRole('button', { name: 'Message Dora Developer' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await dialog.getByRole('button', { name: /Linus Pauling/ }).click();
-  await expect(dialog.getByRole('button', { name: 'Start a group of 3' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Start a group of 2' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -186,8 +180,7 @@ test('an admin who reads the chats of others and of places, with the sentence th
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('link', { name: 'Docs crew' }).click();
-  // The mark is on the chat's row and beside its open conversation alike.
-  await expect(page.getByRole('img', { name: 'You see this as an admin of Acme' })).toHaveCount(2);
+  await expect(page.getByRole('img', { name: 'You see this as an admin of Acme' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -205,7 +198,7 @@ test('messages picked in a selection, and the dialog that forwards them', async 
   const dialog = page.getByRole('dialog', { name: 'Forward' });
   await expect(dialog).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  await dialog.getByRole('searchbox', { name: 'Search chats, people and threads' }).fill('li');
+  await dialog.getByRole('searchbox', { name: 'Search chats and people' }).fill('li');
   await dialog.getByRole('button', { name: /Linus Pauling/ }).click();
   await expect(dialog.getByRole('button', { name: 'Forward to 1 place' })).toBeVisible();
   await expectAccessibleInBothThemes(page);

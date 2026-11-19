@@ -47,11 +47,7 @@ refreshes those pins, and CI checks them offline beside the pinned Actions.
 
 `package --native-connector TARGET --out DIR` builds, unit-tests and runs a
 connector on that target's actual operating system and processor, recording its
-size, BLAKE3 and SHA-256 in an input manifest. Its executed `version` report starts
-with the compiled identity and then lists adapters. Release checks compare that
-identity line with the version, tag and committed CI component counter; diagnostics
-quote the actual line and complete report so line breaks and whitespace are visible.
-Repeated `package --connectors DIR`
+size, BLAKE3 and SHA-256 in an input manifest. Repeated `package --connectors DIR`
 imports only verified builds of the same commit, release and link protocol. They
 are release assets and are also in every server archive's `connectors/` directory
 with their platform-specific download URLs. `--require-all-connectors` refuses

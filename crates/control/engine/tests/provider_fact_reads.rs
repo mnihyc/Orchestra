@@ -50,18 +50,22 @@ async fn world() -> (World, orch_types::ManualClock) {
 #[tokio::test]
 async fn a_new_or_changed_source_is_due_without_opening_its_page_and_its_claim_prevents_repeating_it()
  {
-    use orch_db::queries::provider_facts;
+    use orch_db::queries::provider_facts::{self, ReadSchedule};
     let (world, clock) = world().await;
     let configured = orch_engine::provider_fact_reads::ReadConfig::from_server(
         &orch_config::ServerConfig::default(),
     );
+    let schedule = || ReadSchedule {
+        recent: configured.recent,
+        active: configured.active,
+        idle: configured.idle,
+        refused: configured.refused,
+    };
     let mut conn = world.pool.acquire().await.unwrap();
     sqlx::query("UPDATE providers SET facts_at=NULL,facts_requested_at=NULL,facts='{}',sources='{}' WHERE id=$1")
         .bind(world.provider).execute(&mut *conn).await.unwrap();
     assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, clock.now(), 100)
+        provider_facts::due_reads(&mut conn, clock.now(), schedule(), 100)
             .await
             .unwrap()
             .contains(&world.provider)
@@ -78,9 +82,7 @@ async fn a_new_or_changed_source_is_due_without_opening_its_page_and_its_claim_p
         .unwrap()
     );
     assert!(
-        !world
-            .engine()
-            .due_provider_fact_reads(&mut conn, clock.now(), 100)
+        !provider_facts::due_reads(&mut conn, clock.now(), schedule(), 100)
             .await
             .unwrap()
             .contains(&world.provider)
@@ -104,9 +106,7 @@ async fn a_new_or_changed_source_is_due_without_opening_its_page_and_its_claim_p
         .unwrap()
     );
     assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, clock.now(), 100)
+        provider_facts::due_reads(&mut conn, clock.now(), schedule(), 100)
             .await
             .unwrap()
             .contains(&world.provider),
@@ -671,195 +671,6 @@ async fn registration_and_sign_in_read_facts_and_a_page_reads_at_most_once_a_min
 }
 
 #[tokio::test]
-async fn provider_fact_cadences_use_own_and_topic_values_before_limiting_due_reads() {
-    use orch_db::queries::settings::{Stored, put, testing::insert_provider};
-    let (world, clock) = world().await;
-    let (default, topic) = (orch_types::new_id(), orch_types::new_id());
-    let now = clock.now();
-    let mut conn = world.pool.acquire().await.unwrap();
-    insert_provider(
-        &mut conn,
-        default,
-        "Default interval",
-        world.ada,
-        world.root,
-        &json!({}),
-    )
-    .await
-    .unwrap();
-    insert_provider(
-        &mut conn,
-        topic,
-        "Topic interval",
-        world.ada,
-        world.topic,
-        &json!({}),
-    )
-    .await
-    .unwrap();
-    sqlx::query("UPDATE providers SET machine_id=$2,status='ready',facts='{}',facts_requested_at=$3 WHERE id=ANY($1)")
-        .bind([world.provider, default, topic]).bind(world.machine_id).bind(now).execute(&mut *conn).await.unwrap();
-    sqlx::query("UPDATE providers SET runtime_config=$2 WHERE id=$1")
-        .bind(world.provider)
-        .bind(json!({"providers.facts_idle_minutes":10}))
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    // The older, hourly candidate must not consume the result limit before it is due.
-    sqlx::query("UPDATE providers SET facts_requested_at=$2 WHERE id=$1")
-        .bind(default)
-        .bind(now - Duration::seconds(1))
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    put(
-        &mut conn,
-        Some(world.topic),
-        "providers.facts_idle_minutes",
-        &Stored {
-            value: &json!(12),
-            locked: false,
-            by: Some(world.ada),
-            at: now,
-        },
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(9), 100)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(10), 1)
-            .await
-            .unwrap(),
-        [world.provider]
-    );
-    let due = world
-        .engine()
-        .due_provider_fact_reads(&mut conn, now + Duration::minutes(12), 100)
-        .await
-        .unwrap();
-    assert!(due.contains(&world.provider) && due.contains(&topic) && !due.contains(&default));
-    assert_eq!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(60), 1)
-            .await
-            .unwrap(),
-        [default],
-        "the oldest due read wins after each cadence has been evaluated"
-    );
-    sqlx::query("UPDATE providers SET runtime_config=$2 WHERE id=$1")
-        .bind(world.provider)
-        .bind(json!({"providers.facts_idle_minutes":i64::MAX}))
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    assert!(
-        !world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::days(365), 100)
-            .await
-            .unwrap()
-            .contains(&world.provider),
-        "a large valid interval must not overflow into an immediate read"
-    );
-}
-
-#[tokio::test]
-async fn provider_fact_active_recent_and_refused_intervals_reach_the_due_reader() {
-    let (world, clock) = world().await;
-    let thread = world.thread("Recent work").await;
-    let (turn, _) = world.running_turn(thread, "Hello").await;
-    world
-        .say(
-            thread,
-            common::turn_ended(
-                turn.turn_id,
-                orch_link_contract::events::TurnOutcome::Completed,
-            ),
-        )
-        .await;
-    world.wait_turn(turn.turn_id, "completed").await;
-    world.wait_state(thread, "idle").await;
-    let now = clock.now();
-    let mut conn = world.pool.acquire().await.unwrap();
-    sqlx::query("UPDATE providers SET runtime_config=$2,facts_requested_at=$3,facts='{}',status='ready' WHERE id=$1")
-        .bind(world.provider).bind(json!({"providers.facts_active_minutes":3,"providers.facts_recent_minutes":30,"providers.facts_refused_minutes":2}))
-        .bind(now).execute(&mut *conn).await.unwrap();
-    assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(
-                &mut conn,
-                now + Duration::minutes(3) - Duration::seconds(1),
-                100
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(3), 100)
-            .await
-            .unwrap(),
-        [world.provider]
-    );
-    assert_eq!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(20), 100)
-            .await
-            .unwrap(),
-        [world.provider],
-        "the provider's recent-work window extends beyond the shipped fifteen minutes"
-    );
-    assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(31), 100)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    sqlx::query("UPDATE providers SET status='error' WHERE id=$1")
-        .bind(world.provider)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    assert!(
-        world
-            .engine()
-            .due_provider_fact_reads(
-                &mut conn,
-                now + Duration::minutes(2) - Duration::seconds(1),
-                100
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        world
-            .engine()
-            .due_provider_fact_reads(&mut conn, now + Duration::minutes(2), 100)
-            .await
-            .unwrap(),
-        [world.provider]
-    );
-}
-
-#[tokio::test]
 async fn a_recent_thread_gets_five_minute_reads_an_idle_provider_hourly_and_an_away_machine_none() {
     let (world, clock) = world().await;
     let count = listen(&world, "ready", json!({"plan":"plus","windows":[]}));
@@ -871,17 +682,6 @@ async fn a_recent_thread_gets_five_minute_reads_an_idle_provider_hourly_and_an_a
     let thread = world.thread("recent").await;
     let (turn, _) = world.running_turn(thread, "Hello").await;
     world.answer(thread, &turn, "answer", "Done").await;
-    world
-        .say(
-            thread,
-            common::turn_ended(
-                turn.turn_id,
-                orch_link_contract::events::TurnOutcome::Completed,
-            ),
-        )
-        .await;
-    world.wait_turn(turn.turn_id, "completed").await;
-    world.wait_state(thread, "idle").await;
     clock.advance(Duration::minutes(5) - Duration::seconds(1));
     world.engine().refresh_due_provider_facts().await.unwrap();
     assert_eq!(*count.lock().unwrap(), 1);

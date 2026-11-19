@@ -43,7 +43,7 @@ function LaneItems({ ids, agentHeads }: { ids: readonly string[]; agentHeads: bo
     const turn = item?.turn_id ?? id;
     const head = agentHeads && item?.kind === 'agent_message' && !spoken.has(turn);
     if (head) spoken.add(turn);
-    return <li key={id}><LaneItem id={id} head={head} /></li>;
+    return <LaneItem key={id} id={id} head={head} />;
   });
 }
 
@@ -75,7 +75,7 @@ export function ConversationLane({ kind, identity, label, activityLabel, context
     {history}
     <TimelineContextValue.Provider value={compact}>
       <div ref={itemsRef} role="log" aria-label={activityLabel} className="flex min-w-0 flex-col gap-2">
-        {ids.length === 0 ? loading ? <SkeletonRows rows={2} /> : <EmptyState compact title={empty} /> : <ol role="list" className="flex min-w-0 list-none flex-col gap-2"><LaneItems ids={ids} agentHeads={agentHeads} /></ol>}
+        {ids.length === 0 ? loading ? <SkeletonRows rows={2} /> : <EmptyState compact title={empty} /> : <LaneItems ids={ids} agentHeads={agentHeads} />}
       </div>
       {footer}
     </TimelineContextValue.Provider>

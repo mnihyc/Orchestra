@@ -208,7 +208,6 @@ struct Tracked {
     expires_at: Option<Time>,
     issued_at: Option<Time>,
     signed_in: bool,
-    auth_mode: Option<String>,
     facts: Option<ProviderFacts>,
 }
 
@@ -301,28 +300,6 @@ impl LoginTracker {
 
     fn cached(&self) -> Option<ProviderFacts> {
         self.with(|tracked| tracked.facts.clone())
-    }
-
-    /// Retain the actual program-reported authentication mode, never a provider-kind guess.
-    fn observed_auth_mode(&self, mode: &str) {
-        self.with(|tracked| tracked.auth_mode = Some(mode.to_ascii_lowercase()));
-    }
-
-    fn credential_yield(&self, token: bool) -> Option<CredentialYield> {
-        self.with(|tracked| match tracked.auth_mode.as_deref() {
-            Some("apikey" | "api_key" | "bedrockapikey" | "bedrockaccesskeys") => {
-                Some(CredentialYield::Key)
-            }
-            Some("chatgptauthtokens" | "personalaccesstoken" | "headers" | "agentidentity") => {
-                Some(CredentialYield::Token)
-            }
-            None | Some("chatgpt") => Some(if token {
-                CredentialYield::Token
-            } else {
-                CredentialYield::Login
-            }),
-            Some(_) => None,
-        })
     }
 
     /// Notes that nobody is signed in.
@@ -741,15 +718,16 @@ pub fn facts_from_snapshot(snapshot: &Json, tracker: &LoginTracker, now: Time) -
         plan_credits,
         limit_reached,
         identity,
-        credential: signed_in
-            .then(|| tracker.credential_yield(token))
-            .flatten()
-            .map(|yields| CredentialFacts {
-                method,
-                yields,
-                expires_at,
-                issued_at: tracker.with(|tracked| tracked.issued_at),
-            }),
+        credential: signed_in.then_some(CredentialFacts {
+            method,
+            yields: if token {
+                CredentialYield::Token
+            } else {
+                CredentialYield::Login
+            },
+            expires_at,
+            issued_at: tracker.with(|tracked| tracked.issued_at),
+        }),
         ..ProviderFacts::default()
     }
 }
@@ -810,18 +788,14 @@ pub fn facts_from_update(
                 tracker.signed_out();
                 return Some(ProviderFacts::default());
             }
-            if let Some(mode) = auth_mode.as_str() {
-                tracker.observed_auth_mode(mode);
-            }
             let (identity, _, _, _, _) = tracker.snapshot();
             tracker.signed_in_as(identity, plan);
             let mut facts = tracker.cached().unwrap_or_default();
             let (identity, plan, _, _, _) = tracker.snapshot();
             facts.identity = identity;
             facts.plan = plan;
-            facts.credential = facts_from_snapshot(&json!({}), tracker, now).credential;
             facts.credential_verified = None;
-            for field in ["identity", "plan", "credential"] {
+            for field in ["identity", "plan"] {
                 facts.field_times.insert(field.to_owned(), now);
             }
             Some(tracker.cache(facts))
@@ -900,9 +874,6 @@ pub async fn read_facts(
     if mode.is_none() {
         tracker.signed_out();
         return Ok(ProviderFacts::default());
-    }
-    if let Some(mode) = mode.as_deref() {
-        tracker.observed_auth_mode(mode);
     }
     if let Some(home) = home {
         let (method, expires_at) = read_login_note(home);
@@ -1494,69 +1465,6 @@ mod tests {
         assert_eq!(window_label(Some(4_320)), "3d");
         assert_eq!(window_label(Some(45)), "45m");
         assert_eq!(window_label(None), "window");
-    }
-
-    #[test]
-    fn native_authentication_reports_distinguish_keys_from_subscription_credentials() {
-        let tracker = LoginTracker::default();
-        tracker.signed_in_as(None, Some("pro".into()));
-        let now: Time = "2026-10-11T10:00:00.000Z".parse().unwrap();
-        for (mode, expected) in [
-            ("apiKey", Some(CredentialYield::Key)),
-            ("chatgpt", Some(CredentialYield::Login)),
-            ("chatgptAuthTokens", Some(CredentialYield::Token)),
-            ("headers", Some(CredentialYield::Token)),
-            ("unknown-future-mode", None),
-        ] {
-            let report = facts_from_update(
-                "account/updated",
-                &json!({"authMode":mode,"planType":"pro"}),
-                &tracker,
-                now,
-            )
-            .unwrap();
-            assert_eq!(
-                report.credential.map(|credential| credential.yields),
-                expected
-            );
-            assert_eq!(report.plan.as_deref(), Some("pro"));
-            let later = facts_from_snapshot(&json!({"planType":"pro"}), &tracker, now);
-            assert_eq!(
-                later.credential.map(|credential| credential.yields),
-                expected
-            );
-        }
-        tracker.signed_out();
-        assert!(
-            facts_from_snapshot(&json!({}), &tracker, now)
-                .credential
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn account_plan_ids_survive_native_reports_including_new_and_unknown_plans() {
-        let tracker = LoginTracker::default();
-        for plan in [
-            "pro",
-            "prolite",
-            "promax",
-            "ent26",
-            "enterprise_cbp_automation",
-            "enterprise_cbp_usage_based",
-            "sci",
-            "sci_plus",
-            "future-unlisted-plan",
-        ] {
-            let facts = facts_from_snapshot(
-                &json!({"planType":plan,"primary":null,"secondary":null,"credits":null}),
-                &tracker,
-                "2026-10-11T10:00:00.000Z".parse().unwrap(),
-            );
-            assert_eq!(facts.plan.as_deref(), Some(plan));
-            assert!(facts.windows.is_empty());
-            assert!(!facts.is_exhausted());
-        }
     }
 
     #[test]

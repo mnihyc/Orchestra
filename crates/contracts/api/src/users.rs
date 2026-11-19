@@ -292,9 +292,6 @@ pub struct InvitationPreviewWhat {
 /// What an invitation shows to whoever holds its token, before it is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InvitationPreview {
-    /// Current effective organization terms, or null for no terms and system invitations.
-    #[serde(default)]
-    pub terms: Option<InvitationTerms>,
     /// What it invites to.
     pub kind: InvitationKind,
     /// The org, for an org invitation.
@@ -311,15 +308,6 @@ pub struct InvitationPreview {
     pub email_bound: bool,
     /// When it stops being good.
     pub expires_at: Time,
-}
-
-/// Exact joined Markdown shown to the invitee, and its SHA-256 acknowledgement identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct InvitationTerms {
-    /// The effective text, root organization first, joined by the ordinary setting resolver.
-    pub text: String,
-    /// Lowercase hexadecimal SHA-256 of the UTF-8 bytes of exactly text.
-    pub hash: String,
 }
 
 /// Searches for people by the start of a username or a part of a display name
@@ -377,15 +365,12 @@ pub struct InvitationCreateReply {
     /// The invitation.
     pub invitation: Invitation,
     /// The secret of the link, shown once.
-    pub token: Option<String>,
+    pub token: String,
     /// The address of the link to give out.
-    pub url: Option<String>,
+    pub url: String,
     /// True when a personal link went out by mail. It is false where the org cannot send mail, and
     /// then the caller hands the link on.
     pub sent: bool,
-    /// A completed repeat has no retrievable secret or link.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 /// The authorized new capability without existing invitation or destination content.
@@ -396,14 +381,11 @@ pub struct InvitationCreateReceipt {
     /// The offer that was created.
     pub invitation_id: Id,
     /// The newly generated secret, shown once.
-    pub token: Option<String>,
+    pub token: String,
     /// The generated capability link.
-    pub url: Option<String>,
+    pub url: String,
     /// Whether the native mail intent was accepted.
     pub sent: bool,
-    /// A completed repeat has no retrievable secret or link.
-    #[serde(default, skip_serializing_if = "crate::common::is_false")]
-    pub already_created: bool,
 }
 
 crate::common::full_or_receipt! {
@@ -430,9 +412,6 @@ pub struct InvitationListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvitationAcceptBody {
-    /// SHA-256 from the effective terms displayed before this acceptance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_terms_hash: Option<String>,
     /// The secret of the link.
     pub token: String,
 }
@@ -669,20 +648,26 @@ pub enum UserShare {
 crate::endpoints! {
     /// Opens a person's page with only the pins and places this reader may view.
     ProfileGet: GET "/profiles/{username}", User, none, none, json UserProfile, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Account)], Target::Resolved("account_by_username")),
-            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document)], Target::ResolvedCollection("profile_pins")),
-            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill)], Target::ResolvedCollection(crate::account_sources::PROFILE_CONTEXT_ROLE)),
-            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("profile_places")),
-            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("profile_document_names")),
-        ]);
+        operation Op::single(
+            Read,
+            &[Identity(I::Account)],
+            Target::Resolved("account_by_username"),
+        );
     /// Reads work by day in threads this reader may view.
     ProfileActivityGet: GET "/profiles/{username}/activity", User, none, none, json ProfileActivity, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Identity(I::Account)], Target::Resolved("account_by_username")),
-            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("profile_activity_threads")),
-            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("profile_activity_topics")),
-        ]);
+        operation Op::single(
+            Read,
+            &[
+                Identity(I::Account),
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("account_and_activity_resources"),
+        );
     /// Changes the signed-in person's page.
     MeProfileUpdate: PATCH "/me/profile", User, none, json MeProfileUpdateBody, json UserProfile, 200,
         operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);
@@ -697,10 +682,18 @@ crate::endpoints! {
         operation Op::single(Read, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Lists current direct shares between these two people, cut to both people's View before paging, ordered by kind and identifier.
     UserSharesGet: GET "/users/{id}/shares", User, query PageQuery, none, json Page<UserShare>, 200,
-        operation Op::facets(&[
-            Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Identity(I::Chat)], Target::ResolvedCollection("results")),
-            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("shared_document_names")),
-        ]);
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Document),
+                Identity(I::Chat),
+            ],
+            Target::Resolved("results"),
+        );
     /// Creates an invitation, either a link to share or a personal link bound to one address.
     InvitationCreate: POST "/invitations", Rule("members.manage on the org, a system admin for the system, or what naming an outsider needs on a node or chat"), none, json InvitationCreateBody, json InvitationCreateResponse, 200,
         operation Op::receipt(&Op::facets(&[

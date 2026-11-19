@@ -7,9 +7,6 @@
 #![cfg(target_os = "linux")]
 mod ports_support;
 
-#[path = "ports_walk/native_scopes.rs"]
-mod native_scopes;
-
 use async_trait::async_trait;
 use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
 use orch_api_contract::nodes::{OrgCreate, OrgCreateBody, ProjectCreate, ProjectCreateBody};
@@ -41,10 +38,10 @@ impl orch_api_core::machine_requests::Handler for UnavailablePortReads {
     async fn import(
         &self,
         _machine: Id,
-        request: orch_link_contract::mcp_import::McpLocalAsk,
+        request: orch_link_contract::mcp_import::McpImportAsk,
     ) -> orch_link_contract::mcp_import::McpImportAnswer {
         orch_link_contract::mcp_import::McpImportAnswer {
-            request_id: request.request_id(),
+            request_id: request.request_id,
             server_id: None,
             code: Some("unavailable".into()),
             detail: "the test application hook is unavailable".into(),
@@ -248,8 +245,6 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
-        .into_full()
-        .expect("ordinary created organization content")
         .base
         .id;
     let project = client
@@ -363,7 +358,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .token(&manager_token)
         .body(&MachineEnvironmentCreateBody {
             data_sources: None,
-            home_id: Some(org),
+            home_id: org,
             name: "Preview service".into(),
             root: work.path().display().to_string(),
             home_node_id: None,
@@ -374,8 +369,6 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .send()
         .await
         .ok()
-        .into_full()
-        .expect("ordinary directory registration retains full native content")
         .base
         .id;
     ports_support::eventually("the actual attached environment is running", || async {
@@ -404,9 +397,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&request(port, project))
         .send()
         .await
-        .ok()
-        .into_full()
-        .expect("the ordinary port review retains its full native plan");
+        .ok();
     let body = EnvironmentPortOpeningCreateBody {
         client_id: new_id(),
         preflight_id: plan.preflight_id,
@@ -417,18 +408,14 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .body(&body)
         .send()
         .await
-        .ok()
-        .into_full()
-        .expect("ordinary opening confirmation retains the native full result");
+        .ok();
     let repeated = client
         .call(EnvironmentPortOpeningCreate, &[&env, &port.to_string()])
         .token(&manager_token)
         .body(&body)
         .send()
         .await
-        .ok()
-        .into_full()
-        .expect("ordinary opening confirmation retains the native full result");
+        .ok();
     assert_eq!(first.opening.id, repeated.opening.id);
     let native = connector
         .environment_role()
@@ -498,16 +485,6 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         assert!(refused.data.is_none());
         assert!(refused.failure.is_some());
     }
-    native_scopes::scoped_native_uses(
-        &world,
-        &client,
-        &app,
-        colleague,
-        env,
-        port,
-        first.opening.id,
-    )
-    .await;
     let usage = client
         .call(EnvironmentPortUseCreate, &[&env, &port.to_string()])
         .token(&colleague_token)
@@ -517,9 +494,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok()
-        .into_full()
-        .unwrap();
+        .ok();
     let ingress = tokio::net::TcpListener::bind(("127.0.0.1", ports_support::reserve_port()))
         .await
         .unwrap();
@@ -553,19 +528,13 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         .await
         .ok();
     assert_eq!(live.counts.active, 1);
-    // The scoped-use exercise above deliberately left recent closed connections.
-    // The native journal pages by id, so its first row need not be the active channel.
-    let connections = live.connections.as_ref().unwrap();
-    let active = connections
-        .iter()
-        .filter(|row| row.ended_at.is_none())
-        .collect::<Vec<_>>();
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].inside, inside);
-    assert_eq!(active[0].outside.port, outside.port());
+    assert_eq!(live.connections.as_ref().unwrap()[0].inside, inside);
+    assert_eq!(
+        live.connections.as_ref().unwrap()[0].outside.port,
+        outside.port()
+    );
     // These are the actual native peer and actual TLS machine/API path, not a scripted signer.
     // Concurrent reads of one peer must share its one fresh assertion, including its JWS id.
-    let active_id = active[0].id;
     let mut peers = tokio::task::JoinSet::new();
     for _ in 0..16 {
         let (base, token, path) = (
@@ -582,7 +551,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut assertion = None;
     while let Some(answer) = peers.join_next().await {
         let peer: PortPeer = serde_json::from_value(answer.unwrap()).unwrap();
-        assert_eq!(peer.connection.id, active_id);
+        assert_eq!(peer.connection.id, live.connections.as_ref().unwrap()[0].id);
         assert_eq!(peer.connection.inside, inside);
         assert!(peer.assertion.len() < orch_link_contract::local_ports::PEER_REPLY_BYTES);
         let claims = orch_pki::port_assertions::verify(
@@ -637,9 +606,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok()
-        .into_full()
-        .unwrap();
+        .ok();
     let mut manager_stream = tokio::net::TcpStream::connect(ingress.local_addr().unwrap())
         .await
         .unwrap();
@@ -734,9 +701,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok()
-        .into_full()
-        .unwrap();
+        .ok();
     let udp_ingress = tokio::net::UdpSocket::bind(("127.0.0.1", ports_support::reserve_port()))
         .await
         .unwrap();
@@ -852,9 +817,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
         })
         .send()
         .await
-        .ok()
-        .into_full()
-        .unwrap();
+        .ok();
     let mut after_stream = tokio::net::TcpStream::connect(ingress.local_addr().unwrap())
         .await
         .unwrap();

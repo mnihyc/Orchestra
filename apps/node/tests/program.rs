@@ -1,5 +1,4 @@
 //! The program itself, run as a process against a real gateway and API on loopback: it enrolls a host with a host token, holds its session and tells the system what the host has, says who it is, and stops when it is told to.
-// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -143,18 +142,12 @@ ranges = [{{ from = 41000, to = 41010 }}]
     );
     assert!(out.contains("Enrolled program-host"), "{out}");
     let machine = world.wait_enrolled(hint).await;
-    // A configuration written before the node's first start can contain unmarked connector defaults.
-    // Those defaults are not explicit local refusals of the host's capabilities.
+    // The previous release had no policy provenance marker. Its serialized connector defaults
+    // were not local refusals on a node; upgrade must preserve the host's effective behavior.
     let old_data =
         orch_connector_core::enrollment::DataDir::open(std::path::Path::new(data)).unwrap();
     let mut legacy = old_data.config(|_| None).unwrap();
-    let endpoints = old_data.endpoints(&legacy).unwrap();
-    assert!(
-        legacy.endpoints.is_empty(),
-        "system-advertised addresses are not a local override"
-    );
-    assert_eq!(endpoints, old_data.record().unwrap().server_endpoints);
-    assert!(!old_data.record().unwrap().gateways.is_empty());
+    let endpoints = legacy.endpoints.clone();
     assert!(
         !endpoints.is_empty(),
         "the enrolled node has its gateway addresses"
@@ -167,19 +160,14 @@ ranges = [{{ from = 41000, to = 41010 }}]
     legacy.environment.remote_write = false;
     legacy.environment.terminal = false;
     legacy.tools.fetch = false;
-    // Serializing local policy keeps the independently enrolled system advertisement.
+    // A previous fully serialized config lacks provenance, but retains the enrollment's endpoints.
     let keys = orch_link_contract::policy::PolicyKey::ALL
         .iter()
         .map(|key| key.as_str().to_owned())
         .collect::<Vec<_>>();
     let legacy = orch_connector_core::policy::sparse_config(&legacy, &keys).unwrap();
     std::fs::write(old_data.config_path(), legacy).unwrap();
-    assert_eq!(
-        old_data
-            .endpoints(&old_data.config(|_| None).unwrap())
-            .unwrap(),
-        endpoints
-    );
+    assert_eq!(old_data.config(|_| None).unwrap().endpoints, endpoints);
     // The token was single-use: a second enrollment into the same directory is refused before anything is sent.
     let again = node(&[
         "--config",

@@ -45,9 +45,6 @@ import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
 import { accessProgramDisplayName, modelDisplayName } from '@/features/models/names';
-import { ModelSources } from './ModelSources';
-import { ModelGroupProposal } from './ModelGroupProposal';
-import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
 const shownName = (model: Pick<ProviderModel, 'display_name' | 'model_name'>,t:TFunction): string => modelDisplayName(model.display_name,t);
 
@@ -254,7 +251,6 @@ function Suggestions({ provider }: { provider: Provider }) {
                     disabled={accept.isPending}
                     onCheckedChange={(on) => setChosen((before) => (on ? [...before, suggestion.model_name] : before.filter((name) => name !== suggestion.model_name)))}
                   />
-                  <ModelSources observed={suggestion} at={provider.facts.field_times.models ?? null} />
                 </li>
               );
             })}
@@ -280,8 +276,6 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ProviderModel | null>(null);
   const [removing, setRemoving] = useState<ProviderModel | null>(null);
-  const observedModels = detailState(provider, 'models') === 'told' ? provider.facts.models : null;
-  const observationsByName = new Map((observedModels ?? []).map((observed) => [observed.model_name, observed]));
   const columns: Column<ProviderModel>[] = [
     {
       id: 'display',
@@ -296,8 +290,6 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
           <div className="flex min-w-0 flex-col gap-1">
             <DisplayName provider={provider} model={model} manage={manage} />
             <ModelAvailability provider={provider} name={model.model_name} />
-            <ModelSources current={model} observed={observationsByName.get(model.model_name)} at={provider.facts.field_times.models ?? null} />
-            <ModelGroupProposal provider={provider} model={model} observed={observationsByName.get(model.model_name)} manage={manage} />
             {withoutRouting && model.display_name !== model.model_name && <code className="text-sm wrap-anywhere text-text-muted">{model.model_name}</code>}
             {model.groups.length > 0 && (
               <ul aria-label={t('models.groups.of')} className="flex flex-wrap gap-1">
@@ -332,15 +324,15 @@ export function ProviderModels({ provider, manage }: { provider: Provider; manag
         id="provider-models"
         title={t('providerRecovery.savedModels')}
         action={
-          <div className="flex flex-wrap items-center gap-2"><ArticleGuideLink article="provider-details" heading="confirmed-values" title={t('providerFill.sourceGuide')} />{manage ? (
+          manage ? (
             <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>
               {t('providers.models.add')}
             </Button>
-          ) : null}</div>
+          ) : undefined
         }
       >
         <div className="flex flex-col gap-4">
-          <GroupStrip provider={provider} models={provider.models} manage={manage} options={provider.model_group_options} revision={provider.revision} />
+          <GroupStrip provider={provider} models={provider.models} manage={manage} />
           {provider.models.length === 0 ? (
             <EmptyState compact icon={<Plus aria-hidden />} title={t('providers.models.none')} description={manage ? t('providers.models.noneLead') : undefined} />
           ) : (

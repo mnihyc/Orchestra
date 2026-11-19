@@ -41,9 +41,9 @@ export interface MachinePlugin {
 }
 
 export interface MachineLink {
-  upBps: number | null;
-  downBps: number | null;
-  roundTripMs: number | null;
+  upBps: number;
+  downBps: number;
+  roundTripMs: number;
 }
 
 export interface MachineFactsView {
@@ -109,7 +109,7 @@ export function readMachineFacts(facts: unknown): MachineFactsView {
       const name = text(entry.name);
       return kind === null || name === null ? null : { kind, name, version: text(entry.version) ?? '', state: text(entry.state) ?? '' };
     }),
-    link: up === null && down === null && trip === null ? null : { upBps: up, downBps: down, roundTripMs: trip },
+    link: up === null || down === null || trip === null ? null : { upBps: up, downBps: down, roundTripMs: trip },
     clockOffsetMs: count(source.clock_offset_ms),
     policy: isRecord(source.policy) ? source.policy : null,
   };
@@ -136,20 +136,6 @@ export function formatRate(bitsPerSecond: number, locale: string): string {
   }
   const digits = unit === 0 || value >= 10 ? 0 : 1;
   return `${formatNumber(value, locale, { maximumFractionDigits: digits })} ${units[unit] ?? 'bit/s'}`;
-}
-
-/** Missing observations stay unknown; a measured zero remains a real value. */
-export function machineLinkWords(link: MachineLink | null, t: TFunction, locale: string): string {
-  const missing = '–';
-  if (link === null) return missing;
-  if (link.roundTripMs !== null && link.upBps !== null && link.downBps !== null) return t('machines.overview.linkValue', {
-    trip: formatNumber(link.roundTripMs, locale), up: formatRate(link.upBps, locale), down: formatRate(link.downBps, locale),
-  });
-  return t('machines.overview.linkPartial', {
-    trip: link.roundTripMs === null ? missing : t('machines.overview.linkTrip', { value: formatNumber(link.roundTripMs, locale) }),
-    up: link.upBps === null ? missing : formatRate(link.upBps, locale),
-    down: link.downBps === null ? missing : formatRate(link.downBps, locale),
-  });
 }
 
 /** The harnesses a machine can run profiles for: those found there whose kind its connector has an adapter for. */

@@ -87,29 +87,8 @@ pub struct ConnectorGatewayStatus {
 }
 
 /// Frozen placement beside an unchanged signed tool ticket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TunnelGatewayRule {
-    LowestCombinedRtt,
-    ExecutorPinned,
-    ExecutorSamplesUnavailable,
-    ExecutorPeerCapability,
-}
-
-/// Placement evidence is informational and never grants tunnel access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TunnelGatewayDecision {
-    pub rule: TunnelGatewayRule,
-    pub source_measured_at: Option<Time>,
-    pub destination_measured_at: Option<Time>,
-    pub max_sample_age_secs: u64,
-    pub combined_round_trip_ms: Option<u64>,
-}
-
-/// Frozen placement beside an unchanged signed tool ticket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TunnelGatewayPlan {
-    pub decision: TunnelGatewayDecision,
     pub plan_id: Id,
     pub src: Id,
     pub dst: Id,

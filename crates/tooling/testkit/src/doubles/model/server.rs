@@ -152,8 +152,6 @@ pub struct Inner {
     pub default: Option<Script>,
     /// Scripts that a request naming a response continues.
     pub stored: HashMap<String, Stored>,
-    /// The holds of a script (`hold <name>`) that the test has released.
-    pub released: std::collections::HashSet<String>,
 }
 
 /// What the handlers share.
@@ -163,28 +161,9 @@ pub struct Shared {
     pub config: RwLock<MockConfig>,
     /// What changes as it runs.
     pub inner: Mutex<Inner>,
-    /// Woken when a hold is released.
-    pub opened: tokio::sync::Notify,
 }
 
 impl Shared {
-    /// Releases the hold of this name: the answers that wait at it go on, and so do those that come to it later.
-    pub fn release(&self, name: &str) {
-        self.lock().released.insert(name.to_owned());
-        self.opened.notify_waiters();
-    }
-
-    /// Waits until the hold of this name is released.
-    async fn held(&self, name: &str) {
-        loop {
-            let opened = self.opened.notified();
-            if self.lock().released.contains(name) {
-                return;
-            }
-            opened.await;
-        }
-    }
-
     /// A server with the given set-up and nothing remembered.
     #[must_use]
     pub fn new(config: MockConfig) -> Self {
@@ -198,7 +177,6 @@ impl Shared {
                 default,
                 ..Inner::default()
             }),
-            opened: tokio::sync::Notify::new(),
         }
     }
 
@@ -503,15 +481,6 @@ fn generate_body(
         return failure(format, wanted, seq, now);
     }
     let usage: Usage = usage_of(segment, inbound.chars);
-    shared.update(seq, |record| {
-        record.usage = Some(super::record::Answered {
-            input: usage.input,
-            output: usage.output,
-            cached: usage.cached,
-            reasoning: usage.reasoning,
-            cache_write: usage.cache_write,
-        });
-    });
     let ctx = Ctx {
         seq,
         model: segment
@@ -554,25 +523,6 @@ fn generate_body(
             frames,
             ending,
             error: false,
-            stall: None,
-        };
-    }
-    if segment
-        .steps
-        .iter()
-        .any(|step| matches!(step, Step::Hold(_)))
-    {
-        // A hold is something a stream waits at; an answer in one piece has nothing to wait at.
-        return Answer {
-            status: StatusCode::BAD_REQUEST.as_u16(),
-            content_type: JSON_TYPE,
-            headers: vec![(name.to_owned(), id)],
-            frames: vec![Frame::Bytes(Bytes::from(
-                json!({ "error": "a script with a `hold` needs a streamed answer: this request does not stream" })
-                    .to_string(),
-            ))],
-            ending: Ending::Completed,
-            error: true,
             stall: None,
         };
     }
@@ -714,8 +664,6 @@ async fn serve_api(shared: Arc<Shared>, parts: http::request::Parts, bytes: Byte
             round: 0,
             status: None,
             outcome: Outcome::Pending,
-            usage: None,
-            hold_expired: None,
         });
         seq
     };
@@ -843,33 +791,6 @@ fn frames_stream(frames: Vec<Frame>, guard: Guard) -> impl Stream<Item = Result<
                 match frames.next() {
                     Some(Frame::Bytes(bytes)) => return Some((Ok(bytes), (frames, guard))),
                     Some(Frame::Wait(duration)) => tokio::time::sleep(duration).await,
-                    Some(Frame::Hold(name)) => {
-                        let limit = guard.shared.config().hold_limit;
-                        if tokio::time::timeout(limit, guard.shared.held(&name))
-                            .await
-                            .is_err()
-                        {
-                            // Nobody released it: the stream says so, in an error event, and breaks, so that the
-                            // test that missed the release fails with the name of the hold.
-                            let words = format!(
-                                "the hold {name:?} of the script was not released within {limit:?}"
-                            );
-                            guard.shared.update(guard.seq, |record| {
-                                record.hold_expired = Some(name.clone())
-                            });
-                            let event = json!({
-                                "type": "error",
-                                "error": { "type": "api_error", "message": words },
-                            });
-                            frames = vec![
-                                Frame::Bytes(Bytes::from(format!(
-                                    "event: error\ndata: {event}\n\n"
-                                ))),
-                                Frame::Abort,
-                            ]
-                            .into_iter();
-                        }
-                    }
                     Some(Frame::Abort) => {
                         tokio::time::sleep(ABORT_GRACE).await;
                         guard.reached_end();

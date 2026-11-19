@@ -22,7 +22,6 @@
 pub mod address;
 pub mod builtins;
 pub mod calls;
-pub mod capabilities;
 pub mod choice;
 pub mod credit_fields;
 pub mod facts;
@@ -32,7 +31,6 @@ pub mod limits;
 pub mod members;
 pub mod models;
 pub mod search;
-pub mod services;
 pub mod source;
 pub mod wire;
 

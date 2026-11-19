@@ -334,7 +334,7 @@ async fn write(
         Some(quoted) => Some(quotes::begin(conn, quoted.thread).await?),
         None => None,
     };
-    loaded.lock(conn, act).await?;
+    loaded.lock(conn).await?;
     if let Some(found) = rows::message_by_client(conn, chat, me, &client_id).await? {
         return Ok(Written {
             seq: loaded.row.seq(),
@@ -343,7 +343,6 @@ async fn write(
             told: Told::default(),
         });
     }
-    loaded.ensure_send()?;
     let seq = chats::take(conn, chat).await?;
     let content = content_of(&parts)?;
     let search = search_text_of(&parts);
@@ -530,7 +529,7 @@ pub async fn lock_edit(
             .await?
             .ok_or_else(|| Error::Internal("the thread of a chat is not there".to_owned()))?;
     }
-    loaded.lock(conn, act).await?;
+    loaded.lock(conn).await?;
     // These are the same blob rows pin/unpin changes later, in the established
     // Thread -> Chat -> blob order. Holding them also excludes collection/replacement.
     let mut all = attachments::blobs_in(&prepared.before);
@@ -745,19 +744,7 @@ async fn delete_as(
         (Some(thread), false) => Some(quotes::begin(conn, thread).await?),
         _ => None,
     };
-    loaded.lock(conn, act).await?;
-    if own {
-        loaded.ensure_send()?;
-    } else if !loaded.standing.moderate {
-        return Err(match loaded.row.node_id {
-            Some(node) if !loaded.standing.inspects() => Error::Lacks {
-                node,
-                permission: Permission::ChatManage,
-            },
-            _ => Error::NotTheAuthor,
-        });
-    }
-
+    loaded.lock(conn).await?;
     let found = rows::message(conn, chat, id)
         .await?
         .ok_or(Error::NotFound)?;
@@ -843,8 +830,7 @@ pub async fn react(
     loaded.ensure_send()?;
     check_emoji(emoji)?;
     let chat = loaded.id();
-    loaded.lock(conn, act).await?;
-    loaded.ensure_send()?;
+    loaded.lock(conn).await?;
     let found = live(rows::message(conn, chat, id).await?)?;
     let me = act.user().to_string();
     let mut reactions = found.reactions.as_object().cloned().unwrap_or_default();
@@ -893,8 +879,7 @@ pub async fn pin(
 ) -> Result<MessageRow, Error> {
     loaded.ensure_send()?;
     let chat = loaded.id();
-    loaded.lock(conn, act).await?;
-    loaded.ensure_send()?;
+    loaded.lock(conn).await?;
     let found = live(rows::message(conn, chat, id).await?)?;
     if found.pinned_at.is_some() == pinned {
         return Ok(found);

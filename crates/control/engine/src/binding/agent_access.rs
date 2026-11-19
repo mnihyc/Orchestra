@@ -173,7 +173,6 @@ impl Engine {
             AgentAccessWhere::Nothing => unreachable!("Nothing has no share"),
         };
         let request = ShareWithAgents {
-            link_origin: None,
             viewers_read: None,
             what: ShareWhat::Node(ShareWhatNode { node_id: source }),
             inside: Some(choice.where_ != AgentAccessWhere::Thread),
