@@ -23,6 +23,7 @@ use http::header;
 use orch_access_contract::key_scope::KeyScope;
 
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::common::{SessionEnd, SessionEndCause};
 
 use orch_db::queries::identity;
 
@@ -40,6 +41,9 @@ use sha2::Sha256;
 
 use std::sync::Arc;
 
+#[path = "authentication/api_key.rs"]
+mod api_key;
+pub use api_key::new_api_key;
 pub use native_read::NativeReadIdentity;
 /// What an access token begins with.
 pub const ACCESS_TOKEN_PREFIX: &str = orch_api_contract::surface::BROWSER_TOKEN_PREFIX;
@@ -137,9 +141,12 @@ pub fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-/// A new token: `prefix` and 32 random bytes in base64url.
+/// Make a bearer for its credential family. Account-key issuers use `new_api_key` to retain its ID.
 #[must_use]
 pub fn new_token(prefix: &str) -> String {
+    if prefix == API_TOKEN_PREFIX {
+        return new_api_key().1;
+    }
     use base64::Engine as _;
     let bytes: [u8; 32] = rand::random();
     format!(
@@ -177,41 +184,55 @@ pub fn on_surface(
     surface: orch_api_contract::surface::HttpSurface,
     headers: &HeaderMap,
 ) -> ApiResult<()> {
+    checked_bearer(Some(surface), headers).map(|_| ())
+}
+
+fn checked_bearer(
+    surface: Option<orch_api_contract::surface::HttpSurface>,
+    headers: &HeaderMap,
+) -> ApiResult<Option<&str>> {
     use orch_api_contract::surface::HttpSurface;
-    // Keep the existing resolver's classification: opat_ names a key; other bearers
-    // must still resolve as actual session access tokens. This is not a new token-format rule.
-    if bearer(headers)
-        .is_some_and(|token| (surface == HttpSurface::Key) != token.starts_with(API_TOKEN_PREFIX))
-        || (surface == HttpSurface::Key
-            && cookie(headers, orch_api_contract::common::SESSION_COOKIE).is_some())
+    if surface == Some(HttpSurface::Key)
+        && cookie(headers, orch_api_contract::common::SESSION_COOKIE).is_some()
     {
         return Err(invalid_token());
     }
-    Ok(())
+    let token = bearer(headers);
+    if let Some(token) = token {
+        let account_key = token.starts_with(API_TOKEN_PREFIX);
+        if surface.is_some_and(|plane| (plane == HttpSurface::Key) != account_key)
+            || (account_key && !api_key::valid(token))
+        {
+            return Err(invalid_token());
+        }
+    }
+    Ok(token)
 }
 
-/// The same credential resolver, restricted to the surface selected by the server's mount.
+/// Resolve a credential on the surface selected by the server.
 pub async fn authenticate_on(
     surface: orch_api_contract::surface::HttpSurface,
     app: &AppState,
     headers: &HeaderMap,
     now: DateTime<Utc>,
 ) -> ApiResult<Caller> {
-    on_surface(surface, headers)?;
-    authenticate(app, headers, now).await
+    resolve(app, checked_bearer(Some(surface), headers)?, now).await
 }
 
-/// Finds out who makes a request from its headers. No token is nobody; a
-/// token that is unknown, expired or revoked is refused, and so is a user
-/// who is suspended.
+/// Resolve a bearer directly, applying the same offline format checks as the HTTP mounts.
 pub async fn authenticate(
     app: &AppState,
     headers: &HeaderMap,
     now: DateTime<Utc>,
 ) -> ApiResult<Caller> {
-    let Some(token) = bearer(headers) else {
+    resolve(app, checked_bearer(None, headers)?, now).await
+}
+
+async fn resolve(app: &AppState, token: Option<&str>, now: DateTime<Utc>) -> ApiResult<Caller> {
+    let Some(token) = token else {
         return Ok(Caller::Anonymous);
     };
+    // The digest authenticates the complete bearer, including the public ID.
     let hash = token_hash(token);
     let mut conn = app.db.acquire().await?;
     let (user_id, via, as_admin) = if token.starts_with(API_TOKEN_PREFIX) {
@@ -239,9 +260,27 @@ pub async fn authenticate(
             false,
         )
     } else {
-        let row = identity::session_by_access_token(&mut conn, &hash, now)
-            .await?
-            .ok_or_else(invalid_token)?;
+        let row = match identity::session_by_access_token(&mut conn, &hash, now).await? {
+            Some(row) => row,
+            None => {
+                let mut error = invalid_token();
+                // Only an exact retained bearer match may add a fact. Access-token expiry
+                // alone still asks the live session to renew through its ordinary cookie.
+                if let Some(proof) =
+                    identity::session_proof_by_access_hash(&mut conn, &hash).await?
+                {
+                    if let Some(fact) = recorded_session_end(&proof, now) {
+                        error = error.session_ended(fact);
+                    } else if identity::user_by_id(&mut conn, proof.user_id)
+                        .await?
+                        .is_some_and(|user| user.suspended())
+                    {
+                        error = error.session_ended(unavailable_session());
+                    }
+                }
+                return Err(error);
+            }
+        };
         (
             row.user_id,
             Via::Session {
@@ -254,16 +293,46 @@ pub async fn authenticate(
         .await?
         .ok_or_else(invalid_token)?;
     if user.suspended() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSuspended,
-            "this user is suspended",
-        ));
+        let error = ApiError::new(ErrorCode::AuthSuspended, "this user is suspended");
+        return Err(if matches!(&via, Via::Session { .. }) {
+            error.session_ended(unavailable_session())
+        } else {
+            error
+        });
     }
     Ok(Caller::User(Arc::new(Authed {
         user,
         via,
         as_admin,
     })))
+}
+
+/// The first retained session ending wins; cleanup or a later observation supplies no time.
+pub fn recorded_session_end(
+    proof: &identity::SessionProof,
+    now: DateTime<Utc>,
+) -> Option<SessionEnd> {
+    let expired = (proof.expires_at <= now).then_some(proof.expires_at);
+    if let Some(revoked) = proof.revoked_at
+        && expired.is_none_or(|end| revoked < end)
+    {
+        return Some(SessionEnd {
+            cause: SessionEndCause::Revoked,
+            at_if_known: Some(Time::new(revoked)),
+        });
+    }
+    expired.map(|end| SessionEnd {
+        cause: SessionEndCause::Expired,
+        at_if_known: Some(Time::new(end)),
+    })
+}
+
+/// Account standing has no captured change instant, so it cannot supply one.
+pub fn unavailable_session() -> SessionEnd {
+    SessionEnd {
+        cause: SessionEndCause::AccountUnavailable,
+        at_if_known: None,
+    }
 }
 
 fn invalid_token() -> ApiError {
@@ -283,9 +352,10 @@ pub mod tests {
     #[cfg(any(test, feature = "test-support"))]
     fn surface_headers_reject_foreign_kinds_before_public_and_cookie_shortcuts() {
         use orch_api_contract::surface::HttpSurface;
+        let (_, key) = new_api_key();
         for (token, origin, foreign) in [
             ("oat_synthetic", HttpSurface::Browser, HttpSurface::Key),
-            ("opat_synthetic", HttpSurface::Key, HttpSurface::Browser),
+            (key.as_str(), HttpSurface::Key, HttpSurface::Browser),
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(

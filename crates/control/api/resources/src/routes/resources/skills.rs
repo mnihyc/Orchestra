@@ -944,6 +944,8 @@ async fn read_directory(
         let mut cursor = None;
         loop {
             let body = FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: directory.clone(),
@@ -992,6 +994,11 @@ async fn read_directory(
                     DirEntryKind::Symlink => {
                         return Err(fault(SkillFault::Link(relative.to_owned())));
                     }
+                    DirEntryKind::PermissionDenied
+                    | DirEntryKind::Vanished
+                    | DirEntryKind::Unreadable => {
+                        return Err(fault(SkillFault::Unreadable(relative.to_owned())));
+                    }
                     DirEntryKind::Other => {
                         return Err(fault(SkillFault::NotAFile(relative.to_owned())));
                     }
@@ -1010,6 +1017,7 @@ async fn read_directory(
     let mut files = Vec::with_capacity(found.len());
     for (relative, full, executable) in found {
         let body = FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: environment,
             mount: None,
             path: full,

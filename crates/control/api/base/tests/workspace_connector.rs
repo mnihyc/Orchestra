@@ -17,6 +17,8 @@
 // The program is stopped the way a service manager stops it, with a termination signal.
 #![cfg(unix)]
 
+#[path = "workspace_connector/file_reach.rs"]
+mod file_reach;
 mod places;
 #[path = "workspace_snapshots/scope_helpers.rs"]
 mod snapshot_scope_helpers;
@@ -612,7 +614,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -862,6 +864,66 @@ async fn job_of(site: &Site, id: Id) -> Job {
 // ---------------------------------------------------------------- the tests
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_live_api_page_can_return_more_than_five_thousand_short_names_from_the_real_connector() {
+    use orch_api_contract::workspace::{
+        EnvironmentFileList, EnvironmentFileListQuery, FileListSource,
+    };
+    let names: Vec<_> = (0..6001)
+        .map(|number| format!("wide/{number:04}"))
+        .collect();
+    let files: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), b"x".as_slice()))
+        .collect();
+    let cluster = Cluster::with_store(true, false, &files, false).await;
+    let site = &cluster.site;
+    let first = site
+        .app()
+        .call(EnvironmentFileList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&EnvironmentFileListQuery {
+            prefix: None,
+            thread: None,
+            path: "wide".into(),
+            source: Some(FileListSource::Live),
+            mount: None,
+            cursor: None,
+            limit: Some(6000),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(first.entries.len(), 6000);
+    assert!(first.truncated);
+    let last = site
+        .app()
+        .call(EnvironmentFileList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&EnvironmentFileListQuery {
+            prefix: None,
+            thread: None,
+            path: "wide".into(),
+            source: Some(FileListSource::Live),
+            mount: None,
+            cursor: first.next_cursor.clone(),
+            limit: Some(6000),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.revision, first.revision);
+    assert!(!last.truncated);
+    let got: std::collections::BTreeSet<_> = first
+        .entries
+        .iter()
+        .chain(&last.entries)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(got, names.iter().map(String::as_str).collect());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_recording_uses_the_deployments_disk_store_and_the_restore_routes_put_back_its_files()
  {
     recording_and_restore(false).await;
@@ -920,9 +982,11 @@ async fn recording_and_restore(root_alias: bool) {
             &SerialKey::Environment(site.environment),
             orch_types::Time::new(app.clock.now() + chrono::Duration::seconds(90)),
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: site.environment,
                 snapshot_id: snapshot,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: days,
                 max_bytes,
@@ -1001,6 +1065,8 @@ async fn recording_and_restore(root_alias: bool) {
     // The original native result is good, but old server validation could freeze only a
     // generic unavailable fallback. Reading it must revalidate that original, never recapture.
     let fallback = FsRecordResult {
+        indexing: None,
+
         state: RecordState::Unavailable,
         tree_ref: None,
         repository_head: None,
@@ -1172,7 +1238,7 @@ async fn an_empty_full_index_reaches_the_server_and_file_name_search_answers_an_
         .await
         .ok();
     assert!(
-        matches!(answer, EnvironmentFileSearchReply::Names(entries) if entries.is_empty()),
+        matches!(answer, EnvironmentFileSearchReply::Names(page) if page.entries.is_empty()),
         "an indexed empty tree answers no matches, not a missing-list failure"
     );
 }
@@ -1300,6 +1366,12 @@ async fn a_file_larger_than_one_piece_goes_both_ways() {
         false,
     )
     .await;
+    assert_eq!(
+        read.status,
+        StatusCode::OK,
+        "the complete file read must succeed: {:?}",
+        serde_json::from_slice::<orch_api_contract::common::Problem>(&read.raw).ok()
+    );
     assert_eq!(read.raw.len(), up.len());
     assert!(
         read.raw.as_ref() == up.as_slice(),
@@ -1315,26 +1387,33 @@ async fn a_file_larger_than_one_piece_goes_both_ways() {
         false,
     )
     .await;
+    assert_eq!(
+        part.status,
+        StatusCode::PARTIAL_CONTENT,
+        "the requested file range must succeed: {:?}",
+        serde_json::from_slice::<orch_api_contract::common::Problem>(&part.raw).ok()
+    );
     assert_eq!(part.raw.as_ref(), &up[4_194_304..4_194_404]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_path_outside_the_workspace_is_refused_and_so_is_a_link_that_leads_out_of_it() {
+async fn a_roots_file_grant_cannot_open_or_write_an_outside_path_or_follow_an_outside_link() {
     let cluster = Cluster::start(true).await;
     let (site, work) = (&cluster.site, cluster.work.path());
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("secret.txt"), "not yours").unwrap();
     std::os::unix::fs::symlink(outside.path().join("secret.txt"), work.join("web/leak")).unwrap();
+    file_reach::grant(site, "files.manage", "roots").await;
 
-    // By its path: the API answers as if there were nothing there.
-    for path in ["../secret.txt", "web/../../secret.txt", "/etc/hostname"] {
+    // Relative traversal is rejected before a native command can run.
+    for path in ["../secret.txt", "web/../../secret.txt"] {
         assert_eq!(
-            ask::stat(site, &site.ada, path).await.problem().code,
+            ask::stat(site, &site.vic, path).await.problem().code,
             ApiCode::NotFound,
             "{path}"
         );
         assert_eq!(
-            ask::write(site, &site.ada, path, None, b"x")
+            ask::write(site, &site.vic, path, None, b"x")
                 .await
                 .problem()
                 .code,
@@ -1342,12 +1421,49 @@ async fn a_path_outside_the_workspace_is_refused_and_so_is_a_link_that_leads_out
             "{path}"
         );
     }
-    // By a link inside the workspace: the machine leads nowhere, and nothing is written through it.
-    let fetched = ask::fetch(site, &site.ada, "web/leak", Some(10)).await.ok();
+    // An absolute target outside the holder's roots cannot be opened or written.
+    let absolute = outside
+        .path()
+        .join("secret.txt")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        ask::stat(site, &site.vic, &absolute).await.problem().code,
+        ApiCode::FileReachDenied
+    );
+    assert_eq!(
+        ask::fetch(site, &site.vic, &absolute, Some(10))
+            .await
+            .problem()
+            .code,
+        ApiCode::FileReachDenied
+    );
+    assert_eq!(
+        ask::write(site, &site.vic, &absolute, None, b"overwritten")
+            .await
+            .problem()
+            .code,
+        ApiCode::FileReachDenied
+    );
+    // The link entry itself stays describable; its outside target supplies no content or hash.
+    let link = ask::stat(site, &site.vic, "web/leak").await.ok();
+    assert_eq!(
+        link.entry.kind,
+        orch_api_contract::workspace::DirEntryKind::Symlink
+    );
+    assert_eq!(link.entry.link_target.as_deref(), Some(absolute.as_str()));
+    assert_eq!(link.entry.size, 0);
+    assert!(link.hash.is_none());
+    let fetched = ask::fetch(site, &site.vic, "web/leak", Some(10)).await.ok();
     assert_eq!(fetched.state, FetchStatus::Unavailable);
     assert_eq!(fetched.reason, Some(FetchUnavailable::NotFound));
-    let through = ask::write(site, &site.ada, "web/leak", None, b"overwritten").await;
-    assert!(!through.status.is_success(), "{:?}", through.body);
+    assert_eq!(
+        ask::write(site, &site.vic, "web/leak", None, b"overwritten")
+            .await
+            .problem()
+            .code,
+        ApiCode::NotFound
+    );
     assert_eq!(
         std::fs::read(outside.path().join("secret.txt")).unwrap(),
         b"not yours"

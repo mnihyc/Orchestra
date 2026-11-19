@@ -189,6 +189,18 @@ impl Dir {
         std::fs::read_link(self.path.join(name)).map(PathBuf::into_os_string)
     }
 
+    /// Tests the native account's access without reading file content or opening special files.
+    pub fn check_readable(&self, name: &OsStr, kind: Kind) -> io::Result<()> {
+        match kind {
+            Kind::File => self.open_read(name).map(drop),
+            Kind::Dir => {
+                let directory = self.open_child(name)?;
+                std::fs::read_dir(directory.path()).map(drop)
+            }
+            Kind::Symlink | Kind::Other => Ok(()),
+        }
+    }
+
     /// Opens the regular file called `name` for reading. A link is opened as the link it is, which
     /// is not a regular file, so it is refused.
     pub fn open_read(&self, name: &OsStr) -> io::Result<File> {
@@ -292,6 +304,13 @@ impl Dir {
     }
 
     /// Windows cannot flush a directory by itself: what is written to its files is flushed with them.
+    /// An owned directory iterator; no sibling list is collected in memory.
+    pub fn names_stream(&self) -> io::Result<Box<dyn Iterator<Item = io::Result<OsString>>>> {
+        Ok(Box::new(
+            std::fs::read_dir(&self.path)?.map(|entry| entry.map(|entry| entry.file_name())),
+        ))
+    }
+
     /// Visits names without collecting a large directory; false stops the read immediately.
     pub fn visit_names(&self, visit: &mut dyn FnMut(&OsStr) -> bool) -> io::Result<bool> {
         for entry in std::fs::read_dir(&self.path)? {

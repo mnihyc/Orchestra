@@ -71,6 +71,7 @@ pub(super) async fn setup_with_domain(domain: &str) -> (World, Who, Who, Id, Id,
     let policy = orch_link_contract::policy::LocalPolicy {
         environment_roots: vec!["/srv/ports-core".into()],
         ports: orch_link_contract::policy::MachinePorts {
+            loopback_tcp: Default::default(),
             allowed: vec![
                 orch_api_contract::ports::PortOpeningKind::Place,
                 orch_api_contract::ports::PortOpeningKind::Link,

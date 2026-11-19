@@ -355,6 +355,7 @@ async fn host_plan(
 ) -> PortOpeningPlan {
     port_policy(world, "port_host", "ask").await;
     let policy = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "scoped-create-publisher.example.test".into(),

@@ -14,6 +14,18 @@ unpublished generator input for frontend types; there is no browser OpenAPI endp
 `/openapi/...` paths remain as supplied and remain subject to server credential checks. A command
 using a browser access token must explicitly name its browser path.
 
+## Account API key format
+
+Personal and service-account keys use `opat_<key id>_<secret><checksum>`. The public ID is the lowercase, hyphenated UUID returned in `info.id` (or `token_id` on a restricted issuance receipt). Lists, audit events and revocation use that UUID. It is generated for the key independently of its owner.
+
+The secret is 32 random bytes encoded as 43 unpadded base64url characters. The last six characters are a zero-padded, big-endian base62 encoding of the unsigned CRC32/ISO-HDLC of every preceding ASCII byte, including `opat_`, the public ID and both separators. The base62 alphabet in increasing order is `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz`. Underscores may occur within the secret. Scanners can validate the fixed 91-byte representation and checksum offline. Authentication verifies the SHA-256 digest of the entire bearer against an active, unexpired key.
+
+For a scanner, extract a complete candidate using token boundaries, then check its six-character checksum. Adjacent base64url characters are part of the candidate. The restricted last character of the base64url field enforces the two zero padding bits for a 32-byte secret.
+
+```regex
+opat_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048][0-9A-Za-z]{6}
+```
+
 ## Existing realtime protocol
 
 Use `/api/v1/ws` for browser sessions and `/openapi/v1/ws` for account keys. Both speak the existing

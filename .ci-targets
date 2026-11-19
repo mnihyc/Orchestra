@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-envhost --lib -- directory_pages::
+test -p orch-envhost --lib -- files::tests::
+test -p orch-api-core --test workspace_pages --test workspace_connector
+test -p orch-api-core --lib -- --skip realtime::background_read_tests::
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test -- tests/component/files-source-lifecycle.test.tsx tests/component/file-source-facts.test.tsx tests/unit/inspector.test.ts tests/unit/directory-windows.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

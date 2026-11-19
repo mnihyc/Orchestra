@@ -510,6 +510,7 @@ impl Engine {
             machine,
             SerialKey::Environment(snapshot.environment.id),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: snapshot.environment.id,
                 job_id: None,
