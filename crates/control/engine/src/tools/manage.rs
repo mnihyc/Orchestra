@@ -112,11 +112,10 @@ fn asked_of(arguments: &Json) -> Result<(Asked, Option<String>), Refusal> {
             at + 1
         )));
     }
-    if paths.is_empty() || paths.len() > crate::tools::definitions::MANAGE_PATHS_MAX {
-        return Err(Refusal::invalid(format!(
-            "paths must contain at least one and at most {} selections.",
-            crate::tools::definitions::MANAGE_PATHS_MAX
-        )));
+    if paths.is_empty() {
+        return Err(Refusal::invalid(
+            "paths must contain at least one selection",
+        ));
     }
     let selections = paths
         .iter()

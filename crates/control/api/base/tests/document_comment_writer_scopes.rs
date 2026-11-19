@@ -23,7 +23,7 @@ use orch_api_contract::documents::{
     DocumentDiscussionCreateBody, DocumentDiscussionResolve, DocumentDiscussionResolveBody, Inline,
     InlineRefKind,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::documents::{self as documents, discussions};
 use orch_db::queries::identity::{self, NewApiToken};
@@ -275,11 +275,12 @@ async fn an_editor_who_never_wrote_in_the_discussion_keeps_the_native_resolve_br
     assert_eq!(ordinary["resolved"]["by"]["id"], json!(s.desk.ada.id()));
     // The existing legacy ceiling can allow DocEdit while excluding DocView. Resolve's
     // successful editor branch must not acquire the author fallback's extra View check.
-    let legacy = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let legacy = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *s.desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.desk.ada.id(),
             name: "Native resolve editor-only ceiling",
             token_hash: &token_hash(&legacy),
