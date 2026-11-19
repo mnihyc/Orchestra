@@ -493,7 +493,13 @@ async fn connect(config: &ServerConfig) -> (Option<Db>, Line) {
     let tried = format!("connecting to {place}");
     let connecting = tokio::time::timeout(
         Duration::from_secs(CHECK_SECS),
-        Db::connect(url, DATABASE_CONNECTIONS),
+        Db::connect_with_limits(
+            url,
+            DATABASE_CONNECTIONS,
+            Duration::from_millis(config.database.slow_statement_ms),
+            Duration::from_millis(config.database.slow_acquire_ms),
+            orch_db::pool::Limits::background(&config.database),
+        ),
     )
     .await;
     let db = match connecting {

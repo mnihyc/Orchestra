@@ -58,6 +58,10 @@ WITH units AS (
   UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'attachment',NULL FROM unnest($1::uuid[]) w(id)
     JOIN environments e ON e.facts->'mounts' @> jsonb_build_array(jsonb_build_object('mount_id',w.id,'state','attached'))
     WHERE e.deleted_at IS NULL AND e.lost_at IS NULL
+  UNION ALL SELECT 'mount',w.id,'environment',e.id,e.name,'attachment',NULL FROM unnest($1::uuid[]) w(id)
+    JOIN runtime_resource_inputs inputs ON inputs.mount_fingerprints ? w.id::text
+    JOIN runtimes r ON r.id=inputs.runtime_id JOIN environments e ON e.id=r.environment_id
+    WHERE r.state NOT IN ('retired','removed') AND r.lost_at IS NULL AND e.deleted_at IS NULL AND e.lost_at IS NULL
   UNION ALL SELECT DISTINCT 'skill',v.skill_id,'thread',h.node_id,n.name,'attachment',NULL::timestamptz FROM skill_versions v
     JOIN segments s ON s.delivered_resources @> jsonb_build_object('skills',jsonb_build_array(v.id)) JOIN threads h ON h.current_segment_id=s.id JOIN nodes n ON n.id=h.node_id
     WHERE v.skill_id=ANY($1) AND n.deleted_at IS NULL AND s.delivered_resources->>'state'='open'

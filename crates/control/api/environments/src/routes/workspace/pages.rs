@@ -18,8 +18,6 @@ use orch_api_contract::workspace::FileListSource;
 
 use orch_db::queries::environments::workspace::EnvironmentRow;
 
-use orch_link_contract::commands::FS_LIST_MAX_ENTRIES;
-
 #[cfg(any(test, feature = "test-support"))]
 use orch_link_contract::commands::FsListPageResult;
 
@@ -46,7 +44,7 @@ pub use orch_api_base::routes::workspace::pages::Cursor;
 
 pub use orch_api_base::routes::workspace::pages::Metadata;
 // The same two-MiB page and existing frame allowance as the native snapshot reader.
-const ENTRY_BYTES: usize =
+pub(crate) const ENTRY_BYTES: usize =
     2 * 1024 * 1024 - orch_realtime_contract::version::MAX_CLIENT_FRAME_BYTES;
 
 pub(crate) fn stale() -> ApiError {
@@ -121,6 +119,7 @@ impl PartialOrd for Candidate {
 
 /// At most one response window is retained, even when the cached manifest has millions of paths.
 pub(crate) struct Window {
+    prefix: Option<String>,
     after: Option<Key>,
     limit: usize,
     bytes: usize,
@@ -141,8 +140,9 @@ impl Window {
             })
             .transpose()?;
         Ok(Self {
+            prefix: None,
             after,
-            limit: limit.min(FS_LIST_MAX_ENTRIES) as usize,
+            limit: limit as usize,
             bytes: 1,
             rows: BinaryHeap::new(),
             more: false,
@@ -150,7 +150,18 @@ impl Window {
         })
     }
 
+    pub(crate) fn prefixed(mut self, prefix: Option<&str>) -> Self {
+        self.prefix = prefix.map(str::to_lowercase);
+        self
+    }
     pub(crate) fn push(&mut self, entry: DirEntry) -> ApiResult<()> {
+        if self
+            .prefix
+            .as_ref()
+            .is_some_and(|prefix| !entry.name.to_lowercase().starts_with(prefix))
+        {
+            return Ok(());
+        }
         let key = Key::of(&entry);
         if self.after.as_ref().is_some_and(|after| key <= *after) {
             return Ok(());
@@ -279,6 +290,7 @@ pub mod tests {
 
     fn binding() -> Binding {
         Binding {
+            prefix: None,
             environment: orch_types::new_id(),
             generation: 1,
             machine: None,
