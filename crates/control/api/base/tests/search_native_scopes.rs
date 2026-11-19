@@ -103,6 +103,30 @@ async fn name_search_filters_native_candidates_before_its_limit_and_binds_contex
     assert_eq!(answer["items"].as_array().unwrap().len(), 1);
     assert_eq!(answer["items"][0]["id"], json!(target));
     assert_eq!(answer["items"][0]["name"], "Needle row selected");
+    let exact = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={target}&kinds=project"))
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(exact["items"].as_array().unwrap().len(), 1);
+    assert_eq!(exact["items"][0]["name"], "Needle row selected");
+    let outside = value(
+        world
+            .app
+            .call(NameSearchList, &[])
+            .token(&selected_key)
+            .raw_query(&format!("id={org}&kinds=org"))
+            .send_bytes()
+            .await,
+    );
+    assert!(
+        outside["items"].as_array().unwrap().is_empty(),
+        "an exact identity never widens the key's selected targets"
+    );
     let path = answer["items"][0]["path"].as_array().unwrap();
     assert!(
         path.iter().any(|step| step["id"] == json!(org)),
@@ -255,6 +279,7 @@ async fn weights(s: &rig::Scene, place: &str, references: &str) {
         .call(NodeSettingSet, &[&s.tree.topic.base.id, &"related.weights"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!({"meaning":"0","place":place,"references":references}),
             locked: None,
             expected_revision: None,
@@ -980,9 +1005,14 @@ async fn streamed_search_stops_delivery_after_the_actual_key_expires_between_fra
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
-    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let first: Json = serde_json::from_slice(&first).unwrap();
-    assert_eq!(first["type"], "options");
+    // A search opens with what its index covers, then with the options of this opening.
+    let mut opening = Vec::new();
+    while opening.last().map(String::as_str) != Some("options") {
+        let part = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let part: Json = serde_json::from_slice(&part).unwrap();
+        opening.push(part["type"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(opening, ["coverage", "options"]);
     world.advance(chrono::Duration::hours(2));
     assert!(
         body.frame().await.is_none_or(|frame| frame.is_err()),
@@ -1094,4 +1124,64 @@ async fn streamed_history_keeps_its_original_projection_even_when_the_same_parts
             "the deciding difference is the native projection, not replacement or removal of the part"
         );
     }
+}
+
+#[tokio::test]
+async fn a_name_picker_continues_after_the_actual_candidate_when_scopes_hide_interleaved_rows() {
+    let world = World::new().await;
+    let owner = places::person(&world, "picker").await;
+    let org = places::make_org(&world, &owner, "Paged names", "paged-names")
+        .await
+        .base
+        .id;
+    for index in 0..5 {
+        places::make_project(&world, &owner, org, &format!("Paged row {index}")).await;
+    }
+    let mut query = NameSearchListQuery {
+        q: Some("Paged row".into()),
+        kinds: Some("project".into()),
+        picker: Some(true),
+        limit: Some(100),
+        ..Default::default()
+    };
+    let ordinary = world
+        .app
+        .call(NameSearchList, &[])
+        .token(&owner.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    let wanted = [ordinary.items[1].id, ordinary.items[3].id];
+    let secret = key_with_scope(
+        &world,
+        owner.id(),
+        json!({"rules": wanted.iter()
+        .map(|id| selected("project", *id, "NameSearchList")).collect::<Vec<_>>() }),
+    )
+    .await;
+    query.limit = Some(1);
+    let mut ids = Vec::new();
+    loop {
+        let page = world
+            .app
+            .call(NameSearchList, &[])
+            .token(&secret)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(
+                !ids.contains(&row.id),
+                "a continued page never repeats an admitted name"
+            );
+            ids.push(row.id);
+        }
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        query.cursor = Some(cursor);
+    }
+    assert_eq!(ids, wanted);
 }

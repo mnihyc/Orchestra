@@ -81,7 +81,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
       <p className="text-sm text-text-muted">{t('start.arrangement.pickAgent')}</p>
     );
   }
-  if (resolved.arrangements.length === 0) {
+  if (resolved.arrangements.length === 0 && resolved.arrangement === null) {
     return <p className="text-sm text-text-muted">{t('start.arrangement.unknown', { agent: agent.entry.agent.name })}</p>;
   }
   const first = resolved.arrangements[0];
@@ -98,6 +98,9 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
       ...(row.open ? {} : { disabled: arrangementWhy(row.entry, t) }),
     };
   });
+  if (resolved.arrangement !== null && !options.some((option) => option.value === resolved.arrangement)) {
+    options.push({ value: resolved.arrangement, ...choiceOption(t, `arrangement.${resolved.arrangement}`), disabled: t('start.arrangement.notAvailable') });
+  }
   return (
     <div className={cx('flex flex-col gap-2', refreshing && 'opacity-60')} aria-busy={refreshing || undefined}>
       {resolved.arrangement === null && first !== undefined && (

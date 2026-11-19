@@ -12,9 +12,10 @@ import { namesQuery } from '@/api/search';
 import { COLUMN_SORT, OPTIONAL_COLUMNS, readColumns, saveColumns, type Column, type OptionalColumn } from '@/features/everything/columns';
 import { EverythingTable } from '@/features/everything/EverythingTable';
 import { ScrollRegion } from '@/ui/ScrollRegion';
-import { EVERYTHING_KINDS, initialView, validView, type EverythingView } from './view';
+import { EVERYTHING_KINDS, savedEverythingView, validView, type EverythingView } from './view';
 import { ArrangementSwitch, RecentOrderSelect } from '@/features/navigation/ArrangementSwitch';
-import { writeViewChoice } from '@/lib/viewChoices';
+import { useViewChoice } from '@/lib/viewChoices';
+import { DeviceChoiceException, DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { openAccessToMany } from '@/features/access/AccessDialog';
@@ -106,22 +107,24 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
   if (draft.source !== q) setDraft({ source: q, text: q });
   const typed = draft.source === q ? draft.text : q;
   const choiceKey = `${scope}:${parent ?? 'all'}`;
-  const [choice, setChoice] = useState(() => initialView(person.id, choiceKey, explicit));
+  const [kept, remember, receipt] = useViewChoice<string>('everything', 'view', '', choiceKey);
+  const saved = savedEverythingView(kept);
+  const [choice, setChoice] = useState(() => explicit === undefined ? saved.value : validView(explicit));
   const source = explicit === undefined ? null : JSON.stringify(explicit);
   const [appliedSource, setAppliedSource] = useState(source);
   if (appliedSource !== source) {
     setAppliedSource(source);
-    const next = explicit === undefined ? initialView(person.id, choiceKey) : validView(explicit);
-    if (next.owner !== null && next.owner.id === choice.owner?.id) next.owner = choice.owner;
+    const validated = explicit === undefined ? saved.value : validView(explicit);
+    const next = validated.owner !== null && validated.owner.id === choice.owner?.id ? { ...validated, owner: choice.owner } : validated;
     if (JSON.stringify(next) !== JSON.stringify(choice)) setChoice(next);
   }
   const { kinds, owner, adminAccess, createdFrom, createdTo, activeFrom, sort, direction, arrangement, order: recentOrder } = choice;
   // The initial address is remembered too, as a link's explicit choices become this page's last view.
   const encoded = JSON.stringify(choice);
-  useEffect(() => { if (source !== null) writeViewChoice(person.id, 'everything', 'view', encoded, choiceKey); }, [person.id, encoded, choiceKey, source]);
+  useEffect(() => { if (source !== null && !saved.unavailable) remember(encoded); }, [encoded, source, remember, saved.unavailable]);
   const choose = (patch: Partial<EverythingView>) => {
     const next = { ...choice, ...patch };
-    setChoice(next); writeViewChoice(person.id, 'everything', 'view', JSON.stringify(next), choiceKey); onView?.(next);
+    setChoice(next); remember(JSON.stringify(next)); onView?.(next);
   };
   const setKinds = (next: readonly EverythingKind[] | ((before: readonly EverythingKind[]) => readonly EverythingKind[])) => {
     const selected = typeof next === 'function' ? next(kinds) : next;
@@ -149,6 +152,9 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
     ...(arrangement === 'recent' ? { recent: recentOrder } : {}), navigation: choice.navigation, showArchived: choice.showArchived, hideDone: choice.hideDone,
     ...(participating ? { participating: true } : {}), ...(adminAccess ? { adminAccess: false } : {}) };
   const activeFilters = [kinds.length > 0, owner !== null, createdFrom !== '', createdTo !== '', activeFrom !== '', participating, adminAccess, !choice.showArchived, choice.hideDone].filter((on) => on).length;
+  const observation = receipt === undefined ? undefined : { ...receipt, effective: choice,
+    origin: source !== null ? 'address' as const : saved.unavailable ? 'default' as const : receipt.origin,
+    saved_choice_availability: saved.unavailable ? 'unavailable' as const : receipt.saved_choice_availability };
   const [selecting, setSelecting] = useState(false);
   const selectionKey = JSON.stringify(filter);
   const [selection, setSelection] = useState<{ key: string; rows: ReadonlyMap<string, EverythingRow> }>({ key: selectionKey, rows: new Map() });
@@ -183,7 +189,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
     </div>
     <FilterBar wrap={false} search={<Input label={t('everything.search')} hideLabel type="search" placeholder={t('everything.searchPlaceholder')} autoComplete="off" value={typed}
         onChange={(event) => { setDraft({ source: q, text: event.target.value }); onQuery?.(event.target.value); }} fieldClassName="min-w-0" />}
-      action={<Popover label={t('everything.filters')} open={filtersOpen} onOpenChange={setFiltersOpen} align="end"
+      action={<span className="inline-flex min-w-0 flex-wrap items-center gap-1"><Popover label={t('everything.filters')} open={filtersOpen} onOpenChange={setFiltersOpen} align="end"
         className="w-[min(var(--container-form),calc(100vw-2rem))] max-h-(--radix-popover-content-available-height) overflow-y-auto"
         trigger={<Button icon={<SlidersHorizontal aria-hidden />}>{hasFilters ? t('everything.activeFilters', { count: activeFilters }) : t('everything.filters')}</Button>}>
       {filtersOpen && <div className="flex flex-col gap-3">
@@ -214,8 +220,9 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
             options: (['asc', 'desc'] as const).map((value) => ({ value, name: t(`inventoryChoices.everything.directions.${value}.name`), description: t(`inventoryChoices.everything.directions.${value}.description`) })) },
         ]} />
       {hasFilters && <Button size="sm" variant="ghost" onClick={() => { choose({ kinds: [], owner: null, createdFrom: '', createdTo: '', activeFrom: '', participating: false, adminAccess: false, showArchived: true, hideDone: false, navigation: false }); onParticipation?.(false); }}>{t('everything.clearFilters')}</Button>}
+      <DeviceChoiceFacts observation={observation} current={<>{t(`navigation.arrangement.${arrangement}View`)} · {t(`everything.columns.${sort}`)} · {t(`everything.directions.${direction}`)} · {t('clientFacts.device.currentFilters', { count: activeFilters, number: formatNumber(activeFilters, locale) })}</>} inline />
       </div>}
-    </Popover>} />
+    </Popover>{observation !== undefined && <DeviceChoiceException observation={observation} />}</span>} />
     <div role="group" aria-label={t('everything.sortLabel')} className="flex flex-wrap items-center justify-end gap-3">
       <p aria-live="polite" className="sr-only">{t(words === '' ? 'everything.sorted' : 'everything.sortedMatches', { column: t(`everything.columns.${sort}`), direction: t(`everything.directions.${direction}`) })}</p>
       <div className="flex flex-wrap items-center gap-2">
@@ -234,7 +241,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
       <SelectionSharing rows={[...selected.values()]} />
       <Button size="sm" variant="ghost" disabled={selected.size === 0} onClick={() => setSelection({ key: selectionKey, rows: new Map() })}>{t('day100.batch.clear')}</Button>
     </div>}
-    <ScrollRegion visibleScrollbars label={t('everything.tree')} kind="table" className="relative flex-none rounded-lg border border-border bg-surface sm:min-h-0 sm:flex-1">
+    <ScrollRegion visibleScrollbars label={t('everything.tree')} kind="table" className="relative h-[70dvh] max-h-[70dvh] min-h-0 flex-1 rounded-lg border border-border bg-surface">
       <EverythingTable key={`${scope}:${parent ?? ''}:${arrangement}:${expansionVersion}`} reader={person.id} filter={filter} extraColumns={arrangement === 'recent' ? shownColumns : []} columns={arrangement === 'recent' ? ['name', 'where', ...(recentOrder === 'opened' ? ['opened', 'last_activity'] as const : ['last_activity', 'activity_by'] as const), 'state', ...shownColumns.filter((column) => column !== 'last_activity' && column !== 'state')] : ['name', ...shownColumns]}
         selection={selecting ? { selected: new Set(selected.keys()), toggle: toggleRow, clear: clearSelection, all: (rows) => setSelection({ key: selectionKey, rows: new Map(rows.map((row) => [`${row.kind}:${row.id}`, row])) }) } : undefined}
         parent={parent} expansion={expansion} onSort={order} onOwner={(owner) => setOwner({ id: owner.id, name: owner.display_name })} />

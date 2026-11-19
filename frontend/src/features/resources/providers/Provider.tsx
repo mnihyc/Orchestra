@@ -106,7 +106,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
     </div> }] : []),
     { value: 'activity' as const, label: t('providers.tabs.activity'), panel: <div className="flex min-w-0 flex-col gap-4">
       <ProviderThreads provider={provider} />
-      {(manage || canUse) && harnessesOfProvider(provider).length > 0 && <HarnessSessions showProvider={false} harnesses={harnessesOfProvider(provider)} />}
+      {(manage || canUse) && harnessesOfProvider(provider).length > 0 && <HarnessSessions scopeKey={"provider:" + provider.id} showProvider={false} harnesses={harnessesOfProvider(provider)} />}
     </div> },
   ];
   // An address that names a tab this reader has none of shows the overview.
@@ -114,9 +114,14 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
   const shown = tabs.some((candidate) => candidate.value === requested) ? requested : 'overview';
   const headerStatus = state.next === null && provider.status !== 'needs_setup';
 
+  const notices = <>
+    <ProviderSetupNotice provider={provider} manage={manage} currentTab={shown} onTab={(next) => onTab(providerTab(next) ?? 'overview')} />
+    <CopySetupResult kind="provider" id={provider.id} />
+    {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={()=>void query.refetch()}>{t('common.tryAgain')}</Button>}/>}
+  </>;
   return (
     <Page>
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={provider.access.admin_access} ownership={provider} opening={{ kind: 'provider', id: provider.id }}
         back={back}
         mark={
@@ -132,10 +137,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
         ]}
         actions={<HeadingActs admin={adminSpec(provider, 'provider.manage')} name={provider.name} primary={shown === 'settings' ? null : page.primary} edit={page.edit} menu={page.menu} />}
       />
-      <ProviderSetupNotice provider={provider} manage={manage} currentTab={shown} onTab={(next) => onTab(providerTab(next) ?? 'overview')} />
-      <CopySetupResult kind="provider" id={provider.id} />
-      {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={()=>void query.refetch()}>{t('common.tryAgain')}</Button>}/>}
-      <Tabs label={t('providers.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-3" />
+      <Tabs frame={(navigation, panels) => <>{navigation}{notices}{panels}</>} label={t('providers.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-3" />
       {acts.dialogs}
     </Page>
   );

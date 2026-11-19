@@ -551,8 +551,9 @@ async fn model_list_and_empty_delete_keep_their_existing_key_boundary() {
         .send_bytes()
         .await;
     let listed = body(&reply, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert_eq!(listed[0]["id"], json!(local));
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.get("next_cursor"), Some(&Json::Null));
+    assert_eq!(listed["items"][0]["id"], json!(local));
     let outside = scene
         .world
         .app
@@ -725,8 +726,9 @@ async fn suggestion_list_keeps_its_same_path_manage_only_positive() {
     )
     .await;
     let listed = body(&reply, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert_eq!(listed[0]["model_name"], "scope-private-offer");
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.get("next_cursor"), Some(&Json::Null));
+    assert_eq!(listed["items"][0]["model_name"], "scope-private-offer");
     assert!(scene.models(scene.provider).await.is_empty());
 }
 

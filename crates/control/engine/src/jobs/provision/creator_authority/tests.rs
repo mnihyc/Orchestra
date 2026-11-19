@@ -189,6 +189,7 @@ impl Fixture {
             self.world.machine_id,
             SerialKey::Environment(self.world.environment),
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.world.environment,
                 mount: None,
                 path: "web".into(),
@@ -242,6 +243,7 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         s.world.machine_id,
         SerialKey::Environment(s.world.environment),
         &FsSnapshot {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: s.world.environment,
             job_id: s.job.id(),
@@ -274,6 +276,8 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         body: actual.body.clone(),
         deadline: Some(actual.deadline),
         authority: None,
+        input_facts: None,
+        session_offer: None,
     };
     assert!(s.allows(&canonical).await?);
     let mut conn = s.world.pool.acquire().await?;

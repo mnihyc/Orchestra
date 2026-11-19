@@ -20,6 +20,7 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { Skeleton } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
 
@@ -75,7 +76,7 @@ function Families({ families, unit }: { families: readonly RateFamily[]; unit: s
   return (
     <div className="flex flex-col gap-2">
       <p className="text-sm text-text-muted">{t('usage.rates.catalogue.unit', { unit })}</p>
-      <Table label={t('usage.rates.catalogue.table')} columns={columns} rows={families} rowKey={(family) => family.match} />
+      <CompleteCollection label={t('usage.rates.catalogue.table')} items={families} textOf={(family) => `${family.match} ${family.vendor} ${family.note ?? ''} ${family.source}`}>{(rows) => <Table virtual label={t('usage.rates.catalogue.table')} columns={columns} rows={rows} rowKey={(family) => family.match} />}</CompleteCollection>
     </div>
   );
 }

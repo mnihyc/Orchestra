@@ -22,10 +22,13 @@ import { openGiven } from '@/features/inspector/givenFocus';
 import { openSideAsk } from '@/features/side-threads/ask';
 import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
 import type { Item, Turn } from '@/generated/api-types';
+import { revealView } from '@/features/workbench/openView';
 import { RestoreDialog } from '@/features/source/Restore';
+import { restoreTurnActionState } from '@/features/source/words';
 import { useImmediateFork } from '@/features/thread/ImmediateFork';
 import { ChatRefs } from '@/features/timeline/ChatRefs';
 import { HoverActions } from '@/features/timeline/HoverActions';
+import { ItemStorageFacts } from '@/features/timeline/ItemStorageFacts';
 import { useTimelineContext } from '@/features/timeline/context';
 import { ViewRouteContext } from '@/features/workbench/viewOpening';
 import { isForwarded } from '@/lib/content';
@@ -88,7 +91,7 @@ const LONG_PRESS_MS = 450;
 const LONG_PRESS_DRIFT = 10;
 
 /** The entries for an item, and `extra` ones of its kind first. */
-export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onRestore: ((turn: Turn) => void) | undefined, onBuiltinFork: (through: number) => void): MenuEntry[] {
+export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onRestore: ((turn: Turn) => void) | undefined, onBuiltinFork: (through: number) => void, restoreChanges = false): MenuEntry[] {
   const route = useContext(ViewRouteContext);
   const { t } = useTranslation();
   const context = useTimelineContext();
@@ -129,9 +132,11 @@ export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onR
       context.selection.pick(view.order.filter((id) => view.items.get(id)?.turn_id === turn.id));
     } });
   }
-  if (turn !== undefined && item.kind === 'user_message' && onRestore !== undefined && turn.completed_at !== null && turn.before_snapshot_id !== null && thread?.environment !== null
-    && thread?.environment_permissions.includes('files.view') === true && thread.environment_permissions.includes('files.manage')) {
-    entries.push({ id: 'restore-turn', label: t('thread.turnActions.restoreBefore'), icon: <RotateCcw aria-hidden />, onSelect: () => onRestore(turn) });
+  if (turn !== undefined && item.kind === 'user_message' && onRestore !== undefined) {
+    const state = restoreTurnActionState(thread, turn, restoreChanges, context.readOnly === true, t);
+    entries.push({ id: state.review ? 'review-changes' : 'restore-turn', label: t(state.review ? 'source.restore.review' : 'thread.turnActions.restoreBefore'), icon: <RotateCcw aria-hidden />,
+      disabled: state.review && state.blocked ? state.reason ?? t('thread.turnActions.noCheckpoint') : false,
+      onSelect: () => state.review ? revealView('changes', { thread: context.threadId, scope: 'turn', turn: turn.id }) : onRestore(turn) });
   }
   if (typeof item.model_input_id === 'string') {
     const record = item.model_input_id;
@@ -185,18 +190,22 @@ export interface ItemFrameProps {
   label: string;
   children: ReactNode;
   className?: string;
-  /** Common controls under a human message; its remaining acts keep the same menu and context menu. */
+  /** Common controls under a message; its remaining acts keep the same menu and context menu. */
   messageActions?: ReactNode;
+  /** The controls stand at the right, under a block that is aligned there. */
+  actionsEnd?: boolean;
+  /** File changes already measured by the request, shared with its restore icon. */
+  restoreChanges?: boolean;
 }
 
 /** Wraps an item so that its menu opens under the right mouse button and from a button at its end. */
-export function ItemFrame({ item, extra, label, children, className, messageActions }: ItemFrameProps) {
+export function ItemFrame({ item, extra, label, children, className, messageActions, actionsEnd = false, restoreChanges = false }: ItemFrameProps) {
   const { t } = useTranslation();
   const [restoring, setRestoring] = useState<Turn | null>(null);
   const context = useTimelineContext();
   const thread = useThreadPart(context.threadId, (view) => view.thread);
   const quickFork = useImmediateFork(thread);
-  const entries = useItemEntries(item, extra, setRestoring, quickFork.start);
+  const entries = useItemEntries(item, extra, setRestoring, quickFork.start, restoreChanges);
   const { selection } = context;
   const body = useRef<HTMLDivElement>(null);
   const acts = useRef<HTMLDivElement>(null);
@@ -246,7 +255,8 @@ export function ItemFrame({ item, extra, label, children, className, messageActi
       if (held.current !== null) clearTimeout(held.current);
     };
   }, []);
-  if (context.inspection !== undefined) return <div data-item={item.id} className={className}>{children}</div>;
+  const content = <>{children}<ItemStorageFacts item={item} /></>;
+  if (context.inspection !== undefined) return <div data-item={item.id} className={className}>{content}</div>;
   if (selection.active) {
     // Items are being picked: a box in place of the menu, and the item itself can be pressed to pick it.
     const picked = selection.has(item.id);
@@ -270,7 +280,7 @@ export function ItemFrame({ item, extra, label, children, className, messageActi
           }}
           className="mt-1 size-4 shrink-0 accent-accent-solid"
         />
-        <div className="min-w-0 flex-1">{children}</div>
+        <div className="min-w-0 flex-1">{content}</div>
       </div>
     );
   }
@@ -296,16 +306,16 @@ export function ItemFrame({ item, extra, label, children, className, messageActi
           if (from !== null && Math.hypot(event.clientX - from.x, event.clientY - from.y) > LONG_PRESS_DRIFT) letGo();
         }}
       >
-        <div ref={body} data-item-body>{children}</div>
+        <div ref={body} data-item-body>{content}</div>
         {item.chat_refs > 0 && <ChatRefs count={item.chat_refs} />}
-        {messageActions !== undefined ? <HoverActions owner="person">{messageActions}
-          <Menu label={label} align="end" entries={entries.filter((entry) => !['copy', 'edit-message', 'restore-turn'].includes(entry.id))} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
+        {messageActions !== undefined ? <HoverActions owner="person" end={actionsEnd}>{messageActions}
+          <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
         </HoverActions> : <div ref={acts} data-item-acts className="absolute top-0 right-0 opacity-0 transition-opacity group-focus-within/item:opacity-100 group-hover/item:opacity-100">
           <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
         </div>}
       </div>
     </ContextMenu>
-    {restoring?.before_snapshot_id !== null && restoring !== null && thread !== null && <RestoreDialog thread={thread} snapshotId={restoring.before_snapshot_id} onClose={() => setRestoring(null)} />}
+    {restoring !== null && thread !== null && <RestoreDialog thread={thread} snapshotId={restoring.before_snapshot_id} onClose={() => setRestoring(null)} />}
     {quickFork.confirmation}</>
   );
 }
