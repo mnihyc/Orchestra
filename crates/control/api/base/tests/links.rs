@@ -61,6 +61,7 @@ async fn set(s: &Scene, node: Id, key: &str, value: Json, locked: bool) {
         .call(NodeSettingSet, &[&node, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,

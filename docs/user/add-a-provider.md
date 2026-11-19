@@ -28,6 +28,7 @@ machine that reaches the model. Its local policy must allow that address. `local
 that machine, not your browser. **Run the connection on** is a separate choice; both can use
 the same machine or the new container.
 Only choose a sign-in program on a machine that offers it.
+A new container carries the programs in its image. An agent that needs a separate program is available after the container reports it installed, or after a hosted unit installs an explicitly declared build. Managed provider containers have no local policy to configure.
 
 ## Key proposals
 

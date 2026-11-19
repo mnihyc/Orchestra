@@ -34,6 +34,7 @@ fn validate(body: &CreateThread) -> ApiResult<()> {
         (body.directory.is_some(), "directory"),
         (body.worktree.is_some(), "worktree"),
         (body.prepare_source.is_some(), "prepare_source"),
+        (!body.workspace_edits.is_empty(), "workspace_edits"),
         (body.cwd.is_some(), "cwd"),
         (body.model.is_some(), "model"),
         (body.effort.is_some(), "effort"),

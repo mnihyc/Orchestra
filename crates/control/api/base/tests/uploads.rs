@@ -13,7 +13,6 @@ mod workspace;
 
 use chrono::Duration;
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::threads::UploadSessionDelete;
 use orch_api_contract::threads::{
     ContentPart, Delivery, FILENAME_HEADER, IMAGE_UPLOAD_MAX_BYTES, ImageMediaType,
     ThreadAttachmentBlobBody, ThreadAttachmentCreate, ThreadAttachmentCreateReply, ThreadBlobGet,
@@ -21,6 +20,7 @@ use orch_api_contract::threads::{
     UploadBlobGetQuery, UploadCreate, UploadSessionComplete, UploadSessionCreate,
     UploadSessionCreateBody, UploadSessionPut, UploadSessionPutQuery, UploadedBlob,
 };
+use orch_api_contract::threads::{UploadSessionDelete, UploadSessionGet};
 
 #[tokio::test]
 async fn a_private_preview_is_bounded_and_does_not_grant_another_person_the_original() {
@@ -229,6 +229,16 @@ async fn cancelling_an_upload_discards_its_partial_bytes_and_never_writes_a_work
     assert!(!path.exists());
     assert_eq!(
         end(&site, &site.ada, upload).await.problem().code,
+        ErrorCode::NotFound
+    );
+    assert_eq!(
+        site.app()
+            .call(UploadSessionGet, &[&upload])
+            .token(&site.ada.token)
+            .send()
+            .await
+            .problem()
+            .code,
         ErrorCode::NotFound
     );
     assert_eq!(
@@ -461,12 +471,98 @@ async fn a_file_goes_up_in_pieces_and_ends_as_one_blob_with_its_name_and_type() 
         .unwrap();
     assert_eq!(held.as_ref(), bytes.as_slice(), "the pieces are in order");
 
-    // The upload is over: its pieces are gone, and it cannot be ended again.
+    // The upload is over: pieces are gone, and its retained receipt recovers a lost final answer.
     let part = site.app().app.blobs.part_of_session(upload);
     assert!(!tokio::fs::try_exists(&part).await.unwrap());
+    assert_eq!(end(&site, &site.ada, upload).await.ok(), done);
+    let status = site
+        .app()
+        .call(UploadSessionGet, &[&upload])
+        .token(&site.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(status.completed, Some(done));
+    assert_eq!(
+        put(&site, &site.ada, upload, 0, &bytes[..1])
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn out_of_order_upload_pieces_keep_their_suffix_and_only_complete_after_the_hole_arrives() {
+    let site = Site::new().await;
+    let bytes = bytes_of(12_000);
+    let upload = begin(&site, &site.ada, 12_000, "unordered.bin").await;
+    assert_eq!(
+        put(&site, &site.ada, upload, 8_000, &bytes[8_000..])
+            .await
+            .ok()
+            .received,
+        4_000
+    );
+    assert_eq!(
+        put(&site, &site.ada, upload, 0, &bytes[..4_000])
+            .await
+            .ok()
+            .received,
+        8_000
+    );
     assert_eq!(
         end(&site, &site.ada, upload).await.problem().code,
-        ErrorCode::NotFound
+        ErrorCode::UploadOffset
+    );
+    // A lost acknowledgement repeats the same bytes without inflating coverage or cutting the suffix.
+    assert_eq!(
+        put(&site, &site.ada, upload, 8_000, &bytes[8_000..])
+            .await
+            .ok()
+            .received,
+        8_000
+    );
+    assert_eq!(
+        put(&site, &site.ada, upload, 4_000, &bytes[4_000..8_000])
+            .await
+            .ok()
+            .received,
+        12_000
+    );
+    let done = end(&site, &site.ada, upload).await.ok();
+    assert_eq!(done.blob, Hash::of(&bytes));
+    assert_eq!(
+        site.app()
+            .app
+            .blobs
+            .read_whole(&done.blob, 12_000)
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn a_retry_cannot_replace_an_acknowledged_range_with_different_bytes() {
+    let site = Site::new().await;
+    let bytes = bytes_of(12_000);
+    let upload = begin(&site, &site.ada, 12_000, "unchanged.bin").await;
+    put(&site, &site.ada, upload, 4_000, &bytes[4_000..8_000])
+        .await
+        .ok();
+    let refused = put(&site, &site.ada, upload, 2_000, &vec![255; 8_000])
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::UploadOffset);
+    put(&site, &site.ada, upload, 0, &bytes[..4_000]).await.ok();
+    put(&site, &site.ada, upload, 8_000, &bytes[8_000..])
+        .await
+        .ok();
+    assert_eq!(
+        end(&site, &site.ada, upload).await.ok().blob,
+        Hash::of(&bytes)
     );
 }
 
@@ -500,21 +596,21 @@ async fn an_upload_that_was_cut_goes_on_from_the_bytes_that_arrived() {
     let upload = begin(&site, &site.ada, 9_000, "data.bin").await;
     put(&site, &site.ada, upload, 0, &bytes[..4_000]).await.ok();
 
-    // The answer was lost; the browser sends the same piece again.
-    let again = put(&site, &site.ada, upload, 0, &bytes[..4_000])
-        .await
-        .problem();
-    assert_eq!(again.code, ErrorCode::UploadOffset);
+    // An identical retry is acknowledged, and an independently arriving suffix is retained.
     assert_eq!(
-        again.extra["received"],
-        json!(4_000),
-        "it is told where to go on"
+        put(&site, &site.ada, upload, 0, &bytes[..4_000])
+            .await
+            .ok()
+            .received,
+        4_000
     );
-    let ahead = put(&site, &site.ada, upload, 6_000, &bytes[6_000..])
-        .await
-        .problem();
-    assert_eq!(ahead.code, ErrorCode::UploadOffset);
-    assert_eq!(ahead.extra["received"], json!(4_000));
+    assert_eq!(
+        put(&site, &site.ada, upload, 6_000, &bytes[6_000..])
+            .await
+            .ok()
+            .received,
+        7_000
+    );
 
     put(&site, &site.ada, upload, 4_000, &bytes[4_000..])
         .await
@@ -1351,4 +1447,45 @@ async fn a_file_forwarded_into_a_thread_is_carried_by_it_too() {
             .unwrap()
             .contains("notes.txt")
     );
+}
+
+#[tokio::test]
+async fn resumption_reads_durable_ranges_and_keeps_the_original_sizing_policy() {
+    let site = Site::new().await;
+    let bytes = bytes_of(12_000);
+    let upload = begin(&site, &site.ada, 12_000, "resume.bin").await;
+    put(&site, &site.ada, upload, 8_000, &bytes[8_000..])
+        .await
+        .ok();
+    site.world
+        .set("storage.transfer_max_piece_bytes", json!(8_388_608))
+        .await;
+    let status = site
+        .app()
+        .call(UploadSessionGet, &[&upload])
+        .token(&site.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(status.received, 4_000);
+    assert_eq!(
+        status.ranges,
+        vec![orch_api_contract::threads::UploadRange {
+            start: 8_000,
+            len: 4_000
+        }]
+    );
+    assert_eq!(status.policy.max_piece_bytes, 16_777_216);
+    for other in [&site.dev, &site.eve] {
+        assert_eq!(
+            site.app()
+                .call(UploadSessionGet, &[&upload])
+                .token(&other.token)
+                .send()
+                .await
+                .problem()
+                .code,
+            ErrorCode::NotFound
+        );
+    }
 }

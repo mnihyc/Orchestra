@@ -177,7 +177,10 @@ async fn an_idle_update_fence_holds_a_new_turn_out_and_a_running_approval_keeps_
     tokio::time::timeout(PATIENCE, async {
         loop {
             let progress = rig.controller.progress(id);
-            if matches!(progress, Some(Progress::Accepted)) {
+            if matches!(
+                progress,
+                Some(Progress::Accepted | Progress::Running | Progress::Released)
+            ) {
                 break;
             }
             assert!(
@@ -284,7 +287,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
                 public_url: "https://orch.test".into(),
             },
             pin: "test".into(),
-            protocol_version: 1,
+            protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
             enrolled_at: rig.clock.time(),
             managed: false,
         })
@@ -319,6 +322,7 @@ async fn switching_auto_off_while_a_build_is_staged_discards_it_without_installi
     tokio::pin!(updating);
     let grant = MachineUpdateNow {
         recommended: "2.0.0".into(),
+        automatic: true,
     };
     let granted = rig.send(&SerialKey::Machine, &grant);
     tokio::pin!(granted);
@@ -461,11 +465,15 @@ async fn a_connector_killed_in_the_middle_of_a_turn_says_on_its_return_what_beca
         .into_iter()
         .find(|e| e.kind == "session.lost")
         .unwrap();
+    assert_eq!(
+        lost.body["uncertain"], true,
+        "the synthetic adapter cannot reattach the admitted native turn"
+    );
     assert!(
         lost.body["reason"]
             .as_str()
             .unwrap()
-            .contains("turn was running")
+            .contains("unavailable")
     );
     for (place, event) in rig.applied(thread, segment).iter().enumerate() {
         assert_eq!(event.seq, place as i64 + 1);
@@ -544,7 +552,54 @@ async fn a_session_that_asks_for_what_the_machines_owner_forbids_is_refused_with
 }
 
 #[tokio::test]
-async fn a_sandbox_wider_than_the_ceiling_reaches_the_harness_lowered_and_the_system_is_told() {
+async fn a_managed_runtime_never_attributes_its_template_sandbox_to_a_machine_policy() {
+    let mut rig = Rig::new();
+    rig.managed = true;
+    rig.start().await;
+    let (thread, segment) = (new_id(), new_id());
+    let connector = rig.connector.as_ref().unwrap();
+    assert!(connector.services().policy.policy().is_none());
+    connector
+        .services()
+        .agents
+        .get()
+        .unwrap()
+        .report_sandbox(
+            (thread, segment),
+            Some(new_id()),
+            new_id(),
+            orch_link_contract::commands::SandboxMode::Open,
+            &[],
+        )
+        .await
+        .unwrap();
+    connector
+        .services()
+        .publisher
+        .publish(
+            orch_link_contract::streams::Stream::Session {
+                thread_id: thread,
+                segment_id: segment,
+            },
+            orch_link_contract::events::Event::SessionTitle(
+                orch_link_contract::events::SessionTitle {
+                    title: "The callback finished".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    rig.wait_for(thread, segment, "session.title", 1).await;
+    assert!(
+        !rig.applied(thread, segment)
+            .iter()
+            .any(|event| event.kind == "session.sandbox")
+    );
+    rig.connector.unwrap().stop().await;
+}
+
+#[tokio::test]
+async fn the_applied_sandbox_stays_with_its_native_command_after_the_machine_policy_changes() {
     let mut rig = Rig::new();
     rig.start().await;
     rig.agent_start(json!({})).await;
@@ -574,6 +629,44 @@ async fn a_sandbox_wider_than_the_ceiling_reaches_the_harness_lowered_and_the_sy
     assert_eq!(told[0].body["payload"]["policy"], "agent.max_sandbox");
     assert_eq!(told[0].body["payload"]["asked"], "open");
     assert_eq!(told[0].body["payload"]["used"], "workspace");
+    let mut unchanged = turn.clone();
+    unchanged.turn_id = new_id();
+    unchanged.sandbox_mode = orch_link_contract::commands::SandboxMode::ReadOnly;
+    rig.succeed(&SerialKey::Thread(thread), &unchanged).await;
+    rig.wait_for(thread, segment, "turn.completed", 2).await;
+    rig.wait_for(thread, segment, "session.sandbox", 3).await;
+    rig.connector
+        .as_ref()
+        .unwrap()
+        .services()
+        .policy
+        .set_here(
+            orch_link_contract::policy::PolicyKey::AgentMaxSandbox,
+            &json!("read_only"),
+        )
+        .unwrap();
+    let decisions: Vec<_> = rig
+        .applied(thread, segment)
+        .into_iter()
+        .filter(|event| event.kind == "session.sandbox")
+        .collect();
+    assert_eq!(decisions.len(), 3);
+    assert!(decisions[0].body["turn_id"].is_null());
+    assert_eq!(decisions[1].body["turn_id"], json!(turn.turn_id));
+    for decision in &decisions[..2] {
+        assert_eq!(decision.body["requested"], "open");
+        assert_eq!(decision.body["applied"], "workspace");
+        assert_eq!(decision.body["governing_policy"], "machine_policy");
+        let command: Id = serde_json::from_value(decision.body["command_id"].clone()).unwrap();
+        assert_ne!(command, Id::nil());
+    }
+    assert_eq!(decisions[2].body["turn_id"], json!(unchanged.turn_id));
+    assert_eq!(decisions[2].body["requested"], "read_only");
+    assert_eq!(decisions[2].body["applied"], "read_only");
+    assert_ne!(
+        decisions[0].body["command_id"],
+        decisions[1].body["command_id"]
+    );
     rig.connector.unwrap().stop().await;
 }
 
@@ -1002,3 +1095,8 @@ async fn an_opening_the_system_gave_up_stops_fetching_and_removes_what_it_fetche
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
     rig.connector.unwrap().stop().await;
 }
+
+#[path = "agent_role/automatic_install.rs"]
+mod automatic_install;
+#[path = "agent_role/stop_during_command.rs"]
+mod stop_during_command;
