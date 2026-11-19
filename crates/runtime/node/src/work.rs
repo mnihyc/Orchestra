@@ -183,10 +183,12 @@ pub(crate) fn start(
     command: orch_types::Id,
     clock: Arc<dyn orch_types::Clock>,
     report: Option<WorkReport>,
+    deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     cancel: CancellationToken,
     fallback_timeout_secs: u64,
 ) -> (Arc<dyn VolumeWork>, JoinHandle<()>) {
-    let (counts, mut rx) = watch::channel(None::<VolumeProgress>);
+    let initial = deadline.as_ref().map(|_| VolumeProgress::default());
+    let (counts, mut rx) = watch::channel(initial);
     let timeout_secs = report
         .as_ref()
         .map_or(fallback_timeout_secs, |report| report.timeout_secs);
@@ -237,6 +239,7 @@ pub(crate) fn start(
                         Some(command),
                         &JobProgress {
                             activity: Some(JobActivity {
+                                captured_deadline: deadline.clone(),
                                 waiting_for: None,
                                 updated_at: clock.time(),
                                 stall_after_seconds: 0,

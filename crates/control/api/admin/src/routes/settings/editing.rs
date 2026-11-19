@@ -53,7 +53,7 @@ pub(super) trait Input: operation::Kind {
 }
 
 pub(super) enum Request {
-    Set(api::NodeSettingSetBody),
+    Set(Box<api::NodeSettingSetBody>),
     Clear(api::NodeSettingDeleteQuery),
 }
 
@@ -62,7 +62,7 @@ impl Input for operation::Set {
     type Query = ();
     type Body = api::NodeSettingSetBody;
     fn request(_: (), body: Self::Body) -> Request {
-        Request::Set(body)
+        Request::Set(Box::new(body))
     }
 }
 
@@ -95,10 +95,18 @@ impl Edit {
     }
 }
 
+struct Related {
+    key: &'static str,
+    edit: PreparedWrite,
+    needs: validation::Needs,
+    before: Option<Before>,
+}
+
 pub(super) struct Prepared {
     node: Id,
     key: String,
     edit: Edit,
+    related: Vec<Related>,
     needs: validation::Needs,
     before: Option<Before>,
     provider: Option<Id>,
@@ -110,6 +118,7 @@ pub(super) struct Outcome {
     key: String,
     written: orch_settings::write::Written,
     change: operation::Change,
+    related_changes: Vec<operation::Change>,
     required: Vec<native::Facts<Source>>,
 }
 
@@ -174,8 +183,28 @@ impl<K: Input> effects::Effect for Editor<K> {
             let policy = policy_at(conn, node).await?;
             permit(conn, &principal, node, &key, policy).await?;
             let request = K::request(query, body);
+            let model_choice = match &request {
+                Request::Set(body) => body.model_choice.clone(),
+                Request::Clear(_) => None,
+            };
+            if model_choice.is_some() {
+                if kind != NodeKind::Thread || key != keys::AGENT_MODEL {
+                    return Err(invalid(
+                        "model_choice",
+                        "is supplied only with a thread's model",
+                    ));
+                }
+                if matches!(&request, Request::Set(body) if body.expected_revision.is_none()) {
+                    return Err(invalid(
+                        "expected_revision",
+                        "review the model before changing its related settings",
+                    ));
+                }
+            }
             if let Request::Set(body) = &request {
                 super::super::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
+                super::super::resources::validation::named_things_exist(conn, &key, &body.value)
+                    .await?;
             }
             lock_footprint(conn, node, kind, &key).await?;
             let needs = setting_needs(conn, node, &key).await?;
@@ -245,11 +274,59 @@ impl<K: Input> effects::Effect for Editor<K> {
                     .await
                     .map_err(ApiError::engine)?;
             let before = before_on_a_thread(conn, node, kind, &key).await?;
+            let mut related = Vec::new();
+            if let Some(choice) = model_choice {
+                for (key, change) in [
+                    (keys::AGENT_EFFORT, choice.effort),
+                    (keys::AGENT_PARAMS, choice.params),
+                ] {
+                    let Some(change) = change else {
+                        continue;
+                    };
+                    super::super::resources::validation::setting(
+                        &ctx.app.engine,
+                        key,
+                        &change.value,
+                    )?;
+                    lock_footprint(conn, node, kind, key).await?;
+                    let related_needs = setting_needs(conn, node, key).await?;
+                    // These three parameter keys share this thread subject; none supplies authority for another object.
+                    if related_needs != needs {
+                        return Err(ApiError::internal(
+                            "the model choice has different setting subjects",
+                        ));
+                    }
+                    let policy = policy_at(conn, node).await?;
+                    let may_lock =
+                        permit_needs(conn, &principal, related_needs, policy, None).await?;
+                    let write = Write {
+                        actor,
+                        target: Target::Node(node),
+                        key,
+                        value: change.value,
+                        locked: None,
+                        expected_revision: Some(change.expected_revision),
+                        may_lock,
+                        origin: &origin(ctx),
+                    };
+                    let edit = match orch_settings::write::prepare_write(conn, &write).await {
+                        Ok(edit) => edit,
+                        Err(error) => return Err(write_failed(conn, &principal, node, error).await),
+                    };
+                    related.push(Related {
+                        key,
+                        edit,
+                        needs: related_needs,
+                        before: before_on_a_thread(conn, node, kind, key).await?,
+                    });
+                }
+            }
             Ok((
                 Prepared {
                     node,
                     key,
                     edit,
+                    related,
                     needs,
                     before,
                     provider,
@@ -268,6 +345,9 @@ impl<K: Input> effects::Effect for Editor<K> {
         Box::pin(async move {
             let policy = policy_at(conn, value.node).await?;
             let may_lock = permit_needs(conn, principal, value.needs, policy, None).await?;
+            for related in &value.related {
+                permit_needs(conn, principal, related.needs, policy, None).await?;
+            }
             if value.edit.changes_lock() && !may_lock {
                 return Err(ApiError::new(
                     ErrorCode::AuthzDenied,
@@ -289,6 +369,7 @@ impl<K: Input> effects::Apply for Editor<K> {
     ) -> BoxFuture<'a, ApiResult<effects::Outcome<Outcome>>> {
         Box::pin(async move {
             let actor = Actor::User(principal.user());
+            let mut first = Some(before);
             let written = match &value.edit {
                 Edit::Set(prepared) => {
                     orch_settings::write::apply_write_before(
@@ -297,7 +378,7 @@ impl<K: Input> effects::Apply for Editor<K> {
                         actor,
                         &origin(ctx),
                         ctx.now,
-                        move || before.check(),
+                        || first.take().map_or(Ok(()), |before| before.check()),
                     )
                     .await
                 }
@@ -308,18 +389,48 @@ impl<K: Input> effects::Apply for Editor<K> {
                         actor,
                         &origin(ctx),
                         ctx.now,
-                        move || before.check(),
+                        || first.take().map_or(Ok(()), |before| before.check()),
                     )
                     .await
                 }
             };
-            let written = match written {
+            let mut written = match written {
                 Ok(written) => written,
                 Err(WriteFailure::BeforeEffect(error)) => return Err(error),
                 Err(WriteFailure::Native(error)) => {
                     return Err(write_failed(conn, principal, value.node, error).await);
                 }
             };
+            let mut related_changes = Vec::new();
+            for related in &value.related {
+                let additional = orch_settings::write::apply_write_before(
+                    conn,
+                    &related.edit,
+                    actor,
+                    &origin(ctx),
+                    ctx.now,
+                    || first.take().map_or(Ok(()), |before| before.check()),
+                )
+                .await;
+                let additional = match additional {
+                    Ok(written) => written,
+                    Err(WriteFailure::BeforeEffect(error)) => return Err(error),
+                    Err(WriteFailure::Native(error)) => {
+                        return Err(write_failed(conn, principal, value.node, error).await);
+                    }
+                };
+                if additional.changed {
+                    written.changed = true;
+                    related_changes.push(operation::Change {
+                        node: value.node,
+                        key: related.key.to_owned(),
+                        fingerprint: operation::fingerprint(&additional.view)
+                            .map_err(ApiError::engine)?,
+                        lock_changed: false,
+                        provider: value.provider,
+                    });
+                }
+            }
             if K::VALIDATE_STANDING
                 && written.changed
                 && value.key == keys::AGENT_INSTRUCTIONS
@@ -365,6 +476,28 @@ impl<K: Input> effects::Apply for Editor<K> {
                     .await?;
                 }
             }
+            for related in &value.related {
+                if related.key == keys::AGENT_PARAMS
+                    && related_changes
+                        .iter()
+                        .any(|change| change.key == related.key)
+                    && let Some(before) = &related.before
+                {
+                    write_lines(
+                        conn,
+                        ctx.now,
+                        value.node,
+                        principal.user(),
+                        related.key,
+                        Before {
+                            model: before.model.clone(),
+                            effort: before.effort.clone(),
+                            value: before.value.clone(),
+                        },
+                    )
+                    .await?;
+                }
+            }
             let change = operation::Change {
                 node: value.node,
                 key: value.key.clone(),
@@ -378,6 +511,7 @@ impl<K: Input> effects::Apply for Editor<K> {
                 key: value.key.clone(),
                 written,
                 change,
+                related_changes,
                 required: value.required.clone(),
             };
             Ok(if changed {
@@ -416,14 +550,16 @@ pub(super) async fn run<K: Input>(
     if native::modern(&completed.accepted) {
         let origin = orch_authz::CapturedOperation::capture(&completed.accepted)
             .map_err(ApiError::internal)?;
-        if let Err(error) = completed
-            .ctx
-            .app
-            .engine
-            .setting_changed(&origin, output.change.clone())
-            .await
-        {
-            tracing::warn!(node=%output.node,key=%output.key,%error,"accepted inherited setting changes remain pending");
+        for change in std::iter::once(&output.change).chain(&output.related_changes) {
+            if let Err(error) = completed
+                .ctx
+                .app
+                .engine
+                .setting_changed(&origin, change.clone())
+                .await
+            {
+                tracing::warn!(node=%output.node,key=%change.key,%error,"accepted inherited setting changes remain pending");
+            }
         }
     } else {
         if output.key == keys::AUTH_SECOND_STEP {
@@ -448,6 +584,16 @@ pub(super) async fn run<K: Input>(
                 .await
         {
             tracing::warn!(node=%output.node,%error,"inherited resource changes remain pending");
+        }
+        if orch_engine::environments::is_workspace_setting(&output.key)
+            && let Err(error) = completed
+                .ctx
+                .app
+                .engine
+                .workspace_scope_changed(output.node)
+                .await
+        {
+            tracing::warn!(node=%output.node,%error,"inherited workspace changes remain pending");
         }
     }
     let full = reply::render::<Setting<K>>(&completed.ctx, &completed.accepted, output).await?;

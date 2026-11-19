@@ -14,6 +14,8 @@ pub enum Source {
     Names,
     /// Native full-opening settings at the actual root; absent on incremental pages.
     Settings,
+    /// Actual private group chats contributing only this reader's folded signals.
+    Groups,
 }
 const NAMES: Binding<Source> = Binding {
     source: Source::Names,
@@ -67,6 +69,12 @@ pub const TREE: Declaration<Source> = Declaration {
             source: Source::Results,
             target: Target::ResolvedCollection("results"),
             usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: Source::Groups,
+            target: Target::ResolvedCollection("tree_groups"),
+            usage: FacetUsage::ResponseContent,
             cardinality: Cardinality::Collection,
         },
         NAMES,
