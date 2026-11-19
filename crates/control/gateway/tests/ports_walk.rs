@@ -158,6 +158,7 @@ async fn rules_2_3_6_a_manager_admits_a_colleague_the_connector_stops_starts_and
     let mut config = (*old.config).clone();
     config.edge.ports_domain = Some("ports.test".into());
     let app = Arc::new(orch_api_core::state::AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: old.db.clone(),

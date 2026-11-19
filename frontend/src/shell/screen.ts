@@ -66,9 +66,10 @@ function resolvedHeading(held: Headings | null | undefined): ScreenHeading | nul
 }
 const useHeading = create<Headings & { focused: string | null; byView: ReadonlyMap<string, Headings> }>(() => ({ heading: null, route: null, focused: null, byView: new Map() }));
 function report(owner: string | undefined, kind: keyof Headings, heading: ScreenHeading | null): void {
-  if (owner === undefined) { useHeading.setState({ [kind]: heading }); return; }
   const before = useHeading.getState();
+  if (owner === undefined) { if (before[kind] !== heading) useHeading.setState({ [kind]: heading }); return; }
   const held = before.byView.get(owner) ?? { heading: null, route: null };
+  if (held[kind] === heading) return;
   const byView = new Map(before.byView);
   byView.set(owner, { ...held, [kind]: heading });
   useHeading.setState({ byView });
@@ -91,14 +92,15 @@ export function useRouteHeading(heading: ScreenHeading): void {
   const ancestry = trail === undefined ? '' : JSON.stringify(trail);
   const targetKind = target?.kind, targetId = target?.id;
   usePageTitle(useNodeLabel(nodeId, title), instance === null);
-  useEffect(() => {
-    const route: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, section,
+  const route = useMemo<ScreenHeading>(() => ({ thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, section,
       trail: ancestry === '' ? undefined : JSON.parse(ancestry) as readonly TrailPart[], ...(tabPending === undefined ? {} : { tabPending }),
       path: path === 'null' ? undefined : JSON.parse(path) as ScreenHeading['path'], views: views === 'null' ? undefined : JSON.parse(views) as ScreenHeading['views'],
-      target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId } };
+      target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId } }),
+    [title, tabTitle, tabPending, icon, nodeId, leaf, section, ancestry, presented, path, views, targetKind, targetId]);
+  useEffect(() => {
     report(owner, 'route', route);
     return () => { if (owner === undefined && useHeading.getState().route === route) report(owner, 'route', null); };
-  }, [title, tabTitle, tabPending, icon, nodeId, leaf, section, ancestry, presented, path, views, targetKind, targetId, owner]);
+  }, [owner, route]);
 }
 
 /** Says what the screen in view is, for as long as the calling component is in view. */
@@ -117,9 +119,10 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
   const availability = views === undefined ? '' : JSON.stringify(views);
   const authorized = path === undefined ? '' : JSON.stringify(path);
   const presented = JSON.stringify(heading.thread ?? null);
+  const spoken = useMemo<ScreenHeading>(() => ({ thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, section, leaf, ...(tabPending === undefined ? {} : { tabPending }), target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId }, path: authorized === '' ? undefined : JSON.parse(authorized) as readonly NodeRef[], views: availability === '' ? undefined : JSON.parse(availability) as ScreenHeading['views'], trail: said === '' ? undefined : (JSON.parse(said) as TrailPart[]) }),
+    [title, tabTitle, tabPending, icon, nodeId, section, said, leaf, availability, authorized, presented, targetKind, targetId]);
   useEffect(() => {
     if (!enabled) return;
-    const spoken: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, section, leaf, ...(tabPending === undefined ? {} : { tabPending }), target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId }, path: authorized === '' ? undefined : JSON.parse(authorized) as readonly NodeRef[], views: availability === '' ? undefined : JSON.parse(availability) as ScreenHeading['views'], trail: said === '' ? undefined : (JSON.parse(said) as TrailPart[]) };
     report(owner, 'heading', spoken);
     return () => {
       // Activity pauses hidden page effects. Its already-read identity still belongs to the frame;
@@ -128,13 +131,14 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
       // Only what this screen said is taken back: the next screen may have spoken already.
       if (useHeading.getState().heading === spoken) useHeading.setState({ heading: null });
     };
-  }, [title, tabTitle, tabPending, icon, nodeId, section, said, leaf, availability, authorized, presented, enabled, targetKind, targetId, inWorkbench, owner]);
+  }, [owner, spoken, enabled, inWorkbench]);
 }
 
 /** What the screen in view said of itself, or `null` while it has said nothing. */
-export function useCurrentHeading(): ScreenHeading | null {
+export function useCurrentHeading(enabled = true): ScreenHeading | null {
   const instance = useViewInstance();
   const held = useHeading(useShallow((state) => {
+    if (!enabled) return null;
     const owner = instance === null ? state.focused : instance.headingOwner;
     const current = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
     return { route: current?.route ?? null, heading: current?.heading ?? null };

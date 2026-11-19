@@ -1132,6 +1132,7 @@ async fn movable(world: &World, team: &Team) -> Id {
         team.environment,
         &manifest.hash,
         world.now(),
+        None,
     )
     .await
     .unwrap();

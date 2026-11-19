@@ -29,6 +29,8 @@ pub enum CommandEvidence {
     ReferenceStat(super::reference_preview::FileSource),
     ReferenceFetch(super::reference_preview::FileSource),
     FileMkdir(crate::commands::FileMkdirCommand),
+    MachineDirectory(Box<crate::commands::MachineDirectoryAuthority>),
+    FilePath(Box<super::file_commands::FileCommand>),
 }
 impl CommandEvidence {
     pub fn command_kind(&self) -> &'static str {
@@ -40,6 +42,8 @@ impl CommandEvidence {
             Self::ReferenceStat(_) => "fs.stat",
             Self::ReferenceFetch(_) => "fs.fetch",
             Self::FileMkdir(source) => source.command_kind(),
+            Self::MachineDirectory(_) => "machine.directory.list",
+            Self::FilePath(source) => source.command_kind(),
         }
     }
     pub async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
@@ -52,6 +56,8 @@ impl CommandEvidence {
                 source.lock_source(conn).await
             }
             Self::FileMkdir(source) => source.lock_source(conn).await,
+            Self::MachineDirectory(source) => source.lock_source(conn).await,
+            Self::FilePath(source) => source.lock_source(conn).await,
         }
     }
     pub async fn current_issue_callers(
@@ -73,6 +79,10 @@ impl CommandEvidence {
                 source.current(conn, clock).await
             }
             Self::FileMkdir(source) => source.current_issue(conn, command, clock).await,
+            Self::MachineDirectory(source) => {
+                source.current_issue_callers(conn, command, clock).await
+            }
+            Self::FilePath(source) => source.issue(conn, command, clock).await,
         }
     }
     pub async fn current_callers(
@@ -94,6 +104,8 @@ impl CommandEvidence {
                 source.current(conn, clock).await
             }
             Self::FileMkdir(source) => source.current_stored(conn, command, clock).await,
+            Self::MachineDirectory(source) => source.current_callers(conn, command, clock).await,
+            Self::FilePath(source) => source.stored(conn, command, clock).await,
         }
     }
 }
