@@ -54,7 +54,7 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
         .call(ProviderCreate, &[])
         .token(&company.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Private provider".to_owned(),
             home_id: company.acme,
             access: None,

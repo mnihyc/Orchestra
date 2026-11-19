@@ -1,0 +1,5 @@
+test -p orch-api-core --test container_units --test everything_resources --test realtime_diagnostics --test kfix_binding --test settings --test threads_settings --test model_entries --test provider_models --test ask --test binding_options --test binding_readiness --test org_overview --test native_actions --test provider_credit_schema --test admin_places --test me --test service_accounts --test key_activity --test api_surfaces --test kadmin_tokens
+test -p orch-api-core --test component_updates --test machine_policy_scopes --test machine_registration --test search_names --test search_native_scopes --test documents --test document_list_scopes --test private_documents --test search_content --test threads_start_source --test thread_opening_scopes --test accounts --test notifications_routes --test threads_drive --test thread_continuation_queues --test thread_move --test resource_summaries --test summaries
+test -p orch-api-base -p orch-api-core --lib
+test -p orch-provider-contract --test option_layers
+test -p orch-api-core --test defaults_opening --test node_chat_opening_scopes

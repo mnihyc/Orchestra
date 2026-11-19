@@ -70,7 +70,8 @@ export function groupResourceRows<Row>(rows: readonly Row[], mode: ResourceGroup
         break;
       }
       case 'machine': add(row, (meta.origin_machine === null || meta.origin_machine === undefined) ? { id: 'machine:none', label: t('resourceGroups.noOrigin') }
-        : { id: `machine:${meta.origin_machine.id}`, label: meta.origin_machine.name, machine: meta.origin_machine }); break;
+        // Containers share their host's identity; equally named hosts and later renames keep their own groups.
+        : { id: meta.origin_machine.placement === 'managed' && meta.origin_machine.host_id !== null && meta.origin_machine.host_id !== undefined ? `machine:host:${meta.origin_machine.host_id}` : `machine:${meta.origin_machine.id}`, label: meta.origin_machine.name, machine: meta.origin_machine }); break;
       case 'tag': {
         const tags = meta.tags ?? [];
         if (tags.length === 0) add(row, { id: 'tag:none', label: t('resourceGroups.noTag') });
