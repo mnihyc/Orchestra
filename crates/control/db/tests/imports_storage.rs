@@ -48,6 +48,47 @@ async fn site(conn: &mut Conn) -> Site {
     }
 }
 
+#[tokio::test]
+async fn creation_keys_with_zeroes_do_not_reuse_another_import_or_change_its_original_request() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let site = site(&mut conn).await;
+    let first = serde_json::json!({"client_id":"import\0id","literal":"~orch.exact:unchanged"});
+    let mut ids = Vec::new();
+    for (client, request) in [
+        ("import\0id", first.clone()),
+        ("import�id", serde_json::json!({"client_id":"import�id"})),
+    ] {
+        let row = imports::insert(
+            &mut conn,
+            &imports::NewImport {
+                id: new_id(),
+                user: site.user,
+                node: site.project,
+                client_id: client,
+                request: &request,
+                files: &[],
+                source_blobs: &[],
+                package: None,
+                at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.client_id, client);
+        assert_eq!(row.request, request);
+        ids.push(row.id);
+    }
+    assert_ne!(ids[0], ids[1]);
+    let repeated = imports::by_client(&mut conn, site.user, "import\0id")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated.id, ids[0]);
+    assert_eq!(repeated.request, first);
+}
+
 /// Each scan must examine a page, rather than sorting or rejecting a growing prefix.
 fn examined(plan: &Value) -> f64 {
     match plan {
