@@ -36,9 +36,18 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`shows retention and read-only admin inspection in ${locale}`, async () => {
     await setLocale(locale); const t = i18n.getFixedT(locale);
     show(<AskGovernance conversation={askConversation({ retention_days: 14, inspecting: true, can: { message: false, keep: false, stop: false, delete: false, export: true } })} />);
-    expect(screen.getByText(t('ask.adminNotice'))).toBeVisible();
     expect(screen.getByText(t('ask.inspection'))).toBeVisible();
-    expect(screen.getByText(new RegExp(t('ask.retention', { days: '14' })))).toBeVisible();
+    expect(screen.getByText(new RegExp(t('ask.retention', { count: 14, days: '14' })))).toBeVisible();
+  });
+  it(`names the permanent deletion date in the existing retention line in ${locale}`, async () => {
+    await setLocale(locale);
+    const expires = '2027-01-02T10:17:00.000Z';
+    show(<AskGovernance conversation={askConversation({ retention_days: 14, expires_at: expires })} />);
+    const words = locale === 'en' ? 'Permanent deletion' : '永久删除时间';
+    const line = screen.getByText(new RegExp(words));
+    expect(line).toBeVisible();
+    expect(line.querySelector('time')).toHaveAttribute('datetime', expires);
+    expect(line).toHaveTextContent(i18n.t('ask.retention', { count: 14, days: '14' }));
   });
   it(`names live source reads without showing operation internals in ${locale}`, async () => {
     await setLocale(locale); const t = i18n.getFixedT(locale);

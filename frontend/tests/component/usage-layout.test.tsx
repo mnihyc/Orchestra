@@ -26,14 +26,14 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     return <a {...anchor} href={`${path}${query === '' ? '' : `?${query}`}`}>{children}</a>;
   },
 }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@/features/usage/Export', () => ({ Export: () => null }));
 // Chart rendering has its own component tests; these cases exercise the report's controlled inputs.
 vi.mock('@/features/usage/Chart', () => ({ UsageChart: () => null }));
-vi.mock('@/api/nodes', () => ({ nodeQuery: (id: string) => ({ queryKey: ['layout-node', id], queryFn: (): Promise<Node> => Promise.resolve(org(id, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))) }), orgsQuery: {queryKey:['orgs'],queryFn:()=>Promise.resolve([])}, fetchTree:()=>Promise.resolve({nodes:[]}) }));
-vi.mock('@/api/resources', () => ({ providerQuery: () => ({ queryKey: ['layout-provider'], queryFn: () => Promise.resolve(null) }) }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), nodeQuery: (id: string) => ({ queryKey: ['layout-node', id], queryFn: (): Promise<Node> => Promise.resolve(org(id, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')))) }), orgsQuery: {queryKey:['orgs'],queryFn:()=>Promise.resolve([])}, fetchTree:()=>Promise.resolve({nodes:[]}) }));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(), providerQuery: () => ({ queryKey: ['layout-provider'], queryFn: () => Promise.resolve(null) }) }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/usage', async (importOriginal) => {
   const original = await importOriginal<typeof UsageApi>();
   return {
@@ -84,7 +84,7 @@ it.each(['usage', 'performance'] as const)('locates every scoped %s split locall
     expect(options[index]).toHaveAccessibleName(i18n.t(`usagePerf.choices.splits.${split}.name`));
     expect(options[index]).toHaveAccessibleDescription(i18n.t(`usagePerf.choices.splits.${split}.description`));
   }
-  await user.type(input, 'program', { skipClick: true });
+  await user.type(input, 'access programs', { skipClick: true });
   expect(onSearch).not.toHaveBeenCalled(); expect(usageRead).toHaveBeenCalledTimes(reads); expect(historyRead.mock.calls).toEqual(historyReads);
   await user.keyboard('{Enter}');
   expect(onSearch).toHaveBeenCalledExactlyOnceWith({ series: 'program' });
