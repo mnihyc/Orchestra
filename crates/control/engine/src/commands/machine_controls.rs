@@ -17,8 +17,8 @@ use orch_api_contract::{
     machine_sources::{self as declarations, Source as Role},
     operation_sources::Declaration,
     resources::{
-        HostUpdate, MachinePolicyUpdate, MachinePolicyUpdateBody, MachineProbe,
-        MachineProgramsChange, MachineRolesSet,
+        HostUpdate, MachineDirectoryList, MachinePolicyUpdate, MachinePolicyUpdateBody,
+        MachineProbe, MachineProgramsChange, MachineRolesSet,
     },
     routes::{Endpoint, Route},
 };
@@ -72,8 +72,10 @@ trait Operation: Send + Sync + 'static {
     const ROUTE: Route;
     const DECLARATION: &'static Declaration<Role>;
     const KIND: CommandKind;
+    const KEY: SerialKey = SerialKey::Machine;
     const EXCLUSIVE: bool = false;
     const REQUIRE_VIEW: bool = true;
+    const PERMISSION: Permission = Permission::MachineManage;
     const FAMILY: KeyTargetKind = KeyTargetKind::Object(ObjectKind::Machine);
     fn valid_body(body: &Json) -> bool;
     fn policy_request(_body: &Json) -> Option<MachinePolicyUpdateBody> {
@@ -101,16 +103,27 @@ impl Operation for Probe {
     }
 }
 #[derive(Clone, PartialEq, Eq)]
+struct Directories;
+impl Operation for Directories {
+    const ROUTE: Route = MachineDirectoryList::ROUTE;
+    const DECLARATION: &'static Declaration<Role> = &declarations::DIRECTORIES;
+    const KIND: CommandKind = CommandKind::MachineDirectoryList;
+    const KEY: SerialKey = SerialKey::None;
+    const PERMISSION: Permission = Permission::MachineUse;
+    fn valid_body(body: &Json) -> bool {
+        serde_json::from_value::<orch_link_contract::commands::MachineDirectoryList>(body.clone())
+            .is_ok_and(|body| body.limit > 0 && body.page_bytes > 0)
+    }
+}
+#[derive(Clone, PartialEq, Eq)]
 struct Programs;
 impl Operation for Programs {
     const ROUTE: Route = MachineProgramsChange::ROUTE;
     const DECLARATION: &'static Declaration<Role> = &declarations::PROGRAMS;
     const KIND: CommandKind = CommandKind::MachinePrograms;
     fn valid_body(body: &Json) -> bool {
-        serde_json::from_value::<orch_api_contract::machine_programs::MachineProgramsCommand>(
-            body.clone(),
-        )
-        .is_ok()
+        serde_json::from_value::<orch_link_contract::commands::MachineProgramsRequest>(body.clone())
+            .is_ok_and(|request| request.coherent())
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -144,6 +157,29 @@ impl Operation for Roles {
             }
             Ok(())
         })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct Gateway;
+impl Operation for Gateway {
+    const ROUTE: Route = orch_api_contract::gateways::MachineGatewaySet::ROUTE;
+    const DECLARATION: &'static Declaration<Role> = &declarations::GATEWAY;
+    const KIND: CommandKind = CommandKind::MachineGatewaySet;
+    const EXCLUSIVE: bool = true;
+    const REQUIRE_VIEW: bool = false;
+    fn valid_body(body: &Json) -> bool {
+        serde_json::from_value::<orch_link_contract::commands::MachineGatewaySet>(body.clone())
+            .is_ok_and(|request| match request.choice.selection {
+                orch_link_contract::gateways::GatewaySelection::Automatic => {
+                    request.choice.gateway_id.is_none()
+                }
+                orch_link_contract::gateways::GatewaySelection::Selected => request
+                    .choice
+                    .gateway_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty()),
+            })
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -227,7 +263,7 @@ async fn physical_locks<F: Operation>(conn: &mut Conn, physical: &Physical) -> R
     sqlx::query(if F::EXCLUSIVE {
         "SELECT id FROM machines WHERE id=$1 FOR UPDATE"
     } else {
-        "SELECT id FROM machines WHERE id=$1 FOR SHARE"
+        "SELECT id FROM machines WHERE id=$1 FOR KEY SHARE"
     })
     .bind(physical.machine)
     .fetch_one(&mut *conn)
@@ -276,7 +312,7 @@ impl<F: Operation> Source for Native<F> {
         _value: &'a Physical,
     ) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            for permission in [Permission::MachineView, Permission::MachineManage] {
+            for permission in [Permission::MachineView, F::PERMISSION] {
                 if !F::REQUIRE_VIEW && permission == Permission::MachineView {
                     continue;
                 }
@@ -357,7 +393,7 @@ impl<F: Operation> Authority<F> {
                 .admitted_operation()
                 .is_some_and(|operation| operation != F::ROUTE.name)
             || command.kind != F::KIND
-            || command.key != SerialKey::Machine
+            || command.key != F::KEY
             || !F::valid_body(&command.body)
         {
             return Err(EngineError::unreadable(
@@ -501,6 +537,7 @@ impl<F: Operation> Authority<F> {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -526,7 +563,7 @@ macro_rules! native_command {
             }
         }
         impl $name {
-            pub(super) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
+            pub(crate) async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
                 self.0.lock_source(conn).await
             }
             /// Capture this concrete native operation and exact original raw credential.
@@ -550,7 +587,7 @@ macro_rules! native_command {
             ) -> Result<Option<(Caller, Option<Time>)>, EngineError> {
                 self.0.current(conn, clock).await
             }
-            pub(super) async fn current_issue_callers(
+            pub(crate) async fn current_issue_callers(
                 &self,
                 conn: &mut Conn,
                 command: &NewCommand<'_>,
@@ -558,7 +595,7 @@ macro_rules! native_command {
             ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
                 self.0.current_issue_callers(conn, command, clock).await
             }
-            pub(super) async fn current_callers(
+            pub(crate) async fn current_callers(
                 &self,
                 conn: &mut Conn,
                 command: &CommandRow,
@@ -585,6 +622,11 @@ native_command!(
     Roles,
     "Private delegated-role provenance, with its exact original operation and physical source."
 );
+native_command!(
+    MachineGatewayAuthority,
+    Gateway,
+    "Private primary gateway selection provenance, retaining its exact operation and physical source."
+);
 
 native_command!(
     MachinePolicyAuthority,
@@ -595,4 +637,10 @@ native_command!(
     HostPolicyAuthority,
     HostPolicy,
     "Private native Host policy synchronization provenance, retaining its original HostUpdate operation."
+);
+
+native_command!(
+    MachineDirectoryAuthority,
+    Directories,
+    "Private native directory-read provenance, retaining its exact registration authority and physical source."
 );

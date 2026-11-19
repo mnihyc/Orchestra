@@ -395,6 +395,7 @@ pub(crate) fn place_of(view: Environment) -> PlaceEnvironment {
         }
     }
     PlaceEnvironment {
+        capacity: None,
         grouping: orch_api_contract::resource_groups::ResourceGrouping {
             home: Some(view.home.clone()),
             home_path: Vec::new(),

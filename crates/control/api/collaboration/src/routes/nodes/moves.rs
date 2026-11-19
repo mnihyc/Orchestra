@@ -468,6 +468,7 @@ async fn plan_reply(
             review::effects(ctx, conn, principal, plan.moved.id, plan.to.id).await?
         } else {
             PagePreview {
+                server_host_use: None,
                 owner_reads: None,
                 pages,
                 orgs: None,

@@ -81,6 +81,7 @@ async fn set_at(s: &Scene, org: Id, key: &str, value: Json) {
         .call(NodeSettingSet, &[&org, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -2468,6 +2469,7 @@ async fn queued_meaning_retains_its_canonical_source_and_current_key_without_rev
     orch_db::queries::link::insert_command_with_authority(
         &mut tx,
         &orch_db::queries::link::NewCommand {
+            native_target: None,
             id,
             machine_id: retained.machine,
             kind: &retained.kind,

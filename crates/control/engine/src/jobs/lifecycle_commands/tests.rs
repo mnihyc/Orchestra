@@ -182,6 +182,7 @@ async fn native_lifecycle_proposals_keep_exact_wire_identity_and_current_origina
     assert_eq!(&restored, authority);
     let serial = command.key.wire();
     let proposal = link::NewCommand {
+        native_target: None,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),

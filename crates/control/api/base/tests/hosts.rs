@@ -27,6 +27,159 @@ use resources::{Company, company, name_person};
 use serde_json::json;
 use support::{Statements, World};
 
+#[tokio::test]
+async fn giving_use_on_the_server_host_requires_its_exact_confirmation_and_leaves_no_unconfirmed_grant()
+ {
+    use orch_api_contract::access::PermissionPageUpdate;
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Server host").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert!(read(&world, &c.boss, host).await.bundled_with_server);
+    let body = json!({"rows":[{"permission":"host.use","inherit":false,"add":[{"holder":{"kind":"user","id":c.viewer.id()}}]}]});
+    let refused = world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .raw_body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(refused.extra["server_host_use"]["hosts"], json!(1));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM permission_entries WHERE object_id=$1 AND permission='host.use' AND holder_id=$2 AND removed_at IS NULL")
+        .bind(host).bind(c.viewer.id()).fetch_one(&world.db.pool).await.unwrap();
+    assert_eq!(count, 0);
+    let changed = json!({"rows":[{"permission":"host.use","inherit":false,"add":[{"holder":{"kind":"user","id":c.admin.id()}}]}]});
+    let wrong = world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .header("orch-server-host-use-confirmed", &proof)
+        .raw_body(&changed)
+        .send()
+        .await
+        .problem();
+    assert_eq!(wrong.code, ErrorCode::ConflictConfirmationRequired);
+    world
+        .app
+        .call(PermissionPageUpdate, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .header("orch-server-host-use-confirmed", &proof)
+        .raw_body(&body)
+        .send()
+        .await
+        .ok();
+    let access = read(&world, &c.viewer, host).await;
+    assert!(
+        access
+            .access
+            .permissions
+            .iter()
+            .any(|permission| permission == "host.use")
+    );
+    assert!(access.bundled_with_server);
+}
+
+#[tokio::test]
+async fn system_defaults_cannot_give_use_of_a_server_host_without_the_same_informed_confirmation() {
+    use orch_api_contract::admin::AdminDefaultsUpdate;
+    let world = World::new().await;
+    let c = company(&world).await;
+    let root = admin(&world, "server-guardian").await;
+    // A home makes this host's page actually follow the system defaults through its org.
+    let host = a_host(&world, &root, Some(c.acme), "Server host").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let body = json!({"rows":[{"permission":"host.use","add":[{"holder":{"kind":"user","id":c.viewer.id()}}]}]});
+    let refused = world
+        .app
+        .call(AdminDefaultsUpdate, &[])
+        .token(&root.token)
+        .raw_body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    assert_eq!(refused.extra["server_host_use"]["hosts"], json!(1));
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap();
+    world
+        .app
+        .call(AdminDefaultsUpdate, &[])
+        .token(&root.token)
+        .header("orch-server-host-use-confirmed", proof)
+        .raw_body(&body)
+        .send()
+        .await
+        .ok();
+    assert!(read(&world, &c.viewer, host).await.bundled_with_server);
+}
+
+#[tokio::test]
+async fn handing_the_server_host_to_another_owner_requires_the_same_informed_confirmation() {
+    use orch_api_contract::ownership::{ObjectTransfer, TransferBody};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Server host").await;
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(host)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let body = TransferBody {
+        user_id: c.viewer.id(),
+        keep_previous: Some(true),
+    };
+    let refused = world
+        .app
+        .call(ObjectTransfer, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::ConflictConfirmationRequired);
+    assert_eq!(
+        read(&world, &c.boss, host).await.owner.as_ref().unwrap().id,
+        c.boss.id(),
+        "an unconfirmed handover leaves the original owner and permissions unchanged"
+    );
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap();
+    world
+        .app
+        .call(ObjectTransfer, &[&"hosts", &host])
+        .token(&c.boss.token)
+        .header("orch-server-host-use-confirmed", proof)
+        .body(&body)
+        .send()
+        .await
+        .ok();
+    let changed = read(&world, &c.viewer, host).await;
+    assert_eq!(changed.owner.as_ref().unwrap().id, c.viewer.id());
+    assert!(
+        changed
+            .access
+            .permissions
+            .iter()
+            .any(|permission| permission == "host.use")
+    );
+}
+
 /// A host named `name` at home in `home` (none: the system's), first owned by `owner`, as the
 /// node of a machine would have reported it.
 async fn a_host(world: &World, owner: &Who, home: Option<Id>, name: &str) -> Id {
@@ -234,6 +387,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
     assert_eq!(initial.value, Some(json!(7)));
     assert!(!initial.writable);
     let value = NodeSettingSetBody {
+        model_choice: None,
         value: json!(0),
         locked: None,
         expected_revision: Some(0),
@@ -268,6 +422,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     let bad = NodeSettingSetBody {
+        model_choice: None,
         value: json!(-1),
         locked: None,
         expected_revision: Some(revision),
@@ -1564,6 +1719,21 @@ async fn a_change_against_an_old_revision_is_refused_and_a_change_that_asks_for_
     let c = company(&world).await;
     let id = a_host(&world, &c.boss, Some(c.acme), "Build box").await;
     let first = read(&world, &c.boss, id).await;
+    orch_db::queries::resources::hosting::record_node_load(
+        &mut *world.conn().await,
+        id,
+        &json!({"cpus":1,"memory_mb":100}),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hosts SET capacity=jsonb_set(capacity,'{cpus}','16',true),storages='[]' WHERE id=$1")
+        .bind(id).execute(&world.db.pool).await.unwrap();
+    assert_eq!(
+        read(&world, &c.boss, id).await.revision,
+        first.revision,
+        "capacity, storage and load reports leave the pending host edit current"
+    );
     let renamed = world
         .app
         .call(HostUpdate, &[&id])
@@ -1681,6 +1851,7 @@ async fn token_for(
     world: &World,
     by: &Who,
     home: Option<Id>,
+    name: Option<&str>,
 ) -> orch_api_contract::resources::EnrollmentToken {
     world
         .app
@@ -1689,7 +1860,7 @@ async fn token_for(
         .body(&HostEnrollmentTokenCreateBody {
             delegate_policy: None,
             home_id: home,
-            name_hint: Some("build-box".to_owned()),
+            name_hint: name.map(str::to_owned),
             access: None,
         })
         .send()
@@ -1742,7 +1913,7 @@ async fn a_member_asks_for_the_token_of_a_host_in_their_org_and_it_is_kept_as_a_
 {
     let world = World::new().await;
     let c = company(&world).await;
-    let made = token_for(&world, &c.boss, Some(c.acme)).await;
+    let made = token_for(&world, &c.boss, Some(c.acme), Some("build-box")).await;
     assert!(made.token.starts_with("oenr_"));
     assert!(made.commands.linux.contains(&made.token));
     // A host runs the node, which its own installer sets up, and which is built for Linux.
@@ -1890,7 +2061,7 @@ fn host_enrollment_request(
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Node],
     }
 }
@@ -2027,7 +2198,7 @@ async fn a_host_that_has_just_enrolled_is_used_by_the_people_its_page_names_from
     let root = admin(&world, "root").await;
     // The system's own host, as the bundled node enrolls: every user lists and uses it, and only a
     // system admin manages it.
-    let token = token_for(&world, &root, None).await;
+    let token = token_for(&world, &root, None, None).await;
     let bundled = enrolled_host(&world, &token.token, "Bundled").await;
     for member in [&c.viewer, &c.stranger] {
         assert_eq!(
@@ -2062,7 +2233,7 @@ async fn a_host_that_has_just_enrolled_is_used_by_the_people_its_page_names_from
         .await
         .ok();
     // A host an org's member enrolled for the org is the enroller's own until its page says more.
-    let token = token_for(&world, &c.boss, Some(c.acme)).await;
+    let token = token_for(&world, &c.boss, Some(c.acme), Some("Build box")).await;
     let mine = enrolled_host(&world, &token.token, "Build box").await;
     assert_eq!(
         list(&world, &c.boss, &HostListQuery::default()).await,

@@ -88,6 +88,8 @@ use orch_api_contract::binding::BindingAgent;
 
 use orch_api_contract::binding::BindingCanCreate;
 
+use orch_api_contract::binding::BindingDefaultEnvironment;
+
 use orch_api_contract::binding::BindingDefaults;
 
 use orch_api_contract::binding::BindingEnvironment;
@@ -154,8 +156,6 @@ use orch_api_contract::settings::ModelOption;
 
 use orch_api_contract::settings::ModelOptionReason;
 
-use orch_api_contract::settings::ModelParameters;
-
 use orch_api_contract::threads::Thread;
 
 use orch_authz::nodes::Page;
@@ -214,7 +214,7 @@ use orch_engine::binding::RebindError;
 
 use orch_engine::binding::Replace;
 
-use orch_engine::harnesses::descriptor_of;
+use orch_engine::harnesses::current_descriptor;
 
 use orch_engine::models::allowed_by;
 
@@ -451,7 +451,20 @@ async fn defaults_of(
         agent_id: id(keys::AGENT_DEFAULT_AGENT_ID),
         model_name: value(keys::AGENT_MODEL),
         effort: value(keys::AGENT_EFFORT),
-        locked: found.iter().any(|setting| setting.locked_by.is_some()),
+        locks: orch_api_contract::binding::BindingDefaultLocks {
+            provider: found.iter().any(|setting| {
+                setting.key == keys::AGENT_DEFAULT_PROVIDER_ID && setting.locked_by.is_some()
+            }),
+            agent: found.iter().any(|setting| {
+                setting.key == keys::AGENT_DEFAULT_AGENT_ID && setting.locked_by.is_some()
+            }),
+            model: found
+                .iter()
+                .any(|setting| setting.key == keys::AGENT_MODEL && setting.locked_by.is_some()),
+            effort: found
+                .iter()
+                .any(|setting| setting.key == keys::AGENT_EFFORT && setting.locked_by.is_some()),
+        },
     })
 }
 
@@ -586,6 +599,20 @@ fn model_options(
     settings: &Resolved,
     entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
 ) -> ApiResult<Vec<ModelOption>> {
+    model_options_for(
+        rows,
+        settings,
+        entries,
+        orch_access_contract::permissions::ProviderUsePurpose::Work,
+    )
+}
+
+fn model_options_for(
+    rows: Vec<orch_db::queries::resources::ProviderModelRow>,
+    settings: &Resolved,
+    entries: Option<&[&orch_access_contract::permissions::ProviderUse]>,
+    purpose: orch_access_contract::permissions::ProviderUsePurpose,
+) -> ApiResult<Vec<ModelOption>> {
     rows.into_iter()
         .map(|row| {
             let reason = if !row.enabled {
@@ -597,16 +624,45 @@ fn model_options(
             {
                 Some(ModelOptionReason::ExcludedByPolicy)
             } else if entries.is_some_and(|entries| {
+                !entries.is_empty()
+                    && !entries.iter().any(|entry| entry.allows_purpose(purpose))
+                    && entries.iter().any(|entry| {
+                        entry.allows_purpose(match purpose {
+                            orch_access_contract::permissions::ProviderUsePurpose::Ask => {
+                                orch_access_contract::permissions::ProviderUsePurpose::Work
+                            }
+                            orch_access_contract::permissions::ProviderUsePurpose::Work => {
+                                orch_access_contract::permissions::ProviderUsePurpose::Ask
+                            }
+                        })
+                    })
+            }) {
+                Some(match purpose {
+                    orch_access_contract::permissions::ProviderUsePurpose::Work => {
+                        ModelOptionReason::SharedForAskOnly
+                    }
+                    orch_access_contract::permissions::ProviderUsePurpose::Ask => {
+                        ModelOptionReason::SharedForOtherWorkOnly
+                    }
+                })
+            } else if entries.is_some_and(|entries| {
                 !entries.iter().any(|entry| {
-                    orch_authz::options::allows_model(entry, &row.model_name, &row.groups)
+                    orch_authz::options::entry_allows_for(
+                        entry,
+                        &orch_authz::options::Wanted {
+                            model: Some((&row.model_name, &row.groups)),
+                            ..Default::default()
+                        },
+                        purpose,
+                    )
                 })
             }) {
                 Some(ModelOptionReason::ExcludedByEntry)
             } else {
                 None
             };
-            let parameters: ModelParameters =
-                orch_provider_contract::models::composed_model_parameters(
+            let (parameters, purpose) =
+                orch_provider_contract::models::composed_model_with_purpose(
                     &row.parameters,
                     &row.groups,
                     &row.option_layers,
@@ -614,6 +670,7 @@ fn model_options(
                 )
                 .map_err(ApiError::internal)?;
             Ok(ModelOption {
+                purpose: Some(purpose),
                 token_estimate: orch_engine::token_density::of(&row.model_name),
                 groups: row.groups.clone(),
                 display_name: if row.display_name.is_empty() {
@@ -834,7 +891,9 @@ async fn provider_inputs(
             .await?
             .filter(|row| row.deleted_at.is_none())
         {
-            let descriptor = descriptor_of(&row).map_err(ApiError::internal)?;
+            let descriptor = current_descriptor(conn, &row)
+                .await
+                .map_err(ApiError::internal)?;
             agent_rows.push((row, descriptor));
         }
     }
@@ -1020,8 +1079,19 @@ async fn providers_from(
             })
             .unwrap_or_default();
         let reason = if let Some(granted) = granted {
-            let _ = granted;
-            allowing.is_empty().then_some(NOT_ALLOWED_WHERE)
+            allowing.is_empty().then(|| {
+                if granted.allows(&orch_authz::options::Wanted::default()) {
+                    NOT_ALLOWED_WHERE
+                } else if granted.each.iter().any(|entry| {
+                    entry
+                        .provider
+                        .allows_purpose(orch_access_contract::permissions::ProviderUsePurpose::Ask)
+                }) {
+                    "shared_for_ask_only"
+                } else {
+                    NO_USE
+                }
+            })
         } else if each.resource.disabled {
             Some(DISABLED)
         } else if each.resource.subscription.is_some()
@@ -1111,6 +1181,7 @@ async fn providers_from(
                             .to_owned(),
                     ),
                     program_report: report,
+                    approval_resolution: None,
                     arrangements: Vec::new(),
                 });
                 continue;
@@ -1183,6 +1254,7 @@ async fn providers_from(
                 usable: reason.is_none(),
                 reason,
                 program_report: report,
+                approval_resolution: None,
                 arrangements,
             });
         }
@@ -1317,6 +1389,51 @@ fn environment_reason(
     }
 }
 
+/// The environment the nearest setting of `env.default_id` names for the threads started at `topic`, and the node
+/// whose setting it is: the topic itself, else its project, else its org.
+async fn named_default(conn: &mut Conn, topic: Id) -> ApiResult<Option<(Id, Option<Id>)>> {
+    let resolved = orch_settings::resolve(conn, Place::Node(topic), keys::ENV_DEFAULT_ID)
+        .await
+        .map_err(ApiError::internal)?
+        .resolved;
+    let Some(value) = resolved.value else {
+        return Ok(None);
+    };
+    let environment = serde_json::from_value::<Id>(value).map_err(ApiError::internal)?;
+    Ok(Some((environment, resolved.source.node)))
+}
+
+/// Why a thread cannot be started in the environment that is named the default, when it cannot: the reason its row
+/// carries, or that the caller may not see it at all.
+const ENVIRONMENT_NOT_SEEN: &str = "environment_not_seen";
+
+/// The environment that is named the default at `topic`, where its setting is when that is above the topic, and why
+/// the caller cannot use it when they cannot, so that a default that is passed over is said and not dropped in silence.
+async fn default_environment_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    listed: &[BindingEnvironment],
+    names: &crate::routes::access::page::NameBounds,
+) -> ApiResult<Option<BindingDefaultEnvironment>> {
+    let Some((environment, source)) = named_default(conn, topic).await? else {
+        return Ok(None);
+    };
+    let from = match source.filter(|node| *node != topic) {
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
+        None => None,
+    };
+    let reason = match listed.iter().find(|row| row.environment.id == environment) {
+        Some(row) => row.reason.clone(),
+        None => Some(ENVIRONMENT_NOT_SEEN.to_owned()),
+    };
+    Ok(Some(BindingDefaultEnvironment {
+        environment,
+        from,
+        reason,
+    }))
+}
+
 async fn environments_from(
     conn: &mut Conn,
     principal: &Principal,
@@ -1336,10 +1453,8 @@ async fn environments_from(
     let grouped = grouping::metadata(app, conn, principal, &subjects, projection).await?;
     let uses = history::environment_uses(conn, &ids, topic).await?;
     let hosts = environment_choice::hosts_of(conn, &ids).await?;
-    let default = environment_queries::default_for(conn, &ids)
+    let default = named_default(conn, topic)
         .await?
-        .into_iter()
-        .find(|(_, of)| *of == topic)
         .map(|(environment, _)| environment);
     let topic_name = thread_rows::node_name(conn, topic)
         .await?
@@ -1367,6 +1482,16 @@ async fn environments_from(
         .filter_map(|row| row.machine_id)
         .collect();
     let machines = machine_refs(app, conn, &machine_ids).await?;
+    let readable_ids: Vec<_> = machine_ids
+        .into_iter()
+        .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+        .collect();
+    let capacity = orch_api_base::routes::environments::places::machine_capacities(
+        conn,
+        principal,
+        &readable_ids,
+    )
+    .await?;
     let mut topic_ids: Vec<Id> = uses.iter().flat_map(|each| each.topics.clone()).collect();
     topic_ids.sort_unstable();
     topic_ids.dedup();
@@ -1401,9 +1526,15 @@ async fn environments_from(
         } else {
             2
         };
+        let machine = row
+            .machine_id
+            .filter(|_| row.placement == "connected")
+            .filter(|id| projection.is_none_or(|p| p.machines.contains(id)))
+            .and_then(|id| machines.get(&id).cloned());
         listed.push((
             group,
             BindingEnvironment {
+                capacity: machine.as_ref().and_then(|m| capacity.get(&m.id)).cloned(),
                 owner: Some(environment.owner.clone()),
                 grouping: {
                     let mut metadata = grouped
@@ -1437,13 +1568,7 @@ async fn environments_from(
                         name: name.clone(),
                         address: host_addresses.get(host).cloned().unwrap_or_default(),
                     }),
-                machine: row
-                    .machine_id
-                    .filter(|_| row.placement == "connected")
-                    .filter(|machine| {
-                        projection.is_none_or(|projection| projection.machines.contains(machine))
-                    })
-                    .and_then(|machine| machines.get(&machine).cloned()),
+                machine,
                 threads: used_here.map_or(0, |used| used.threads),
                 usable: reason.is_none(),
                 reason: reason.map(str::to_owned),
@@ -1844,6 +1969,7 @@ async fn options(ctx: Ctx, (): (), (): ()) -> ApiResult<BindingOptions> {
         providers,
         environments,
         environment_default,
+        default_environment: None,
         source,
         access,
         agent_access: None,

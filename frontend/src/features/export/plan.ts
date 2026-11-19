@@ -24,6 +24,7 @@ export interface PlanReading {
   state: PlanState;
   bytes: number;
   maxBytes: number;
+  maxFileBytes: number;
   /** Conversations, chats and documents together: the number the place limits. */
   items: number;
   maxItems: number;
@@ -64,6 +65,7 @@ export function readPlan(plan: ExportPlan): PlanReading {
     state,
     bytes: plan.bytes,
     maxBytes: plan.limits.max_bytes,
+    maxFileBytes: plan.limits.max_file_bytes,
     items,
     maxItems: plan.limits.max_items,
     keepHours: plan.limits.keep_hours,

@@ -308,6 +308,7 @@ async fn start_api(
     link.set_applier(applier.clone());
     link.start().await.unwrap();
     let app: App = Arc::new(AppState {
+        metrics_listener_failed: Default::default(),
         host_ports: Default::default(),
         builtin_sources: Default::default(),
         db: db.clone(),
@@ -398,6 +399,150 @@ async fn start_gateway(
 }
 
 impl World {
+    /// A transport case uses a real admitted physical session, with the same frozen ticket reference as production.
+    pub async fn tool_ticket(
+        &self,
+        source: Id,
+        destination: Id,
+        executor: &str,
+        expires: orch_types::Time,
+    ) -> String {
+        use orch_db::queries::{
+            hierarchy,
+            link::{NewCommand, insert_command},
+            resources::access_fixtures as fixtures,
+            threads,
+        };
+        use orch_link_contract::commands::{TicketSlot, TicketWanted};
+        use orch_link_contract::tunnels::TunnelKind;
+        use serde_json::json;
+        let (root, project, topic, thread, segment, opening) = (
+            orch_types::new_id(),
+            orch_types::new_id(),
+            orch_types::new_id(),
+            orch_types::new_id(),
+            orch_types::new_id(),
+            orch_types::new_id(),
+        );
+        let mut conn = self.db.acquire().await.unwrap();
+        for (id, kind, parent) in [
+            (root, "org", None),
+            (project, "project", Some(root)),
+            (topic, "topic", Some(project)),
+        ] {
+            hierarchy::testing::insert_node(&mut conn, id, kind, parent, kind, self.user)
+                .await
+                .unwrap();
+        }
+        threads::insert_thread(
+            &mut conn,
+            thread,
+            topic,
+            "Tool transport",
+            self.user,
+            self.clock.now(),
+        )
+        .await
+        .unwrap();
+        let environment = fixtures::insert_environment(
+            &mut conn,
+            self.user,
+            Some(topic),
+            "Tool workspace",
+            "connected",
+        )
+        .await
+        .unwrap();
+        let provider = fixtures::insert_resource(
+            &mut conn,
+            "provider",
+            Some(self.user),
+            Some(topic),
+            "Tool provider",
+        )
+        .await
+        .unwrap();
+        let agent = fixtures::insert_resource(
+            &mut conn,
+            "agent",
+            Some(self.user),
+            Some(topic),
+            "Tool agent",
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE environments SET machine_id=$2,status='running',generation=1 WHERE id=$1",
+        )
+        .bind(environment)
+        .bind(destination)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        threads::insert_segment(
+            &mut conn,
+            &threads::NewSegment {
+                id: segment,
+                thread_id: thread,
+                agent_id: agent,
+                provider_id: provider,
+                environment_id: environment,
+                env_generation: 1,
+                arrangement: "separated",
+                executor: Some(executor),
+                tool_set: None,
+                credential_path: "native",
+                native_session_ref: None,
+                started_by: Some(self.user),
+                started_at: self.clock.now(),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE segments SET machine_id=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(source)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE threads SET current_segment_id=$2,environment_id=$3,provider_id=$4,agent_id=$5 WHERE node_id=$1")
+            .bind(thread).bind(segment).bind(environment).bind(provider).bind(agent).execute(&mut *conn).await.unwrap();
+        let wanted=TicketWanted {kind:TunnelKind::Exec,more:json!({"service":format!("exec/{executor}"),"dst":destination,"thread_id":thread,"environment_id":environment,"environment_generation":1,"ttl_secs":(expires.get()-self.clock.now()).num_seconds().max(0)}).as_object().unwrap().clone()};
+        let mut ticket = TicketSlot::ask(TunnelKind::Exec);
+        if let TicketSlot::Asked(ask) = &mut ticket {
+            ask.ticket = wanted.clone();
+        }
+        let body = json!({"thread_id":thread,"segment_id":segment,"exec":{"environment_id":environment,"generation":1,"ticket":ticket},"mcp":[],"skills":[]});
+        insert_command(
+            &mut conn,
+            &NewCommand {
+                native_target: None,
+                id: opening,
+                machine_id: source,
+                kind: "session.open",
+                body: &body,
+                serial_key: None,
+                deadline_at: self.clock.now() + chrono::Duration::minutes(2),
+            },
+            self.clock.now(),
+        )
+        .await
+        .unwrap();
+        let facts =
+            orch_db::queries::session_dependencies::command_tool_session(&mut conn, opening)
+                .await
+                .unwrap()
+                .unwrap();
+        let scope =
+            orch_api_core::tickets::Tickets::command_scope(&facts, &wanted, source).unwrap();
+        self.api
+            .link
+            .tickets()
+            .for_session_request(&wanted, source, &scope)
+            .unwrap()
+    }
+
     /// A gateway/API fixture with content explicitly disabled.
     pub async fn start() -> Self {
         Self::start_with(content_support::router()).await
@@ -620,7 +765,7 @@ impl World {
                 arch: Arch::X86_64,
             },
             connector_version: "0.1.0".to_owned(),
-            protocol_versions: vec![1],
+            protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
             roles: vec![Role::Agent, Role::Environment],
         };
         let tls = pinned_client_config(
