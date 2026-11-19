@@ -47,7 +47,7 @@ fn request_for(token: &EnrollmentToken, csr_pem: &str) -> EnrollRequest {
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     }
 }
@@ -115,7 +115,10 @@ fn a_token_enrolls_a_machine_with_a_certificate_for_its_own_key_and_the_id_the_s
         .enroll(&request_for(&token, pending.csr_pem()))
         .unwrap();
     assert_eq!(enrolled.certificate.machine_id(), Some(enrolled.machine_id));
-    assert_eq!(enrolled.protocol_version, 1);
+    assert_eq!(
+        enrolled.protocol_version,
+        orch_link_contract::version::PROTOCOL_VERSION
+    );
     let reply = EnrollReply {
         gateways: Vec::new(),
         machine_id: enrolled.machine_id,
@@ -129,7 +132,7 @@ fn a_token_enrolls_a_machine_with_a_certificate_for_its_own_key_and_the_id_the_s
             name: "Orch".to_owned(),
             public_url: "https://orch.example.com".to_owned(),
         },
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
     };
     let identity = pending.complete(&token, &reply, &system.clock).unwrap();
     assert_eq!(identity.machine_id, enrolled.machine_id);
@@ -244,7 +247,7 @@ fn a_machine_keeps_nothing_from_an_answer_whose_authority_is_not_the_one_its_tok
             name: "Fake".to_owned(),
             public_url: "https://fake.example".to_owned(),
         },
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
     };
     // The machine holds the real system's token, so the answer of the intruder fails the pin, and there is
     // no identity to keep.
@@ -271,7 +274,7 @@ fn a_certificate_for_another_key_than_the_machines_is_not_accepted() {
             name: "Orch".to_owned(),
             public_url: String::new(),
         },
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
     };
     assert_eq!(
         pending.complete(&token, &reply, &system.clock).unwrap_err(),

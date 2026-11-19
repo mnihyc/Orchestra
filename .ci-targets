@@ -1,0 +1,7 @@
+fmt
+test -p orch-engine --test caps --test forks --test initial_files --test environment_moves --test machine_moves --test volume_carry
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-settings-contract --lib
+test -p orch-api-contract --lib
+test -p orchctl --bin orchctl -- commands::doctor::
+test -p orch-xtask --bin orch-xtask -- release::

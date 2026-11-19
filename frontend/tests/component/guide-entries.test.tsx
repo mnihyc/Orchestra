@@ -12,8 +12,8 @@ import { Popover } from '@/ui/Popover';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn(), access: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.access }));
 
 describe('one guide entry on the screen', () => {
 
@@ -101,7 +101,7 @@ describe('the empty place’s creation question', () => {
   it.each(['org', 'project'] as const)('opens %s’s own creation row without an access write', async (kind) => {
     calls.access.mockClear();
     show(<CreationPermissionLink place={{ kind, id: 'actual-place', name: 'My place' }} />);
-    await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }));
+    await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may make topics here?' }));
     expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: kind === 'project' ? 'project.create_topics' : 'org.interact' });
   });
 });

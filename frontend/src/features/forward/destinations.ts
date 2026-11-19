@@ -25,7 +25,7 @@ const matches = (text: string, query: string): boolean => text.toLowerCase().inc
 export function nodeDestinations(nodes: Iterable<TreeNode>, query: string, pathOf: (node: TreeNode) => string | null): Destination[] {
   return [...nodes]
     .filter((node) => !node.deleted && !node.archived && (query.trim() === '' || matches(node.name, query)))
-    .sort((one, other) => other.chat.seq - one.chat.seq || one.name.localeCompare(other.name))
+    .sort((one, other) => (other.chat.seq ?? 0) - (one.chat.seq ?? 0) || one.name.localeCompare(other.name))
     .map((node) => ({ key: `chat:${node.chat.id}`, kind: 'node' as const, chatId: node.chat.id, label: node.name, detail: pathOf(node), nodeKind: node.kind, ...(node.thread?.display === undefined ? {} : { display: node.thread.display }) }));
 }
 

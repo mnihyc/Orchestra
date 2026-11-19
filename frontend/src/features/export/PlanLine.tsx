@@ -92,6 +92,7 @@ export function PlanLine({ reading, counting, error, onRetry, idle }: PlanLinePr
         <span className="min-w-0">
           {counting && reading !== null && <span className="sr-only">{t('export.plan.counting')} </span>}
           {main}
+          {reading !== null && idle === null && reading.state !== 'none-allowed' && <span className="inline-flex items-center gap-x-1"><span aria-hidden> · </span><span>{t('export.plan.fileLimit', { max: size(reading.maxFileBytes) })}</span></span>}
         </span>
       </p>
       {left !== null && left.notExportable > 0 && (
