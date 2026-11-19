@@ -1,4 +1,5 @@
 /** ACK-gated raw observations. Native source identity and local read ownership stay separate. */
+import { admittedReadCommit, supersededRead, visibleReadCount } from '@/api/reads';
 import { CancelledError, infiniteQueryOptions, type InfiniteData, type Query, type QueryClient, type QueryKey } from '@tanstack/react-query';
 import { api, client, ok } from '@/api/client';
 import { assertThreadRead, isCurrentThreadRead, readInThread, receiveThreadRead, threadQueryRead,
@@ -35,7 +36,7 @@ export class RawSourceError extends Error {
   constructor(code: string, detail: string) { super(detail); this.name = 'RawSourceError'; this.code = code; }
 }
 const protocolError = () => new RawSourceError('bad_feed', 'The raw subscription did not identify its captured source');
-const installed = new WeakMap<QueryClient, RawJoin>();
+const installed = new WeakMap<ReturnType<QueryClient['getQueryCache']>, RawJoin>();
 /** Page identity survives the awaits between queryFn, infinite aggregation and Query.setData. */
 const publications = new WeakMap<object, Publication>();
 /** Concurrent infinite fetches can retain an older published page no longer in the current head. */
@@ -47,7 +48,7 @@ function publicationAuthority(query: Query): object {
   if (held !== undefined) return held;
   const authority = {}; publicationAuthorities.set(query, authority); return authority;
 }
-const retiredPublication = () => new CancelledError({ silent: true, revert: false });
+const retiredPublication = () => supersededRead();
 
 /** Retire a cancelled attempt even if an already-dispatched HTTP implementation settles late.
  * The request still receives the same abort signal; its late completion has a rejection handler. */
@@ -136,17 +137,17 @@ export function scopedRawFramesQuery(target: ThreadReadTarget, segment: string) 
     meta: { scopedRaw: source } satisfies RawQueryMeta,
     initialPageParam: null as number | null,
     queryFn: ({ client: cache, queryKey, signal, pageParam }): Promise<ThreadRawListReply> => {
-      const join = installed.get(cache);
+      const join = installed.get(cache.getQueryCache());
       if (join === undefined) return Promise.reject(new RawSourceError('transport_unavailable', 'The live connection is not installed'));
       return join.read(queryKey, source, pageParam, signal);
     },
     getNextPageParam: (_last, pages, _lastParam, params) => nextBefore(pages, params),
     // Merge before observer notification: an older infinite-page completion must not expose
     // its captured old head even briefly after a newer head/live row has been accepted.
-    structuralSharing: (previous, next) => {
+    structuralSharing: admittedReadCommit((previous, next) => {
       if (source.owner === null) throw retiredPublication();
       return source.owner.join.commit(source.owner.query, source, previous, next);
-    },
+    }),
     retry: false, staleTime: Infinity, refetchOnWindowFocus: false,
   });
 }
@@ -249,7 +250,7 @@ class RawJoin {
     for (const query of this.cache.getQueryCache().getAll()) {
       this.bind(query);
       const source = descriptor(query), captured = source?.captured;
-      if (source !== null && query.getObserversCount() > 0 && (query.isActive() || source.captured === null)) observedOwners.add(threadReadCacheKey(source.ref));
+      if (source !== null && visibleReadCount(query) > 0 && (query.isActive() || source.captured === null)) observedOwners.add(threadReadCacheKey(source.ref));
       if (source === null || captured === undefined || captured === null || !query.isActive()
         || !isCurrentThreadRead(captured) || this.consumers.has(query)) continue;
       if (query.state.status === 'error' && query.state.fetchStatus !== 'fetching') continue;
@@ -557,9 +558,9 @@ class RawJoin {
 
 /** One manager per existing application query cache, released with its socket integration. */
 export function installRawQueryFeeds(socket: RealtimeSocket, cache: QueryClient): () => void {
-  const previous = installed.get(cache);
+  const previous = installed.get(cache.getQueryCache());
   previous?.stop();
   const join = new RawJoin(socket, cache);
-  installed.set(cache, join);
-  return () => { if (installed.get(cache) === join) installed.delete(cache); join.stop(); };
+  installed.set(cache.getQueryCache(), join);
+  return () => { if (installed.get(cache.getQueryCache()) === join) installed.delete(cache.getQueryCache()); join.stop(); };
 }

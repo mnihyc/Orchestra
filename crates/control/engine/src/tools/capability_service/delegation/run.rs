@@ -107,9 +107,11 @@ impl Drop for Owned {
 
 #[derive(sqlx::FromRow)]
 struct Generated {
+    #[sqlx(try_from = "orch_db::storage::Text")]
     native_ref: String,
     blob: String,
     media_type: String,
+    #[sqlx(try_from = "orch_db::storage::OptionalText")]
     revised_prompt: Option<String>,
 }
 
@@ -300,6 +302,7 @@ pub(crate) async fn execute(
             .map_err(EngineError::unreadable)?;
         tokio::select! {
             ()=engine.inner.signal.notified()=>{},
+            ()=engine.inner.stopped.cancelled()=>return Err(EngineError::StaleToolSource),
             ()=tokio::time::sleep(remaining.min(engine.inner.config.sweep_every))=>{},
         }
     }

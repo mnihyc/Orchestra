@@ -1,6 +1,6 @@
 //! The stored server and actual offering used by either existing-definition import.
 
-use super::{ImportSelection, may_import, select_import};
+use super::{ImportSelection, may_import};
 use crate::{
     EngineError,
     operation_scope::{
@@ -327,13 +327,14 @@ pub async fn select<K: Kind>(
         {
             continue;
         }
-        let selected = select_import(
+        let selected = super::select_import_from(
             conn,
             environment,
             origin["source"].as_str().unwrap_or_default(),
             scope.clone(),
             origin["directory"].as_str().map(str::to_owned),
             origin["name"].as_str().unwrap_or_default(),
+            origin["origin"].as_str(),
         )
         .await
         .map_err(native)?;
@@ -495,7 +496,7 @@ impl<K: Kind> Source for Stored<K> {
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.machine)
                 .fetch_optional(&mut *conn)
                 .await
@@ -722,6 +723,7 @@ impl Command {
                 scope: &self.input.scope,
                 directory: self.input.command.directory.as_deref(),
                 name: &self.input.command.name,
+                origin: super::command_origin(&self.input.command),
             }
             .spec(reply, self.origin.user(), Time::new(now));
             if selected {

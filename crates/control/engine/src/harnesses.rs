@@ -19,6 +19,7 @@ use crate::unit::Unit;
 use orch_agent_contract::descriptor::AgentDescriptor;
 use orch_db::queries::resources::binding as resources_binding;
 use orch_db::queries::resources::thread_engine::{self as resources, AgentRow, ProviderRow};
+use orch_db::queries::threads;
 use orch_link_contract::commands::{
     AgentDiscoverSessions, AgentDiscoverSessionsResult, AgentStart, AgentStartResult, AgentStop,
     CommandError, ErrorCode, SerialKey, UnitAfterUp, UnitAfterUpResult,
@@ -67,6 +68,8 @@ impl OrchToolsRevision {
 /// Session-only values which a turn cannot replace on an already open native conversation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionConfiguration {
+    /// Retention allowance accepted by the native session.
+    pub output_capture_bytes: u64,
     /// The resolved absolute start directory.
     pub cwd: String,
     /// Explicit cache lifetime accepted by a program which declares it.
@@ -74,6 +77,8 @@ pub struct SessionConfiguration {
     pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
     /// The background completion preference accepted when the session opened.
     pub background_wake: bool,
+    /// The native web action wait accepted when the session opened.
+    pub web_action_wait_secs: u64,
     /// Native image generation accepted when the session opened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -89,14 +94,20 @@ pub struct SessionConfiguration {
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
     /// The native executor build named by the accepted tool ticket.
     pub executor_version: Option<String>,
+    /// The accepted workspace configuration and exact files the environment answered for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_configuration: Option<orch_link_contract::commands::WorkspaceConfiguration>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
+            output_capture_bytes: open.output_capture_bytes,
             cwd: open.cwd.clone(),
+            workspace_configuration: open.workspace_configuration.clone(),
             prompt_cache_ttl: open.prompt_cache_ttl,
             background_wake: open.background_wake,
+            web_action_wait_secs: open.web_action_wait_secs,
             image_generation: open.image_generation,
             native_configuration: open
                 .native_model
@@ -134,6 +145,45 @@ impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     }
 }
 
+/// Credential-free comparison evidence from an acknowledged opening, not native liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionHints {
+    thread: Id,
+    harness: HarnessKey,
+    instructions: orch_types::Hash,
+    subagent_limits: orch_agent_contract::session::SubagentLimits,
+    mcp: orch_types::Hash,
+    orch_tools: orch_types::Hash,
+    skills: orch_types::Hash,
+}
+
+impl SessionHints {
+    pub(crate) fn of(
+        thread: Id,
+        harness: HarnessKey,
+        instructions: &str,
+        subagent_limits: orch_agent_contract::session::SubagentLimits,
+        mcp: McpRevision,
+        orch_tools: OrchToolsRevision,
+        skills: orch_types::Hash,
+    ) -> Self {
+        Self {
+            thread,
+            harness,
+            instructions: orch_types::Hash::of(instructions.as_bytes()),
+            subagent_limits,
+            mcp: mcp.0,
+            orch_tools: orch_tools.0,
+            skills,
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, thread: Id, harness: HarnessKey) -> bool {
+        self.thread == thread && self.harness == harness
+    }
+}
+
 /// The sessions this process saw opened, and in which harness process.
 #[derive(Debug, Default)]
 pub struct OpenSessions {
@@ -143,6 +193,8 @@ pub struct OpenSessions {
     requested_orch_tools: HashMap<Id, OrchToolsRevision>,
     requested_subagent_limits: HashMap<Id, orch_agent_contract::session::SubagentLimits>,
     accepted_configuration: HashMap<Id, SessionConfiguration>,
+    /// Last captured setup for comparison; it never puts a session into by_segment.
+    restored_configuration: HashMap<Id, Json>,
     requested_skills: HashMap<Id, orch_types::Hash>,
 }
 
@@ -161,16 +213,39 @@ impl OpenSessions {
     /// Whether the effective cwd/notes plan differs from the last acknowledged opening.
     #[must_use]
     pub fn configuration_changed(&self, segment: Id, configuration: &SessionConfiguration) -> bool {
-        self.accepted_configuration.get(&segment) != Some(configuration)
+        match self.accepted_configuration.get(&segment) {
+            Some(accepted) => accepted != configuration,
+            None => self
+                .restored_configuration
+                .get(&segment)
+                .is_none_or(|accepted| {
+                    serde_json::to_value(configuration).ok().as_ref() != Some(accepted)
+                }),
+        }
     }
 
-    /// Whether this API process observed the actual successful opening.
+    /// A captured accepted setup supports comparison independently of live-session verification.
     pub(crate) fn configuration_known(&self, segment: Id) -> bool {
         self.accepted_configuration.contains_key(&segment)
+            || self.restored_configuration.contains_key(&segment)
+    }
+
+    /// Restores only acknowledged comparisons; opening still needs native confirmation.
+    pub(crate) fn restore_setup(&mut self, segment: Id, hints: SessionHints, configuration: Json) {
+        self.requested_instructions
+            .insert(segment, hints.instructions);
+        self.requested_subagent_limits
+            .insert(segment, hints.subagent_limits);
+        self.requested_mcp.insert(segment, McpRevision(hints.mcp));
+        self.requested_orch_tools
+            .insert(segment, OrchToolsRevision(hints.orch_tools));
+        self.requested_skills.insert(segment, hints.skills);
+        self.restored_configuration.insert(segment, configuration);
     }
 
     /// Records only an actual successful SessionOpen body, never a requested or refused change.
     pub fn configuration_accepted(&mut self, segment: Id, configuration: SessionConfiguration) {
+        self.restored_configuration.remove(&segment);
         self.accepted_configuration.insert(segment, configuration);
     }
 
@@ -253,6 +328,8 @@ impl OpenSessions {
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
         self.requested_skills
             .retain(|id, _| self.by_segment.contains_key(id));
     }
@@ -265,6 +342,7 @@ impl OpenSessions {
         self.requested_orch_tools.remove(&segment);
         self.requested_subagent_limits.remove(&segment);
         self.accepted_configuration.remove(&segment);
+        self.restored_configuration.remove(&segment);
         self.requested_skills.remove(&segment);
     }
 
@@ -279,6 +357,8 @@ impl OpenSessions {
         self.requested_orch_tools
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
         self.requested_skills
             .retain(|id, _| self.by_segment.contains_key(id));
@@ -304,6 +384,8 @@ impl OpenSessions {
         self.requested_orch_tools
             .retain(|id, _| self.by_segment.contains_key(id));
         self.accepted_configuration
+            .retain(|id, _| self.by_segment.contains_key(id));
+        self.restored_configuration
             .retain(|id, _| self.by_segment.contains_key(id));
     }
 }
@@ -349,7 +431,7 @@ pub fn descriptor_of(agent: &AgentRow) -> Result<Option<AgentDescriptor>, Engine
 
 /// The selected runtime's declaration, or the profile's last declaration before that runtime reports.
 /// A reported version (or an exact pin for an unstarted runtime) remains a fact after display overrides.
-pub(crate) async fn descriptor_at(
+pub async fn descriptor_at(
     conn: &mut orch_db::Conn,
     agent: &AgentRow,
     provider: Id,
@@ -368,7 +450,6 @@ pub(crate) async fn descriptor_at(
     {
         selected.descriptor.clone_from(&report.descriptor);
     }
-    let mut descriptor = descriptor_of(&selected)?;
     let version = report
         .and_then(|report| report.harness_version)
         .or_else(|| {
@@ -385,11 +466,52 @@ pub(crate) async fn descriptor_at(
                 .and_then(Json::as_str)
                 .map(str::to_owned)
         });
+    if selected
+        .descriptor
+        .as_object()
+        .is_some_and(|members| !members.is_empty())
+    {
+        selected.descriptor["kind"] = Json::String(agent.harness_kind.clone());
+        if let Some(version) = &version {
+            selected.descriptor["harness"]["version"] = Json::String(version.clone());
+        }
+        selected.descriptor = crate::hosting::build_limits_on(conn, selected.descriptor, machine)
+            .await?
+            .0;
+    }
+    let mut descriptor = descriptor_of(&selected)?;
     if let Some(descriptor) = &mut descriptor {
         descriptor.kind.clone_from(&agent.harness_kind);
         if let Some(version) = version {
             descriptor.harness.version = version;
         }
+    }
+    Ok(descriptor)
+}
+
+/// Current native build evidence with the profile's current parameter definitions.
+pub async fn descriptor_for_thread(
+    conn: &mut orch_db::Conn,
+    agent: &AgentRow,
+    provider: &ProviderRow,
+    thread: &threads::ThreadRow,
+) -> Result<Option<AgentDescriptor>, EngineError> {
+    let environment_machine = match thread.environment_id {
+        Some(environment) => {
+            orch_db::queries::environments::thread_engine::environment(conn, environment)
+                .await?
+                .and_then(|environment| environment.machine_id)
+        }
+        None => None,
+    };
+    let machine = machine_of(thread.arrangement.as_deref(), provider, environment_machine);
+    let mut descriptor = descriptor_at(conn, agent, provider.id, machine).await?;
+    // A process report may precede a profile's parameter changes. Its native build and approval
+    // proof still govern admission, while the profile keeps the controls and recorded option meanings.
+    if let Some(descriptor) = &mut descriptor
+        && let Some(profile) = descriptor_of(agent)?
+    {
+        descriptor.parameters = profile.parameters;
     }
     Ok(descriptor)
 }
@@ -807,13 +929,65 @@ impl Engine {
         Box::pin(self.ensure_harness_with_preparation(key, agent, command, None)).await
     }
 
+    /// A thread may withdraw its wait without dropping a process transaction or cancelling the shared start.
+    pub(crate) async fn ensure_harness_for_turn(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        turn: Id,
+    ) -> Result<Option<Started>, EngineError> {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        lock(&self.inner.start_waits).insert(turn, cancel.clone());
+        let current = async {
+            let mut conn = self.inner.db.acquire().await?;
+            threads::turn(&mut conn, turn).await
+        }
+        .await;
+        match current {
+            Ok(Some(row)) if row.state == "starting" && row.interrupted_by.is_none() => {}
+            other => {
+                lock(&self.inner.start_waits).remove(&turn);
+                return match other {
+                    Err(error) => Err(error.into()),
+                    _ => Ok(None),
+                };
+            }
+        }
+        let engine = self.clone();
+        let agent = agent.clone();
+        let serial = self.harness_serial(key);
+        let withdrawn = cancel.clone();
+        let starting = tokio::spawn(async move {
+            let _held = tokio::select! {
+                biased;
+                () = withdrawn.cancelled() => return Ok(Started::Up),
+                held = serial.lock() => held,
+            };
+            // From here the process serves every waiter. Finish it even if this turn leaves.
+            engine
+                .ensure_harness_locked(key, &agent, command, None)
+                .await
+        });
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(None),
+            joined = starting => match joined {
+                Ok(result) => result.map(Some),
+                Err(error) => Err(EngineError::unreadable(format!("the shared process start did not finish: {error}"))),
+            },
+        };
+        lock(&self.inner.start_waits).remove(&turn);
+        result
+    }
+
     /// The profile the program is started with: an option that holds back the end of a turn which the profile does not
     /// set takes its default, or less where `[engine] interrupt_force_secs` leaves less (see
     /// [`orch_agent_contract::turn_end_delays`]). A value the profile sets is kept as it is; the profile that sets one
     /// that does not fit is refused when a turn is prepared, not here.
-    fn profile_under_the_bound(&self, agent: &AgentRow) -> Result<Json, EngineError> {
+    async fn profile_under_the_bound(&self, agent: &AgentRow) -> Result<Json, EngineError> {
         let mut profile = agent.profile.clone();
-        let Some(delays) = descriptor_of(agent)?
+        let Some(mut delays) = descriptor_of(agent)?
             .as_ref()
             .and_then(crate::preflight::declared_turn_end_delays)
         else {
@@ -821,6 +995,47 @@ impl Engine {
         };
         let mut config = profile.get("config").cloned().unwrap_or(Json::Null);
         let before = config.clone();
+        for delay in &mut delays.delays {
+            if let Some(buffer) = &mut delay.pending_buffer
+                && config
+                    .pointer(&buffer.pointer)
+                    .and_then(Json::as_u64)
+                    .is_none()
+            {
+                buffer.default_bytes = orch_settings::get::<u64>(
+                    &mut *self.inner.db.acquire().await?,
+                    orch_settings::Place::System,
+                    &buffer.default_setting,
+                )
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable(format!(
+                        "the native notification buffer setting {} has no default",
+                        buffer.default_setting
+                    ))
+                })?;
+            }
+            if config
+                .pointer(&delay.pointer)
+                .and_then(Json::as_u64)
+                .is_some()
+            {
+                continue;
+            }
+            if let Some(setting) = &delay.default_setting {
+                delay.default_ms = orch_settings::get::<u64>(
+                    &mut *self.inner.db.acquire().await?,
+                    orch_settings::Place::System,
+                    setting,
+                )
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable(format!(
+                        "the native wait setting {setting} has no default"
+                    ))
+                })?;
+            }
+        }
         match delays.fit(&mut config, self.inner.config.interrupt_force) {
             Ok(lowered) => {
                 for each in lowered {
@@ -853,6 +1068,18 @@ impl Engine {
     ) -> Result<Started, EngineError> {
         let serial = self.harness_serial(key);
         let _held = serial.lock().await;
+        self.ensure_harness_locked(key, agent, command, preparation)
+            .await
+    }
+
+    /// The caller owns the harness serial lock for all process effects and database transactions.
+    async fn ensure_harness_locked(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        preparation: Option<&preparation::Preparation>,
+    ) -> Result<Started, EngineError> {
         if let Some(source) = preparation {
             source
                 .check_selection(self, preparation::Target::Harness(key))
@@ -884,7 +1111,7 @@ impl Engine {
             provider_kind,
             agent_id: key.agent,
             harness_kind: agent.harness_kind.clone(),
-            profile: serde_json::from_value(self.profile_under_the_bound(agent)?)?,
+            profile: serde_json::from_value(self.profile_under_the_bound(agent).await?)?,
             home,
             provider_config,
             runtime: crate::provider_runtime::harness_variables(
@@ -1253,8 +1480,29 @@ pub async fn current_descriptor(
     agent: &AgentRow,
 ) -> Result<Option<AgentDescriptor>, EngineError> {
     let mut limited = agent.clone();
+    if limited
+        .descriptor
+        .as_object()
+        .is_some_and(|members| !members.is_empty())
+    {
+        limited.descriptor["kind"] = Json::String(agent.harness_kind.clone());
+        if let Some(version) = agent.profile.get("harness_version").and_then(Json::as_str) {
+            limited.descriptor["harness"]["version"] = Json::String(version.to_owned());
+        }
+    }
     limited.descriptor = crate::hosting::with_build_limits(conn, limited.descriptor).await?;
-    descriptor_of(&limited)
+    let mut descriptor = descriptor_of(&limited)?;
+    if let Some(descriptor) = &mut descriptor {
+        descriptor.kind.clone_from(&agent.harness_kind);
+        if let Some(version) = limited
+            .descriptor
+            .pointer("/harness/version")
+            .and_then(Json::as_str)
+        {
+            descriptor.harness.version = version.to_owned();
+        }
+    }
+    Ok(descriptor)
 }
 
 /// What bringing a harness process up anew came to.
@@ -1673,6 +1921,60 @@ mod tests {
     }
 
     #[test]
+    fn captured_setup_keeps_its_comparison_without_claiming_the_conversation_is_open()
+    -> serde_json::Result<()> {
+        let process = key(new_id());
+        let segment = new_id();
+        let configuration = SessionConfiguration {
+            cwd: "/workspace/retained".into(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            output_capture_bytes: 67_108_864,
+            web_action_wait_secs: 120,
+            image_generation: None,
+            native_configuration: Default::default(),
+            model_details: None,
+            restart_sensitive: None,
+            memory: None,
+            executor_version: None,
+            workspace_configuration: None,
+        };
+        let mcp = McpRevision::of(b"accepted external tools");
+        let tools = OrchToolsRevision::of(&serde_json::json!({"tools":[]}));
+        let skills = orch_types::Hash::of(b"accepted skills");
+        let limits = orch_agent_contract::session::SubagentLimits::default();
+        let hints = SessionHints::of(
+            new_id(),
+            process,
+            "accepted instructions",
+            limits,
+            mcp,
+            tools,
+            skills,
+        );
+        let mut sessions = OpenSessions::default();
+        sessions.restore_setup(segment, hints, serde_json::to_value(&configuration)?);
+        assert!(sessions.configuration_known(segment));
+        assert!(!sessions.configuration_changed(segment, &configuration));
+        assert!(!sessions.instructions_changed(segment, "accepted instructions"));
+        assert!(!sessions.subagent_limits_changed(segment, limits));
+        assert!(!sessions.mcp_changed(segment, mcp));
+        assert!(!sessions.orch_tools_changed(segment, tools));
+        assert!(!sessions.skills_changed(segment, &skills));
+        assert!(!sessions.is_open(segment, process));
+        assert!(sessions.of_provider(process.provider).is_empty());
+        let edited = SessionConfiguration {
+            background_wake: false,
+            ..configuration
+        };
+        assert!(sessions.configuration_changed(segment, &edited));
+        sessions.closed(segment);
+        assert!(!sessions.configuration_known(segment));
+        assert!(!sessions.is_open(segment, process));
+        Ok(())
+    }
+
+    #[test]
     fn accepted_session_configuration_expires_with_the_actual_process_or_lane() {
         let machine = new_id();
         let process = key(machine);
@@ -1682,12 +1984,15 @@ mod tests {
             cwd: "/workspace/child".into(),
             prompt_cache_ttl: None,
             background_wake: true,
+            output_capture_bytes: 67_108_864,
+            web_action_wait_secs: 120,
             image_generation: None,
             native_configuration: Default::default(),
             model_details: None,
             restart_sensitive: None,
             memory: None,
             executor_version: None,
+            workspace_configuration: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);
@@ -1697,6 +2002,38 @@ mod tests {
         );
         sessions.configuration_accepted(segment, configuration.clone());
         assert!(!sessions.configuration_changed(segment, &configuration));
+        for (answer, files) in [
+            (
+                orch_link_contract::commands::ConfigTrust::Trust,
+                "first-files",
+            ),
+            (
+                orch_link_contract::commands::ConfigTrust::KeepOut,
+                "first-files",
+            ),
+            (
+                orch_link_contract::commands::ConfigTrust::KeepOut,
+                "changed-files",
+            ),
+        ] {
+            let trust = SessionConfiguration {
+                workspace_configuration: Some(
+                    orch_link_contract::commands::WorkspaceConfiguration {
+                        answer,
+                        files: files.to_owned(),
+                    },
+                ),
+                ..configuration.clone()
+            };
+            assert!(
+                sessions.configuration_changed(segment, &trust),
+                "a first answer, changed answer or new file revision reaches the session"
+            );
+            sessions.configuration_accepted(segment, trust.clone());
+            assert!(!sessions.configuration_changed(segment, &trust));
+        }
+        sessions.configuration_accepted(segment, configuration.clone());
+
         let details = SessionConfiguration {
             model_details: Some(
                 serde_json::json!({"model":"current","parameters":{"context_window":40_000}}),
