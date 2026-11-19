@@ -21,7 +21,6 @@ image.workspace = true # recognize the actual accepted image bytes for common im
 metrics.workspace = true
 globset.workspace = true
 hex.workspace = true  # the SHA-256 of a skill's files, as its manifest writes them
-jsonschema.workspace = true
 liblzma.workspace = true  # a tar packed with xz that an import reads
 orch-chat.workspace = true
 orch-documents.workspace = true
@@ -46,9 +45,11 @@ orch-settings-contract.workspace = true
 orch-summarizer-contract.workspace = true
 orch-summarizer-model.workspace = true
 orch-plugin-contract.workspace = true
+orch-private-file.workspace = true
 orch-provider-contract.workspace = true
 orch-types.workspace = true
 rand.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true  # the SHA-256 of each file a skill's manifest lists
@@ -64,6 +65,7 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 orch-adapter-claude-code.workspace = true # continuation admission uses the isolated scripted native rig
 orch-adapter-codex.workspace = true # real separated-turn loss uses the existing pinned native adapter rig
 orch-executor-codex.workspace = true # retire the real local-program executor, not a socket stand-in
@@ -79,3 +81,8 @@ tracing-subscriber.workspace = true # bounded phase diagnostics for native reade
 
 [lints]
 workspace = true
+
+[[test]]
+name = "tool_catalogue"
+path = "tests/tool_catalogue.rs"
+harness = false

@@ -2,13 +2,15 @@
 """Record the exact source schema, transport roots and native release catalogue."""
 
 import argparse
+import functools
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 
-from release_gate import command, version
+from release_gate import command, compare, version
 
 
 # Native runner bindings for the targets supported by the packaging catalogue.
@@ -86,6 +88,140 @@ def catalogue(root, name):
     return rows
 
 
+def https_edge_contract(root):
+    """Keep the shipped HTTPS path configurable, resumable and safe to replay only for reads."""
+    required = {
+        "deploy/frontend.sh": ["include /etc/orch/frontend-tls/transport.include;", "nginx -t && nginx -s reload"],
+        "deploy/compose.frontend-https.yml": [":443/udp"],
+        "deploy/nginx.conf": ['$ssl_early_data:$http_early_data', "proxy_set_header Early-Data $orch_early_data;",
+                              "map $http_host $orch_https_port"],
+        "crates/control/api/base/src/certificates/transport.rs": ["ssl_session_cache", "ssl_session_timeout",
+            "ssl_session_tickets", "ssl_early_data", "http2", "listen 443 quic reuseport;", "Alt-Svc"],
+        "crates/control/api/base/src/registry.rs": ['get_all("early-data")', "!parts.method.is_safe()",
+            'route.path.starts_with("/auth/oidc/")', "ErrorCode::RequestTooEarly"],
+        "apps/api/src/composition.rs": ["publish_frontend_transport", "keep_frontend_transport"],
+    }
+    for relative, fragments in required.items():
+        path = root / relative
+        if not path.is_file():
+            raise ValueError(f"the HTTPS edge is missing {relative}")
+        text = path.read_text()
+        for fragment in fragments:
+            if fragment not in text:
+                raise ValueError(f"the HTTPS edge lost {fragment!r} in {relative}")
+    registry = (root / "crates/control/api/base/src/registry.rs").read_text()
+    opened = registry[registry.index("async fn open("):]
+    if opened.index('get_all("early-data")') > opened.index("authentication::on_surface"):
+        raise ValueError("the HTTPS edge must refuse early writes before authentication can have an effect")
+
+
+# The deployment files of a release (update.sh follows them): the generation of the files, the oldest generation the
+# programs of the release work with, the set of files that must agree, and what each published release shipped.
+FILE_SETS = "deploy/FILE_SETS"
+# update.sh is a release file of its own, and its digest stands in the notes, from the release after this one.
+LAST_RELEASE_WITHOUT_DIGEST = "v0.1.3"
+NOTES_DIGEST = re.compile(r"^update\.sh SHA-256: ([0-9a-f]{64})$", re.M)
+
+
+def sha256_of(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def followed_paths(paths):
+    """The files of deploy/ an update brings: all but config/ and the table itself."""
+    return sorted(p for p in paths if not p.startswith("config/") and p != "FILE_SETS")
+
+
+def read_file_sets(text):
+    """The header, the sets and the rows of a FILE_SETS, refusing what an updater would not read."""
+    table = {"format": None, "generation": None, "minimum": None, "main": [], "rows": []}
+    for number, line in enumerate(text.splitlines(), 1):
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            continue
+        kind, rest = words[0], words[1:]
+        if kind in ("format", "generation", "minimum") and len(rest) == 1 and rest[0].isdecimal():
+            table[kind] = int(rest[0])
+        elif kind == "set" and len(rest) >= 2:
+            if rest[0] == "main":
+                table["main"] = rest[1:]
+        elif kind == "file" and len(rest) == 4 and re.fullmatch(r"[0-9]+", rest[1]) and re.fullmatch(r"[0-9a-f]{64}", rest[2]):
+            version(rest[0])
+            table["rows"].append((rest[0], int(rest[1]), rest[2], rest[3]))
+        else:
+            raise ValueError(f"{FILE_SETS} line {number} cannot be read")
+    if table["format"] != 1 or table["generation"] is None or table["minimum"] is None or not table["main"]:
+        raise ValueError(f"{FILE_SETS} needs format 1, a generation, a minimum and a main set")
+    if table["minimum"] > table["generation"]:
+        raise ValueError(f"{FILE_SETS} asks for a minimum generation above its own")
+    return table
+
+
+def git_tree_files(root, revision):
+    """The files of deploy/ at a revision, by their path below deploy/."""
+    names = command("git", "-C", str(root), "ls-tree", "-r", "--name-only", revision, "deploy").splitlines()
+    followed = set(followed_paths(name[len("deploy/"):] for name in names))
+    return {name[len("deploy/"):]: subprocess.run(["git", "-C", str(root), "show", f"{revision}:{name}"],
+                                                  check=True, capture_output=True).stdout for name in names if name[len("deploy/"):] in followed}
+
+
+def published_rows(files, tag, generation):
+    return [f"file {tag} {generation} {sha256_of(files[path])} {path}" for path in followed_paths(files)]
+
+
+def file_sets_contract(root, tag):
+    """The deployment files are described whole, and a release that changes them says so."""
+    deploy = root / "deploy"
+    if not (root / FILE_SETS).is_file():
+        raise ValueError(f"the candidate has no {FILE_SETS}")
+    table = read_file_sets((root / FILE_SETS).read_text())
+    for member in table["main"]:
+        path = deploy / member
+        if (path.resolve() != deploy.resolve() / member or Path(member).is_absolute()
+                or member.startswith(("config/", "runtime/")) or member in {".env", "FILE_SETS"}
+                or not path.is_file()):
+            raise ValueError(f"{FILE_SETS} names {member} in the main set, and deploy/ has no such file")
+    if not (deploy / "update.sh").is_file():
+        raise ValueError("the candidate has no deploy/update.sh")
+    published = {}
+    for row_tag, generation, digest, path in table["rows"]:
+        if row_tag == tag:
+            raise ValueError(f"{FILE_SETS} already has rows for {tag}: packaging adds a release's own")
+        published.setdefault(row_tag, {})[path] = (generation, digest)
+    for row_tag, rows in published.items():
+        if len({generation for generation, _ in rows.values()}) != 1:
+            raise ValueError(f"{FILE_SETS} gives the files of {row_tag} more than one generation")
+    latest = max(published, key=functools.cmp_to_key(compare), default=None)
+    if latest:
+        rows = published[latest]
+        generation = next(iter(rows.values()))[0]
+        unchanged = all(rows.get(member, (None, None))[1] == sha256_of((deploy / member).read_bytes()) for member in table["main"])
+        if unchanged and table["generation"] != generation:
+            raise ValueError(f"the files of the main set are those of {latest}, which is generation {generation}, and {FILE_SETS} says {table['generation']}")
+        if not unchanged and table["generation"] <= generation:
+            raise ValueError(f"the files of the main set differ from those of {latest} (generation {generation}), so the generation must be raised: {FILE_SETS} says {table['generation']}")
+    digest = sha256_of((deploy / "update.sh").read_bytes())
+    notes = root / ".github/release-notes" / f"{tag}.md"
+    if notes.is_file():
+        found = NOTES_DIGEST.findall(notes.read_text())
+        if len(found) > 1 or (found and found[0] != digest):
+            raise ValueError(f"the notes of {tag} give an update.sh SHA-256 that is not deploy/update.sh's ({digest})")
+        if not found and compare(tag, LAST_RELEASE_WITHOUT_DIGEST) > 0:
+            raise ValueError(f"the notes of {tag} must give the SHA-256 of deploy/update.sh on a line `update.sh SHA-256: {digest}`")
+    return {"generation": table["generation"], "minimum": table["minimum"], "update_sh_sha256": digest}
+
+
+def record_file_sets(root, tag, revision):
+    """Appends the files a published release shipped to deploy/FILE_SETS: a release adds itself once it is out."""
+    path = root / FILE_SETS
+    table = read_file_sets(path.read_text())
+    if any(row[0] == tag for row in table["rows"]):
+        raise ValueError(f"{FILE_SETS} has the files of {tag} already")
+    rows = published_rows(git_tree_files(root, revision), tag, table["generation"])
+    path.write_text(path.read_text().rstrip("\n") + "\n" + "\n".join(rows) + "\n")
+    return len(rows)
+
+
 def source_contract(root, commit, tag, *, require_sealed=True):
     version(tag)
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -108,10 +244,18 @@ def source_contract(root, commit, tag, *, require_sealed=True):
     if surfaces != {"browser": "/api/v1", "keys": "/openapi/v1"}:
         raise ValueError("the candidate changed the reviewed browser/key transport roots")
     nginx = (root / "deploy/nginx.conf").read_text()
+    # The API's group keeps its connections and looks the service's name up again as its address changes, so an API
+    # made again by an update is found without the edge being restarted.
+    groups = re.findall(r"upstream\s+orch_api\s*\{([^{}]*)\}", nginx)
+    if len(groups) != 1 or not re.search(r"\bserver\s+api:8443\s+resolve;", groups[0]):
+        raise ValueError("the stock edge must look the API's address up again (upstream orch_api with `resolve`)")
     for route in ["/api/", "/api/v1/ws", "/openapi/", "/openapi/v1/ws"]:
         blocks = re.findall(rf"location\s+{re.escape(route)}\s*\{{([^{{}}]*)\}}", nginx)
-        if len(blocks) != 1 or "proxy_pass $upstream$request_uri;" not in blocks[0]:
+        # A `proxy_pass` without a URI part hands the request's own URI on as it was received.
+        if len(blocks) != 1 or not re.search(r"\bproxy_pass\s+https://orch_api;", blocks[0]):
             raise ValueError(f"the stock edge must forward the unchanged {route} route")
+    https_edge_contract(root)
+    deployment_files = file_sets_contract(root, tag)
     native = catalogue(root, "TARGETS")
     nodes = catalogue(root, "NODE_TARGETS")
     if any(row[1] != "linux" or row[0] not in {target[0] for target in native} for row in nodes):
@@ -121,6 +265,7 @@ def source_contract(root, commit, tag, *, require_sealed=True):
         "schema": {"algorithm": "sha384", "files": files, "sealed": sealed,
                    "fingerprint": hashlib.sha384(ledger_text(files).encode()).hexdigest()},
         "surfaces": surfaces,
+        "deployment_files": deployment_files,
         "native_matrix": {"include": [{"os": RUNNERS[target], "target": target} for target, *_ in native]},
         "package_matrix": {"include": [{"os": RUNNERS[target], "arch": arch} for target, _, arch, _ in nodes]},
         "connectors": [name for *_, name in native],
@@ -138,15 +283,22 @@ def require_source(root, commit, tag, *, require_sealed=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["seal-schema", "record"])
+    parser.add_argument("action", choices=["seal-schema", "record", "record-published"])
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--commit")
+    parser.add_argument("--revision", help="record-published: the commit or tag whose deploy/ the release shipped (default: --commit)")
     parser.add_argument("--tag")
     parser.add_argument("--mode", choices=["release", "rehearsal", "warm"], default="release")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.action == "seal-schema":
         print(f"Sealed {len(seal_schema(args.root))} schema files; review and commit RELEASED before building")
+        return
+    if args.action == "record-published":
+        if not args.tag or not (args.revision or args.commit):
+            parser.error("record-published requires --tag and --revision")
+        count = record_file_sets(args.root, args.tag, args.revision or args.commit)
+        print(f"Recorded {count} files of {args.tag} in {FILE_SETS}; review and commit it")
         return
     if not args.commit or not args.tag or not args.out:
         parser.error("record requires --commit, --tag and --out")
