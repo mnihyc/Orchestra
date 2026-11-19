@@ -13,7 +13,7 @@ import { World } from '../doubles/world';
 
 const calls = vi.hoisted(() => ({ bootstrap: vi.fn<() => Promise<MeBootstrapReply>>(), get: vi.fn<(path: string, options?: { params?: { query?: { resolve_ids?: string } } }) => Promise<{ data: unknown; response: Response }>>() }));
 vi.mock('@/features/shared/Shared', () => ({ SharedScreen: () => null }));
-vi.mock('@/shell/bootstrap', () => ({ ensureShellBootstrap: calls.bootstrap }));
+vi.mock('@/shell/bootstrap', async (loadOriginal) => ({ ...await loadOriginal<object>(), ensureShellBootstrap: calls.bootstrap }));
 vi.mock('@/api/client', async (original) => { const actual = await original<typeof ClientModule>(); return { ...actual, api: { ...actual.api, GET: calls.get } }; });
 const previous = client.session.getState();
 afterEach(() => { queryClient.clear(); scheduledReads.advance(); localStorage.clear(); client.session.setState(previous); });

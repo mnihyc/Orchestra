@@ -1,30 +1,40 @@
 /** Permanent loss requires exact consent, and independent recovery and batch destinations retain their reviewed choices. */
-import { screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DeclareLostDialog } from '@/features/resources/DeclareLost';
 import { MoveDialog } from '@/features/fleet/MoveDialog';
 import { BatchChange } from '@/features/change/BatchChange';
 import { EnvironmentStartRecovery } from '@/features/thread/EnvironmentStartRecovery';
-import type { EnvironmentBatch, EnvironmentRecoveryPlan, EnvironmentRecoverPreflightBody, LossPlan, Thread } from '@/generated/api-types';
+import type { EnvironmentBatch, EnvironmentRecoveryPlan, EnvironmentRecoverPreflightBody, ForkBatch, LossPlan, Provider, ProviderModel, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { formatBytes } from '@/lib/format';
 import { failedStart } from './failed-start-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+import { detailAgent } from './resource-detail-fixtures';
+import { planProvider } from '../unit/provider-plan-fixtures';
+import { MODEL_ESTIMATE } from '../doubles/fixtures';
+import { resourcePlan } from './plan-resource-fixtures';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ declare: vi.fn(), recovery: vi.fn<(body: EnvironmentRecoverPreflightBody) => Promise<EnvironmentRecoveryPlan>>(), start: vi.fn(), batch: vi.fn(), startEnvironment: vi.fn(), change: vi.fn(), count: vi.fn(), help: vi.fn() }));
+const batchChoices = vi.hoisted(() => ({ providers: [] as Provider[], models: [] as ProviderModel[], running: null as ForkBatch | null }));
 const loss = { admin_grants: [], notification: { people: 0, default_on: false }, provider_threads: [], provider_threads_hidden: 0, preflight_id: 'loss-plan', name: 'host-2', environments: [{ environment: { id: 'env', name: 'Main' }, threads: [{ id: 'thread', name: 'Visible work' }], threads_hidden: 2, kept_bytes: 4096 }], providers: [], mounts: [], jobs: 1, kept_bytes: 4096 } as unknown as LossPlan;
 const environment = { id: 'destination', name: 'Available', address: 'team/Available', status: 'running', access: { permissions: ['environment.manage'] } };
 const query = (key: string, value: unknown) => ({ queryKey: [key], queryFn: () => Promise.resolve(value) });
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.help }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.help }));
 vi.mock('@/api/loss', () => ({ lossPlanQuery: () => query('loss-plan', loss), declareLost: calls.declare, recoverableQuery: () => query('recoverable', { environments: [], others: 0 }), recoveryBatchQuery: () => query('recovery-batch', null), planRecovery: calls.recovery, startRecovery: calls.start }));
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentsQuery: () => query('environments', [environment]), startEnvironment: calls.startEnvironment }));
-vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), hostsQuery: () => query('hosts', []), providersQuery: () => query('providers', []), agentsQuery: () => query('agents', []) }));
-vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planBatch: calls.batch, jobQuery: (id: string) => ({ queryKey: ['recovery-count', id], queryFn: calls.count }) }));
+vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), hostsQuery: () => query('hosts', []), providersQuery: () => query('providers', batchChoices.providers), agentsQuery: () => query('agents', [detailAgent]), providerModelsQuery: () => query('batch-models', batchChoices.models) }));
+vi.mock('@/api/resource-impact', async (original) => ({ ...await original<object>(), resourceImpactQuery: () => query('batch-impact', { name: 'Source', facts: { dependents: [{ relation: 'binding', count: 2, hidden: 0,
+  visible: [{ object: { kind: 'thread', id: 'first' }, name: 'First' }, { object: { kind: 'thread', id: 'second' }, name: 'Second' }] }] } }) }));
+vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), planBatch: calls.batch, batchQuery: (id: string) => query(`batch-${id}`, batchChoices.running), jobQuery: (id: string) => ({ queryKey: ['recovery-count', id], queryFn: calls.count }) }));
 vi.mock('@/features/change/target', async (original) => ({ ...await original<object>(), openChange: calls.change }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  batchChoices.providers = []; batchChoices.models = []; batchChoices.running = null;
   calls.declare.mockResolvedValue(loss);
   calls.batch.mockResolvedValue({ preflight_id: 'batch-plan', executable: 0, plans: [], skipped: [], turns_running: 0, options: { wait_minutes: 10 }, estimate: { seconds_low: 1, seconds_high: 2 } });
 });
@@ -97,6 +107,65 @@ it('names an existing destination in the batch request even when each thread kee
   await user.click(await screen.findByRole('option', { name: 'Available' }));
   await waitFor(() => expect(calls.batch).toHaveBeenCalled());
   expect(calls.batch.mock.calls.at(-1)?.[0]).toEqual({ thread_ids: ['first', 'second'], environment: { use: 'destination' } });
+});
+
+it.each(['provider', 'environment'] as const)('keeps every chosen runtime field when an all-%s batch gains a destination or becomes a subset', async (kind) => {
+  batchChoices.providers = [planProvider({ id: 'target-provider', name: 'Target', protocols: ['openai'] })];
+  batchChoices.models = [{ ...MODEL_ESTIMATE, id: 'chosen-model', model_name: 'chosen-model', display_name: 'Chosen model', enabled: true, source: 'manual', groups: [],
+    parameters: { efforts: ['low', 'high'], default_effort: 'low' } }];
+  show(<BatchChange source={{ kind, id: 'source' }} batch={null} open onClose={vi.fn()} />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole('combobox', { name: i18n.t('change.runs.provider') }));
+  await user.click(await screen.findByRole('option', { name: 'Target' }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('change.runs.agent') }));
+  await user.click(await screen.findByRole('option', { name: detailAgent.name }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('change.runs.model') }));
+  await user.click(await screen.findByRole('option', { name: 'Chosen model' }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('change.runs.effort') }));
+  await user.click(await screen.findByRole('option', { name: 'High' }));
+  const target = { provider_id: 'target-provider', agent_id: detailAgent.id, model: 'chosen-model', effort: 'high' };
+  await waitFor(() => expect(calls.batch.mock.calls.at(-1)?.[0]).toHaveProperty('to', target));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('loss.destination') }));
+  await user.click(await screen.findByRole('option', { name: 'Available' }));
+  await waitFor(() => expect(calls.batch.mock.calls.at(-1)?.[0]).toMatchObject({ [`all_of_${kind}`]: 'source', to: target, environment: { use: 'destination' } }));
+  await user.click(screen.getByRole('checkbox', { name: 'Second' }));
+  await waitFor(() => expect(calls.batch.mock.calls.at(-1)?.[0]).toMatchObject({ thread_ids: ['first'], to: target, environment: { use: 'destination' } }));
+});
+
+it.each(['en', 'zh-CN'] as const)('searches and pages large thread and plan lists without dropping hidden selections (%s)', async (locale) => {
+  await setLocale(locale);
+  const threads = Array.from({ length: 30 }, (_, i) => ({ id: `Thread ${i}`, name: `Thread ${i}` }));
+  const plans = threads.map((row) => resourcePlan(row.name));
+  const first = plans[0]!;
+  calls.batch.mockResolvedValue({ preflight_id: 'large-plan', expires_at: first.expires_at, executable: plans.length, options: first.options, estimate: first.estimate, plans, skipped: [], turns_running: 0 });
+  show(<BatchChange source={{ kind: 'threads', threads, label: 'Selected' }} batch={null} open onClose={vi.fn()} />);
+  const user = userEvent.setup();
+  const members = await screen.findByRole('group', { name: i18n.t('change.batch.threads') });
+  expect(within(members).getAllByRole('checkbox').length).toBeLessThan(threads.length);
+  fireEvent.change(within(members).getByRole('searchbox'), { target: { value: 'Thread 29' } });
+  expect(within(members).getByRole('checkbox', { name: 'Thread 29' })).toBeChecked();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('loss.destination') }));
+  await user.click(await screen.findByRole('option', { name: 'Available' }));
+  await waitFor(() => expect(calls.batch.mock.calls.at(-1)?.[0]).toHaveProperty('thread_ids', threads.map((thread) => thread.id)));
+  const reviews = await screen.findByRole('group', { name: i18n.t('change.batch.plans') });
+  expect(reviews.querySelectorAll('[data-plan-row]').length).toBeLessThan(plans.length);
+  fireEvent.change(within(reviews).getByRole('searchbox'), { target: { value: 'Thread 29' } });
+  expect(within(reviews).getByText('Thread 29')).toBeVisible();
+  expect(reviews.querySelectorAll('[data-plan-row]')).toHaveLength(1);
+  await user.click(within(members).getByRole('checkbox', { name: 'Thread 29' }));
+  await waitFor(() => expect(calls.batch.mock.calls.at(-1)?.[0]).toHaveProperty('thread_ids', threads.filter((thread) => thread.id !== 'Thread 29').map((thread) => thread.id)));
+});
+
+it('searches and pages completed batch jobs in their own bounded list', async () => {
+  const jobs = Array.from({ length: 30 }, (_, i) => ({ thread: resourcePlan(`Thread ${i}`).source,
+    job: { ...failedStart().job, id: `job-${i}`, state: 'succeeded' as const, error: null } }));
+  batchChoices.running = { batch_id: 'finished', jobs, hidden: 0, percent: 100, counts: { queued: 0, running: 0, succeeded: 30, failed: 0, cancelled: 0 } };
+  show(<BatchChange source={{ kind: 'threads', threads: [], label: 'Selected' }} batch="finished" open onClose={vi.fn()} />);
+  const list = await screen.findByRole('group', { name: i18n.t('change.batch.jobs') });
+  expect(list.querySelectorAll('[data-batch-job]').length).toBeLessThan(jobs.length);
+  await userEvent.type(within(list).getByRole('searchbox'), 'Thread 29');
+  expect(within(list).getByText('Thread 29')).toBeVisible();
+  expect(list.querySelectorAll('[data-batch-job]')).toHaveLength(1);
 });
 
 it.each(['en', 'zh-CN'] as const)('keeps a blocked environment independent and confirms the reviewed executable members once (%s)', async (locale) => {

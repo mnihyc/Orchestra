@@ -86,6 +86,7 @@ async fn configure(room: &Room) -> Provider {
         .call(NodeSettingSet, &[&room.root, &"agent.default_provider_id"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(provider.base.id),
             locked: None,
             expected_revision: None,

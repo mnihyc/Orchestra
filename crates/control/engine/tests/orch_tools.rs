@@ -12,7 +12,7 @@ use shared::native_tools;
 
 use common::{World, eventually, queued, turn_ended};
 use orch_authz::Caller;
-use orch_link_contract::commands::{Command, CommandKind, OrchTool, OrchToolResult};
+use orch_link_contract::commands::{Command, CommandKind, CommandResult, OrchTool, OrchToolResult};
 use orch_link_contract::events::TurnOutcome;
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -247,6 +247,30 @@ async fn a_session_is_opened_with_the_tools_the_thread_enables_that_are_built() 
             OrchTool::RequestCapability,
             OrchTool::OrchDocs
         ]
+    );
+    let accepted: Json = world.scalar("SELECT orch_tools_offer FROM segments WHERE thread_id=$1 ORDER BY ordinal DESC LIMIT 1", thread).await;
+    assert_eq!(accepted["offered_count"], 4);
+    assert!(
+        accepted["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["key"] == "announce" && tool["offered"] == true)
+    );
+    assert!(
+        accepted["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["key"] == "send_message" && tool["reason"] == "off_here")
+    );
+    world
+        .set(world.topic, "orch_tools.enabled", json!([]))
+        .await;
+    let still_accepted: Json = world.scalar("SELECT orch_tools_offer FROM segments WHERE thread_id=$1 ORDER BY ordinal DESC LIMIT 1", thread).await;
+    assert_eq!(
+        still_accepted, accepted,
+        "a setting edit is not a new native tool offer"
     );
     assert!(
         open.instructions
@@ -846,6 +870,27 @@ async fn an_agent_that_calls_more_than_a_minute_allows_is_told_how_long_to_wait(
     let (code, message) = refused(&third);
     assert_eq!(code, "rate_limited");
     assert!(message.contains("Wait "), "{message}");
+    let recorded = serde_json::to_value(&third).unwrap();
+    assert_eq!(recorded["error"]["rate_limit"]["allowed_calls"], 2);
+    assert_eq!(recorded["error"]["rate_limit"]["period_secs"], 60);
+    assert!(recorded["error"]["rate_limit"]["retry_at"].is_string());
+    world
+        .set(world.topic, "orch_tools.calls_per_minute", json!(9))
+        .await;
+    let stored = world
+        .commands
+        .as_engine()
+        .retained_body(orch_engine::ids::tool_result(thread, &third.call_ref))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored["error"]["rate_limit"], recorded["error"]["rate_limit"],
+        "a later budget does not rewrite the recorded refusal"
+    );
+    world
+        .set(world.topic, "orch_tools.calls_per_minute", json!(2))
+        .await;
     // Another thread's agent has a rate of its own.
     let other = world.thread("Other").await;
     let fine = call(
@@ -1083,6 +1128,48 @@ async fn a_milestone_raised_to_the_topic_is_delivered_like_a_notice_with_its_own
         )
         .await;
     assert_eq!(notices[0]["title"], "Build is done");
+}
+
+#[tokio::test]
+async fn an_unavailable_steer_keeps_its_applied_fallback_after_the_profile_and_default_change() {
+    let world = a_world_whose_agent_takes_tools().await;
+    let sender = world.thread("Fallback sender").await;
+    let receiver = world.thread("Fallback receiver").await;
+    world.running_turn(receiver, "Keep running").await;
+    world
+        .set(world.topic, "broadcast.fallback", json!("next_turn"))
+        .await;
+    world.exec("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,steer}','false'::jsonb)").await;
+    let sent = call(
+        &world,
+        sender,
+        OrchTool::Announce,
+        json!({"title":"Keep this delivery outcome"}),
+    )
+    .await;
+    assert_eq!(delivered(&sent)["queued"], 1);
+    let read = world.sync(receiver).await;
+    let input = read
+        .inputs
+        .iter()
+        .find(|input| input.source == orch_api_contract::threads::InputSource::Announcement)
+        .unwrap();
+    let recorded = serde_json::to_value(input).unwrap()["delivery_resolution"].clone();
+    assert_eq!(recorded["requested"], "steer");
+    assert_eq!(recorded["applied"], "queue");
+    assert_eq!(recorded["reason"], "steer_unavailable");
+    assert_eq!(recorded["source"]["kind"], "setting");
+    assert_eq!(recorded["source"]["value"], "next_turn");
+    world
+        .set(world.topic, "broadcast.fallback", json!("interrupt"))
+        .await;
+    world.exec("UPDATE agents SET descriptor=jsonb_set(descriptor,'{capabilities,steer}','true'::jsonb)").await;
+    let read = world.sync(receiver).await;
+    let kept = read.inputs.iter().find(|row| row.id == input.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(kept).unwrap()["delivery_resolution"],
+        recorded
+    );
 }
 
 #[tokio::test]
@@ -1854,5 +1941,74 @@ async fn a_place_replaces_the_description_of_a_tool_by_a_text_of_its_own() {
     assert!(
         list.description
             .starts_with("List what the team shared with you")
+    );
+}
+
+#[tokio::test]
+async fn an_announcement_keeps_its_applied_steering_fallback_when_the_policy_changes_later() {
+    let world = a_world_whose_agent_takes_tools().await;
+    let mut descriptor: Json = world
+        .scalar("SELECT descriptor FROM agents WHERE id=$1", world.agent)
+        .await;
+    descriptor["capabilities"]["steer"] = json!(false);
+    sqlx::query("UPDATE agents SET descriptor=$2 WHERE id=$1")
+        .bind(world.agent)
+        .bind(&descriptor)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let typed: orch_agent_contract::descriptor::AgentDescriptor =
+        serde_json::from_value(descriptor).unwrap();
+    world.machine.handler.on(CommandKind::AgentStart, move |_| {
+        Ok(CommandResult::AgentStart(
+            orch_link_contract::commands::AgentStartResult {
+                reused: false,
+                harness_version: "1.0.0".into(),
+                descriptor: typed.clone(),
+            },
+        ))
+    });
+    let receiver = world.thread("Cannot steer").await;
+    let _ = world.running_turn(receiver, "Keep working").await;
+    let sender = world.thread("Announcer").await;
+    let result = call(
+        &world,
+        sender,
+        OrchTool::Announce,
+        json!({"title":"Keep this notice"}),
+    )
+    .await;
+    assert_eq!(delivered(&result)["queued"], 1);
+    let before: Json = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE thread_id=$1 AND source='announcement'",
+            receiver,
+        )
+        .await;
+    assert_eq!(before["delivery_resolution"]["requested"], "steer");
+    assert_eq!(before["delivery_resolution"]["applied"], "queue");
+    assert_eq!(before["delivery_resolution"]["reason"], "steer_unavailable");
+    world
+        .set(world.topic, "broadcast.fallback", json!("interrupt"))
+        .await;
+    let after: Json = world
+        .scalar(
+            "SELECT to_jsonb(i) FROM thread_inputs i WHERE thread_id=$1 AND source='announcement'",
+            receiver,
+        )
+        .await;
+    assert_eq!(before["delivery_resolution"], after["delivery_resolution"]);
+    let notice: Json = world
+        .scalar(
+            "SELECT payload FROM items WHERE thread_id=$1 AND kind='announcement'",
+            receiver,
+        )
+        .await;
+    // The stored receipt keeps its private source pointer, which a conversation's payload never carries.
+    let mut receipt = before["delivery_resolution"].clone();
+    receipt.as_object_mut().unwrap().remove("source_node");
+    assert_eq!(
+        notice["delivery_resolution"], receipt,
+        "the retained announcement outcome shares the exact input receipt"
     );
 }

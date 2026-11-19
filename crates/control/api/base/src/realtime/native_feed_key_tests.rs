@@ -152,6 +152,8 @@ async fn keep_raw(rig: &Rig, thread: Id, segment: Id, n: i64) -> Proof<RawEvent>
         .keep(
             &mut conn,
             &orch_link_contract::events::RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n,
                 direction: "in".into(),
                 payload: json!({"observation":"scoped native frame"}),
