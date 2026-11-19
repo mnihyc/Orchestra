@@ -208,7 +208,7 @@ impl FileSource {
             .await
             .map_err(DbError::from)?;
         if let Some(machine) = self.physical.machine {
-            let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(machine)
                 .fetch_optional(&mut *conn)
                 .await

@@ -2022,11 +2022,17 @@ pub async fn document_notices_page(
         .bind(by).bind(document).bind(after).bind(limit).fetch_all(conn).await?)
 }
 
+macro_rules! runnable_document_notice {
+    () => {
+        "SELECT id FROM jobs WHERE kind='document_notices' AND state IN ('queued','running')
+         AND (plan#>>'{runner,until}' IS NULL OR (plan#>>'{runner,until}')::timestamptz <= $1)"
+    };
+}
 /// One next notification job; only four valid leases can precede a queued row under the durable slots.
-pub const DOCUMENT_NOTICE_RUNNABLE_SQL: &str =
-    "SELECT id FROM jobs WHERE kind='document_notices' AND state IN ('queued','running')
-    AND (plan#>>'{runner,until}' IS NULL OR (plan#>>'{runner,until}')::timestamptz <= $1)
-    ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const DOCUMENT_NOTICE_RUNNABLE_SQL: &str = concat!(
+    runnable_document_notice!(),
+    " ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+);
 
 /// Claims work only into the four durable slots. Caller holds one transaction; concurrent engines skip its slots.
 pub async fn claim_document_notices(
@@ -2034,6 +2040,16 @@ pub async fn claim_document_notices(
     now: DateTime<Utc>,
     until: DateTime<Utc>,
 ) -> Result<Vec<(Id, Id)>, DbError> {
+    // An idle sweep does not reserve slots. A job committed after this snapshot
+    // is eligible on the next sweep. The locked claim below rechecks eligibility.
+    let runnable: bool =
+        sqlx::query_scalar(concat!("SELECT EXISTS(", runnable_document_notice!(), ")"))
+            .bind(now)
+            .fetch_one(&mut *conn)
+            .await?;
+    if !runnable {
+        return Ok(Vec::new());
+    }
     let slots: Vec<i16> = sqlx::query_scalar(
         "SELECT s.slot FROM document_notice_slots s LEFT JOIN jobs j ON j.id=s.job_id
         WHERE s.job_id IS NULL OR j.id IS NULL OR j.state NOT IN ('queued','running')

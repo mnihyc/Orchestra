@@ -6,7 +6,6 @@
 )]
 
 use orch_link::spool::{Relief, Spool, SpoolEvent, SpoolOptions};
-use orch_link_contract::streams::ResetReason;
 use orch_types::Time;
 use serde_json::json;
 use std::path::Path;
@@ -187,7 +186,7 @@ fn completed(item: &str, n: i64) -> SpoolEvent {
 }
 
 #[test]
-fn a_full_spool_gives_up_diagnostics_first() {
+fn diagnostic_pressure_sheds_only_waiting_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
     let mut spool = open(
         dir.path(),
@@ -197,19 +196,21 @@ fn a_full_spool_gives_up_diagnostics_first() {
             ..options()
         },
     );
-    for n in 0..6 {
-        spool
-            .append(
-                STREAM,
-                &event(
-                    "raw.frame",
-                    n,
-                    json!({ "direction": "in", "payload": "p".repeat(300) }),
-                ),
-            )
-            .unwrap();
-    }
     let mut relief = Vec::new();
+    for n in 0..30 {
+        relief.extend(
+            spool
+                .append(
+                    STREAM,
+                    &event(
+                        "raw.frame",
+                        n,
+                        json!({ "direction": "in", "payload": "p".repeat(300) }),
+                    ),
+                )
+                .unwrap(),
+        );
+    }
     for n in 0..8 {
         relief.extend(spool.append(STREAM, &plain(n)).unwrap());
     }
@@ -227,7 +228,7 @@ fn a_full_spool_gives_up_diagnostics_first() {
 }
 
 #[test]
-fn then_the_deltas_of_an_item_that_is_completed_and_not_yet_sent() {
+fn completed_items_preserve_the_deltas_that_explain_their_progress() {
     let dir = tempfile::tempdir().unwrap();
     let mut spool = open(
         dir.path(),
@@ -237,51 +238,35 @@ fn then_the_deltas_of_an_item_that_is_completed_and_not_yet_sent() {
             ..options()
         },
     );
-    let mut relief = Vec::new();
     for n in 0..10 {
-        relief.extend(spool.append(STREAM, &delta("item-1", n)).unwrap());
+        assert!(
+            spool
+                .append(STREAM, &delta("item-1", n))
+                .unwrap()
+                .is_empty()
+        );
     }
-    relief.extend(spool.append(STREAM, &completed("item-1", 10)).unwrap());
+    spool.append(STREAM, &completed("item-1", 10)).unwrap();
     for n in 11..30 {
-        relief.extend(spool.append(STREAM, &delta("item-2", n)).unwrap());
+        assert!(
+            spool
+                .append(STREAM, &delta("item-2", n))
+                .unwrap()
+                .is_empty()
+        );
     }
-    let superseded: usize = relief
-        .iter()
-        .filter_map(|r| {
-            if let Relief::SupersededDeltas { events } = r {
-                Some(*events)
-            } else {
-                None
-            }
-        })
-        .sum();
-    assert!(superseded > 0, "{relief:?}");
     let all = spool.number(STREAM, 1_000).unwrap();
-    assert!(
-        all.iter().any(|e| e.event.kind == "item.completed"),
-        "the completed item holds the whole text"
-    );
-    let item1_deltas = all
-        .iter()
-        .filter(|e| e.event.kind == "item.delta" && e.event.body["native_ref"] == "item-1")
-        .count();
-    assert!(
-        item1_deltas < 10,
-        "deltas of the completed item were left out: {item1_deltas}"
-    );
-    let item2_deltas = all
-        .iter()
-        .filter(|e| e.event.body["native_ref"] == "item-2")
-        .count();
-    assert!(
-        item2_deltas > 0,
-        "the deltas of an item that is still growing stay"
-    );
-    let numbers: Vec<_> = all.iter().map(|e| e.seq).collect();
+    assert_eq!(all.len(), 30);
     assert_eq!(
-        numbers,
-        (1..=numbers.len() as i64).collect::<Vec<_>>(),
-        "no hole in the numbering"
+        all.iter()
+            .filter(|e| e.event.kind == "item.delta" && e.event.body["native_ref"] == "item-1")
+            .count(),
+        10
+    );
+    assert!(all.iter().any(|e| e.event.kind == "item.completed"));
+    assert_eq!(
+        all.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=30).collect::<Vec<_>>()
     );
 }
 
@@ -307,13 +292,13 @@ fn deltas_already_sent_are_never_left_out() {
     let held = spool.read(STREAM, spool.oldest(STREAM), 1_000).unwrap();
     let sent_deltas = held.iter().filter(|e| e.event.kind == "item.delta").count();
     assert!(
-        sent_deltas == 6 || spool.oldest(STREAM) > 1,
-        "sent deltas are numbered and stay, or the oldest went whole"
+        sent_deltas == 6 && spool.oldest(STREAM) == 1,
+        "numbered deltas stay until acknowledged"
     );
 }
 
 #[test]
-fn last_the_oldest_events_of_the_fullest_stream_go_and_the_loss_is_reported() {
+fn a_busy_stream_keeps_its_history_after_the_diagnostic_allowance_is_full() {
     let dir = tempfile::tempdir().unwrap();
     let mut spool = open(
         dir.path(),
@@ -326,48 +311,18 @@ fn last_the_oldest_events_of_the_fullest_stream_go_and_the_loss_is_reported() {
     for n in 0..4 {
         spool.append(OTHER, &plain(n)).unwrap();
     }
-    let mut relief = Vec::new();
     for n in 0..60 {
-        relief.extend(spool.append(STREAM, &plain(n)).unwrap());
-    }
-    let gone: Vec<&Relief> = relief
-        .iter()
-        .filter(|r| matches!(r, Relief::OldestEvents { .. }))
-        .collect();
-    assert!(!gone.is_empty(), "{relief:?}");
-    for r in &gone {
-        let Relief::OldestEvents {
-            stream,
-            reason,
-            events,
-            ..
-        } = r
-        else {
-            unreachable!()
-        };
-        assert_eq!(
-            stream, STREAM,
-            "the fullest stream gives, not the quiet one"
-        );
-        assert_eq!(*reason, ResetReason::SpoolOverflow);
-        assert!(*events > 0);
+        assert!(spool.append(STREAM, &plain(n)).unwrap().is_empty());
     }
     assert_eq!(spool.unsent(OTHER), 4);
-    assert!(spool.bytes() <= 3_000);
-    assert!(
-        spool.unsent(STREAM) < 60,
-        "the oldest events of the fullest stream went"
-    );
-    assert_eq!(
-        spool.oldest(STREAM),
-        1,
-        "events that never had a number leave no gap in the numbering when they go"
-    );
+    assert_eq!(spool.unsent(STREAM), 60);
+    assert!(spool.bytes() > 3_000);
+    assert_eq!(spool.oldest(STREAM), 1);
     assert_eq!(spool.number(STREAM, 1).unwrap()[0].seq, 1);
 }
 
 #[test]
-fn dropping_events_that_were_already_numbered_says_how_far_the_numbers_went() {
+fn numbered_events_keep_their_numbers_while_unacknowledged_work_accumulates() {
     let dir = tempfile::tempdir().unwrap();
     let mut spool = open(
         dir.path(),
@@ -381,31 +336,16 @@ fn dropping_events_that_were_already_numbered_says_how_far_the_numbers_went() {
         spool.append(STREAM, &plain(n)).unwrap();
     }
     spool.number(STREAM, 8).unwrap();
-    let mut relief = Vec::new();
     for n in 8..40 {
-        relief.extend(spool.append(STREAM, &plain(n)).unwrap());
+        assert!(spool.append(STREAM, &plain(n)).unwrap().is_empty());
     }
-    let first = relief
-        .iter()
-        .find_map(|r| {
-            if let Relief::OldestEvents {
-                numbered_through, ..
-            } = r
-            {
-                Some(*numbered_through)
-            } else {
-                None
-            }
-        })
-        .unwrap();
-    assert!(
-        first.is_some_and(|through| (1..=8).contains(&through)),
-        "{relief:?}"
-    );
+    assert_eq!(spool.oldest(STREAM), 1);
+    assert_eq!(spool.sent_through(STREAM), 8);
+    assert_eq!(spool.unsent(STREAM), 32);
 }
 
 #[test]
-fn events_older_than_the_age_limit_go_from_the_front() {
+fn authoritative_events_stay_after_the_diagnostic_age_passes() {
     let dir = tempfile::tempdir().unwrap();
     let mut spool = open(
         dir.path(),
@@ -417,20 +357,8 @@ fn events_older_than_the_age_limit_go_from_the_front() {
     for n in 0..10 {
         spool.append(STREAM, &plain(n * 20)).unwrap();
     }
-    let relief = spool.expire(at(190)).unwrap();
-    // Events 0..=4 are 100 or more seconds old at 190, events from 5 on are younger.
-    assert!(
-        matches!(
-            &relief[..],
-            [Relief::OldestEvents {
-                events: 5,
-                numbered_through: None,
-                ..
-            }]
-        ),
-        "{relief:?}"
-    );
-    assert_eq!(spool.unsent(STREAM), 5);
+    assert!(spool.expire(at(190)).unwrap().is_empty());
+    assert_eq!(spool.unsent(STREAM), 10);
 }
 
 #[test]
@@ -503,4 +431,118 @@ fn a_rewrite_that_was_cut_off_is_finished_or_undone_so_that_one_whole_copy_remai
         "the old copy came back, because the new one was not whole"
     );
     assert!(!staged.exists() && !replaced.exists());
+}
+
+#[test]
+fn unacknowledged_history_survives_pressure_age_and_restart_with_its_original_numbers() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = SpoolOptions {
+        max_bytes: 1_000,
+        max_age: Duration::from_secs(1),
+        segment_bytes: 300,
+    };
+    {
+        let mut spool = open(dir.path(), limits);
+        for n in 0..8 {
+            spool.append(STREAM, &plain(n)).unwrap();
+        }
+        spool.number(STREAM, 8).unwrap();
+        for n in 8..40 {
+            assert!(spool.append(STREAM, &plain(n)).unwrap().is_empty());
+        }
+        assert!(spool.expire(at(3_600)).unwrap().is_empty());
+        assert_eq!(spool.oldest(STREAM), 1);
+        assert_eq!(spool.sent_through(STREAM), 8);
+        assert_eq!(spool.unsent(STREAM), 32);
+        spool.sync().unwrap();
+    }
+    let mut spool = open(dir.path(), limits);
+    assert_eq!(spool.oldest(STREAM), 1);
+    assert_eq!(spool.sent_through(STREAM), 8);
+    spool.number(STREAM, 100).unwrap();
+    let all = spool.read(STREAM, 1, 100).unwrap();
+    assert_eq!(all.len(), 40);
+    for (index, event) in all.iter().enumerate() {
+        assert_eq!(event.seq, index as i64 + 1);
+        assert_eq!(event.event.body["n"], index as i64);
+    }
+}
+
+#[test]
+fn an_authoritative_event_can_outgrow_the_diagnostic_spool_allowance() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = SpoolOptions {
+        max_bytes: 100,
+        ..options()
+    };
+    let mut spool = open(dir.path(), limits);
+    let expected = event(
+        "item.updated",
+        0,
+        json!({"native_ref":"fixture-item", "payload":{"text":"x".repeat(1_000)}}),
+    );
+    assert!(spool.append(STREAM, &expected).unwrap().is_empty());
+    spool.sync().unwrap();
+    drop(spool);
+    let mut spool = open(dir.path(), limits);
+    assert_eq!(spool.number(STREAM, 1).unwrap()[0].event, expected);
+}
+
+#[test]
+fn a_retained_authoritative_record_over_sixty_four_megabytes_is_not_mistaken_for_damage() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = event(
+        "item.updated",
+        0,
+        json!({"native_ref":"fixture-item", "payload":{"text":"x".repeat(64 * 1024 * 1024 + 1)}}),
+    );
+    let mut spool = open(dir.path(), options());
+    spool.append(STREAM, &expected).unwrap();
+    spool.sync().unwrap();
+    drop(spool);
+    let (mut spool, recovery) = Spool::open(dir.path(), options()).unwrap();
+    assert!(recovery.damaged.is_empty());
+    assert_eq!(spool.number(STREAM, 1).unwrap()[0].event, expected);
+}
+
+#[test]
+fn diagnostic_shedding_keeps_its_capture_gap_without_discarding_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut spool = open(
+        dir.path(),
+        SpoolOptions {
+            max_bytes: 1_000,
+            segment_bytes: 300,
+            ..options()
+        },
+    );
+    for n in 0..40 {
+        spool.append(STREAM, &plain(n)).unwrap();
+    }
+    let discarded = event(
+        "raw.frame",
+        0,
+        json!({"direction":"in", "payload":"x".repeat(2_000)}),
+    );
+    assert_eq!(
+        spool.append(STREAM, &discarded).unwrap(),
+        [Relief::Diagnostics { events: 1 }]
+    );
+    assert_eq!(spool.oldest(STREAM), 1);
+    assert_eq!(spool.unsent(STREAM), 40);
+    spool.number(STREAM, 40).unwrap();
+    spool.acknowledge(STREAM, 40).unwrap();
+    spool
+        .append(
+            STREAM,
+            &event("raw.frame", 1, json!({"direction":"in", "payload":"small"})),
+        )
+        .unwrap();
+    spool.promote_diagnostics(STREAM, 1).unwrap();
+    let next = spool.number(STREAM, 1).unwrap();
+    assert_eq!(next[0].seq, 41);
+    assert_eq!(
+        next[0].event.body["n"], 2,
+        "the discarded diagnostic's capture number is not reused"
+    );
 }

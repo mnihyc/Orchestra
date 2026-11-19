@@ -1,4 +1,5 @@
 /** The system catalogue handles an empty installation and names its file and origin in the reader's language. */
+import userEvent from '@testing-library/user-event';
 import { screen } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 
@@ -8,15 +9,16 @@ import type { RateCatalogue, RateTable } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-const fake = vi.hoisted(() => ({ catalogue: null as RateCatalogue | null }));
+const fake = vi.hoisted(() => ({ catalogue: null as RateCatalogue | null, url: null as string | null, replace: vi.fn<typeof UsageApi.setCatalogue>() }));
 vi.mock('@/api/usage', async (load) => ({
   ...await load<typeof UsageApi>(),
-  nodeSettingsQuery: () => ({ queryKey: ['system-rates-settings'], queryFn: () => Promise.resolve([]) }),
+  nodeSettingsQuery: () => ({ queryKey: ['system-rates-settings'], queryFn: () => Promise.resolve([{ key: 'usage.catalogue_url', value: fake.url, own: null }]) }),
+  setCatalogue: fake.replace,
   ratesQuery: () => ({ queryKey: ['system-rates-table'], queryFn: (): Promise<RateTable> => Promise.resolve({ models: [], catalogue: { on: true, scale: '1', as_of: '' } }) }),
   catalogueQuery: () => ({ queryKey: ['system-rates-catalogue'], queryFn: (): Promise<RateCatalogue | null> => Promise.resolve(fake.catalogue) }),
 }));
 
-beforeEach(() => { fake.catalogue = null; });
+beforeEach(() => { fake.catalogue = null; fake.url = null; fake.replace.mockReset(); });
 
 it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)(
   'shows no loaded catalogue without an error or a repeated upload label (%s, %s)', async (locale, theme) => {
@@ -52,4 +54,43 @@ it('translates a loaded catalogue origin instead of showing the wire enum', asyn
     expect(view.container).not.toHaveTextContent('shipped');
     expect(screen.queryByText(i18n.t('usage.rates.catalogue.none'), { exact: true })).not.toBeInTheDocument();
   } finally { view.unmount(); await setLocale(previous); }
+});
+
+
+it('explains why Fetch now needs a source before making a request', async () => {
+  await setLocale('en');
+  const user = userEvent.setup(); const view = show(<SystemRates />);
+  try {
+    const fetch = await screen.findByRole('button', { name: 'Fetch now' });
+    expect(fetch).toHaveAttribute('aria-disabled', 'true');
+    await user.click(fetch); expect(fake.replace).not.toHaveBeenCalled();
+    expect(fetch).toHaveAccessibleDescription('Set a catalogue URL first');
+    expect(screen.getByRole('link', { name: 'Source' })).toHaveAttribute('href', '/admin/settings?setting=usage.catalogue_url');
+  } finally { view.unmount(); }
+});
+
+it('shows the fetched catalogue and its outcome without a document reload', async () => {
+  await setLocale('en'); fake.url = 'https://rates.example/catalogue.json';
+  const after: RateCatalogue = { format: 1, as_of: '2026-11-01', unit: 'USD', origin: 'fetched', source: fake.url,
+    loaded_at: '2026-11-02T00:00:00Z', loaded_by: null, shipped_as_of: '2026-10-10', families: [] };
+  fake.replace.mockResolvedValue(after);
+  const view = show(<SystemRates />);
+  try {
+    await userEvent.click(await screen.findByRole('button', { name: 'Fetch now' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Fetched 0 families');
+    expect(screen.getByText(i18n.t('usage.rates.catalogueFrom', { date: after.as_of, origin: i18n.t('usageAdmin.origins.fetched') }))).toBeVisible();
+    expect(fake.replace).toHaveBeenCalledExactlyOnceWith({ fetch: true });
+  } finally { view.unmount(); }
+});
+
+it('says Nothing new when a fetch brings the same rates', async () => {
+  await setLocale('en'); fake.url = 'https://rates.example/catalogue.json';
+  fake.catalogue = { format: 1, as_of: '2026-11-01', unit: 'USD', origin: 'fetched', source: fake.url,
+    loaded_at: '2026-11-01T00:00:00Z', loaded_by: null, shipped_as_of: '2026-10-10', families: [] };
+  fake.replace.mockResolvedValue({ ...fake.catalogue, loaded_at: '2026-11-02T00:00:00Z' });
+  const view = show(<SystemRates />);
+  try {
+    await userEvent.click(await screen.findByRole('button', { name: 'Fetch now' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Nothing new');
+  } finally { view.unmount(); }
 });
