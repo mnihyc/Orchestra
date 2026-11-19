@@ -10,7 +10,8 @@
           "type": "integer",
           "description": "How many rows: 50 when left out.",
           "minimum": 1,
-          "maximum": 200
+          "maximum": 9223372036854775807,
+          "default": 50
         },
         "cursor": {
           "type": "string",
@@ -36,7 +37,8 @@
           "type": "integer",
           "description": "How many levels down to list. 1 when left out.",
           "minimum": 1,
-          "maximum": 4
+          "maximum": 4294967295,
+          "default": 1
         },
         "kinds": {
           "type": "array",
@@ -63,9 +65,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -111,9 +114,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most bytes of text to return. 20000 when left out.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "Bytes of text to return; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -199,9 +203,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -251,9 +256,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -425,14 +431,14 @@
               "command"
             ]
           },
-          "maxItems": 100,
           "minItems": 1
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         }
       },
       "required": [
@@ -472,11 +478,10 @@
         },
         "paths": {
           "type": "array",
-          "description": "One thread or chat path, or one to twenty document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
+          "description": "One thread or chat path, or document or document-folder paths or id references from list_shared. create_folder takes exactly one new folder path whose parent exists. At most fifty documents and folders, including all descendants, may be affected; overlapping selections are refused. restore also accepts a deleted item or one earlier document version.",
           "items": {
             "type": "string"
           },
-          "maxItems": 20,
           "minItems": 1
         },
         "to": {
@@ -497,9 +502,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -574,9 +580,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -656,9 +663,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -697,9 +705,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -854,7 +863,7 @@
           "type": "integer",
           "description": "How many rows: 50 when left out.",
           "minimum": 1,
-          "maximum": 200
+          "maximum": 9223372036854775807
         },
         "cursor": {
           "type": "string",
@@ -862,9 +871,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -991,9 +1001,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1028,9 +1039,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1085,7 +1097,7 @@
           "type": "integer",
           "description": "How many rows: 50 when left out.",
           "minimum": 1,
-          "maximum": 200
+          "maximum": 9223372036854775807
         },
         "cursor": {
           "type": "string",
@@ -1093,9 +1105,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1221,13 +1234,14 @@
           "type": "integer",
           "description": "For list: rows per page, 20 by default.",
           "minimum": 1,
-          "maximum": 200
+          "maximum": 9223372036854775807
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1266,9 +1280,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1302,9 +1317,10 @@
         },
         "max_bytes": {
           "type": "integer",
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000.",
-          "minimum": 1000,
-          "maximum": 40000
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "minimum": 1,
+          "maximum": 9223372036854775807,
+          "default": 20000
         },
         "ids": {
           "type": "boolean",
@@ -1356,8 +1372,9 @@
         "max_bytes": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 40000,
-          "description": "The most UTF-8 bytes in the complete answer: 20000 when left out, at most 40000."
+          "maximum": 9223372036854775807,
+          "description": "UTF-8 bytes in the complete answer; omitted uses the advertised default.",
+          "default": 20000
         },
         "images": {
           "type": "array",

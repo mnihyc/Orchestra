@@ -1,0 +1,5 @@
+test -p orch-api-base -p orch-api-core --lib
+test -p orch-provider-contract --test option_layers
+test -p orch-api-core --test defaults_opening --test node_chat_opening_scopes --test thread_move
+test -p orch-envhost --lib -- http_and_watch_first_reads_share_only_a_registration_covered_native_observation_in_either_order
+test -p orch-provider-contract --lib -- a_thousand_capability_resolutions_compile_one_route_declaration_and_check_each_offering
