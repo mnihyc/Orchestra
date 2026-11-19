@@ -8,7 +8,7 @@ describe('choosing a summary handoff', () => {
     for (const value of [null, {}, { kind: '' }, ['model']]) expect(summaryConfigured([{ key: 'auto.summarizer', value }])).toBe(false);
   });
   it('allows a configured built-in or installed producer without assuming a model is the only kind', () => {
-    expect(summaryConfigured([{ key: 'auto.summarizer', value: { kind: 'model', provider_id: 'provider', model_name: 'small' } }])).toBe(true);
+    expect(summaryConfigured([{ key: 'auto.summarizer', value: { kind: 'model', backend: { route: 'summarizer-model.complete', offering: { provider: 'provider', offering: 'small' }, config: null } } }])).toBe(true);
     expect(summaryConfigured([{ key: 'auto.summarizer', value: { kind: 'rules' } }])).toBe(true);
   });
 });

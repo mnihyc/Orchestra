@@ -14,6 +14,7 @@
 
 pub mod background;
 mod paid_commands;
+pub mod program_node;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -251,6 +252,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,6 +428,7 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
@@ -669,7 +672,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -690,6 +693,14 @@ impl Commands for Process {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -726,6 +737,59 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let first_start = matches!(
+            command.kind,
+            CommandKind::TurnStart | CommandKind::TurnStartFenced
+        ) && !lock(&self.commands.issued).contains_key(&command.id);
+        let before = if command.input_facts.is_some() || first_start {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            if let Some(facts) = command.input_facts.as_deref() {
+                orch_engine::commands::retain_input_facts(
+                    &mut tx,
+                    facts,
+                    command.id,
+                    &command.body,
+                )
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            }
+            if first_start
+                && let Some(row) = link_queries::lock_command(&mut tx, command.id)
+                    .await
+                    .map_err(|error| CommandsError::Body(error.to_string()))?
+            {
+                if row.machine_id != command.machine
+                    || row.kind != command.kind.as_str()
+                    || row.serial_key() != command.key.wire().as_deref()
+                    || row.body != command.body
+                {
+                    return Err(CommandsError::AuthorityMismatch);
+                }
+                // The engine persisted this exact start. The first wire transaction records
+                // its native model admission before the scripted machine can observe it.
+                Box::pin(orch_engine::inputs::native_delivery::mark_model_admitted(
+                    &mut tx,
+                    &row,
+                    self.commands.clock.time(),
+                ))
+                .await
+                .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -755,6 +819,7 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
@@ -1193,6 +1258,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1531,6 +1597,18 @@ impl World {
         change(&mut lock(&self.config));
     }
 
+    /// An independent worker shares durable rows and the real command supplier, with its own engine state.
+    pub fn recovery_worker(&self) -> Engine {
+        build_engine(
+            &self.pool,
+            &self.clock,
+            &lock(&self.config),
+            &self.commands,
+            &self.access,
+            &self.live,
+        )
+    }
+
     /// The API restarts: the engine is built anew on the same database, the machine's link is made anew
     /// from the cursors the database holds, and the commands that did not end are handed to it.
     pub async fn restart_api(&self) {
@@ -1542,6 +1620,15 @@ impl World {
     pub async fn restart_api_using(
         &self,
         wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+    ) {
+        self.restart_api_configured(wrap, |_| {}).await;
+    }
+
+    /// Restore the deployment's installed services before the new supervisor can pick up work.
+    pub async fn restart_api_configured(
+        &self,
+        wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+        configure: impl FnOnce(&Engine),
     ) {
         let before = self.hub.session_of(self.machine_id);
         self.engine().stop();
@@ -1578,6 +1665,7 @@ impl World {
         engine.attach_capability_services(Arc::new(
             orch_provider_contract::builtins::BuiltinSources::default(),
         ));
+        configure(&engine);
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);
@@ -1738,6 +1826,7 @@ impl World {
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1835,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt
@@ -2069,6 +2165,20 @@ impl World {
             .fetch_one(self.pool.pool())
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    /// The persisted decision when a summary retry did not reach its expected executor.
+    pub async fn summary_recovery_decision(&self, node: Id) -> Json {
+        self.scalar(
+            "SELECT jsonb_build_object(
+                'summary_reason', (SELECT reason_code FROM node_summary_state WHERE node_id=$1),
+                'recovery', (SELECT jsonb_build_object('state',state,'detail',context->>'detail','skipped',context->>'skipped')
+                    FROM model_call_recovery WHERE node_id=$1 AND purpose='summary' ORDER BY updated_at DESC LIMIT 1),
+                'choice', (SELECT jsonb_build_object('state',state,'reason',reason)
+                    FROM pool_choices WHERE source->>'node'=$1::uuid::text AND source->>'purpose'='summary'
+                    ORDER BY created_at DESC LIMIT 1))",
+            node,
+        ).await
     }
 
     /// Counts rows, with one identifier bound to `$1`.

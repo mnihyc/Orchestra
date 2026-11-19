@@ -138,7 +138,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
         ...(scope.kind==='me'?[]:[{name:t('usage.chip.person'),value:row.user?.display_name??t('usage.key.nobody')}]),
         ...[row.project,row.topic].filter((place)=>scope.kind!=='node' || place.id!==scope.id).map((place)=>({name:t(`usage.chip.${place.kind}` as 'usage.chip.project'),value:placeName(place)})),
       ];
-      const threadName=thread===null ? row.purpose==='summary'?t('usage.records.summary'):row.purpose==='embeddings'?t('usage.records.embeddings'):purposeLabel(row.purpose,t) : scope.kind==='node' && thread.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{id:ordinal}) : placeName(thread);
+      const threadName=thread===null ? row.purpose==='summary'?t('usage.records.summary'):row.purpose==='embeddings'?t('usage.records.embeddings'):purposeLabel(row.purpose,t) : scope.kind==='node' && thread.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{number:ordinal}) : placeName(thread);
       const compact = [
         ...(!shown.has(TOKENS_COLUMN) ? [{name:t('usagePerf.tokensInOut'),value:t('usagePerf.tokenPair', { input: tokens(row), output: tokens(row, true) })}] : []),
         ...(!shown.has(FIRST_COLUMN) ? [{name:t('usagePerf.requestFirstToken'),value:timeText(measured(row.timing?.first_token_ms), format.locale, t)}] : []),

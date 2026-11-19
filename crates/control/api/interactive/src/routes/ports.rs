@@ -450,6 +450,11 @@ async fn opening_view_prepared(
         admission,
         opened_at: Time::new(row.opened_at),
         until: row.until_at.map(Time::new),
+        refused_until: if state == PortOpeningState::Refused {
+            rows::refused_until(conn, row.id).await?.map(Time::new)
+        } else {
+            None
+        },
         state,
         reason,
         program,

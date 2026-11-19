@@ -3,7 +3,7 @@ import type { EverythingDirection, EverythingKind, EverythingSort } from '@/gene
 import type { NavigationArrangement, RecentOrder } from '@/features/navigation/recent';
 import { readViewChoice } from '@/lib/viewChoices';
 
-export const EVERYTHING_KINDS: readonly EverythingKind[] = ['org', 'project', 'topic', 'thread', 'document', 'chat', 'environment', 'provider', 'agent', 'mcp_server', 'machine', 'host', 'mount', 'template', 'skill'];
+export const EVERYTHING_KINDS: readonly EverythingKind[] = ['org', 'project', 'topic', 'thread', 'document', 'chat', 'environment', 'provider', 'agent', 'mcp_server', 'machine', 'host', 'mount', 'template', 'skill', 'pool'];
 const SORTS: readonly EverythingSort[] = ['name', 'kind', 'created', 'created_by', 'owner', 'last_activity', 'opened', 'where', 'activity_by', 'state', 'size', 'my_access', 'tags'];
 export interface EverythingView {
   arrangement: NavigationArrangement;
@@ -75,6 +75,19 @@ export function addressFromView(view: EverythingView): EverythingSearch {
 
 export function initialView(person: string, thing: string, explicit?: Partial<EverythingView>): EverythingView {
   if (explicit !== undefined) return validView(explicit);
-  try { return validView(JSON.parse(readViewChoice(person, 'everything', 'view', '', thing))); }
-  catch { return { ...DEFAULT_VIEW }; }
+  return savedEverythingView(readViewChoice(person, 'everything', 'view', '', thing)).value;
+}
+
+/** A validated fallback never replaces the still-saved value that could not be applied. */
+export function savedEverythingView(raw: string): { value: EverythingView; unavailable: boolean } {
+  if (raw === '') return { value: { ...DEFAULT_VIEW }, unavailable: false };
+  try {
+    const parsed: unknown = JSON.parse(raw), value = validView(parsed);
+    const unavailable = parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+      || Object.entries(parsed).some(([key, saved]) => {
+        const current: unknown = Reflect.get(value, key);
+        return Array.isArray(saved) && Array.isArray(current) ? saved.some((entry: unknown) => !current.includes(entry)) : JSON.stringify(saved) !== JSON.stringify(current);
+      });
+    return { value, unavailable };
+  } catch { return { value: { ...DEFAULT_VIEW }, unavailable: true }; }
 }
