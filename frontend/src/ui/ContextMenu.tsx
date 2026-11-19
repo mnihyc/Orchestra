@@ -7,7 +7,7 @@ import { ContextMenu as Primitive } from 'radix-ui';
 import type { ComponentProps, ReactNode } from 'react';
 import { ChoicePicker } from '@/ui/Choice';
 
-import { menuContentClasses, MenuEntries, type MenuEntry, type MenuParts } from '@/ui/Menu';
+import { focusMenuFacts, menuContentClasses, MenuEntries, type MenuEntry, type MenuParts } from '@/ui/Menu';
 import { useScrolls } from '@/ui/useScrolls';
 import { usePromptCovered } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
@@ -62,7 +62,7 @@ export function ContextMenu({ entries = [], content, label, children, disabled =
         {children}
       </Primitive.Trigger>
       <Primitive.Portal>
-        <Primitive.Content style={covered ? { display: 'none' } : undefined} ref={attach} {...scrollProps} aria-label={label} collisionPadding={8} className={menuContentClasses} onCloseAutoFocus={onCloseAutoFocus}
+        <Primitive.Content style={covered ? { display: 'none' } : undefined} ref={attach} {...scrollProps} aria-label={label} collisionPadding={8} className={menuContentClasses} onCloseAutoFocus={onCloseAutoFocus} onKeyDown={focusMenuFacts}
           onInteractOutside={(event) => { if (isInspectionTarget(event.target)) event.preventDefault(); }}>
           <ChoicePicker>{content ?? <MenuEntries parts={CONTEXT_PARTS} entries={entries} />}</ChoicePicker>
         </Primitive.Content>
