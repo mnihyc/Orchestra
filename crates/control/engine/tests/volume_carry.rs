@@ -150,7 +150,7 @@ async fn a_home_and_private_view_fork_measures_then_carries_whole_volumes_before
             Ok(CommandResult::NodeRuntimeVolumeImport(Empty {}))
         },
     );
-    let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"name":"Carried volumes","template_id":template,"host_id":target.id,"files":{"mode":"none"},"home":true}}})).unwrap();
+    let request = serde_json::from_value(json!({"result":"new","history":{"mode":"none"},"environment":{"new":{"name":"Carried volumes","template_id":template,"host_id":orch_provider_contract::pools::Target::host(target.id),"files":{"mode":"none"},"home":true}}})).unwrap();
     let caller = Caller::session(world.ada);
     let draft = world
         .engine()

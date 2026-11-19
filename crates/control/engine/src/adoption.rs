@@ -361,6 +361,8 @@ impl Engine {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: adoption.topic,
                     provider: adoption.provider,
@@ -680,6 +682,8 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: adoption.topic,
                     provider: adoption.provider,

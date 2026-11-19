@@ -16,10 +16,13 @@ import { Where } from '@/features/start/Where';
 import type { Approval, BindingEnvironment, MissingAccess, UserRef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { serverClock } from '@/lib/serverClock';
 import { actionName } from '@/ui/actions';
 import { ADA, BEA, TOPIC } from '../unit/general-access-fixtures';
 import { environment, options } from '../unit/start-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ request: vi.fn<typeof AccessApi.requestAccess>(), join: vi.fn<typeof AccessApi.requestJoin>(), decide: vi.fn<typeof ApprovalApi.decideApproval>() }));
 vi.mock('@/api/access', async (original) => ({ ...await original<typeof AccessApi>(), requestAccess: calls.request, requestJoin: calls.join }));
@@ -47,15 +50,35 @@ const missing: MissingAccess = { object: { kind: 'thread', id: 'thread', name: '
 const appearance = useAppearance.getState();
 
 beforeEach(() => {
+  serverClock.clear();
   sessionStorage.clear();
   vi.clearAllMocks();
   calls.request.mockResolvedValue({ batch_id: 'batch', approvals: [approval] });
   calls.join.mockResolvedValue({ batch_id: 'batch', approvals: [approval] });
   calls.decide.mockResolvedValue({ ...approval, state: 'approved' });
 });
-afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { cleanup();serverClock.clear();vi.restoreAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`requests a custom five minutes without choosing a calendar date in ${locale}`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    show(<AccessRequest missing={[missing]} objectId="thread" fixed />);
+    await user.click(screen.getByRole('combobox', { name: i18n.t('access.request.duration') }));
+    await user.click(screen.getByRole('option', { name: i18n.t('access.request.customLength') }));
+    const field = screen.getByRole('spinbutton', { name: i18n.t('access.request.length') });
+    fireEvent.change(field, { target: { value: '0' } });
+    expect(screen.getByRole('button', { name: i18n.t('access.request.send') })).toBeDisabled();
+    fireEvent.change(field, { target: { value: '5' } });
+    const before = Date.now();
+    await user.click(screen.getByRole('button', { name: i18n.t('access.request.send') }));
+    await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
+    const end = Date.parse(calls.request.mock.calls[0]?.[0].expires_at ?? '');
+    expect(end % 60_000).toBe(0);
+    expect(end - before).toBeGreaterThan(4 * 60_000);
+    expect(end - Date.now()).toBeLessThanOrEqual(5 * 60_000);
+  });
+
   it(`sends a week from the request time and shows the requested end in ${locale}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale });
     const user = userEvent.setup();
@@ -67,7 +90,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
     const end = calls.request.mock.calls[0]?.[0].expires_at;
     expect(end).toBeDefined();
-    expect(Date.parse(end!) - before).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(end!) - before).toBeGreaterThan(7 * 24 * 60 * 60 * 1000 - 60_000);
     expect(Date.parse(end!) - Date.now()).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000);
     expect(await screen.findByText(i18n.t('access.request.requestedUntil'))).toBeVisible();
   });
@@ -113,7 +136,7 @@ it.each([['1 day', 1], ['30 days', 30]] as const)('requests %s from the time of 
   await user.click(screen.getByRole('button', { name: i18n.t('access.request.send') }));
   await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
   const end = Date.parse(calls.request.mock.calls[0]?.[0].expires_at ?? '');
-  expect(end).toBeGreaterThanOrEqual(before + days * 24 * 60 * 60 * 1000);
+  expect(end).toBeGreaterThan(before + days * 24 * 60 * 60 * 1000 - 60_000);
   expect(end).toBeLessThanOrEqual(Date.now() + days * 24 * 60 * 60 * 1000);
 });
 
@@ -125,7 +148,7 @@ it('keeps an end on retry and starts a fresh duration for a new request', () => 
   const first = result.current.end(0);
   clock.mockReturnValue(now + 60_000);
   expect(result.current.end(0)).toBe(first);
-  expect(result.current.end(1)).toBe(new Date(now + 60_000 + 7 * 24 * 60 * 60 * 1000).toISOString());
+  expect(result.current.end(1)).toBe(new Date(Math.floor((now + 60_000 + 7 * 24 * 60 * 60 * 1000) / 60_000) * 60_000).toISOString());
   clock.mockRestore();
 });
 
@@ -197,4 +220,32 @@ it('offers the same duration when requesting Use from the new-thread picker', as
   await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
   expect(calls.request.mock.calls[0]?.[0].items[0]).toEqual({ object: { kind: 'environment', id: 'blocked' }, permissions: ['environment.use'] });
   expect(calls.request.mock.calls[0]?.[0].expires_at).toBeDefined();
+});
+
+
+it('keeps the chosen five server minutes and its retry instant after a measured device clock replacement',()=>{
+  const device=Date.parse('2026-11-15T10:00:00Z'),minute=60_000;
+  const clock=vi.spyOn(Date,'now').mockReturnValue(device);
+  serverClock.observe(new Date(device+2*minute).toISOString(),device,device);
+  const {result}=renderHook(()=>useRequestEnd());
+  act(()=>{result.current.setDuration('length');result.current.setAmount('5');});
+  const end=result.current.end();expect(Date.parse(end??'')).toBe(device+7*minute);
+  clock.mockReturnValue(device+8*minute);
+  act(()=>serverClock.observe(new Date(device+3*minute).toISOString(),device+8*minute,device+8*minute));
+  expect(result.current.end()).toBe(end);
+  act(()=>serverClock.observe(new Date(device+8*minute).toISOString(),device+8*minute,device+8*minute));
+  expect(Date.parse(result.current.end()??'')).toBe(device+13*minute);
+});
+
+it('disables a chosen calendar minute as soon as the measured server clock passes it without a device tick',()=>{
+  const device=Date.parse('2026-11-15T10:00:00Z'),minute=60_000;
+  vi.spyOn(Date,'now').mockReturnValue(device);
+  serverClock.observe(new Date(device).toISOString(),device,device);
+  const local=new Date(device+minute),pad=(value:number)=>String(value).padStart(2,'0');
+  const date=`${local.getFullYear()}-${pad(local.getMonth()+1)}-${pad(local.getDate())}T${pad(local.getHours())}:${pad(local.getMinutes())}`;
+  const {result}=renderHook(()=>useRequestEnd());
+  act(()=>{result.current.setDuration('custom');result.current.setDate(date);});
+  expect(result.current.valid).toBe(true);
+  act(()=>serverClock.observe(new Date(device+2*minute).toISOString(),device,device));
+  expect(result.current.valid).toBe(false);
 });

@@ -220,14 +220,34 @@ impl ParentLink {
             };
             let parameters: orch_provider_contract::models::ModelParameters =
                 serde_json::from_value(model.parameters)?;
-            let use_request = model::ModelUse {
-                place: record.call.thread,
-                provider: record.provider,
-                offering: &record.model,
-                groups: &model.groups,
-                effort: parameters.default_effort.as_deref(),
-            };
             for caller in origins.callers() {
+                let pool = match record.recovery.as_ref() {
+                    Some(recovery) => {
+                        recovery
+                            .selection(
+                                conn,
+                                caller,
+                                record.call.thread,
+                                record.provider,
+                                &record.model,
+                                &record.capability,
+                            )
+                            .await?
+                    }
+                    None => None,
+                };
+                let use_request = model::ModelUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                        &record.capability,
+                    ),
+                    pool: pool.as_ref(),
+                    in_thread: true,
+                    place: record.call.thread,
+                    provider: record.provider,
+                    offering: &record.model,
+                    groups: &model.groups,
+                    effort: parameters.default_effort.as_deref(),
+                };
                 if model::offering_use(conn, caller, &use_request, clock)
                     .await?
                     .is_none()
@@ -747,8 +767,10 @@ impl Engine {
         let mut tx = self.db().begin().await?;
         source::check_call(&mut tx, call).await?;
         let item:Option<(Id,Json)>=sqlx::query_as("SELECT id,payload FROM items WHERE thread_id=$1 AND turn_id=$2 AND native_ref=$3 AND kind='tool_call' AND status='in_progress' AND payload#>>'{tool,kind}'='orch' AND payload#>>'{tool,tool}'=$4")
-            .bind(call.thread).bind(call.turn).bind(&call.call_ref).bind(call.tool.name()).fetch_optional(&mut *tx).await.map_err(orch_db::DbError::from)?;
-        if let Some((id, mut payload)) = item {
+            .bind(call.thread).bind(call.turn).bind(orch_types::storable::encode_key(&call.call_ref)).bind(call.tool.name()).fetch_optional(&mut *tx).await.map_err(orch_db::DbError::from)?;
+        if let Some((id, payload)) = item {
+            let mut payload =
+                orch_types::storable::decode_exact(payload).map_err(orch_db::DbError::from)?;
             payload["tool"]["result"] = json!({"state":"running","helper":record.helper_info()});
             let now = self.inner.clock.now();
             let mut unit = crate::unit::Unit::new(&mut tx, now);

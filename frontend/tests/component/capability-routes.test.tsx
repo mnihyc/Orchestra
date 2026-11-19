@@ -7,7 +7,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 const help = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => help }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => help }));
 // The provider card owns its own current read. This suite keeps the ordinary chip as supplied text.
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject }: { subject: { provider: { name: string } } }) => <span>{subject.provider.name}</span> }));
 
@@ -20,7 +20,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
     show(<CapabilityRoutes value={[
       { ...row, capability: 'generation', program_default: true, route_view: { kind: 'native-program' } },
       { ...row, capability: 'web_search', route_view: { kind: 'service' }, provider: { id: 'fixture-account', title: 'Team search' }, prices: { search: { amount: '0.00075', currency: 'USD', unit: 'search' } }, route: { backend: { config: { secret: 'private-backend' } } } },
-      { ...row, capability: 'page_fetch', route_view: null, reason: 'disabled', fallbacks:[{rule_id:'pages',scope:'org',when:'unavailable',provider:null,offering:null}] },
+      { ...row, capability: 'page_fetch', route_view: null, reason: 'disabled', fallbacks:[{rule_id:'pages',scope:'org',when:'unavailable',pool_kind:null,provider:null,offering:null}] },
       { ...row, capability: 'image_generation', route_view: null, reason: 'current_authority_refused' },
       { ...row, capability: 'future_capability', title: 'Future capability', route_view: { kind: 'future-route' } },
       { ...row, capability: 'embeddings', route_view: { kind: 'native-model' }, provider: { id: 'fixture-router', title: 'Router account' } },

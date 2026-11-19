@@ -274,6 +274,10 @@ impl AgentAdapter for CallingFake {
         self.inner.start_turn(turn).await
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        self.inner.interrupt_handle()
+    }
+
     async fn interrupt(
         &mut self,
         thread: ThreadId,

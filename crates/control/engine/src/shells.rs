@@ -584,6 +584,11 @@ impl Shells {
         if !setting(conn, place, keys::TERMINAL_ENABLED, true).await? {
             return Ok(Some(TerminalNotAllowedReason::DisabledByPolicy));
         }
+        if orch_authz::file_reach::machine_bound(conn, site.id).await?
+            != orch_access_contract::permissions::FileReach::Machine
+        {
+            return Ok(Some(TerminalNotAllowedReason::MachinePolicy));
+        }
         if !site.terminal {
             return Ok(Some(TerminalNotAllowedReason::EnvironmentSwitchOff));
         }

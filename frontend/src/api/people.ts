@@ -1,6 +1,7 @@
 /** Current readers, deliberate read positions, document copies and imports use the generated authenticated API. */
 import { queryOptions } from '@tanstack/react-query';
 import { api, done, ok } from '@/api/client';
+import { UploadTask } from '@/lib/uploads';
 import type { ChatPart, UploadedBlob, UserRef, NodeDocumentCopyBody as CopyBody, DocumentDiscussionLevel as DiscussionLevel, DocumentImportRequest as ImportBody } from '@/generated/api-types';
 import type { GuardedOpsBody } from '@/features/people/pending';
 
@@ -9,15 +10,15 @@ export interface DocumentMentionPage { items: DocumentMentionCandidate[]; next_c
 interface MentionReply { data?: DocumentMentionPage; error?: unknown; response: Response }
 type MentionRead = (path: '/documents/{id}/mentions', options: { params: { path: { id: string }; query: { q: string; cursor?: string } }; signal?: AbortSignal }) => Promise<MentionReply>;
 export const documentReadersQuery = (id: string, q = '', cursor: string | null = null) => queryOptions({
-  queryKey: ['document-readers', id, q, cursor], retry: false, staleTime: 0, gcTime: 0,
+  queryKey: ['document-readers', id, q, cursor], retry: false, gcTime: 0,
   queryFn: ({ signal }): Promise<DocumentMentionPage> => ok((api.GET as unknown as MentionRead)('/documents/{id}/mentions', { params: { path: { id }, query: { q, ...(cursor === null ? {} : { cursor }) } }, signal })),
 });
 export const mentionChoicesQuery = (id: string, q = '') => queryOptions({
-  queryKey: ['chat-mentions', id, q], retry: false, staleTime: 0,
+  queryKey: ['chat-mentions', id, q], retry: false,
   queryFn: ({ signal }) => ok(api.GET('/chats/{id}/mentions', { params: { path: { id }, query: { q } }, signal })),
 });
 export const mentionAudienceQuery = (id: string, parts: ChatPart[], replyTo: string | null = null) => {
-  return queryOptions({ queryKey: ['chat-mention-audience', id, parts, replyTo], retry: false, staleTime: 0,
+  return queryOptions({ queryKey: ['chat-mention-audience', id, parts, replyTo], retry: false,
     queryFn: () => ok(api.POST('/chats/{id}/mentions/preview', { params: { path: { id } }, body: { parts, ...(replyTo === null ? {} : { reply_to: replyTo }) } })),
   });
 };
@@ -30,13 +31,5 @@ export const importDocuments = (id: string, body: ImportBody) => ok(api.POST('/n
 
 /** The ordinary upload-session protocol owns chunk size, status and progress. */
 export async function uploadImport(file: File, progress: (received: number) => void): Promise<UploadedBlob> {
-  const session = await ok(api.POST('/uploads/sessions', { body: { name: file.name, size: file.size, media_type: file.type || 'application/octet-stream' } }));
-  let offset = 0;
-  while (offset < file.size) {
-    const piece = file.slice(offset, offset + session.chunk_bytes);
-    const reply = await ok(api.PUT('/uploads/sessions/{upload_id}', { params: { path: { upload_id: session.upload_id }, query: { offset } }, body: '', bodySerializer: () => piece, headers: { 'Content-Type': 'application/octet-stream' } }));
-    if (reply.received <= offset) throw new Error('Upload did not advance');
-    offset = reply.received; progress(offset);
-  }
-  return ok(api.POST('/uploads/sessions/{upload_id}/complete', { params: { path: { upload_id: session.upload_id } } }));
+  return new UploadTask(file).run(new AbortController().signal, progress);
 }
