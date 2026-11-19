@@ -408,6 +408,9 @@ pub struct PortOpening {
     pub opened_at: Time,
     /// Its lapse, or null for an ordinary place or host opening.
     pub until: Option<Time>,
+    /// The stored end of refusal coalescing; no new decision is created before it for the same effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_until: Option<Time>,
     /// Its admission and current availability state.
     pub state: PortOpeningState,
     /// The safe state explanation.

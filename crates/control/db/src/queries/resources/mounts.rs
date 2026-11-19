@@ -448,7 +448,9 @@ pub async fn applied(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, DbErr
     )
     .bind(runtime.to_string())
     .fetch_optional(conn)
-    .await?)
+    .await?
+    .map(orch_types::storable::decode_exact)
+    .transpose()?)
 }
 
 /// The latest approved request may still be retained by the node even if it did not apply.
@@ -459,7 +461,9 @@ pub async fn requested(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, DbE
     )
     .bind(runtime.to_string())
     .fetch_optional(conn)
-    .await?)
+    .await?
+    .map(orch_types::storable::decode_exact)
+    .transpose()?)
 }
 
 /// Private layers created live remain owned environment data after detachment and unit retirement.
@@ -499,7 +503,9 @@ pub async fn last_attach(
     .bind(environment.to_string())
     .bind(machine)
     .fetch_optional(conn)
-    .await?)
+    .await?
+    .map(orch_types::storable::decode_exact)
+    .transpose()?)
 }
 
 /// Mount setting rows and their last writers along a home chain.
