@@ -1,0 +1,6 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --test node_chat_opening_scopes --test summaries --test resource_summaries
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --test goals --test resource_summaries

@@ -50,6 +50,12 @@ export class NetworkError extends Error {
   }
 }
 
+interface FailureDetails { readonly limitMs: number; readonly responseStarted: boolean }
+const details = new WeakMap<NetworkError, FailureDetails>();
+
+/** Facts of the admitted request for its existing failure line, without changing the error or its retry policy. */
+export function networkFailureDetails(error: NetworkError): FailureDetails | null { return details.get(error) ?? null; }
+
 /** The statuses whose answer never has a body. */
 const BODILESS = new Set([101, 103, 204, 205, 304]);
 
@@ -67,6 +73,12 @@ export async function sendUntilSilent(
   limitMs: number = SILENCE_LIMIT_MS,
 ): Promise<Response> {
   const quiet = new AbortController();
+  let responseStarted = false;
+  const failed = (cause: unknown): NetworkError => {
+    const error = asNetworkError(cause, request.signal);
+    if (!details.has(error)) details.set(error, { limitMs, responseStarted });
+    return error;
+  };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const moved = () => {
     clearTimeout(timer);
@@ -90,8 +102,9 @@ export async function sendUntilSilent(
     response = await Promise.race([send(new Request(request, { signal })), ended]);
   } catch (cause) {
     settled();
-    throw asNetworkError(cause, request.signal);
+    throw failed(cause);
   }
+  responseStarted = true;
   // An answer that has no body by its status is complete as it is. Some browsers hand out an empty
   // stream for one all the same, and no answer of such a status can be made round a stream.
   if (response.body === null || BODILESS.has(response.status)) {
@@ -114,7 +127,7 @@ export async function sendUntilSilent(
         const chunk = await reader.read();
         if (signal.aborted) {
           finished();
-          controller.error(asNetworkError(signal.reason, request.signal));
+          controller.error(failed(signal.reason));
         } else if (chunk.done) {
           finished();
           controller.close();
@@ -124,7 +137,7 @@ export async function sendUntilSilent(
         }
       } catch (cause) {
         finished();
-        controller.error(asNetworkError(cause, request.signal));
+        controller.error(failed(cause));
       }
     },
     cancel(reason) {

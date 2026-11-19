@@ -365,6 +365,8 @@ impl Effect for ReviewPlan {
                 token: actor.caller().grant().and_then(|grant| grant.token()),
                 creator_origin: None,
                 scheduled_input: None,
+                workspace_edits: Vec::new(),
+                prepared_source: None,
                 action: Action::Restore {
                     body: FsRestore {
                         work: None,
@@ -752,14 +754,16 @@ impl Initial for ReviewPlan {
                 writer_ids(&mut conn, anchor.environment(), &anchor.command().directory).await?;
             drop(conn);
             if anchor.command().touched.is_none() {
-                later(
-                    &mut measured.paths,
-                    &private["current"],
-                    input
-                        .target
-                        .as_ref()
-                        .and_then(|turn| turn.files_end_manifest.as_ref()),
-                );
+                let end = match input
+                    .target
+                    .as_ref()
+                    .and_then(|turn| turn.end_manifest_blob.as_deref())
+                    .and_then(|raw| Hash::from_slice(raw).ok())
+                {
+                    Some(hash) => ctx.app.engine.read_end_namespace(hash).await.ok(),
+                    None => None,
+                };
+                later(&mut measured.paths, &private["current"], end.as_ref());
             }
             let mut candidates = Vec::new();
             for id in ids {

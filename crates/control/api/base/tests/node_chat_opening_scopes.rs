@@ -427,9 +427,18 @@ async fn summary_provider_scope_declines_only_its_metadata_and_never_the_admitte
         .unwrap();
     sqlx::query("UPDATE resource_summaries SET text=$2,producer=$3,source_snapshot='{}',source_refs=$4,completed_request_id=$5,completed_at=$6,completed_dirty_revision=dirty_revision WHERE id=$1")
         .bind(summary.id).bind("The admitted topic paragraph stays readable.")
-        .bind(json!({"provider_id":provider,"model_name":"private-summary-model"}))
+        .bind(json!({"provider_id":provider,"model_name":"private-summary-model","model_display":"Recorded topic model"}))
         .bind(json!([target])).bind(new_id()).bind(room.world.now())
         .execute(&mut *conn).await.unwrap();
+    // A later attempt used the same supplier. Its recorded name has the same opening scope.
+    let previous_request = new_id();
+    sqlx::query("INSERT INTO resource_summary_requests(id,call_id,summary_id,origin,paying_user,arguments,accepted_source,prepared,attempt_facts,accepted_revision,options_revision,dirty_revision,state,problem,created_at,due_at,finished_at)
+        VALUES($1,$2,$3,'automatic',$4,'{}','{}',$5,$6,1,0,0,'discarded',$7,$8,$8,$8)")
+        .bind(previous_request).bind(new_id()).bind(summary.id).bind(room.ada.id())
+        .bind(json!({"refs":[target],"source":{}}))
+        .bind(json!({"provider_id":provider,"producer":{"kind":"model","provider":null,"title":"Earlier attempt label","offering":"attempt-model"},"at":room.world.now()}))
+        .bind(json!({"code":"summary_changed","message":"Its source changed.","reason":"source_changed"}))
+        .bind(room.world.now()).execute(&mut *conn).await.unwrap();
     drop(conn);
     let limited_rules = vec![
         rule("topic", room.topic),
@@ -466,15 +475,24 @@ async fn summary_provider_scope_declines_only_its_metadata_and_never_the_admitte
             assert_eq!(topic["producer"]["provider"]["id"], json!(provider));
             assert_eq!(topic["producer"]["provider"]["title"], PROVIDER);
             assert_eq!(topic["producer"]["offering"], "private-summary-model");
+            assert_eq!(topic["producer"]["title"], "Recorded topic model");
+            assert_eq!(
+                topic["last_attempt"]["producer"]["offering"],
+                "attempt-model"
+            );
         } else {
             assert!(topic["producer"]["provider"].is_null());
             assert!(topic["producer"]["offering"].is_null());
             assert!(!opened.to_string().contains(PROVIDER));
             assert!(!opened.to_string().contains("private-summary-model"));
+            assert!(!opened.to_string().contains("Recorded topic model"));
+            assert_eq!(topic["last_attempt"]["outcome"], "discarded");
+            assert!(!opened.to_string().contains("attempt-model"));
+            assert!(!opened.to_string().contains("Earlier attempt label"));
         }
     }
-    let work: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_summary_requests)+(SELECT count(*) FROM summary_calls)+(SELECT count(*) FROM usage_events WHERE purpose='summary')")
-        .fetch_one(&mut *room.world.conn().await).await.unwrap();
+    let work: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM resource_summary_requests WHERE id<>$1)+(SELECT count(*) FROM summary_calls)+(SELECT count(*) FROM usage_events WHERE purpose='summary')")
+        .bind(previous_request).fetch_one(&mut *room.world.conn().await).await.unwrap();
     assert_eq!(work, 0);
 }
 
