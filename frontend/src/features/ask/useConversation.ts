@@ -8,9 +8,11 @@ import { queryClient } from '@/api/query';
 import type { AskGetReply } from '@/generated/api-types';
 import { acceptsAskEvent, applyAskEvent } from './events';
 import { NetworkError } from '@/lib/requests';
+import type { TranslationKey } from '@/i18n';
+import { hasErrorSentence } from '@/i18n/errors';
 
 export function useConversation(id: string | null, visible: boolean, inspect = false) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [presentationId, setPresentationId] = useState(id);
   const [streamError, setStreamError] = useState<unknown>(null);
   const [notice, setNotice] = useState('');
@@ -49,8 +51,9 @@ export function useConversation(id: string | null, visible: boolean, inspect = f
           if (current === undefined || event.conversation_id !== id || !Number.isSafeInteger(event.seq) || event.seq <= (cursor ?? current.conversation.seq)) return;
           cursor = event.seq;
           attempts = 0;
-          if (event.data.kind === 'error' && event.data.code === 'ask_context_no_room') setNotice(t('ask.contextNoRoom'));
-          else if (event.data.kind === 'error' && event.data.code === 'ask_context_too_long' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.contextTooLong', { model: event.data.model }));
+          if (event.data.kind === 'error' && event.data.code === 'ask_context_too_long' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.contextTooLong', { model: event.data.model }));
+          else if (event.data.kind === 'error' && event.data.code === 'ask_turn_too_long' && 'model' in event.data && typeof event.data.model === 'string') setNotice(t('ask.turnTooLong', { model: event.data.model }));
+          else if (event.data.kind === 'error' && event.data.code.startsWith('ask.') && hasErrorSentence(`errors.${event.data.code}`, i18n.language)) setNotice(t(`errors.${event.data.code}` as TranslationKey));
           else if (event.data.kind === 'notice' || event.data.kind === 'error') setNotice(event.data.message);
           if (!acceptsAskEvent(current, event)) return;
           if (event.data.kind === 'deleted') { stopped = true; setDeleted(true); queryClient.removeQueries({ queryKey: askKey(id, inspect), exact: true }); return; }
@@ -78,7 +81,7 @@ export function useConversation(id: string | null, visible: boolean, inspect = f
     };
     void resume();
     return () => { abort.abort(); if (timer !== undefined) clearTimeout(timer); };
-  }, [id, visible, ready, ended, inspect, retry, refetch, t]);
+  }, [id, visible, ready, ended, inspect, retry, refetch, t, i18n.language]);
   return { ...read, data: ended || refused ? undefined : read.data,
     streamError: sameConversation && read.error === null ? streamError : null,
     notice: sameConversation && !refused ? notice : '', deleted: ended, tools: sameConversation && !ended && !refused ? tools : {},
