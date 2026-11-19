@@ -394,9 +394,11 @@ fn apply_with_checkpoints(
             files,
             &observed.indexed,
             &orch_link_contract::source::FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: request.environment_id,
                 snapshot_id: request.undo_snapshot_id,
                 directory: plan.directory.clone(),
+                wait_for_indexing: true,
                 kind: orch_link_contract::source::RecordKind::Restore,
                 record_days: plan.record_policy.record_days,
                 max_bytes: plan.record_policy.max_bytes,
@@ -957,6 +959,7 @@ pub fn plan(
         files,
         &crate::index::Index::new(orch_link_contract::commands::IndexMode::Live, 0),
         &orch_link_contract::source::FsRecordRead {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: request.environment_id,
             snapshot_id: request.snapshot_id,
             path: None,
@@ -1237,7 +1240,10 @@ mod tests {
         );
         let states =
             FileStates::new(ObjectStore::open(&dir.path().join("kept"), &workspace).unwrap());
-        let index = Index::new(IndexMode::Full, Limits::default().index_max_entries);
+        let index = Index::new(
+            IndexMode::Full,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+        );
         index.scan(files.root(), files.ignore().unwrap()).unwrap();
         states.refresh(&files, &index, None, true).unwrap();
         let environment = new_id();
@@ -1246,9 +1252,11 @@ mod tests {
             .record(
                 &files,
                 &FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment,
                     snapshot_id: snapshot,
                     directory: String::new(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: crate::file_states::DEFAULT_RECORD_DAYS,
                     max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -1262,6 +1270,7 @@ mod tests {
             files,
             states,
             FsRestorePlan {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 touched: None,
                 environment_id: environment,
                 snapshot_id: snapshot,
@@ -1291,9 +1300,11 @@ mod tests {
             .record(
                 &files,
                 &FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: original.environment_id,
                     snapshot_id: snapshot,
                     directory: String::new(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: 7,
                     max_bytes: 1,
@@ -1560,6 +1571,7 @@ mod tests {
         result: &FsRestorePlanResult,
     ) -> orch_link_contract::source::FsRestore {
         orch_link_contract::source::FsRestore {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             recovery_only: None,
             environment_id: request.environment_id,
@@ -1610,7 +1622,10 @@ mod tests {
                 }
                 (CODE_FILES * CODE_BYTES + b"before".len()) as i64
             };
-            let index = Index::new(IndexMode::Full, files.limits().index_max_entries);
+            let index = Index::new(
+                IndexMode::Full,
+                orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+            );
             index.scan(files.root(), files.ignore().unwrap()).unwrap();
             let store_before = stored_bytes(states.store().root());
             let baseline_start = std::time::Instant::now();
@@ -1622,9 +1637,11 @@ mod tests {
                 .record(
                     &files,
                     &FsRecord {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         environment_id: request.environment_id,
                         snapshot_id: request.snapshot_id,
                         directory: String::new(),
+                        wait_for_indexing: true,
                         kind: RecordKind::Turn,
                         record_days: crate::file_states::DEFAULT_RECORD_DAYS,
                         max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -1847,9 +1864,11 @@ mod tests {
     fn restore_undo_metadata_never_falls_back_to_recording_an_unrelated_current_baseline() {
         let (_dir, files, states, request) = fixture();
         let undo = orch_link_contract::source::FsRecord {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: request.environment_id,
             snapshot_id: new_id(),
             directory: request.directory,
+            wait_for_indexing: true,
             kind: orch_link_contract::source::RecordKind::Restore,
             record_days: crate::file_states::DEFAULT_RECORD_DAYS,
             max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
@@ -2083,7 +2102,10 @@ mod tests {
         symlink("../outside", workspace.join("raw-link")).unwrap();
         std::fs::write(workspace.join(".gitignore"), "private\n").unwrap();
         std::fs::write(workspace.join("private"), "ignored before").unwrap();
-        let index = Index::new(IndexMode::Full, files.limits().index_max_entries);
+        let index = Index::new(
+            IndexMode::Full,
+            orch_link_contract::commands::WorkspaceLimits::default().index_entries,
+        );
         index.scan(files.root(), files.ignore().unwrap()).unwrap();
         states.refresh(&files, &index, None, true).unwrap();
         request.snapshot_id = new_id();
@@ -2091,9 +2113,11 @@ mod tests {
             .record(
                 &files,
                 &FsRecord {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: request.environment_id,
                     snapshot_id: request.snapshot_id,
                     directory: String::new(),
+                    wait_for_indexing: true,
                     kind: RecordKind::Turn,
                     record_days: crate::file_states::DEFAULT_RECORD_DAYS,
                     max_bytes: crate::file_states::DEFAULT_RECORD_MAX_BYTES,
