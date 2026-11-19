@@ -243,6 +243,8 @@ pub struct Ctx {
     retained_source: Arc<crate::key_operations::resolver::RetainedSource>,
     /// Final transport lifetime and immutable native-source checks, independent of replanning.
     pub publication: Arc<crate::key_operations::publication::State>,
+    /// Entry into the HTTP request, before authentication or database reads.
+    pub arrived: std::time::Instant,
     /// The request's identifier, as in its answer.
     pub request_id: String,
     /// The moment the handler was prepared, after JSON decoding; action checks
@@ -258,6 +260,19 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Ordinary browser openings have a read-only projection and independent visit bookkeeping.
+    pub fn ordinary_browser_opening(&self) -> bool {
+        self.route.name == "ThreadOpeningGet"
+            && self.surface == Some(HttpSurface::Browser)
+            && self.ask_read.is_none()
+            && !self.inspect_deleted
+            && self.inspection.is_none()
+            && self.operation_ceiling().is_none()
+            && self
+                .user()
+                .is_ok_and(|user| user.is_session() && !user.as_admin)
+    }
+
     /// Retain this authenticated entry's restrictions for a native preparation source.
     /// This is not a complete operation capture or a business-effect checkpoint.
     pub async fn capture_http_preparation(
@@ -307,6 +322,7 @@ impl Ctx {
             operation_initial: Arc::default(),
             retained_source: Arc::default(),
             publication: Arc::default(),
+            arrived: std::time::Instant::now(),
             request_id: format!("tool:{id}"),
             now,
             headers: HeaderMap::new(),
@@ -1111,12 +1127,15 @@ pub(crate) fn decode_body<B: DeserializeOwned>(route: &Route, bytes: &[u8]) -> A
 
 /// Whether a request whose commit was refused because who may do what changed meanwhile is
 /// served once more, deciding again under the new authority: an ordinary write or a change that only
-/// grants, which has done nothing outside its transaction that a second serving would repeat. Any other
-/// change of authority, a personal credential and a raw body are answered as they failed
-/// (`conflict.stale_revision`).
+/// grants, or a permission-page writer whose effects all belong to its refused transaction.
+/// These do nothing outside that transaction that a second serving would repeat. Other
+/// changes of authority, personal credentials and raw bodies are answered as they failed
+/// (`conflict.concurrent_change`).
 fn retried_after_refusal(route: &Route) -> bool {
     route.method.as_str() != "GET"
-        && (!changes_authority(route) || only_grants(route))
+        && (!changes_authority(route)
+            || only_grants(route)
+            || matches!(route.name, "PermissionPageUpdate" | "NodeDefaultsUpdate"))
         && matches!(
             route.access,
             Access::User | Access::Session | Access::Permission(_) | Access::Rule(_)
@@ -1131,6 +1150,7 @@ async fn open(
     typed_operation: bool,
     deferred_creation: bool,
 ) -> ApiResult<Ctx> {
+    let arrived = std::time::Instant::now();
     let ask_read = parts
         .extensions
         .get::<Arc<crate::ask::tools::ReadRequest>>()
@@ -1265,6 +1285,7 @@ async fn open(
         operation_initial: Arc::default(),
         retained_source: Arc::default(),
         publication: Arc::default(),
+        arrived,
         request_id: request_id.to_owned(),
         now,
         headers: parts.headers.clone(),

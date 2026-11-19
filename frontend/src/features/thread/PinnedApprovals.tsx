@@ -9,7 +9,6 @@ import { approvalAtItem } from '@/features/approvals/current';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { useTimelinePreferences } from '@/features/timeline/preferences';
-import { recentTurns } from '@/features/timeline/rows';
 import type { Item } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { useSocketStatus } from '@/realtime/live';
@@ -32,7 +31,7 @@ export function PinnedApprovals({ threadId }: { threadId: string }) {
   const pending = items.filter((item, index): item is ApprovalItem => (approvalAtItem(item, observed[index]?.data)?.state ?? 'pending') === 'pending');
   if (readOnly || view.closed !== null || view.thread === null || view.thread.archived || pending.length === 0) return null;
   const context: TimelineContext = { threadId, threadName: view.thread.name, detail: preferences.detail,
-    layout: preferences.layout, setLayout: preferences.setLayout, recent: recentTurns(view.turns), meId,
+    layout: preferences.layout, setLayout: preferences.setLayout, meId,
     canInteract: holds(view.thread.access, 'thread.interact'), canManage: holds(view.thread.access, 'thread.manage'),
     live: socket.phase === 'ready' && view.error === null, readOnly: false, lit: null, selection: NOT_PICKING };
   return <TimelineContextValue.Provider value={context}><section aria-label={t('thread.pinnedApprovals')} className="flex min-w-0 flex-col gap-2" data-pinned-approvals>
