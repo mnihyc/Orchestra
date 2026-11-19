@@ -582,6 +582,7 @@ impl native::Selected for Preview {
     type Query = DuplicateBody;
     type Value = Operands;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Role> =
         &declarations::PROVIDER_MOVE_PREVIEW;
     const WATCH_ORDINARY: bool = true;

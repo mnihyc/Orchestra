@@ -680,3 +680,92 @@ async fn another_installation_or_older_pair_cannot_advance_the_imported_success(
     );
     assert!(backups::publish_pair(records.path(), &dump, &manifest, &system).is_err());
 }
+
+#[path = "installation_records/server_update.rs"]
+mod server_update;
+
+#[tokio::test]
+async fn only_system_administrators_can_see_and_retry_a_bundled_host_registration_failure() {
+    use orch_api_contract::admin::{
+        AdminBundledNodeEnrollmentGet, AdminBundledNodeEnrollmentRetry, BundledNodeEnrollment,
+    };
+    let world = World::new().await;
+    let cast = admin_support::cast(&world).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node_enrollment_token");
+    std::fs::write(&path, "invalid-test-file").unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let service = world.app.app.link.certificates().clone();
+    let task = tokio::spawn({
+        let cancelled = stop.clone();
+        let file = path.clone();
+        async move { service.register_bundled_node(&file, cancelled).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = world
+                .app
+                .call(AdminBundledNodeEnrollmentGet, &[])
+                .token(&cast.root.token)
+                .send()
+                .await
+                .ok();
+            if state == Some(BundledNodeEnrollment::InvalidTokenFile) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentGet, &[])
+            .token(&cast.ada.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentRetry, &[])
+            .token(&cast.ada.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+    let token = orch_pki::enrollment::issue_token(
+        world.app.app.link.certificates().authority(),
+        std::time::Duration::ZERO,
+        world.app.app.clock.as_ref(),
+    );
+    std::fs::write(&path, token.token.to_string()).unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentRetry, &[])
+            .token(&cast.root.token)
+            .send()
+            .await
+            .status,
+        204
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if world.app.app.link.certificates().bundled_node_enrollment()
+                == Some(BundledNodeEnrollment::WaitingForNode)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the administrator's retry wakes registration before the automatic interval");
+    stop.cancel();
+    task.await.unwrap();
+}

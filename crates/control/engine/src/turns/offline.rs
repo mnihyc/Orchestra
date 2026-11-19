@@ -50,15 +50,44 @@ impl Engine {
         {
             return Ok(false);
         }
-        let after = orch_settings::get::<Option<i64>>(
+        let selected = orch_settings::resolve(
             unit.conn,
             orch_settings::Place::Node(thread.node_id),
             orch_settings_contract::registry::keys::THREADS_OFFLINE_DEADLINE,
         )
-        .await?
-        .flatten();
+        .await?;
+        let after = selected
+            .value()
+            .cloned()
+            .map(serde_json::from_value::<Option<i64>>)
+            .transpose()?
+            .flatten();
         let at = unit.now();
-        Ok(threads::offline::begin(unit.conn, turn.id, machine, at, after).await?)
+        let observed = threads::offline::Episode {
+            machine,
+            since: at,
+            after_secs: after,
+        };
+        let deadline = match after {
+            Some(after_seconds) => orch_api_contract::threads::OfflineEpisodeDeadline::Finite {
+                after_seconds,
+                at: observed.at().map(orch_types::Time::new),
+            },
+            None => orch_api_contract::threads::OfflineEpisodeDeadline::Indefinite,
+        };
+        let mut receipt = serde_json::to_value(orch_api_contract::threads::ThreadOfflineEpisode {
+            began_at: orch_types::Time::new(at),
+            deadline,
+            policy_source: Some(serde_json::from_value(serde_json::to_value(
+                selected.resolved.source.scope,
+            )?)?),
+            episode_revision: 0,
+            closed_at: None,
+        })?;
+        // Keep the exact origin privately; ordinary turn facts expose its scope, never an unchecked ancestor name.
+        receipt["policy_source_node"] = serde_json::to_value(selected.resolved.source.node)?;
+        let seq = unit.stamp(thread.node_id).await?;
+        Ok(threads::offline::begin(unit.conn, turn.id, machine, at, after, &receipt, seq).await?)
     }
     /// Recheck the exact active turn/source and current machine presence under the stop transaction.
     pub(super) async fn offline_deadline_due_in(
@@ -88,7 +117,7 @@ impl Engine {
             return Ok(None);
         }
         let online: Option<bool> =
-            sqlx::query_scalar("SELECT online FROM machines WHERE id=$1 FOR SHARE")
+            sqlx::query_scalar("SELECT online FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(episode.machine)
                 .fetch_optional(&mut *unit.conn)
                 .await
