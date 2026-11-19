@@ -23,7 +23,11 @@ Use the paperclip, paste or drop files to attach them. The usual attachment chip
 
 The model chip lists the usable entries in this root organization's **Ask models** setting (`ask.models`). **Default · model** follows the first usable entry in that ordered list. Choose another entry and your reasoning effort through the same model-and-effort control used by threads. Effort follows the model’s default until you choose it. A model that declares no effort has no effort rows. Other declared choices stay within the provider's constraints. Your personal choice, including its parameters, is kept with the conversation.
 
-Ask models have their own policy list in **Settings → Automation**. At system scope, a person who may edit it can add or remove enabled API models and move them up or down. Entries store the provider and model only. At an organization, the list comes from above: an editor can remove entries to narrow it, but cannot add or reorder them; the order from above is retained. Effort and other parameters stay with your personal choice in the chip. Subscription-only providers are not Ask models. Current organization policy and usage caps apply to every turn.
+Ask models have their own policy list in **Settings → Automation**. At system scope, a person who may edit it can add or remove enabled API models and supported subscription programs and move them up or down. Each entry keeps its exact route, account offering and configuration. At an organization, the list comes from above: an editor can remove entries to narrow it, but cannot add or reorder them; the order from above is retained. Effort and other parameters stay with your personal choice in the chip. Current organization policy and usage caps apply to every turn.
+
+For a subscription, choose an account that both you and the payer can use. You can open the subscription details below the model choice to see reported plan windows. Ask records each program turn against that account. The program can request several reads in one reply. Orch checks each read against your current access and shows its sources in the conversation. If a saved subscription becomes unavailable, the chooser shows the reason and lets you choose another model.
+
+A provider's **Use** entry can allow **Ask**, **Other work**, or both. To share a provider only for questions, open that entry's options and leave only **Ask** selected under **Uses**. Its model and effort restrictions still apply together. Other work includes ordinary threads, summaries and services. The asking person and the configured payer both need an entry that permits Ask; choosing a payer grants no access.
 
 When the list is unset, empty or has no usable entry, including when model policy excludes every entry, the panel shows the reason and has no message composer. A link to the setting appears only when you may edit it. Otherwise, the explanation remains visible so you can ask an organization admin to configure a usable model.
 
@@ -46,9 +50,15 @@ When the conversation approaches the chosen model’s context window, Ask summar
 
 Summarizing counts as your Ask usage, through the conversation’s current payer and usage caps. It does not choose a separate summary model.
 
-Administrators can set `ask.max_output_tokens` (4096 by default) and the optional `ask.context_tokens` policy at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. Fitting reserves the answer’s output tokens and the turn’s tool-result allowance (`ask.turn_tool_bytes`), converted with the chosen model’s measured token estimate. There is no item-count cutoff. If the model’s window has not been recorded, Ask uses the existing conservative handoff estimate; record its context size or reduce the reserves if they do not fit.
+What bounds a conversation is the chosen model’s context window, counted in tokens with that model’s measured estimate. The answer allowance is `ask.max_output_tokens` (4096 by default). Administrators can set it and the optional `ask.context_tokens` at system or organization scope; the lowest value applies. Unset context uses the model’s own window; a configured value can reduce that window for Ask without changing ordinary threads. Ask reserves the smaller of the configured answer allowance and half the known window, with a minimum of one answer token. Instructions and tools also need input room, so a very small context can leave no room for any question. There is no item-count cutoff and no limit in bytes.
 
-If the reserves leave no room, the reason names `ask.context_tokens` and the reserves to change. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. No history disappears silently.
+When the history does not fit, the oldest messages are summarized as above. Completed reads are fitted before the page in view. A source that cannot fit is shortened in tokens, ends in a line that says so and where the whole source is, and the answer goes on from there; open that link, or ask for a narrower part, to read more. Every later step checks the current source again and fits it to the available tokens, including content added since its first reading.
+
+A model whose window has not been recorded is not given a small one: Ask sends the conversation as it is. If the provider refuses the combined input and answer allowance, Ask retries with a smaller answer allowance first. A refusal even with the smallest answer establishes a smaller window and triggers a summary of the oldest messages; record the model’s context size to avoid extra requests. If even a summary cannot fit, Ask says the conversation is too long for the selected model: start a new conversation or **Keep as thread**. If the question and what it read are too long by themselves, no summary of earlier messages helps, and Ask says so: ask a narrower question or start with fewer sources. No history disappears silently.
+
+The numbers inside the read tools are settings too, each with today’s value as its default: `ask.docs_hits` (5 guide pages per search), `ask.docs_excerpt_tokens` (1,000 tokens of each), `ask.max_operations` (20 operations per catalogue search) and `ask.max_links` (50 links kept from one read). The step and tool counts per question are `ask.max_steps` (16) and `ask.max_tools` (32).
+
+When Ask cannot take a question, the message says why in its own words: the model or provider is not allowed or not ready, a usage limit was reached, or the organization cannot be opened as you. Ask answers as you are in an organization, whatever the **As admin** switch says; an administrator who is not a member of an organization can inspect its conversations but not ask in it.
 
 ## One organization per conversation
 
@@ -66,13 +76,13 @@ Conversations normally live in your personal organization. If personal organizat
 
 Ask reads as you and makes no changes. It can search, open readable sources, read their history and consult the bundled user guide. It does not lend access to another person or instruct a working thread.
 
-The panel states that the conversation's root-organization admins can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
+The admins of a conversation's root organization can inspect and export it. An admin inspection is read-only: it cannot send, retry, stop or keep someone else's conversation. Turn on the existing **As admin** switch, open **History**, choose **Inspect this organization’s conversations**, then open a row. **Export conversation** downloads the permitted conversation as JSON.
 
 You normally pay for questions you ask, unless the effective Ask setting selects its setting owner's provider use. The panel shows the effective payer. Your organization's applicable per-person and shared usage caps still apply.
 
 By default, a conversation is deleted for good **30 days after its last message**. The effective period is held within the minimum and maximum set by its root organization's admins; the panel shows that period and expiry. There is no second recovery window after expiry.
 
-Before expiry, choose **Keep as thread** to create a Private permanent thread in the same root organization. Review the destination topic, or use the authorized default. The original conversation becomes kept; the new thread follows ordinary thread access and retention. Changing its agent later uses the normal thread controls.
+Before expiry, choose **Keep as thread** to create a Private permanent thread in an authorized destination topic, or use the authorized default. The review names the organization the new conversation will search and be governed in. A copy into another organization takes that destination’s knowledge, tools, model choices, policies and billing from its first turn; the source’s fixed root stays unchanged. Cross-organization copies still require the source’s copy and Export controls. The original temporary conversation becomes kept; the new thread follows ordinary thread access and retention. Changing its agent later uses the normal thread controls.
 
 Unavailable **Export conversation** and **Keep as thread** controls stay
 focusable and explain their own state on hover or keyboard focus. No
@@ -84,7 +94,7 @@ admin inspection; permitted Export remains available in either state.
 
 In a topic, open **New thread**, or **Change** beneath its starter, then choose **Start read-only questions**. Review the model choice and the new thread's access: **Private** or **Use this topic’s default access**. You can include the first question. This program needs no environment or agent profile.
 
-A permanent question thread keeps its normal timeline, files, saved draft and **Stop** control. Its model chooser shows the saved preference. Choose another allowed API model for the next question, or **Default** to reset that preference when the next question is accepted. Each sender's current permissions, model access and usage limits apply.
+A permanent question thread keeps its normal timeline, files, saved draft and **Stop** control. Its model chooser shows the saved preference. Choose another allowed model for the next question, or **Default** to reset that preference when the next question is accepted. Each sender's current permissions, model access and usage limits apply.
 
 ## Installation addresses
 

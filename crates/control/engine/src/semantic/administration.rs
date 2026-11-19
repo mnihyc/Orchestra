@@ -404,6 +404,8 @@ impl EmbeddingCommand {
             .background_provider_use(
                 conn,
                 &crate::access::ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Embeddings,
                     person: self.writer,
                     node: self.work.org(),
                     provider: self.provider,

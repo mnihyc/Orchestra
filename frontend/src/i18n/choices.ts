@@ -12,6 +12,7 @@ export type ChoiceValues = Record<string, string | number>;
 /** Schema-only editors receive the setting's context once; nested choices keep the same context. */
 export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup[] | undefined>> = {
   'notify.operations': ['operationNotices'],
+  'models.add_switches_on': ['modelAddSwitches'],
   'ask.paid_by': ['askPayer'],
   'gateways.tunnel_strategy': ['tunnelGateway'],
   'threads.agent_access': ['agentReach', 'agentStep'],
@@ -23,6 +24,7 @@ export const SETTING_CHOICE_GROUPS: Readonly<Record<string, readonly ChoiceGroup
   'agents.page_fetch': ['pageFetch'],
   'agent.effort': ['effort'], 'agent.memory': ['memory'], 'approval.mode': ['approvalMode'], 'approval.allowed_modes': ['approvalMode'],
   'sandbox.mode': ['sandboxLevel'], 'collab.attribution': ['attribution'], 'collab.default_delivery': ['delivery'],
+  'env.host_id': ['hostTarget'], 'runtime.host_id': ['hostTarget'],
   'env.thread_default': ['environmentDefault'], 'env.lifetime': ['environmentLifetime'], 'env.update': ['updateMode'], 'runtime.update': ['updateMode'], 'env.mounts': ['mountMode'],
   'env.data_sources': ['dataSource'], 'runtime.data_sources': ['dataSource'], 'runtime.home': ['dataSource'],
   'orch_tools.enabled': ['sharedTool'],

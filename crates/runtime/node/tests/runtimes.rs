@@ -1120,3 +1120,152 @@ async fn a_new_unit_uses_its_nodes_verified_address_or_that_nodes_explicit_unit_
         rig.stop().await;
     }
 }
+
+#[tokio::test]
+async fn an_admitted_program_keeps_its_real_parent_and_helper_without_starting_a_unit_from_metadata()
+ {
+    use orch_link_contract::commands::NodeProgramAdmit;
+    use orch_link_contract::program_work::Admission;
+    let mut rig = Rig::new();
+    rig.have_connector();
+    rig.start().await;
+    let parent = rig.spec(RuntimeKind::Provider, "program-parent");
+    rig.made(&parent).await;
+    let work = Admission {
+        work: new_id(),
+        helper: new_id(),
+        peer: new_id(),
+        parent: parent.runtime_id,
+        endpoints: vec![],
+        deadline: rig.deadline(),
+    };
+    let body = NodeProgramAdmit {
+        runtime_id: work.work,
+        work: work.clone(),
+    };
+    rig.succeed(&SerialKey::Runtime(work.work), &body).await;
+    rig.succeed(&SerialKey::Runtime(work.work), &body).await;
+    let kept = rig.role().ledger().program(work.work).unwrap();
+    assert_eq!(kept.admission, work);
+    assert_eq!(kept.template, parent.spec);
+    assert_eq!(kept.tools, parent.tools);
+    let mut invented = serde_json::to_value(&body).unwrap();
+    invented["work"]["template"] = json!({"image":"another-base"});
+    assert!(
+        serde_json::from_value::<NodeProgramAdmit>(invented).is_err(),
+        "program admission never accepts a replacement for the parent's real original source"
+    );
+    assert!(kept.unit.is_none());
+    assert_eq!(
+        rig.driver.list(SYSTEM).await.unwrap().len(),
+        1,
+        "admission metadata is not an execution effect"
+    );
+    let mut changed = body.clone();
+    changed.work.helper = new_id();
+    rig.refused(&SerialKey::Runtime(work.work), &changed).await;
+    assert_eq!(
+        rig.role().ledger().program(work.work).unwrap().admission,
+        work
+    );
+    let mut unknown = body;
+    unknown.runtime_id = new_id();
+    unknown.work.work = unknown.runtime_id;
+    unknown.work.parent = new_id();
+    rig.refused(&SerialKey::Runtime(unknown.runtime_id), &unknown)
+        .await;
+    assert!(rig.role().ledger().program(unknown.runtime_id).is_none());
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn an_admitted_program_channel_refuses_other_helpers_and_addresses_only_its_own_unit() {
+    use orch_link::program_work::Client;
+    use orch_link_contract::commands::NodeProgramAdmit;
+    use orch_link_contract::program_work::{Admission, Reply, Request};
+    use orch_link_contract::session::Role;
+    use orch_link_contract::tunnels::{Service, TicketSource};
+    use orch_pki::tickets::{TicketRequest, TicketSigner};
+    use orch_testkit::doubles::{
+        controller::ScriptedController,
+        machine::{MachineSpec, ScriptedMachine},
+    };
+    let mut rig = Rig::new();
+    rig.have_connector();
+    let signer = TicketSigner::generate();
+    rig.hub.set_ticket_verifier(signer.verifier());
+    let peer = new_id();
+    let _peer_controller =
+        ScriptedController::attach(&rig.hub, rig.clock.clone(), peer, vec![Role::Provider]);
+    let machine = ScriptedMachine::start(
+        &rig.hub,
+        &rig.clock,
+        &rig.pki.machine(peer),
+        &MachineSpec {
+            roles: vec![Role::Provider],
+            ..MachineSpec::default()
+        },
+    );
+    rig.start().await;
+    tokio::time::timeout(PATIENCE, machine.link.connected())
+        .await
+        .unwrap();
+    let parent = rig.spec(RuntimeKind::Provider, "isolated-channel-parent");
+    rig.made(&parent).await;
+    let admission = Admission {
+        work: new_id(),
+        helper: new_id(),
+        peer,
+        parent: parent.runtime_id,
+        endpoints: vec![],
+        deadline: rig.deadline(),
+    };
+    rig.succeed(
+        &SerialKey::Runtime(admission.work),
+        &NodeProgramAdmit {
+            runtime_id: admission.work,
+            work: admission.clone(),
+        },
+    )
+    .await;
+    let ticket = |helper| {
+        signer
+            .issue(&TicketRequest {
+                src: TicketSource::Machine(peer),
+                dst: rig.machine_id,
+                service: Service::Program {
+                    work_id: admission.work,
+                },
+                thread_id: Some(helper),
+                tool_set: None,
+                expires_at: admission.deadline,
+            })
+            .unwrap()
+    };
+    let request = Request::ReadFile {
+        path: "../../provider-state/auth.json".into(),
+        max_bytes: 1024,
+    };
+    let wrong = Client::new(machine.link.clone(), ticket(new_id()));
+    assert!(
+        wrong.request(&request, &[]).await.is_err(),
+        "a real signed ticket for another helper is still refused by the admitted node"
+    );
+    let own = Client::new(machine.link.clone(), ticket(admission.helper));
+    let answer = own.request(&request, &[]).await.unwrap();
+    assert!(
+        matches!(answer.reply, Reply::Failed { .. }),
+        "the admitted channel cannot substitute its provider's unit for its absent work unit"
+    );
+    assert!(answer.bytes.is_empty());
+    assert!(
+        rig.role()
+            .ledger()
+            .program(admission.work)
+            .unwrap()
+            .unit
+            .is_none()
+    );
+    assert_eq!(rig.driver.list(SYSTEM).await.unwrap().len(), 1);
+    rig.stop().await;
+}

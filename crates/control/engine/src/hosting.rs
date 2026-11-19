@@ -405,7 +405,8 @@ mod tests {
 
 /// A harness's descriptor constrained by every kept build's evidence at that kind and version, across systems
 /// and processors. Named failed capabilities stay off. Codex standalone native import is enabled only after all
-/// those builds prove that case in a complete native report; an unproved or legacy declaration cannot offer it.
+/// those builds passed the case that proves it; an unproved or legacy declaration cannot offer it, and a case the
+/// manifest has gained since the check does not take the proof away.
 ///
 /// # Errors
 /// The database failed.
@@ -422,7 +423,16 @@ pub async fn with_build_limits(
 /// The database failed.
 pub async fn build_limits(
     conn: &mut Conn,
+    descriptor: orch_types::Json,
+) -> Result<(orch_types::Json, Vec<String>), crate::EngineError> {
+    build_limits_on(conn, descriptor, None).await
+}
+
+/// Applies proof from the selected machine's build rather than another platform's build.
+pub(crate) async fn build_limits_on(
+    conn: &mut Conn,
     mut descriptor: orch_types::Json,
+    machine: Option<orch_types::Id>,
 ) -> Result<(orch_types::Json, Vec<String>), crate::EngineError> {
     let (Some(kind), Some(version)) = (
         descriptor
@@ -436,6 +446,35 @@ pub async fn build_limits(
     ) else {
         return Ok((descriptor, Vec::new()));
     };
+    let platform = match machine {
+        Some(machine) => orch_db::queries::resources::machine(conn, machine).await?,
+        None => None,
+    };
+    let runtime: Option<orch_types::Id> = match machine {
+        Some(machine) => sqlx::query_scalar(
+            "SELECT id FROM runtimes WHERE machine_id=$1 AND successor_of IS NULL
+                AND state NOT IN ('retired','removed') ORDER BY id LIMIT 1",
+        )
+        .bind(machine)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(orch_db::DbError::from)?,
+        None => None,
+    };
+    let tools: Vec<ToolBuild> = match runtime {
+        Some(runtime) => orch_db::queries::jobs::changes::tools_among(conn, &[runtime])
+            .await?
+            .into_iter()
+            .find_map(|(_, tools)| tools)
+            .and_then(|tools| serde_json::from_value(tools).ok())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let hashes: Vec<_> = tools
+        .iter()
+        .filter(|tool| tool.version == version)
+        .map(|tool| tool.sha256.as_str())
+        .collect();
     let kept: Vec<(String, orch_types::Json)> =
         orch_db::queries::resources::management::stored_harness_builds(conn)
             .await?
@@ -444,6 +483,14 @@ pub async fn build_limits(
                 build.get("kind").and_then(orch_types::Json::as_str) == Some(kind.as_str())
                     && build.get("version").and_then(orch_types::Json::as_str)
                         == Some(version.as_str())
+                    && platform.as_ref().is_none_or(|machine| {
+                        build["os"].as_str() == Some(machine.platform_os.as_str())
+                            && build["arch"].as_str() == Some(machine.platform_arch.as_str())
+                    })
+                    && (hashes.is_empty()
+                        || build["sha256"]
+                            .as_str()
+                            .is_some_and(|hash| hashes.contains(&hash)))
             })
             .collect();
     let programs = orch_db::programs::registry(conn).await?;
@@ -461,56 +508,124 @@ pub async fn build_limits(
         && let Some(held) = descriptor.pointer_mut("/capabilities/import_native")
     {
         *held = orch_types::Json::Bool(
-            !kept.is_empty()
-                && kept
-                    .iter()
-                    .all(|(_, build)| proves_native_import(build, &expected)),
+            !kept.is_empty() && kept.iter().all(|(_, build)| proves_native_import(build)),
         );
     }
+    let auto_cases: Vec<&str> = programs
+        .program(&kind)
+        .into_iter()
+        .flat_map(|manifest| &manifest.checks.conformance)
+        .filter(|case| case.feature.as_deref() == Some(AUTO_FEATURE))
+        .map(|case| case.name.as_str())
+        .collect();
+    apply_auto_proof(&mut descriptor, &kept, &auto_cases);
     let off = apply_failed_checks(&mut descriptor, &kept);
     Ok((descriptor, off))
 }
 
-fn proves_native_import(build: &orch_types::Json, expected: &[String]) -> bool {
-    matches!(build["status"].as_str(), Some("checked" | "failed"))
-        && build
-            .pointer("/check/stage")
-            .and_then(orch_types::Json::as_str)
-            == Some("complete")
-        && build
-            .pointer("/check/cases")
-            .and_then(orch_types::Json::as_array)
-            .is_some_and(|cases| {
-                cases.len() == expected.len()
-                    && cases.iter().all(|case| {
-                        case["passed"]
-                            .as_bool()
-                            .is_some_and(|passed| passed == case["error"].is_null())
-                            && case["elapsed_ms"]
-                                .as_i64()
-                                .is_some_and(|elapsed| elapsed >= 0)
-                    })
-                    && expected.iter().all(|name| {
-                        cases
-                            .iter()
-                            .filter(|case| case["name"] == name.as_str())
-                            .count()
-                            == 1
-                    })
-                    && cases.iter().any(|case| {
-                        case["name"] == "history.native_import"
-                            && case["passed"] == true
-                            && case["unsupported"].is_null()
-                    })
+/// Keeps the original declaration while recomputing the result, so a successful recheck restores Auto.
+fn apply_auto_proof(
+    descriptor: &mut orch_types::Json,
+    kept: &[(String, orch_types::Json)],
+    cases: &[&str],
+) {
+    use orch_agent_contract::descriptor::{AutoApprovalCheck, AutoApprovalState as State};
+    let Some(modes) = descriptor
+        .get("approval_modes")
+        .and_then(orch_types::Json::as_array)
+    else {
+        return;
+    };
+    let declared = modes.iter().any(|mode| mode == "auto")
+        || descriptor
+            .pointer("/approval_auto/declared")
+            .and_then(orch_types::Json::as_bool)
+            == Some(true);
+    let failed = failed_features(kept)
+        .iter()
+        .any(|feature| feature == AUTO_FEATURE)
+        || kept.iter().any(|(_, build)| {
+            cases.iter().any(|name| {
+                auto_case_result(build, name).is_some_and(|case| case["passed"] == false)
             })
+        });
+    let passed = !kept.is_empty()
+        && kept.iter().all(|(_, build)| {
+            cases.iter().all(|name| {
+                auto_case_result(build, name).is_some_and(|case| {
+                    case["passed"] == true
+                        && case["error"].is_null()
+                        && case["unsupported"].is_null()
+                        && case["elapsed_ms"]
+                            .as_i64()
+                            .is_some_and(|elapsed| elapsed >= 0)
+                })
+            })
+        });
+    let state = if !declared || cases.is_empty() {
+        State::Unavailable
+    } else if failed {
+        State::Failed
+    } else if passed {
+        State::Passed
+    } else {
+        State::NotProven
+    };
+    let proof = AutoApprovalCheck {
+        declared,
+        state,
+        check_available: declared && !cases.is_empty() && !kept.is_empty(),
+    };
+    if let Some(modes) = descriptor
+        .get_mut("approval_modes")
+        .and_then(orch_types::Json::as_array_mut)
+    {
+        modes.retain(|mode| mode != "auto");
+        if state == State::Passed {
+            modes.push(orch_types::Json::String("auto".to_owned()));
+        }
+    }
+    descriptor["approval_auto"] = serde_json::json!(proof);
+}
+
+fn auto_case_result<'a>(build: &'a orch_types::Json, name: &str) -> Option<&'a orch_types::Json> {
+    let results = build
+        .pointer("/check/cases")
+        .and_then(orch_types::Json::as_array)?;
+    let mut matching = results.iter().filter(|case| case["name"] == name);
+    match (matching.next(), matching.next()) {
+        (Some(case), None) => Some(case),
+        _ => None,
+    }
+}
+
+/// Whether the stored check of a build holds the case that proves native import, once, passed and available. The
+/// proof is that case: how many other cases the check ran is not, so a manifest that has grown since the check, or a
+/// check that is being run again (its record keeps the cases of the last whole one), does not take it away.
+fn proves_native_import(build: &orch_types::Json) -> bool {
+    build
+        .pointer("/check/cases")
+        .and_then(orch_types::Json::as_array)
+        .is_some_and(|cases| {
+            let mut ours = cases
+                .iter()
+                .filter(|case| case["name"] == "history.native_import");
+            matches!(
+                (ours.next(), ours.next()),
+                (Some(case), None)
+                    if case["passed"] == true
+                        && case["error"].is_null()
+                        && case["unsupported"].is_null()
+                        && case["elapsed_ms"].as_i64().is_some_and(|elapsed| elapsed >= 0)
+            )
+        })
 }
 
 /// The feature whose case proves Auto's reviewer for a build.
 const AUTO_FEATURE: &str = "approval_modes.auto";
 
 /// What the stored checks of a build switch off: what each check lists as off, and Auto where a check ran its case
-/// and the case did not pass. A build with no stored check, or a check that has not ended, switches nothing off: what
-/// is not verified stays as the adapter declares it.
+/// and the case did not pass. Positive Auto availability is decided separately by its declared case.
 fn failed_features(kept: &[(String, orch_types::Json)]) -> Vec<String> {
     let mut off: Vec<String> = kept
         .iter()
@@ -543,6 +658,20 @@ fn failed_features(kept: &[(String, orch_types::Json)]) -> Vec<String> {
     off
 }
 
+/// A declaration without a program case cannot claim Auto.
+#[cfg(test)]
+fn keep_auto_only_for_a_program_with_a_trial(descriptor: &mut orch_types::Json, has_trial: bool) {
+    if has_trial {
+        return;
+    }
+    if let Some(modes) = descriptor
+        .get_mut("approval_modes")
+        .and_then(orch_types::Json::as_array_mut)
+    {
+        modes.retain(|mode| mode.as_str() != Some("auto"));
+    }
+}
+
 /// Switches off in `descriptor` what the stored checks of the build found failed, and returns the names.
 fn apply_failed_checks(
     descriptor: &mut orch_types::Json,
@@ -553,10 +682,21 @@ fn apply_failed_checks(
     off
 }
 
-/// Switches off the named capabilities of a descriptor that are switches; the others stay as declared.
+/// The capabilities that are claimed by being present rather than by being true: absent, they are not claimed.
+const CLAIMED_BY_PRESENCE: [&str; 1] = ["native_input_prefix"];
+
+/// Switches off the named capabilities of a descriptor that are switches (a boolean, a mode, an approval kind, the
+/// shared tools, or a member claimed by being present); the others stay as declared.
 fn switch_off(descriptor: &mut orch_types::Json, off: &[String]) {
     // A mode a failed case stood for is no mode of the build.
     for capability in off {
+        if let Some(mode) = capability.strip_prefix("side_thread_modes.")
+            && let Some(modes) = descriptor
+                .get_mut("side_thread_modes")
+                .and_then(orch_types::Json::as_array_mut)
+        {
+            modes.retain(|each| each.as_str() != Some(mode));
+        }
         if let Some(mode) = capability.strip_prefix("approval_modes.")
             && let Some(modes) = descriptor
                 .get_mut("approval_modes")
@@ -589,6 +729,10 @@ fn switch_off(descriptor: &mut orch_types::Json, off: &[String]) {
                 );
                 continue;
             }
+            if CLAIMED_BY_PRESENCE.contains(&capability.as_str()) {
+                capabilities.remove(capability);
+                continue;
+            }
             if let Some(held) = capabilities.get_mut(capability)
                 && held.is_boolean()
             {
@@ -605,6 +749,16 @@ fn switch_off(descriptor: &mut orch_types::Json, off: &[String]) {
 
 #[cfg(test)]
 mod build_limit_tests {
+    #[test]
+    fn a_failed_tool_free_trial_withholds_only_its_unproved_reading_mode() {
+        let mut descriptor = serde_json::json!({"side_thread_modes":["no_tools","read_only"],"capabilities":{"steer":true}});
+        super::switch_off(&mut descriptor, &["side_thread_modes.no_tools".into()]);
+        assert_eq!(
+            descriptor["side_thread_modes"],
+            serde_json::json!(["read_only"])
+        );
+        assert_eq!(descriptor["capabilities"]["steer"], true);
+    }
     #[test]
     fn an_unavailable_child_stream_removes_child_controls_and_keeps_other_features() {
         let mut descriptor = serde_json::json!({"capabilities":{"subagents":true,"subagent_limits":["at_once","depth"],"steer":true,"approvals":["command"]}});
@@ -652,6 +806,94 @@ mod build_limit_tests {
         );
     }
 
+    #[test]
+    fn a_failed_exact_checkpoint_takes_it_out_and_leaves_what_stands_beside_it() {
+        let mut descriptor = serde_json::json!({
+            "capabilities": { "native_input_prefix": "turn_start", "fork_native": true, "steer": true }
+        });
+        super::switch_off(&mut descriptor, &["native_input_prefix".to_owned()]);
+        assert!(
+            descriptor["capabilities"]
+                .get("native_input_prefix")
+                .is_none(),
+            "a member claimed by being present is claimed no more"
+        );
+        assert_eq!(descriptor["capabilities"]["fork_native"], true);
+        assert_eq!(descriptor["capabilities"]["steer"], true);
+        let read = serde_json::from_value::<orch_agent_contract::descriptor::Capabilities>(
+            descriptor["capabilities"].clone(),
+        );
+        assert!(read.is_ok_and(|read| read.native_input_prefix.is_none()));
+        super::switch_off(&mut descriptor, &["native_input_prefix".to_owned()]);
+        assert!(
+            descriptor["capabilities"]
+                .get("native_input_prefix")
+                .is_none()
+        );
+    }
+
+    /// A stored check whose cases are the named ones, all passed, in a build with the given status and stage.
+    fn stored_check(status: &str, stage: &str, names: &[&str]) -> serde_json::Value {
+        let cases: Vec<_> = names
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name, "passed": true, "feature": null, "error": null, "elapsed_ms": 10
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "kind": "codex", "version": "0.170.0", "status": status,
+            "check": { "stage": stage, "off": [], "cases": cases }
+        })
+    }
+
+    #[test]
+    fn a_stored_check_that_passed_native_import_still_proves_it_when_the_cases_have_grown() {
+        // The check ran three cases; the present manifest lists a fourth. What it proved stays proved.
+        let before = stored_check(
+            "checked",
+            "complete",
+            &["startup", "native_import", "history.native_import"],
+        );
+        assert!(
+            super::proves_native_import(&before),
+            "the case that proves it passed: the count of cases is not the proof"
+        );
+        // A check that never ran the case proves nothing, whatever else it ran.
+        let without = stored_check("checked", "complete", &["startup", "native_import"]);
+        assert!(!super::proves_native_import(&without));
+        // The case failed, or was unavailable, or is told twice: not proved.
+        let mut failed = before.clone();
+        failed["check"]["cases"][2]["passed"] = serde_json::json!(false);
+        failed["check"]["cases"][2]["error"] = serde_json::json!("not observed");
+        assert!(!super::proves_native_import(&failed));
+        let mut unavailable = before.clone();
+        unavailable["check"]["cases"][2]["unsupported"] = serde_json::json!("no");
+        assert!(!super::proves_native_import(&unavailable));
+        let mut twice = before.clone();
+        let again = twice["check"]["cases"][2].clone();
+        if let Some(cases) = twice["check"]["cases"].as_array_mut() {
+            cases.push(again);
+        }
+        assert!(!super::proves_native_import(&twice));
+    }
+
+    #[test]
+    fn a_check_being_run_again_keeps_the_proof_it_had_until_it_ends() {
+        let running = stored_check(
+            "checking",
+            "conformance",
+            &["startup", "native_import", "history.native_import"],
+        );
+        assert!(
+            super::proves_native_import(&running),
+            "a build being checked again does not lose its proof for the minutes it takes"
+        );
+        let first = stored_check("checking", "conformance", &[]);
+        assert!(!super::proves_native_import(&first));
+    }
+
     fn build(check: serde_json::Value) -> (String, serde_json::Value) {
         (
             "key".to_owned(),
@@ -665,6 +907,49 @@ mod build_limit_tests {
             "error": if passed { serde_json::Value::Null } else { serde_json::json!("the reviewer did not answer") },
             "elapsed_ms": 10
         })
+    }
+
+    #[test]
+    fn a_successful_recheck_restores_declared_auto_but_missing_or_duplicate_evidence_never_proves_it()
+     {
+        let mut descriptor = claimed();
+        super::apply_auto_proof(&mut descriptor, &[], &["approval.auto"]);
+        assert_eq!(descriptor["approval_auto"]["state"], "not_proven");
+        assert!(
+            !descriptor["approval_modes"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("auto"))
+        );
+        let failed = [build(serde_json::json!({"cases":[auto_case(false)]}))];
+        super::apply_auto_proof(&mut descriptor, &failed, &["approval.auto"]);
+        assert_eq!(descriptor["approval_auto"]["state"], "failed");
+        for cases in [
+            serde_json::json!([]),
+            serde_json::json!([auto_case(true), auto_case(true)]),
+        ] {
+            super::apply_auto_proof(
+                &mut descriptor,
+                &[build(serde_json::json!({"cases":cases}))],
+                &["approval.auto"],
+            );
+            assert_eq!(descriptor["approval_auto"]["state"], "not_proven");
+        }
+        let passed = [build(serde_json::json!({"cases":[auto_case(true)]}))];
+        super::apply_auto_proof(&mut descriptor, &passed, &["approval.auto"]);
+        assert_eq!(descriptor["approval_auto"]["state"], "passed");
+        assert_eq!(
+            descriptor["approval_modes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|mode| **mode == "auto")
+                .count(),
+            1
+        );
+        super::apply_auto_proof(&mut descriptor, &passed, &[]);
+        assert_eq!(descriptor["approval_auto"]["state"], "unavailable");
+        assert_eq!(descriptor["approval_auto"]["check_available"], false);
     }
 
     fn claimed() -> serde_json::Value {
@@ -746,6 +1031,27 @@ mod build_limit_tests {
             other_build,
             claimed(),
             "only the checks of the exact build are in `kept`"
+        );
+    }
+
+    #[test]
+    fn auto_is_a_mode_only_of_a_program_that_has_the_trial_whatever_its_builds_say() {
+        let mut without = claimed();
+        super::keep_auto_only_for_a_program_with_a_trial(&mut without, false);
+        assert_eq!(
+            without["approval_modes"],
+            serde_json::json!(["ask", "on_request", "bypass"]),
+            "a program with no trial of Auto has no Auto, checked or not"
+        );
+        let mut with = claimed();
+        super::keep_auto_only_for_a_program_with_a_trial(&mut with, true);
+        assert_eq!(with, claimed(), "a program with the trial keeps it");
+        let mut empty = serde_json::json!({ "capabilities": {} });
+        super::keep_auto_only_for_a_program_with_a_trial(&mut empty, false);
+        assert_eq!(
+            empty,
+            serde_json::json!({ "capabilities": {} }),
+            "a descriptor with no modes is left as it is"
         );
     }
 

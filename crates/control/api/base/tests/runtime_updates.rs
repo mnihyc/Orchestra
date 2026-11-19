@@ -22,6 +22,8 @@ mod places;
 mod provider_batch_scopes;
 #[path = "runtime_updates/provider_owner_host_use.rs"]
 mod provider_owner_host_use;
+#[path = "runtime_updates/recovery_source.rs"]
+mod recovery_source;
 mod resources;
 mod support;
 use support::FullMoveReply as _;
@@ -1132,6 +1134,7 @@ async fn movable(world: &World, team: &Team) -> Id {
         team.environment,
         &manifest.hash,
         world.now(),
+        None,
     )
     .await
     .unwrap();

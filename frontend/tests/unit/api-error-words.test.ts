@@ -31,6 +31,25 @@ beforeAll(async () => { await startI18n('en'); });
 afterAll(async () => { await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps a concurrent operation distinct from an outdated edit revision in ${locale}`, async () => {
+    await setLocale(locale);
+    const error=new ApiError({type:'orch:error:conflict.concurrent_change',code:'conflict.concurrent_change',
+      title:diagnostic,detail:diagnostic,status:409,request_id:'concurrent-request'},null);
+    expect(error.message).toBe(locale==='en'
+      ? 'A concurrent change interrupted this operation. Try again.'
+      : '同时发生的更改中断了此操作，请重试。');
+    expect(error.message).not.toBe(i18n.t('errors.conflict.stale_revision'));
+    expect(error.is('conflict.stale_revision')).toBe(false);
+  });
+  it(`explains a web action's missing end in ${locale}`, async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const result = errorText({ code: 'native_web_no_end', message: diagnostic }, t, { locale });
+    expect(result.message).toBe(t('ui.error.nativeWebNoEnd'));
+    expect(result.message).not.toBe(t('ui.error.nativeWebActionUnproven'));
+    expect(hasErrorCode(result.message)).toBe(false);
+  });
+
   it(`gives workspace attachment refusals a catalogued cause and recovery in ${locale}`, async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);
@@ -107,4 +126,15 @@ for(const locale of ['en','zh-CN'] as const)it(`names provider display names fro
   const message=errorText({code:'model_rerouted',message:'native English words',details:{from_model:'requested-route',to_model:'safe-route',from_display:'Chosen model',to_display:'Safety model'}},i18n.getFixedT(locale),{locale}).message;
   expect(message).toContain('Chosen model');expect(message).toContain('Safety model');
   expect(message).not.toContain('native English words');expect(message).not.toContain('requested-route');
+});
+
+it.each([
+  ['en', 'Pool access changed. The task stopped.'],
+  ['zh-CN', '资源池访问权限已变化，任务已停止。'],
+] as const)('explains a stopped pool task without private resource or giver names in %s', async (locale, expected) => {
+  await setLocale(locale);
+  const result = errorText({ code: 'pool_access_changed', message: 'Private pool and lender diagnostics', retryable: false }, i18n.getFixedT(locale), { locale });
+  expect(result.message).toBe(expected);
+  expect(result.message).not.toContain('Private');
+  expect(result.retryable).toBe(false);
 });

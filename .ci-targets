@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-engine --lib -- summaries::resource::tests::
+test -p orch-engine --lib -- tools::source::tests::source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --test call_recovery --test resource_summaries

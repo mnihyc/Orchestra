@@ -197,12 +197,14 @@ CREATE TABLE providers (
     status_at timestamp with time zone DEFAULT now() NOT NULL,
     credential_trial_input_id uuid,
     credential_trial_turn_id uuid,
+    credential_trial_receipt jsonb,
     facts_requested_at timestamp with time zone,
     credential_renewed_at timestamp with time zone,
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     facts_overrides jsonb DEFAULT '{}'::jsonb NOT NULL,
     facts_at timestamp with time zone,
     revision bigint DEFAULT 1 NOT NULL,
+    observation_revision bigint DEFAULT 0 NOT NULL CHECK (observation_revision >= 0),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
@@ -226,6 +228,8 @@ CREATE TABLE providers (
 );
 
 -- The same factual option sources accompany every stored model reader.
+CREATE TRIGGER providers_revision BEFORE UPDATE ON providers FOR EACH ROW EXECUTE FUNCTION orch_provider_revision();
+
 CREATE FUNCTION provider_option_layers(uuid, text[]) RETURNS jsonb
     LANGUAGE sql STABLE
 AS $$
@@ -258,6 +262,9 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_provider_id_fkey FOREIGN KEY (provider_id) 
 ALTER TABLE leases ADD CONSTRAINT leases_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id);
 
 CREATE TABLE summary_calls (
+    program_backend jsonb CHECK (program_backend IS NULL OR jsonb_typeof(program_backend)='object'),
+    delegated_program jsonb CHECK (delegated_program IS NULL OR jsonb_typeof(delegated_program)='object'),
+    delegated_result jsonb CHECK (delegated_result IS NULL OR jsonb_typeof(delegated_result)='object'),
     prepared_command jsonb CHECK (prepared_command IS NULL OR jsonb_typeof(prepared_command) = 'object'),
     entry_id uuid,
     issued_by uuid,
