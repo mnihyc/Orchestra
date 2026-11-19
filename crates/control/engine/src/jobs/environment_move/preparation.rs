@@ -317,7 +317,10 @@ impl CommandEvidence {
             return Ok(None);
         }
         let actual = Outgoing {
+            after: None,
             authority: None,
+            input_facts: None,
+            session_offer: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,
@@ -346,7 +349,10 @@ impl CommandEvidence {
             return Ok(None);
         }
         let actual = Outgoing {
+            after: None,
             authority: None,
+            input_facts: None,
+            session_offer: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,

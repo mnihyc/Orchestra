@@ -206,11 +206,7 @@ pub async fn turns_between(
     low: i64,
     high: i64,
 ) -> Result<Vec<TurnRow>, DbError> {
-    let sql = format!(
-        "{OWNERS} {TURN_SELECT} WHERE thread_id=$1 AND ordinal::bigint BETWEEN $3 AND $4
-      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
-        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
-    );
+    let sql = turns_between_sql(TURN_SELECT);
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -218,6 +214,15 @@ pub async fn turns_between(
         .bind(high)
         .fetch_all(conn)
         .await?)
+}
+
+/// Fixed projections share the same window selector in the reader and its plan proof.
+pub(super) fn turns_between_sql(select: &'static str) -> String {
+    format!(
+        "{OWNERS} {select} WHERE thread_id=$1 AND ordinal BETWEEN $3 AND $4
+      AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id
+        AND turns.ordinal BETWEEN o.first_turn AND o.last_turn) ORDER BY ordinal"
+    )
 }
 
 /// A forward export page bounds segment identities before loading their records.
@@ -272,16 +277,40 @@ pub async fn turn_high(
     view: Id,
     ordinal: i64,
 ) -> Result<Option<Seq>, DbError> {
-    let sql=format!("{OWNERS} SELECT max(i.seq_created) FROM owners o JOIN turns t
-      ON t.thread_id=$1 AND t.continuation_id=o.owner AND t.ordinal BETWEEN o.first_turn AND o.last_turn
-      JOIN items i ON i.turn_id=t.id AND i.continuation_id=o.owner WHERE t.ordinal::bigint<=$3
-        AND i.seq_created BETWEEN o.first_seq AND o.last_seq AND i.stream='main' AND i.kind<>'reasoning'");
-    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(turn_high_sql()))
         .bind(thread)
         .bind(view)
         .bind(ordinal)
         .fetch_one(conn)
         .await?)
+}
+
+/// Index the exact integer bounds once. Redundant integer and floating filters
+/// otherwise make generic plans estimate one row and sort the whole prefix.
+/// GiST queues large distances as floats, so an exact suffix seek resolves ties.
+pub(super) fn turn_high_sql() -> String {
+    let bounds = format!(
+        "i.thread_id=$1 AND i.continuation_id=o.owner
+          AND i.ordinal BETWEEN o.first_turn AND LEAST(o.last_turn,
+            GREATEST({minimum}::bigint,LEAST({maximum}::bigint,$3))::integer)
+          AND i.seq_created BETWEEN o.first_seq AND LEAST(o.last_seq,newest.ceiling)",
+        minimum = i32::MIN,
+        maximum = i32::MAX
+    );
+    format!("{OWNERS} SELECT max(edge.seq_created) FROM owners o
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created AS ceiling FROM items i WHERE i.thread_id=$1 AND i.continuation_id=o.owner
+          ORDER BY i.seq_created DESC LIMIT 1
+      ) newest
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created FROM thread_history_item_edges i WHERE {bounds}
+          ORDER BY i.seq_created <-> LEAST(o.last_seq,newest.ceiling) LIMIT 1
+      ) nearest
+      CROSS JOIN LATERAL (
+        SELECT i.seq_created FROM thread_history_item_edges i WHERE {bounds}
+          AND i.seq_created>=nearest.seq_created
+          ORDER BY i.seq_created DESC LIMIT 1
+      ) edge")
 }
 
 /// Read through the common bounded decoder, stopping before the next written window.

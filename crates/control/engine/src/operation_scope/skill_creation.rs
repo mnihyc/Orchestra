@@ -458,7 +458,7 @@ impl Input {
                         .map_err(DbError::from)?;
                 }
                 if let Some(machine) = machine {
-                    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+                    sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                         .bind(machine)
                         .fetch_optional(&mut *conn)
                         .await
@@ -471,7 +471,7 @@ impl Input {
                     .fetch_optional(&mut *conn)
                     .await
                     .map_err(DbError::from)?;
-                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                     .bind(machine)
                     .fetch_optional(&mut *conn)
                     .await
@@ -635,6 +635,7 @@ impl CommandSource {
             return Ok(None);
         };
         let outgoing = Outgoing {
+            after: None,
             id: command.id,
             machine: command.machine_id,
             key: SerialKey::None,
@@ -642,6 +643,8 @@ impl CommandSource {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if !matches!(self.input.command(&outgoing),Ok(super::http_command_source::CommandEvidence::Skill(expected)) if expected==*self)
         {
