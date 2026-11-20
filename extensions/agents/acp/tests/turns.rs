@@ -1238,3 +1238,48 @@ async fn a_program_that_dies_in_a_turn_is_lost_by_how_it_ended_and_what_it_wrote
         );
     }
 }
+
+#[tokio::test]
+async fn an_acting_side_completes_its_turn_while_the_main_session_waits_for_permission() {
+    let agent = Agent::new();
+    agent.script(vec![
+        tool_call("main-call", "bash", json!({"command":"pwd"})),
+        permission("main-call", "main-choice"),
+    ]);
+    agent.script(vec![
+        tool_call("side-call", "bash", json!({"command":"pwd"})),
+        tool_done("side-call", "completed", "workspace\n[exit code: 0]"),
+    ]);
+    let mut rig = Rig::start(
+        program(json!({"command_exit_marker":"[exit code:"})),
+        agent.clone(),
+    )
+    .await;
+    let main = rig.session().await;
+    let main_turn = rig.begin(&main, "show the working directory").await;
+    let events = rig.until(|event| event.is("approval.requested")).await;
+    let request = events.last().unwrap().body["request_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let side = rig.session().await;
+    assert_ne!(side.native, main.native);
+    let events = rig.say(&side, "inspect this workspace").await;
+    assert!(events.iter().any(|event| event.thread == Some(side.thread)
+        && event.is("item.completed")
+        && event.body["payload"]["tool"]["kind"] == "command"));
+    assert!(agent.answer("main-choice").is_none());
+    rig.adapter
+        .resolve_approval(
+            main.thread,
+            &request,
+            ApprovalDecision::Option {
+                option_id: "allow-once".into(),
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
+    let events = rig.until(|event| event.is("turn.completed")).await;
+    assert_eq!(events.last().unwrap().body["turn_id"], json!(main_turn));
+}

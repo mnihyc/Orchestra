@@ -58,6 +58,8 @@ pub mod attachments;
 #[path = "backplane.rs"]
 pub mod backplane;
 
+pub mod relay;
+
 #[path = "blobs.rs"]
 pub mod blobs;
 
@@ -185,3 +187,5 @@ extern crate self as orch_api_base;
 #[cfg(any(test, feature = "test-support"))]
 extern crate self as orch_api_core;
 pub mod route_assembly;
+
+pub mod transit;
