@@ -231,7 +231,7 @@ async fn an_actual_provider_creation_leaves_its_home_admin_the_permission_page_w
         .call(ProviderCreate, &[])
         .token(&company.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Private key".to_owned(),
             home_id: company.acme,
             access: None,

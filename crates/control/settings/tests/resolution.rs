@@ -1113,3 +1113,198 @@ async fn a_key_nobody_set_costs_no_statement_beyond_the_rows_of_the_chain() {
         .unwrap();
     assert_eq!(Statements::now() - start, 1, "the system's rows");
 }
+
+#[tokio::test]
+async fn translation_defaults_are_captured_and_a_place_cannot_reopen_a_policy_closed_above_it() {
+    let world = World::new().await;
+    let before = orch_settings::provider_translation::load(
+        &mut world.db.pool.acquire().await.unwrap(),
+        Place::Node(world.topic),
+    )
+    .await
+    .unwrap();
+    assert!(before.allowed);
+    assert_eq!(before.output_tokens, 4096);
+    world
+        .set(
+            Target::System,
+            keys::PROVIDERS_TRANSLATION_OUTPUT_TOKENS,
+            json!(16384),
+        )
+        .await;
+    world
+        .set(
+            Target::Node(world.root),
+            keys::PROVIDERS_TRANSLATION,
+            json!(false),
+        )
+        .await;
+    world
+        .set(
+            Target::Node(world.project),
+            keys::PROVIDERS_TRANSLATION,
+            json!(true),
+        )
+        .await;
+    let after = orch_settings::provider_translation::load(
+        &mut world.db.pool.acquire().await.unwrap(),
+        Place::Node(world.topic),
+    )
+    .await
+    .unwrap();
+    assert!(!after.allowed);
+    assert_eq!(after.output_tokens, 16384);
+    assert_eq!(
+        before.output_tokens, 4096,
+        "a later edit cannot rewrite an admitted request's capture"
+    );
+}
+
+#[tokio::test]
+async fn several_thread_settings_keep_each_model_environment_and_lock_without_repeating_source_reads()
+ {
+    use orch_settings::{Snapshot, Wanted, snapshots_at_nodes};
+    use orch_settings_contract::registry::get as definition;
+    let w = World::new().await;
+    let mut ids = vec![w.thread];
+    for number in 1..10 {
+        ids.push(
+            w.node("thread", w.topic, &format!("Parallel thread {number}"))
+                .await,
+        );
+    }
+    w.set(Target::Node(w.topic), keys::AGENT_MODEL, json!("small"))
+        .await;
+    w.set(
+        Target::Node(w.project),
+        keys::AGENT_INSTRUCTIONS,
+        json!("Keep the shared project rules"),
+    )
+    .await;
+    let provider = new_id();
+    let mut conn = w.conn().await;
+    insert_provider(
+        &mut conn,
+        provider,
+        "Shared provider",
+        w.ada,
+        w.root,
+        &json!({}),
+    )
+    .await
+    .unwrap();
+    for (model, effort) in [("small", "low"), ("large", "high")] {
+        insert_provider_model(
+            &mut conn,
+            provider,
+            model,
+            &json!({"efforts":["low","high"],"default_effort":effort}),
+            w.ada,
+        )
+        .await
+        .unwrap();
+    }
+    for id in &ids {
+        bind_thread_to_provider(&mut conn, *id, provider)
+            .await
+            .unwrap();
+    }
+    drop(conn);
+    for (number, id) in ids.iter().enumerate() {
+        w.managed_environment(*id,w.topic,&json!({"agent_defaults":{"approval.mode":if number%2==0 {"on_request"}else{"bypass"}},"sandbox":{"default":if number%2==0 {"workspace"}else{"open"}}}),&json!({})).await;
+        if number % 2 != 0 {
+            w.set(Target::Node(*id), keys::AGENT_MODEL, json!("large"))
+                .await;
+        }
+    }
+    w.set(Target::Node(ids[2]), keys::AGENT_EFFORT, json!("high"))
+        .await;
+    let keys = [
+        keys::AGENT_MODEL,
+        keys::AGENT_EFFORT,
+        keys::APPROVAL_MODE,
+        keys::SANDBOX_MODE,
+        keys::AGENT_INSTRUCTIONS,
+        keys::THREAD_CWD,
+        keys::AGENT_MEMORY,
+    ];
+    let defs = keys
+        .iter()
+        .map(|key| definition(key).unwrap())
+        .collect::<Vec<_>>();
+    let mut conn = w.conn().await;
+    let before = Statements::now();
+    snapshots_at_nodes(&mut conn, &ids[..1], &keys)
+        .await
+        .unwrap();
+    let one = Statements::now() - before;
+    let before = Statements::now();
+    let batch = snapshots_at_nodes(&mut conn, &ids, &keys).await.unwrap();
+    assert_eq!(
+        Statements::now() - before,
+        one,
+        "a page reads shared ancestors, rows and supplied facts once"
+    );
+    assert!(
+        one <= 5,
+        "the batch needs only ancestors, settings, environment identities, machine facts and model parameters: {one}"
+    );
+    for (number, id) in ids.iter().enumerate() {
+        let single = Snapshot::load(&mut conn, Place::Node(*id), Wanted::Keys(&defs))
+            .await
+            .unwrap();
+        for def in &defs {
+            assert_eq!(
+                batch[id].resolve(def),
+                single.resolve(def),
+                "{} for thread {number}",
+                def.key
+            );
+        }
+        assert_eq!(
+            batch[id]
+                .resolve(definition(keys::AGENT_EFFORT).unwrap())
+                .value,
+            Some(json!(if number % 2 != 0 || number == 2 {
+                "high"
+            } else {
+                "low"
+            }))
+        );
+    }
+    drop(conn);
+    w.lock(Target::Node(w.project), keys::AGENT_EFFORT, json!("low"))
+        .await;
+    let side = w.node("thread", ids[1], "An aside").await;
+    let mut mixed = ids.clone();
+    mixed.extend([side, w.root, w.project, w.topic]);
+    let mut conn = w.conn().await;
+    let next = snapshots_at_nodes(&mut conn, &mixed, &keys).await.unwrap();
+    for id in mixed {
+        let single = Snapshot::load(&mut conn, Place::Node(id), Wanted::Keys(&defs))
+            .await
+            .unwrap();
+        for def in &defs {
+            assert_eq!(
+                next[&id].resolve(def),
+                single.resolve(def),
+                "{} retains its own branch and provenance",
+                def.key
+            );
+        }
+    }
+    assert_eq!(
+        batch[&ids[1]]
+            .resolve(definition(keys::AGENT_EFFORT).unwrap())
+            .value,
+        Some(json!("high")),
+        "an earlier immutable read does not change"
+    );
+    assert_eq!(
+        next[&ids[1]]
+            .resolve(definition(keys::AGENT_EFFORT).unwrap())
+            .value,
+        Some(json!("low")),
+        "the next read sees the new parent lock"
+    );
+}

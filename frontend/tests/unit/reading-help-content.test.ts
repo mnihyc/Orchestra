@@ -33,3 +33,14 @@ for (const language of ['en', 'zh-CN']) it('the finder hint reaches its authored
   expect(edition?.headings.find((heading) => heading.id === target?.heading)?.keywords).toContain(language === 'en' ? 'All' : '全部');
   expect(edition?.body).toContain(language === 'en' ? '**All**' : '**全部**');
 });
+
+it('names the current thread reading choices in both shipped editions', () => {
+  const content = readHelpContent();
+  const article = content.guide.articles.find((one) => one.id === 'running-thread-views');
+  const english = article?.body ?? '';
+  const chinese = article?.translations?.['zh-CN']?.body ?? '';
+  for (const name of ['**Normal**', '**Verbose**', '**Diagnostics**']) expect(english).toContain(name);
+  for (const name of ['**常规**', '**详细**', '**诊断**']) expect(chinese).toContain(name);
+  expect(english).not.toMatch(/\*\*(Focused|Full|Live)\*\*/u);
+  expect(chinese).not.toMatch(/“(专注|完整|实时)”/u);
+});
