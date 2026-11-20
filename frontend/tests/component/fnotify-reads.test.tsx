@@ -11,7 +11,7 @@ import type { PlaceGroup } from '@/features/inbox/away/model';
 import { TooltipProvider } from '@/ui/Tooltip';
 
 vi.setConfig({ testTimeout: 30_000 });
-vi.mock('@/api/away', () => ({ readGroup: vi.fn(), groupedKey: ['away', 'groups'] }));
+vi.mock('@/api/away', async (loadOriginal) => ({ ...await loadOriginal<object>(), readGroup: vi.fn(), groupedKey: ['away', 'groups'] }));
 afterEach(() => vi.clearAllMocks());
 
 const group: PlaceGroup = { key: 'supplied-group', place: null, unread: 2, waiting_for_me: 0, through_seq: 12, rows: [] };

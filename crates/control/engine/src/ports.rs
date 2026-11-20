@@ -114,7 +114,7 @@ pub struct Policies {
     /// The maximum link age from creation.
     pub link_max_secs: i64,
     /// The independent pending-decision life.
-    pub request_expiry_hours: i64,
+    pub request_expiry_minutes: i64,
     /// Current values with their deciding scope for safe UI projection.
     pub snapshot: Snapshot,
 }
@@ -125,7 +125,7 @@ pub async fn policies(conn: &mut Conn, environment: Id) -> Result<Policies, Erro
         keys::PORTS_ENABLED,
         keys::PORTS_MAX_OPEN,
         keys::PORTS_LINK_MAX_SECS,
-        keys::REQUESTS_EXPIRY_HOURS,
+        keys::REQUESTS_EXPIRY_MINUTES,
     ]
     .map(|key| {
         registry::get(key)
@@ -153,7 +153,7 @@ pub async fn policies(conn: &mut Conn, environment: Id) -> Result<Policies, Erro
         enabled: flag(0)?,
         max_open: number(1)?,
         link_max_secs: number(2)?,
-        request_expiry_hours: number(3)?,
+        request_expiry_minutes: number(3)?,
         snapshot,
     })
 }
@@ -273,6 +273,33 @@ pub fn validate_program(program: &PortProgram) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// The TCP listener numbers a human reader may use on this registered machine.
+pub async fn named_listeners(
+    conn: &mut Conn,
+    principal: &Principal,
+    env: &EnvironmentFull,
+) -> Result<BTreeSet<u16>, Error> {
+    if env.placement != "connected" {
+        return Ok(BTreeSet::new());
+    }
+    let Some(ports) = orch_db::queries::environment_facts::of(conn, env.id)
+        .await?
+        .and_then(|machine| machine.policy)
+        .and_then(|policy| policy.get("ports").cloned())
+        .and_then(|ports| {
+            serde_json::from_value::<orch_link_contract::policy::MachinePorts>(ports).ok()
+        })
+        .filter(|ports| !ports.loopback_tcp.is_empty() && ports.valid())
+    else {
+        return Ok(BTreeSet::new());
+    };
+    if orch_authz::file_reach::port_machine(conn, principal, env.id).await? {
+        Ok(ports.loopback_tcp)
+    } else {
+        Ok(BTreeSet::new())
+    }
 }
 
 /// Checks the physical machine's offered policy section before every carrying or widening act.
@@ -1526,7 +1553,11 @@ pub async fn reconcile_before(
             if opening.requested_by.is_none() && opening.requested_by_thread.is_none() {
                 ending = Some("requester_deleted");
             } else if policy.as_ref().is_some_and(|p| {
-                opening.opened_at + chrono::Duration::hours(p.request_expiry_hours) <= now.get()
+                Time::new(opening.opened_at)
+                    .checked_add_minutes(p.request_expiry_minutes)
+                    .unwrap_or_else(Time::maximum)
+                    .to_minute()
+                    <= now
             }) {
                 ending = Some("request_expired");
             }
@@ -1760,7 +1791,11 @@ pub async fn request_waiting(
         ),
     };
     // The card waits a working day, or until the link it asks for would lapse, if sooner.
-    let mut expires = now.get() + chrono::Duration::hours(policy.request_expiry_hours);
+    let mut expires = now
+        .checked_add_minutes(policy.request_expiry_minutes)
+        .unwrap_or_else(Time::maximum)
+        .to_minute()
+        .get();
     if let Some(until) = resolved.until {
         expires = expires.min(until.get());
     }

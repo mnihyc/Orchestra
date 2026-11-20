@@ -61,6 +61,7 @@ async fn upload(world: &World, by: &Who, name: &str, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: name.to_owned(),
             media_type: None,
@@ -80,6 +81,8 @@ async fn upload(world: &World, by: &Who, name: &str, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 
