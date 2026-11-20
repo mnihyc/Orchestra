@@ -285,6 +285,8 @@ impl NativeModelContext {
 /// The members of a session that are the same on the link and for the adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSettings {
+    /// Bytes retained for one native text output; resolved from the thread setting.
+    pub output_capture_bytes: u64,
     /// Captured model metadata and the core route result; absent on older callers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_model: Option<Box<NativeModelContext>>,
@@ -336,6 +338,8 @@ pub struct SessionSettings {
     /// Whether completion of owned background work may continue the conversation.
     #[serde(default = "background_wake_default")]
     pub background_wake: bool,
+    /// Seconds before a native web action without an end is closed with its reason.
+    pub web_action_wait_secs: u64,
     /// A native image-generation override; absent keeps the program's own default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<bool>,
@@ -557,6 +561,8 @@ pub struct ExecBinding {
 /// An MCP server of the environment, as `session.open` names it on the link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpBinding {
+    /// The registered server's stable identity, independent of its offered name.
+    pub server_id: Id,
     /// The server's name.
     pub name: String,
     /// The tunnel to it.
@@ -641,6 +647,11 @@ pub struct LocalFile {
 /// What the adapter is given to open a session ([`crate::adapter::AgentAdapter::open_session`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSpec {
+    /// The accepted physical opening command, retained by every asynchronous report producer.
+    pub opening_id: Id,
+    /// The controller command configuring this opening, for native configuration receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_command: Option<Id>,
     /// What is the same on the link.
     #[serde(flatten)]
     pub settings: SessionSettings,
@@ -678,6 +689,9 @@ pub struct SessionSkills {
 /// The result of opening a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionOpened {
+    /// Orch server names actually supplied to the program; absent until a delayed launch reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<Vec<String>>,
     /// The harness's id for the session.
     pub native_session_ref: String,
     /// Whether it continued a session that existed.
@@ -997,6 +1011,9 @@ pub struct ToolError {
     pub code: String,
     /// What to do instead, in one line.
     pub message: String,
+    /// Structured facts retained by the native tool's deciding operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<Box<orch_api_contract::threads::ToolRateLimit>>,
 }
 
 #[cfg(test)]
@@ -1126,7 +1143,7 @@ mod tests {
           "directory": "/workspace/web", "cwd": "/workspace/web/api",
           "mounts": [ { "name": "src", "path": "/data/src", "read_only": true } ],
           "model": "gpt-6-sol", "effort": "high", "params": {}, "approval_mode": "on_request", "sandbox_mode": "workspace",
-          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "background_wake": true, "side_reading": null, "workspace_configuration": null,
+          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "web_action_wait_secs": 120, "background_wake": true, "side_reading": null, "workspace_configuration": null,
           "instructions": "You are working inside Orch.",
           "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "harness" },
           "arrangement": "separated",
@@ -1134,10 +1151,10 @@ mod tests {
                         "protocol": "openai-responses", "ticket": { "$ticket": { "kind": "llm" } } },
           "exec": { "executor": "codex-exec-server", "environment_id": "0199abcd-1234-7000-8000-000000000005",
                     "generation": 3, "ticket": { "$ticket": { "kind": "exec" } } },
-          "mcp": [ { "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
+          "mcp": [ { "server_id":"0199abcd-1234-7000-8000-000000000006", "name": "tmux", "ticket": { "$ticket": { "kind": "mcp" } } } ],
           "orch_tools": ["list_shared", "read_shared", "search_shared", "download_shared", "edit_document",
                          "send_message", "announce", "request_capability"],
-          "raw_events": true
+          "output_capture_bytes":67108864, "raw_events": true
         })
     }
 
@@ -1364,6 +1381,8 @@ mod tests {
     fn what_an_adapter_is_given_has_the_session_key_and_no_tickets() {
         let open: SessionOpen = serde_json::from_value(open()).unwrap();
         let spec = SessionSpec {
+            opening_id: orch_types::new_id(),
+            opening_command: None,
             settings: open.settings.clone(),
             session_key: "0123456789abcdef0123456789abcdef".into(),
             archive: Some(SessionArchive {

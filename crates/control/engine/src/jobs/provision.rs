@@ -233,6 +233,16 @@ pub async fn queue(
     {
         plan["initial_files"] = files;
     }
+    let original = if mode == Mode::Start {
+        env_rows::live_runtime(conn, environment.id)
+            .await?
+            .map(|runtime| runtime.id)
+    } else {
+        None
+    };
+    if mode == Mode::Start {
+        plan["runtime"] = json!(original);
+    }
     let job = make(
         conn,
         &Making {
@@ -245,6 +255,9 @@ pub async fn queue(
         now,
     )
     .await?;
+    if let Some(runtime) = original {
+        super::runtime_commands::capture(conn, job.id, runtime).await?;
+    }
     // An environment that is stopped and has no unit to start is made anew, so a make begins from
     // that too.
     let from: &[&str] = match mode {
@@ -258,6 +271,20 @@ pub async fn queue(
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
         Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
+    crate::environment_preparation::accepted_job(
+        conn,
+        environment.id,
+        environment.generation,
+        if mode == Mode::Start {
+            orch_api_contract::threads::EnvironmentPreparationKind::Start
+        } else {
+            orch_api_contract::threads::EnvironmentPreparationKind::Create
+        },
+        job.id,
+        now,
+    )
+    .await
+    .map_err(MakeError::Internal)?;
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
 }
@@ -318,11 +345,14 @@ pub struct SpecInputs<'a> {
     pub volumes: &'a Json,
 }
 
+/// The variable that gives the connector in a unit the identifier of the runtime the unit is of.
+pub const UNIT_VARIABLE: &str = "ORCH_RUNTIME_ID";
+
 /// The body of `node.runtime.create`, in the stored form: the token is the reference to the secret that
 /// holds it, which the link seals to the host's key when the command is written.
 #[must_use]
 pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
-    let env: BTreeMap<String, String> = inputs
+    let mut env: BTreeMap<String, String> = inputs
         .spec
         .get("env")
         .and_then(Json::as_object)
@@ -335,12 +365,15 @@ pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    // The connector in the unit keeps the state of its machine on a volume that outlives the unit: it
+    // tells its own state from that of an earlier unit by this.
+    env.insert(UNIT_VARIABLE.to_owned(), inputs.runtime.to_string());
     // A harness that runs beside the tools needs the connector in the unit to host agents as well.
     let beside = !orch_agent_programs::Programs::colocated_for(inputs.spec).is_empty();
     let roles: &[&str] = if beside {
-        &["environment", "agent"]
+        &["environment", "agent", "provider"]
     } else {
-        &["environment"]
+        &["environment", "provider"]
     };
     json!({
         "runtime_id": inputs.runtime,
@@ -433,6 +466,10 @@ impl Provision {
     }
 
     async fn placed(&self, job: &Job) -> Result<Placed, Stop> {
+        self.placed_for(job, false).await
+    }
+
+    async fn placed_for(&self, job: &Job, creating: bool) -> Result<Placed, Stop> {
         let plan = job.plan().await?;
         let mut conn = self
             .engine
@@ -454,12 +491,22 @@ impl Provision {
             .and_then(|id| id.parse::<Id>().ok());
         let runtime = match planned {
             Some(id) => env_rows::runtime(&mut conn, id).await?,
+            None if plan.get("runtime").is_some() => None,
             None => env_rows::live_runtime(&mut conn, environment.id).await?,
         }
         .ok_or_else(|| failed("runtime_gone", "the environment has no unit to work on"))?;
         let host = host_rows::host(&mut conn, runtime.host_id)
             .await?
             .ok_or_else(|| failed("no_host", "the host the unit is on is gone"))?;
+        super::runtime_commands::placement(
+            &mut conn,
+            job.id(),
+            runtime.id,
+            runtime.host_id,
+            host.machine_id,
+            creating,
+        )
+        .await?;
         if host.disabled || environment.status == "disabled" {
             return Err(failed(
                 "environment_unavailable",
@@ -684,6 +731,7 @@ impl Provision {
                 now,
             )
             .await?;
+        super::runtime_commands::capture(&mut tx, job.id(), runtime_id).await?;
         if let Some(recovery) = plan.get("recovery") {
             let mut volumes = recovery["volumes"].clone();
             volumes["state"] = json!({"name":format!("orch-state-{}-{}",environment.id,runtime_id.simple()),"storage":null});
@@ -718,6 +766,7 @@ impl Provision {
             &mut tx,
             job.id(),
             &json!({
+                "calculation": chosen.place.calculation,
                 "host": chosen.place.host.id,
                 "host_name": chosen.place.host.name,
                 "runtime": runtime_id,
@@ -1074,7 +1123,7 @@ impl Provision {
     // ------------------------------------------------------------ create, start
 
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
-        let placed = self.placed(job).await?;
+        let placed = self.placed_for(job, true).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
         let enrollment: Enrollment = if super::recreate::environment_authority::is_restricted(
@@ -1358,6 +1407,11 @@ impl Provision {
                     spec[field] = value.clone();
                 }
             }
+            // What was kept says which runtime the old unit was of; this unit is of its own, and its connector
+            // puts the machine of the old unit aside by that.
+            if let Some(env) = spec["env"].as_object_mut() {
+                env.insert(UNIT_VARIABLE.to_owned(), json!(placed.runtime.id));
+            }
         }
         // Runtime replacement keeps the exact command definition for later recreation.
         job.remember(&json!({ "created_spec": spec })).await?;
@@ -1390,9 +1444,30 @@ impl Provision {
             &NodeRuntimeCreate(serde_json::from_value(spec).map_err(EngineError::from)?),
         )
         .map_err(body_stop)?;
-        if let Err(stop) = job.command(made).await {
-            return Err(self.explain_creation(&plan, &placed, stop));
-        }
+        let (original, made) = super::runtime_commands::prepare_create(
+            &self.engine,
+            job.id(),
+            placed.runtime.id,
+            made,
+        )
+        .await?;
+        let created_command = made.id;
+        let created_result = job
+            .command(made)
+            .await
+            .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        let created_source = match original.as_ref() {
+            Some(original) => Some(
+                super::runtime_commands::created(
+                    &self.engine,
+                    original,
+                    created_command,
+                    &created_result,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         job.progress(0.5, Some("starting the unit")).await?;
         let started = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"create"]),
@@ -1403,9 +1478,28 @@ impl Provision {
             },
         )
         .map_err(body_stop)?;
-        job.command(started)
+        let started = match (original.as_ref(), created_source) {
+            (Some(original), Some(source)) => {
+                super::runtime_commands::prepare_start(&self.engine, original, source, started)
+                    .await?
+            }
+            _ => started,
+        };
+        let start_command = started.id;
+        let start_result = job
+            .command(started)
             .await
             .map_err(|stop| self.explain_creation(&plan, &placed, stop))?;
+        if let (Some(original), Some(source)) = (original.as_ref(), created_source) {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                source,
+                start_command,
+                &start_result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1475,23 +1569,15 @@ impl Provision {
                 .await?;
             }
         }
-        let mut conn = self
-            .engine
-            .inner
-            .db
-            .acquire()
-            .await
-            .map_err(EngineError::from)?;
-        env_rows::set_runtime_state(
-            &mut conn,
+        let original = super::runtime_commands::starting(
+            &self.engine,
+            job.id(),
             placed.runtime.id,
-            &[runtime_state::STOPPED, runtime_state::FAILED],
-            runtime_state::CREATING,
-            None,
+            placed.host.id,
+            placed.host.machine_id,
             job.now(),
         )
         .await?;
-        drop(conn);
         let command = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"start"]),
             placed.host.machine_id,
@@ -1501,9 +1587,33 @@ impl Provision {
             },
         )
         .map_err(body_stop)?;
-        job.command(command)
+        let command = match original.as_ref() {
+            Some(original) => {
+                super::runtime_commands::prepare_start(
+                    &self.engine,
+                    original,
+                    original.source(),
+                    command,
+                )
+                .await?
+            }
+            None => command,
+        };
+        let id = command.id;
+        let result = job
+            .command(command)
             .await
             .map_err(|stop| self.explain_creation(&json!({}), &placed, stop))?;
+        if let Some(original) = original.as_ref() {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                original.source(),
+                id,
+                &result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1738,6 +1848,15 @@ impl Provision {
         let current = env_rows::lock_environment(&mut tx, placed.environment.id)
             .await?
             .ok_or_else(|| failed("environment_gone", "the environment was removed"))?;
+        super::runtime_commands::placement(
+            &mut tx,
+            job.id(),
+            placed.runtime.id,
+            placed.runtime.host_id,
+            placed.host.machine_id,
+            false,
+        )
+        .await?;
         let up = env_rows::make_running(
             &mut tx,
             current.id,
@@ -1842,7 +1961,8 @@ impl Provision {
             )
             .await?;
         }
-        crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
+        let copy_released =
+            crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
         if self.mode == Mode::Make {
             crate::resource_facts::library::created(
                 &mut tx,
@@ -1887,6 +2007,9 @@ impl Provision {
             checked.check(self.engine.inner.clock.as_ref())?;
         }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released) = copy_released {
+            released.settle(&self.engine).await;
+        }
         Ok(Done::Finished)
     }
 
@@ -1914,11 +2037,12 @@ impl Provision {
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
         if let Ok(mut tx) = self.engine.db().begin().await
-            && crate::initial_files::release(&mut tx, job.id(), Time::new(job.now()))
-                .await
-                .is_ok()
+            && let Ok(released) =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await
+            && tx.commit().await.is_ok()
+            && let Some(released) = released
         {
-            let _ = tx.commit().await;
+            released.settle(&self.engine).await;
         }
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());
@@ -1951,7 +2075,12 @@ impl Provision {
         }
         let fresh = plan.get("fresh").and_then(Json::as_bool).unwrap_or(false);
         if left.is_empty() {
-            left.extend(crate::mount_copies::undo(job).await);
+            match crate::mount_copies::undo(job).await {
+                Ok(copies) => left.extend(copies),
+                Err(_) => {
+                    return Undone::Deferred(crate::mount_copies::CUSTODY_PENDING.into());
+                }
+            }
         }
         if (fresh || plan.get("recovery").is_some()) && left.is_empty() {
             for (role, volume) in placed.runtime.volumes.as_object().into_iter().flatten() {
@@ -2221,6 +2350,18 @@ impl Phased for Provision {
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        if let Ok(plan) = job.plan().await
+            && let Some(runtime) = plan
+                .get("runtime")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok())
+        {
+            match super::runtime_commands::undo_current(&self.engine, job.id(), runtime).await {
+                Ok(true) => {},
+                Ok(false) => return Undone::Partly("The original native unit or control changed; its unit and data were left unchanged.".into()),
+                Err(error) => return Undone::Deferred(format!("The original native unit could not be confirmed before cleanup: {error:?}")),
+            }
+        }
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted after-start outcome could not be recorded");
         }
@@ -2238,6 +2379,7 @@ impl Phased for Provision {
             "runtime": plan.get("runtime"),
             "host": plan.get("host"),
             "warnings": plan.get("warnings"),
+            "calculation": plan.get("calculation"),
         }))
     }
 }
@@ -2337,8 +2479,12 @@ mod tests {
             spec["enroll_token"],
             json!({ "$secret": enrollment.secret })
         );
-        assert_eq!(spec["roles"], json!(["environment"]));
-        assert_eq!(spec["env"], json!({ "A": "b" }), "only text is a variable");
+        assert_eq!(spec["roles"], json!(["environment", "provider"]));
+        assert_eq!(
+            spec["env"],
+            json!({ "A": "b", "ORCH_RUNTIME_ID": runtime }),
+            "only text is a variable, and the unit is told which runtime it is of"
+        );
         assert_eq!(spec["labels"]["orch.system"], "acme");
         assert_eq!(spec["labels"]["orch.kind"], "environment");
         assert!(

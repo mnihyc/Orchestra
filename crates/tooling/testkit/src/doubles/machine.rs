@@ -41,14 +41,18 @@ pub struct Execution {
     pub kind: CommandKind,
 }
 
-type Script = Box<dyn Fn(&Command) -> Result<CommandResult, CommandError> + Send + Sync>;
+type Script =
+    Box<dyn Fn(&CommandContext, &Command) -> Result<CommandResult, CommandError> + Send + Sync>;
+type Observation = Arc<dyn Fn(&Command) + Send + Sync>;
 
 /// What answers the commands of a scripted machine.
 #[derive(Default)]
 pub struct ScriptedHandler {
+    observation: Mutex<Option<Observation>>,
     executions: Mutex<Vec<Execution>>,
     scripts: Mutex<HashMap<CommandKind, Script>>,
     hold: Mutex<Vec<CommandKind>>,
+    hold_results: Mutex<Vec<CommandKind>>,
     started: Notify,
     release: Notify,
     take: Mutex<Duration>,
@@ -61,11 +65,27 @@ impl std::fmt::Debug for ScriptedHandler {
 }
 
 impl ScriptedHandler {
+    /// Observes the actual handler after its deliberate waits, independently of its chosen responder.
+    pub fn observe(&self, observation: impl Fn(&Command) + Send + Sync + 'static) {
+        *lock(&self.observation) = Some(Arc::new(observation));
+    }
     /// Answers commands of `kind` with what `script` makes of them.
     pub fn on(
         &self,
         kind: CommandKind,
         script: impl Fn(&Command) -> Result<CommandResult, CommandError> + Send + Sync + 'static,
+    ) {
+        self.on_with_context(kind, move |_, command| script(command));
+    }
+
+    /// A scripted native producer receives the immutable target of its actual admitted command.
+    pub fn on_with_context(
+        &self,
+        kind: CommandKind,
+        script: impl Fn(&CommandContext, &Command) -> Result<CommandResult, CommandError>
+        + Send
+        + Sync
+        + 'static,
     ) {
         lock(&self.scripts).insert(kind, Box::new(script));
     }
@@ -75,9 +95,23 @@ impl ScriptedHandler {
         lock(&self.hold).push(kind);
     }
 
-    /// Lets the commands that wait go on.
+    /// Hold the outcome only after its script ran, so a case can distinguish a
+    /// completed native effect from the still-unreceived original reply.
+    pub fn hold_result(&self, kind: CommandKind) {
+        lock(&self.hold_results).push(kind);
+    }
+
+    /// Lets the commands and already-produced replies that wait go on.
     pub fn release(&self) {
         lock(&self.hold).clear();
+        lock(&self.hold_results).clear();
+        self.release.notify_waiters();
+    }
+
+    /// Releases one actual handler kind while retaining the fixture's other deliberate waits.
+    pub fn release_kind(&self, kind: CommandKind) {
+        lock(&self.hold).retain(|held| *held != kind);
+        lock(&self.hold_results).retain(|held| *held != kind);
         self.release.notify_waiters();
     }
 
@@ -142,11 +176,30 @@ impl CommandHandler for ScriptedHandler {
         if !take.is_zero() {
             tokio::time::sleep(take).await;
         }
-        let scripts = lock(&self.scripts);
-        match scripts.get(&kind) {
-            Some(script) => script(&command),
-            None => default_result(&command),
+        let observation = lock(&self.observation).clone();
+        if let Some(observation) = observation {
+            observation(&command);
         }
+        let outcome = {
+            let scripts = lock(&self.scripts);
+            match scripts.get(&kind) {
+                Some(script) => script(&context, &command),
+                None => default_result(&command),
+            }
+        };
+        loop {
+            let released = self.release.notified();
+            if !lock(&self.hold_results).contains(&kind) {
+                break;
+            }
+            tokio::select! {
+                () = released => {},
+                // Cancellation releases fixture ownership without denying the
+                // effect that its script already performed.
+                () = context.cancel.cancelled() => break,
+            }
+        }
+        outcome
     }
 }
 
@@ -314,8 +367,18 @@ impl ScriptedMachine {
 
     /// Publishes an event.
     pub async fn publish(&self, stream: &Stream, event: &Event) {
+        self.publish_from(None, stream, event).await;
+    }
+
+    /// Publishes the physical producer already captured by the fixture's observation source.
+    pub async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: &Stream,
+        event: &Event,
+    ) {
         self.link
-            .publish(stream, event)
+            .publish_from_now(native_opening_id, stream, event)
             .await
             .unwrap_or_else(|error| panic!("an event could not be published: {error}"));
     }

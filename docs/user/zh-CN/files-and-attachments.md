@@ -1,21 +1,21 @@
 ---
 title: 文件和附件
 screens: /thread/$threadId, /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /doc/$documentId, /workbench, /search, /inbox, /resources/environments/$id, /inspect/$kind/$id
-keywords: 文件, 附件, 图片, 照片, PDF, 音频, 视频, 预览, 标签, 卡片, 显示为, 小, 中, 大, 下载, 引用, 代理, files, attachments
+keywords: 文件, 附件, 图片, 照片, PDF, 音频, 视频, 预览, 标签, 卡片, 显示为, 小, 中, 大, 下载, 引用, 代理, files, attachments, 智能体
 heading_id.预览和标签大小: previews-and-chip-sizes
 heading_id.打开和下载: open-and-download
-heading_id.交给代理的文件: files-for-an-agent
+heading_id.交给智能体的文件: files-for-an-agent
 heading_id.预览状态: preview-states
 heading_keywords.previews-and-chip-sizes: 缩略图, 显示为, 小, 中, 大, 右键, 菜单键, 长按, 文档, 工作台
 heading_keywords.open-and-download: 查看器, 图片, PDF, 音频, 视频, 代码, Markdown, 压缩包, 原文件, 减少动态效果
 heading_keywords.files-for-an-agent: 模型, 原生图片, 路径, 大小, 共享文档, download_shared
-heading_keywords.preview-states: 加载, 无法预览, 已不存在, 私密, 过大
-summary: 预览文件、选择附件显示方式，并查看代理实际收到的内容。
+heading_keywords.preview-states: 加载, 无法预览, 已不存在, 私密, 过大, 私有
+summary: 预览文件、选择附件显示方式，并查看智能体实际收到的内容。
 ---
 
 # 文件和附件
 
-消息、代理工具、文档、文件面板、搜索和收件箱使用同一种文件标签和卡片。
+消息、智能体工具、文档、文件面板、搜索和收件箱使用同一种文件标签和卡片。
 悬停、聚焦或点击标签即可打开卡片。能够预览的图片会显示小缩略图。
 在文件面板中，点击名称会打开常用的代码视图；悬停或聚焦名称仍可查看卡片。
 
@@ -55,15 +55,15 @@ summary: 预览文件、选择附件显示方式，并查看代理实际收到�
 **复制引用**取得可以粘贴到消息或文档中的链接。工作区引用可以包含选中的行号。
 尚未保存引用、也没有接收路径的草稿或工具产物，会说明为什么不能复制引用。
 
-## 交给代理的文件
+## 交给智能体的文件
 
-在输入框中添加附件并发送消息。模型和代理工具都支持图片，且图片不超过配置的原生图片额度时，模型会直接收到图片。
-图片也会写入线程目录。其他文件以经过检查的工作区路径、类型和大小交给代理。
+在输入框中添加附件并发送消息。模型和智能体工具都支持图片，且图片不超过配置的原生图片额度时，模型会直接收到图片。
+图片也会写入会话目录。其他文件以经过检查的工作区路径、类型和大小交给智能体。
 
-**此模型将以文件形式接收图片**表示代理将通过路径取得图片。你仍可发送，也可更换模型。
+**此模型将以文件形式接收图片**表示智能体将通过路径取得图片。你仍可发送，也可更换模型。
 如果文件实际投递失败，输入会被留住，并说明哪个文件失败以及原因。
 
-共享文档中的文件仍然是文件引用。代理可通过 `download_shared` 取得原文件。
+共享文档中的文件仍然是文件引用。智能体可通过 `download_shared` 取得原文件。
 转发，以及分叉、切换、移动或导出中选定的文件，都携带原文件，而不是缩略图。操作计划和当前访问权限仍然适用。
 
 ## 预览状态

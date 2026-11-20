@@ -51,6 +51,7 @@ async fn claude_model_and_live_hook_states_audit_once_through_the_shared_native_
                 &world,
                 1,
                 &Event::SessionOpened(SessionOpened {
+                    opening_id: world.opening_of(thread).await,
                     native_session_ref: "claude-audit".into(),
                     resumed: false,
                 }),
