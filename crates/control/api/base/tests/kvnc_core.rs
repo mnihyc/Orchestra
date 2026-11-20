@@ -30,7 +30,10 @@ async fn an_environment_without_a_machine_lists_displays_offline_without_issuing
         .app
         .call(EnvironmentDisplayList, &[&scene.on.environment])
         .token(&scene.ada.token)
-        .query(&EnvironmentDisplayListQuery { look: Some(true) })
+        .query(&EnvironmentDisplayListQuery {
+            look: Some(true),
+            ..Default::default()
+        })
         .send()
         .await
         .ok();
@@ -262,7 +265,10 @@ async fn forgetting_an_announced_display_leaves_its_original_real_server_running
         .app
         .call(EnvironmentDisplayList, &[&floor.environment])
         .token(&floor.scene.ada.token)
-        .query(&EnvironmentDisplayListQuery { look: Some(true) })
+        .query(&EnvironmentDisplayListQuery {
+            look: Some(true),
+            ..Default::default()
+        })
         .send()
         .await
         .ok();
@@ -642,4 +648,48 @@ async fn an_owned_screen_reuses_its_original_endpoint_and_x_display_after_regist
     let mut screen =
         displays_support::Screen::attach(&floor, &floor.scene.ada, display.id, false).await;
     screen.picture_without_clipboard().await;
+}
+
+#[tokio::test]
+async fn retained_closed_displays_are_paged_and_searched_without_contacting_an_offline_environment()
+{
+    let s = rig::Scene::new().await;
+    s.rig.engine.stop();
+    s.rig.world.set("vnc.enabled", json!(true)).await;
+    let now = s.rig.world.now();
+    let id = orch_types::new_id();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    sqlx::query("UPDATE environments SET vnc=true,status='offline' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO display_sessions(id,environment_id,env_generation,name,origin,endpoint,state,close_reason,opened_at,last_used_at,closed_at) SELECT $1,id,generation,'Retained screen','announced','','closed','environment_stopped',$3,$3,$3 FROM environments WHERE id=$2")
+        .bind(id).bind(s.on.environment).bind(now-chrono::Duration::days(2)).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let before = s.rig.commands.issued_of("screen.look");
+    let query: EnvironmentDisplayListQuery =
+        serde_json::from_value(json!({"closed":true,"query":"Retained"})).unwrap();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentDisplayList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.displays.len(), 1);
+    assert_eq!(page.displays[0].id, id);
+    let receipt = serde_json::to_value(&page.displays[0]).unwrap();
+    assert_eq!(
+        receipt["lifecycle"]["idle_close_eligible_at"]["state"], "not_applicable",
+        "displays do not borrow the browser idle policy"
+    );
+    assert_eq!(
+        receipt["lifecycle"]["retirement_reason"],
+        "environment_stopped"
+    );
+    assert_eq!(s.rig.commands.issued_of("screen.look"), before);
 }

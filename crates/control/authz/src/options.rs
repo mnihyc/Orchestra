@@ -1,4 +1,4 @@
-//! The options an entry carries: models, efforts, arrangement types and the places work may run in on a provider, and the limits of a host and of a template; what a person's entries allow.
+//! The options an entry carries: purposes, models, efforts, arrangement types and the places work may run in on a provider, and the limits of a host and of a template; what a person's entries allow.
 //!
 //! An entry in the Use row of a provider, a host or a template says what its holder may do with it,
 //! and nothing else takes options. A person is let in by several entries at once (their own, a
@@ -18,7 +18,8 @@
 
 use orch_access_contract::pages::{Entry, Holder};
 use orch_access_contract::permissions::{
-    Arrangement, HostUse, Options, Permission, ProviderUse, TemplateUse,
+    Arrangement, FileAccess, FileReach, HostUse, Options, Permission, ProviderUse,
+    ProviderUsePurpose, TemplateUse, UsagePurpose,
 };
 use orch_access_contract::whereabouts::Whereabouts;
 use orch_agent_contract::discovery::ModelPattern;
@@ -32,9 +33,15 @@ use crate::Error;
 #[must_use]
 pub fn unlimited(permission: Permission) -> Options {
     match permission {
-        Permission::ProviderUse => Options::ProviderUse(ProviderUse::default()),
+        Permission::ProviderUse | Permission::ProviderRelay => Options::ProviderUse(ProviderUse::default()),
+        Permission::PoolUse => {
+            Options::PoolUse(Box::new(orch_access_contract::pools::PoolUse::unlimited()))
+        }
         Permission::HostUse => Options::HostUse(HostUse::default()),
         Permission::TemplateUse => Options::TemplateUse(TemplateUse::default()),
+        Permission::FilesView | Permission::FilesManage => Options::Files(FileAccess {
+            reach: FileReach::Machine,
+        }),
         _ => Options::None,
     }
 }
@@ -63,10 +70,14 @@ pub fn either(one: &Options, other: &Options) -> Options {
         (Options::ProviderUse(one), Options::ProviderUse(other)) => {
             Options::ProviderUse(one.or(other))
         }
+        (Options::PoolUse(one), Options::PoolUse(other)) => {
+            Options::PoolUse(Box::new(one.or(other)))
+        }
         (Options::HostUse(one), Options::HostUse(other)) => Options::HostUse(one.or(other)),
         (Options::TemplateUse(one), Options::TemplateUse(other)) => {
             Options::TemplateUse(one.or(other))
         }
+        (Options::Files(one), Options::Files(other)) => Options::Files(one.or(other)),
         (one, _) => one.clone(),
     }
 }
@@ -97,10 +108,12 @@ pub fn of_provider(options: &Options) -> ProviderUse {
     }
 }
 
-/// What a person wants to do through a provider, as far as it is known. What is not known does not
-/// narrow: a question that carries no model asks about the entries that allow the place, and so on.
+/// What a person wants to do through a provider, with its actual purpose. Other details not yet known
+/// do not narrow: a question that carries no model asks about the entries that allow the place.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Wanted<'a> {
+    /// The actual work being admitted; a thread choice asks for ordinary turns.
+    pub purpose: UsagePurpose,
     /// The model, as the provider names it, with the groups of the provider's models it is in.
     pub model: Option<(&'a str, &'a [String])>,
     /// The reasoning effort.
@@ -119,9 +132,20 @@ pub struct Wanted<'a> {
 /// allowed is what a single entry allows, never what several allow member by member.
 #[must_use]
 pub fn entry_allows(options: &ProviderUse, wanted: &Wanted<'_>) -> bool {
-    wanted
-        .model
-        .is_none_or(|(model, groups)| allows_model(options, model, groups))
+    entry_allows_for(options, wanted, wanted.purpose.grant())
+}
+
+/// One entry must allow the requested use and all its model, effort, service and place limits together.
+#[must_use]
+pub fn entry_allows_for(
+    options: &ProviderUse,
+    wanted: &Wanted<'_>,
+    purpose: ProviderUsePurpose,
+) -> bool {
+    options.allows_purpose(purpose)
+        && wanted
+            .model
+            .is_none_or(|(model, groups)| allows_model(options, model, groups))
         && wanted.service.is_none_or(|(service, groups)| {
             options
                 .services
@@ -522,6 +546,135 @@ mod tests {
         }
     }
 
+    #[test]
+    fn other_work_allows_a_shared_threads_turns_and_every_paid_helper() {
+        use orch_access_contract::permissions::UsagePurpose;
+        let shared = provider_use(serde_json::json!({"purposes":["work"],"models":["shared"]}));
+        for purpose in [
+            UsagePurpose::Turn,
+            UsagePurpose::Summary,
+            UsagePurpose::Review,
+            UsagePurpose::Embeddings,
+            UsagePurpose::WebSearch,
+            UsagePurpose::PageFetch,
+            UsagePurpose::ImageGeneration,
+        ] {
+            assert!(
+                entry_allows(
+                    &shared,
+                    &Wanted {
+                        purpose,
+                        ..in_model("shared")
+                    }
+                ),
+                "{purpose}"
+            );
+        }
+        assert!(!entry_allows(
+            &shared,
+            &Wanted {
+                purpose: UsagePurpose::Ask,
+                ..in_model("shared")
+            }
+        ));
+    }
+
+    #[test]
+    fn an_ask_only_entry_serves_ask_and_never_combines_its_model_with_another_purpose() {
+        use orch_access_contract::permissions::UsagePurpose;
+        let entries = [
+            provider_use(serde_json::json!({"models":["shared"],"purposes":["ask"]})),
+            provider_use(serde_json::json!({"models":["private"],"purposes":["work"]})),
+        ];
+        assert!(one_allows(
+            &entries,
+            &Wanted {
+                purpose: UsagePurpose::Ask,
+                ..in_model("shared")
+            }
+        ));
+        assert!(!one_allows(&entries, &in_model("shared")));
+        assert!(!one_allows(
+            &entries,
+            &Wanted {
+                purpose: UsagePurpose::Ask,
+                ..in_model("private")
+            }
+        ));
+        assert!(one_allows(&entries, &in_model("private")));
+        assert!(one_allows(
+            &[ProviderUse::default()],
+            &Wanted {
+                purpose: UsagePurpose::Ask,
+                ..in_model("shared")
+            }
+        ));
+        assert!(entries[0].within(&ProviderUse::default()));
+        assert!(!ProviderUse::default().within(&entries[0]));
+        for purpose in UsagePurpose::ALL {
+            let one = provider_use(serde_json::json!({"purposes":[purpose.grant()]}));
+            for requested in UsagePurpose::ALL {
+                assert_eq!(
+                    entry_allows(
+                        &one,
+                        &Wanted {
+                            purpose: *requested,
+                            ..Wanted::default()
+                        }
+                    ),
+                    purpose.grant() == requested.grant(),
+                    "each paid purpose keeps its Ask or work grant boundary"
+                );
+            }
+        }
+        let empty = provider_use(serde_json::json!({"purposes":[]}));
+        assert!(UsagePurpose::ALL.iter().all(|purpose| !entry_allows(
+            &empty,
+            &Wanted {
+                purpose: *purpose,
+                ..Wanted::default()
+            }
+        )));
+    }
+
+    #[test]
+    fn an_ask_only_entry_does_not_authorize_an_ordinary_model_request() {
+        let ask_only =
+            provider_use(serde_json::json!({"purposes":["ask"],"models":["allowed-model"]}));
+        assert!(!entry_allows(&ask_only, &in_model("allowed-model")));
+        assert!(!entry_allows(&ask_only, &in_model("another-model")));
+        assert!(entry_allows_for(
+            &ask_only,
+            &in_model("allowed-model"),
+            ProviderUsePurpose::Ask
+        ));
+        assert!(!entry_allows_for(
+            &ask_only,
+            &in_model("another-model"),
+            ProviderUsePurpose::Ask
+        ));
+    }
+
+    #[test]
+    fn a_model_and_a_purpose_from_different_entries_do_not_form_a_wider_grant() {
+        let entries = [
+            provider_use(json!({"purposes":["ask"],"models":["ask-model"]})),
+            provider_use(json!({"purposes":["work"],"models":["work-model"]})),
+        ];
+        assert!(entries.iter().any(|entry| entry_allows_for(
+            entry,
+            &in_model("ask-model"),
+            ProviderUsePurpose::Ask
+        )));
+        assert!(!entries.iter().any(|entry| entry_allows_for(
+            entry,
+            &in_model("work-model"),
+            ProviderUsePurpose::Ask
+        )));
+        assert!(!one_allows(&entries, &in_model("ask-model")));
+        assert!(one_allows(&entries, &in_model("work-model")));
+    }
+
     fn at(environment: Id) -> Whereabouts {
         Whereabouts {
             environment: Some(environment),
@@ -546,6 +699,34 @@ mod tests {
             };
             assert!(one_allows(&entries, &wanted), "anywhere");
         }
+    }
+
+    #[test]
+    fn an_ask_only_entry_cannot_be_combined_with_another_models_work_grant() {
+        let entries = [
+            provider_use(json!({"models":["small"],"purposes":["ask"]})),
+            provider_use(json!({"models":["big"],"purposes":["work"]})),
+        ];
+        let ask_allows = |wanted: &Wanted<'_>| {
+            entries
+                .iter()
+                .any(|entry| entry_allows_for(entry, wanted, ProviderUsePurpose::Ask))
+        };
+        assert!(ask_allows(&in_model("small")));
+        assert!(
+            !one_allows(&entries, &in_model("small")),
+            "ordinary work cannot borrow Ask permission"
+        );
+        assert!(
+            !ask_allows(&in_model("big")),
+            "the model and use belong to one grant"
+        );
+        assert!(one_allows(&entries, &in_model("big")));
+        assert!(entry_allows_for(
+            &ProviderUse::unlimited(),
+            &in_model("small"),
+            ProviderUsePurpose::Ask
+        ));
     }
 
     #[test]

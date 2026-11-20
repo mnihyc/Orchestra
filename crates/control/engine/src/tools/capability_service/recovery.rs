@@ -75,7 +75,7 @@ fn candidate_selection(
     sources: &BuiltinSources,
     capability: &str,
     root: &selection::Selection,
-    candidate: &orch_provider_contract::calls::Candidate,
+    candidate: &crate::calls::SelectedCandidate,
 ) -> Option<selection::Selection> {
     if candidate.agent_id.is_some()
         || candidate.dimensions.is_some()
@@ -131,6 +131,146 @@ fn candidate_selection(
         executor: selected.executor,
         ..root.clone()
     })
+}
+
+/// Current native metadata and complete Use for a prospective recovery leaf. The real origin,
+/// input quantities, deadlines and command fence are checked again by the existing executor.
+pub(crate) async fn recovery_candidate_reason(
+    engine: &Engine,
+    conn: &mut Conn,
+    node: Id,
+    purpose: Purpose,
+    callers: &[Caller],
+    candidate: &crate::calls::SelectedCandidate,
+    membership: (
+        &orch_provider_contract::pools::Leaf,
+        &[crate::resource_choice::Hop],
+    ),
+) -> Result<Option<String>, EngineError> {
+    let Some(capability) = purpose.capability() else {
+        return Ok(Some("candidate_purpose".into()));
+    };
+    let sources = engine
+        .inner
+        .capability_services
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(sources) = sources else {
+        return Ok(Some("candidate_unavailable".into()));
+    };
+    let Some(root) = selection::load(
+        conn,
+        node,
+        sources.capabilities().declarations(),
+        capability,
+    )
+    .await?
+    else {
+        return Ok(Some("candidate_purpose".into()));
+    };
+    let Some(selected) = candidate_selection(&sources, capability, &root, candidate) else {
+        return Ok(Some("candidate_parameters".into()));
+    };
+    let Some(offering) = selected.offering() else {
+        return Ok(Some("candidate_unavailable".into()));
+    };
+    let Some(provider) = resources::routes::providers(conn, &[offering.provider])
+        .await?
+        .into_iter()
+        .find(|provider| crate::providers::request_status_available(&provider.status))
+    else {
+        return Ok(Some("candidate_unavailable".into()));
+    };
+    let available = match selected.executor.as_str() {
+        "model-backed" => {
+            let model =
+                resources::thread_engine::model(conn, offering.provider, &offering.offering)
+                    .await?;
+            match model {
+                Some(model) => model::available(&sources, &provider.upstreams, &model, capability)?,
+                None => false,
+            }
+        }
+        "program-session" => {
+            delegation::native_available(
+                conn,
+                &sources,
+                offering.provider,
+                &offering.offering,
+                capability,
+            )
+            .await?
+        }
+        "api-backed" => serde_json::from_value::<BTreeMap<String, ServiceConfig>>(
+            provider.service_offerings.clone(),
+        )?
+        .get(&offering.offering)
+        .is_some_and(|config| config.enabled),
+        _ => false,
+    };
+    if !available {
+        return Ok(Some("candidate_unavailable".into()));
+    }
+    for caller in callers {
+        let pool = crate::resource_choice::ProviderSelection::prospective(
+            membership.0,
+            membership.1,
+            crate::calls::provider_purpose(purpose),
+            caller,
+        );
+        let allowed = if selected.executor == "api-backed" {
+            let config = serde_json::from_value::<BTreeMap<String, ServiceConfig>>(
+                provider.service_offerings.clone(),
+            )?
+            .remove(&offering.offering)
+            .ok_or(EngineError::StaleToolSource)?;
+            service_use(
+                conn,
+                caller,
+                &ServiceUse {
+                    purpose: crate::access::provider_purpose(purpose),
+                    place: node,
+                    provider: offering.provider,
+                    offering: &offering.offering,
+                    groups: config.groups.as_deref().unwrap_or_default(),
+                    pool: pool.as_ref(),
+                    in_thread: true,
+                },
+                engine.inner.clock.as_ref(),
+            )
+            .await?
+            .is_some()
+        } else {
+            let Some(model) =
+                resources::thread_engine::model(conn, offering.provider, &offering.offering)
+                    .await?
+            else {
+                return Ok(Some("candidate_unavailable".into()));
+            };
+            model::offering_use(
+                conn,
+                caller,
+                &model::ModelUse {
+                    purpose: crate::access::provider_purpose(purpose),
+                    place: node,
+                    provider: offering.provider,
+                    offering: &offering.offering,
+                    groups: &model.groups,
+                    effort: None,
+                    pool: pool.as_ref(),
+                    in_thread: purpose != Purpose::Summary,
+                },
+                engine.inner.clock.as_ref(),
+            )
+            .await?
+            .is_some()
+        };
+        if !allowed {
+            return Ok(Some("candidate_not_allowed".into()));
+        }
+    }
+    Ok(None)
 }
 
 fn pause_reason(
@@ -279,6 +419,50 @@ pub(super) async fn execute(
                     call: command,
                     candidate,
                 } => {
+                    let candidate = if let Some(intent) = candidate {
+                        let origins = source::original_callers(
+                            &mut tx,
+                            call,
+                            engine.inner.clock.as_ref(),
+                            engine.inner.access.as_ref(),
+                        )
+                        .await?;
+                        let resolved = engine
+                            .resolve_recovery_candidate(
+                                &mut tx,
+                                &crate::calls::DestinationRequest {
+                                    node: call.thread,
+                                    purpose,
+                                    root,
+                                    attempt: command,
+                                    retained_route: Some(configured.reference.clone()),
+                                },
+                                origins.callers(),
+                                &intent,
+                                configured_model,
+                            )
+                            .await?;
+                        match resolved.selected {
+                            Some(candidate) => Some(Box::new(candidate)),
+                            None => {
+                                let row =
+                                    crate::calls::read_root(&mut tx, call.thread, purpose, root)
+                                        .await?
+                                        .ok_or(EngineError::StaleToolSource)?;
+                                crate::calls::skip_step(
+                                    &mut tx,
+                                    &row,
+                                    &resolved.reason,
+                                    engine.inner.clock.now(),
+                                )
+                                .await?;
+                                tx.commit().await.map_err(orch_db::DbError::from)?;
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let selected = match candidate.as_ref() {
                         Some(candidate) => {
                             match candidate_selection(sources, capability, &configured, candidate) {

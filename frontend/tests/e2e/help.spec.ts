@@ -125,7 +125,7 @@ test('the finder keeps explicit mode controls after reload and resetting closed 
   await page.keyboard.press('Escape');
 
   await page.keyboard.press('F1');
-  await helpView(page).getByRole('button', { name: 'Show closed tips again' }).click();
+  await helpView(page).getByRole('button', { name: 'Show closed hints again' }).click();
   await page.keyboard.press('Control+k');
   await expect(tip).toHaveCount(0);
   await expect(page.getByRole('dialog', { name: 'Find' }).getByRole('group', { name: 'Keep the finder to' }).getByRole('button', { name: 'Commands', exact: true })).toBeVisible();
