@@ -490,7 +490,7 @@ async fn locks(conn: &mut Conn, input: &Input, value: &Value) -> Result<(), Erro
         .iter()
         .map(|(id, _)| *id)
         .collect::<Vec<_>>();
-    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE")
         .bind(machines)
         .fetch_all(&mut *conn)
         .await
@@ -1046,6 +1046,7 @@ impl Command {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

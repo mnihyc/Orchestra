@@ -364,6 +364,42 @@ fn release_with_builds() -> (tempfile::TempDir, ServerConfig) {
     (directory, config)
 }
 
+#[tokio::test]
+async fn a_shipped_build_can_run_its_native_checks_without_a_channel_read_or_an_admin_copy() {
+    use orch_api_contract::admin::HarnessBuildStatus;
+    use orch_api_contract::program_admin::AdminProgramBuildCheck;
+    let (_release, config) = release_with_builds();
+    let world = World::with(config).await;
+    let people = cast(&world).await;
+    let accepted = world
+        .app
+        .call(AdminProgramBuildCheck, &[&"codex", &"1.0.0"])
+        .token(&people.root.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(accepted.queued, 1);
+    for _ in 0..400 {
+        let rows = builds(&world, &people.root).await;
+        let held = rows.iter().find(|build| build.version == "1.0.0").unwrap();
+        if let Some(check) = &held.check
+            && held.status != HarnessBuildStatus::Checking
+        {
+            assert_eq!(held.source, HarnessBuildSource::Release);
+            assert_eq!(held.status, HarnessBuildStatus::Untested);
+            assert!(
+                check
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("no host"))
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the check result never reached the shipped build");
+}
+
 fn versions(all: &[HarnessBuild]) -> Vec<(&str, HarnessBuildSource, bool)> {
     all.iter()
         .map(|each| (each.version.as_str(), each.source, each.is_default))

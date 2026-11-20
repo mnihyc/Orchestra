@@ -386,6 +386,28 @@ async fn a_change_against_an_old_revision_is_refused_with_what_the_profile_is_no
     let c = company(&world).await;
     let made = make(&world, &c.boss, c.acme, "Main").await;
     let id = made.base.id;
+    let declaration = json!({"kind":"codex","adapter_version":1,
+        "harness":{"name":"Codex","version":"2.0","supported_range":"*","status":"supported"},"arrangements":[]});
+    serde_json::from_value::<orch_agent_contract::descriptor::AgentDescriptor>(declaration.clone())
+        .unwrap();
+    sqlx::query("UPDATE agents SET descriptor=$2,updated_at=$3 WHERE id=$1")
+        .bind(id)
+        .bind(declaration)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let refreshed = world
+        .app
+        .call(AgentGet, &[&id])
+        .token(&c.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        refreshed.revision, made.revision,
+        "a learned descriptor leaves the pending configuration edit current"
+    );
     let rename = |name: &str, revision: i64| AgentUpdateBody {
         name: Some(name.to_owned()),
         profile: None,
