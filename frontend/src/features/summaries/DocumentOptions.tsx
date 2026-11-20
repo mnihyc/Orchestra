@@ -6,7 +6,7 @@ import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import { documentSummaryOptionsKey, documentSummaryOptionsQuery, setDocumentSummaryOptions, summaryReaderKey } from '@/api/summaries';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
-import { shapeOf } from '@/features/settings/settingsModel';
+import { shapeOf, words } from '@/features/settings/settingsModel';
 import { settingFieldName } from '@/features/settings/settingText';
 import { ValueControl } from '@/features/settings/ValueControl';
 import type { SummaryTargetOptions } from '@/generated/api-types';
@@ -70,6 +70,7 @@ function Options({ documentId, reader, onOpenChange }: { documentId: string; rea
             <SettingChoiceContext.Provider value="summary.targets">
               <ValueControl shape={shape} value={value} label={t('summaryOptions.document.title')} hideLabel
                 memberLabel={(name) => settingFieldName(name, 'summary.targets', t)} disabled={!writable || write.isPending}
+                say={(word) => word === 'on' ? t('settingsEditors.targets.automaticOn') : word === 'off' ? t('settingsEditors.targets.automaticOff') : words(word)}
                 onChange={(next) => setDraft(next as SummaryTargetOptions)} />
             </SettingChoiceContext.Provider>
             {write.isError && <ErrorAlert error={write.error} action={next} />}

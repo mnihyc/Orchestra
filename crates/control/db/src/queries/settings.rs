@@ -88,6 +88,71 @@ pub async fn rows_on_chain(
     nodes: &[Id],
     keys: Option<&[String]>,
 ) -> Result<Vec<SettingRow>, DbError> {
+    // A complete settings panel already has all the stored keys at these places.
+    // A narrow read on its own continues to ask SQL for only the requested keys.
+    if let Some(Some(found)) = super::snapshot::with(conn, |rows| {
+        let places: std::collections::BTreeSet<_> = std::iter::once(None)
+            .chain(nodes.iter().copied().map(Some))
+            .collect();
+        let mut found = Vec::new();
+        for place in places {
+            let stored = rows.all_settings.get(&place)?;
+            found.extend(
+                stored
+                    .iter()
+                    .filter(|row| keys.is_none_or(|keys| keys.contains(&row.key)))
+                    .cloned(),
+            );
+        }
+        Some(found)
+    }) {
+        return Ok(found);
+    }
+    if let Some(keys) = keys {
+        let chain = super::snapshot::with(conn, |_| {
+            let mut chain = nodes.to_vec();
+            chain.sort_unstable();
+            chain.dedup();
+            chain
+        });
+        if let Some(chain) = chain {
+            let places = chain.clone();
+            return super::snapshot::matching(
+                conn,
+                keys,
+                move |rows| rows.selected_settings.entry(chain.clone()).or_default(),
+                |row| row.key.clone(),
+                move |conn, missing| {
+                    Box::pin(
+                        async move { select_rows_on_chain(conn, &places, Some(missing)).await },
+                    )
+                },
+            )
+            .await;
+        }
+    }
+    let selected = select_rows_on_chain(conn, nodes, keys).await?;
+    if keys.is_none() {
+        let _ = super::snapshot::with(conn, |rows| {
+            for place in std::iter::once(None).chain(nodes.iter().copied().map(Some)) {
+                rows.all_settings.insert(place, Vec::new());
+            }
+            for row in &selected {
+                rows.all_settings
+                    .entry(row.node_id)
+                    .or_default()
+                    .push(row.clone());
+            }
+        });
+    }
+    Ok(selected)
+}
+
+async fn select_rows_on_chain(
+    conn: &mut Conn,
+    nodes: &[Id],
+    keys: Option<&[String]>,
+) -> Result<Vec<SettingRow>, DbError> {
     Ok(sqlx::query_as(concat!(
         "SELECT ",
         setting_columns!(),
@@ -541,16 +606,55 @@ pub async fn thread_environment(
     conn: &mut Conn,
     thread: Id,
 ) -> Result<Option<ThreadEnvironment>, DbError> {
-    Ok(sqlx::query_as(
-        "SELECT e.id AS environment_id, e.placement, t.spec AS template_spec
-           FROM threads th
-           JOIN environments e ON e.id = th.environment_id
-           LEFT JOIN env_templates t ON t.id = e.template_id
-          WHERE th.node_id = $1",
+    Ok(thread_environments(conn, &[thread])
+        .await?
+        .pop()
+        .map(|(_, row)| row))
+}
+
+/// The same native environment defaults for a page of threads.
+pub async fn thread_environments(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<Vec<(Id, ThreadEnvironment)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        threads,
+        |rows| &mut rows.environments,
+        |row| row.0,
+        |conn, ids| Box::pin(load_thread_environments(conn, ids)),
     )
-    .bind(thread)
-    .fetch_optional(conn)
-    .await?)
+    .await
+}
+
+async fn load_thread_environments(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<Vec<(Id, ThreadEnvironment)>, DbError> {
+    if threads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(Id, Id, String, Option<Json>)> = sqlx::query_as(
+        "SELECT th.node_id,e.id,e.placement,t.spec FROM threads th
+         JOIN environments e ON e.id=th.environment_id
+         LEFT JOIN env_templates t ON t.id=e.template_id WHERE th.node_id=ANY($1)",
+    )
+    .bind(threads)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(thread, environment_id, placement, template_spec)| {
+            (
+                thread,
+                ThreadEnvironment {
+                    environment_id,
+                    placement,
+                    template_spec,
+                },
+            )
+        })
+        .collect())
 }
 
 /// What the machine a connected environment is registered on lets an exec
@@ -583,6 +687,11 @@ pub async fn thread_model_parameters(
     thread: Id,
     model: &str,
 ) -> Result<Option<Json>, DbError> {
+    if let Some(Some(value)) = super::snapshot::with(conn, |rows| {
+        rows.model_parameters.get(&thread)?.get(model).cloned()
+    }) {
+        return Ok(value);
+    }
     let row: Option<(Json, Vec<String>, Json)> = sqlx::query_as(
         "SELECT pm.parameters, pm.groups, provider_option_layers(pm.provider_id, pm.groups)
            FROM threads th
@@ -591,20 +700,70 @@ pub async fn thread_model_parameters(
     )
     .bind(thread)
     .bind(model)
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    row.map(|(parameters, groups, layers)| {
-        let value = orch_provider_contract::models::composed_model_parameters(
-            &parameters,
-            &groups,
-            &layers,
-            None,
-        )
-        .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
-        serde_json::to_value(value)
-            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
-    })
-    .transpose()
+    let value = row
+        .map(|(parameters, groups, layers)| {
+            let value = orch_provider_contract::models::composed_model_parameters(
+                &parameters,
+                &groups,
+                &layers,
+                None,
+            )
+            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+            serde_json::to_value(value)
+                .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
+        })
+        .transpose()?;
+    let _ = super::snapshot::with(conn, |rows| {
+        rows.model_parameters
+            .entry(thread)
+            .or_default()
+            .insert(model.to_owned(), value.clone());
+    });
+    Ok(value)
+}
+
+/// Composed defaults of the selected models for a page of threads. Shared provider/model
+/// pairs read their named-group layers once, before being associated with each thread.
+pub async fn thread_model_parameters_many(
+    conn: &mut Conn,
+    requested: &[(Id, String)],
+) -> Result<Vec<(Id, Json)>, DbError> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted = Json::Array(
+        requested
+            .iter()
+            .map(|(thread, model)| serde_json::json!({"thread_id":thread,"model":model}))
+            .collect(),
+    );
+    let rows:Vec<(Id,Json,Vec<String>,Json)>=sqlx::query_as(
+        "WITH selected AS MATERIALIZED (
+            SELECT w.thread_id,th.provider_id,w.model FROM jsonb_to_recordset($1) AS w(thread_id uuid,model text)
+            JOIN threads th ON th.node_id=w.thread_id
+         ), listed AS MATERIALIZED (
+            SELECT pm.provider_id,pm.model_name,pm.parameters,pm.groups,provider_option_layers(pm.provider_id,pm.groups) AS layers
+            FROM provider_models pm JOIN (SELECT DISTINCT provider_id,model FROM selected) w
+              ON w.provider_id=pm.provider_id AND w.model=pm.model_name
+         ) SELECT s.thread_id,l.parameters,l.groups,l.layers FROM selected s
+           JOIN listed l ON l.provider_id=s.provider_id AND l.model_name=s.model")
+        .bind(wanted).fetch_all(conn).await?;
+    rows.into_iter()
+        .map(|(thread, parameters, groups, layers)| {
+            let value = orch_provider_contract::models::composed_model_parameters(
+                &parameters,
+                &groups,
+                &layers,
+                None,
+            )
+            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+            serde_json::to_value(value)
+                .map(|value| (thread, value))
+                .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
+        })
+        .collect()
 }
 
 /// Whether the system has a mail server of its own that is switched on.
