@@ -33,9 +33,27 @@ vi.mock('@/api/nodes', async (load) => {
   } };
 });
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: live.feed }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string | undefined, title: string) => title }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string | undefined, title: string) => title }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useParams: () => ({ threadId: ACME.mainThread }), useRouterState: () => ({ pathname: `/thread/${ACME.mainThread}`, search: {} }) }));
 function Caption() { return <output aria-label="Frame title">{useCurrentHeading()?.title}</output>; }
+
+it('keeps a reader of the current place still when only the screen caption changes', () => {
+  const renderPlace = vi.fn();
+  function Place() {
+    const at = useCurrentHeading(true, (heading) => ({ nodeId: heading.nodeId }));
+    renderPlace();
+    return <output>{at?.nodeId}</output>;
+  }
+  function Publisher({ id, title }: { id: string; title: string }) { useRouteHeading({ nodeId: id, title }); return null; }
+  const place = <Place />;
+  const view = show(<><Publisher id="place-a" title="Idle" />{place}</>);
+  expect(screen.getByText('place-a')).toBeVisible();
+  renderPlace.mockClear();
+  view.rerender(<><Publisher id="place-a" title="Running" />{place}</>);
+  expect(renderPlace).not.toHaveBeenCalled();
+  view.rerender(<><Publisher id="place-b" title="Running" />{place}</>);
+  expect(screen.getByText('place-b')).toBeVisible();
+});
 afterEach(() => { cleanup(); clearScreenHeading(); threadWriter.evict(ACME.mainThread); useWorkbench.getState().leave(); vi.clearAllMocks(); });
 
 function ResourceFrame({ route }: { route: ScreenHeading }) {
@@ -78,7 +96,7 @@ it('resolves the cold thread title, chat context and inactive first-tab icon wit
   expect(screen.getByLabelText('Frame title')).toHaveTextContent(thread.name);
   expect(currentHeading()?.nodeId).toBe(thread.id);
   expect(currentHeading()?.path).toEqual(thread.path);
-  expect(useWorkbench.getState().named.get(first.id)).toEqual({ title: thread.name, icon: THREAD_GLYPHS[thread.display.state], source: 'view', thread: { id: thread.id, display: thread.display } });
+  expect(useWorkbench.getState().named.get(first.id)).toEqual({ title: thread.name, icon: THREAD_GLYPHS[thread.display.state], source: 'view', thread: { id: thread.id, rootId: thread.org_id, display: thread.display } });
   expect(allTabs(useWorkbench.getState().layout)).toHaveLength(2);
   act(() => { threadWriter.closed(thread.id, 'revoked'); });
   expect(currentHeading()?.target).toBeUndefined();

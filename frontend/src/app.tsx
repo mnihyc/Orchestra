@@ -12,6 +12,7 @@ import { LucideProvider } from 'lucide-react';
 
 import { meKey, metaKey } from '@/api/auth';
 import { client } from '@/api/client';
+import { pageHtmlReads } from '@/api/htmlReads';
 import { queryClient } from '@/api/query';
 import { installReaderCacheBoundary } from '@/api/readerCache';
 import type { Meta } from '@/generated/api-types';
@@ -55,7 +56,11 @@ declare module '@tanstack/react-router' {
   }
 }
 
-router.subscribe('onBeforeNavigate', () => { cancelOwnerReadConfirmations(); beginOpening(); });
+router.subscribe('onBeforeNavigate', ({ toLocation }) => {
+  pageHtmlReads()?.visit(toLocation.pathname);
+  cancelOwnerReadConfirmations();
+  beginOpening();
+});
 
 installReaderCacheBoundary(client, queryClient);
 client.onSession((event) => {
