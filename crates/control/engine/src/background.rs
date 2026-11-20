@@ -12,7 +12,7 @@ use orch_api_contract::background::{
 use orch_authz::{Act, Caller, Policy, Principal, nodes, resources};
 use orch_db::queries::{jobs, threads};
 use orch_db::{Conn, DbError, Tx};
-use orch_link_contract::background::{NativeBackground, PAGE_BYTES, SNAPSHOT_COMMANDS};
+use orch_link_contract::background::{BackgroundReadLimits, NativeBackground, PAGE_BYTES};
 use orch_link_contract::commands::{SerialKey, SessionBackground};
 use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,6 @@ use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
 
-/// A small list opens comfortably while old command sets remain short-lived.
-const REVIEW_IDLE: Duration = Duration::seconds(30);
 /// Native reads coalesce within one change interval, rather than sampling for every viewer.
 const READ_GAP: Duration = Duration::seconds(1);
 /// Ordinary roster pages contain fifty commands.
@@ -100,6 +98,7 @@ pub struct PreparedPage {
     capture: Capture,
     offset: usize,
     limit: usize,
+    idle: Duration,
 }
 
 impl PreparedPage {
@@ -190,6 +189,37 @@ fn permitted(decision: Decision) -> Result<(), BackgroundError> {
 }
 
 impl Engine {
+    async fn background_read_limits(
+        &self,
+        thread: Id,
+    ) -> Result<BackgroundReadLimits, EngineError> {
+        let mut conn = self.db().acquire().await?;
+        let place = orch_settings::Place::Node(thread);
+        use orch_settings_contract::registry::keys;
+        Ok(BackgroundReadLimits {
+            idle_seconds: orch_settings::get(
+                &mut conn,
+                place,
+                keys::THREADS_BACKGROUND_SNAPSHOT_SECONDS,
+            )
+            .await?
+            .unwrap_or(30),
+            page_items: orch_settings::get(&mut conn, place, keys::THREADS_BACKGROUND_PAGE_ITEMS)
+                .await?
+                .unwrap_or(200),
+            page_bytes: orch_settings::get(&mut conn, place, keys::THREADS_BACKGROUND_PAGE_BYTES)
+                .await?
+                .unwrap_or(131_072),
+            preview_bytes: orch_settings::get(
+                &mut conn,
+                place,
+                keys::THREADS_BACKGROUND_PREVIEW_BYTES,
+            )
+            .await?
+            .unwrap_or(4_096),
+        })
+    }
+
     /// Reads the thread's existing native sessions without opening any process, session, turn or lease.
     pub async fn capture_background(&self, thread: Id) -> Result<Capture, EngineError> {
         let read = {
@@ -213,7 +243,6 @@ impl Engine {
             sources(&mut conn, thread).await?
         };
         let mut sessions = Vec::new();
-        let mut remaining = SNAPSHOT_COMMANDS;
         for source in all {
             let observation = if let Some(machine) = source.machine_id {
                 self.read_background_session(thread, machine, source.segment_id)
@@ -221,14 +250,6 @@ impl Engine {
             } else {
                 NativeBackground::unsupported("this segment has no recorded source machine")
             };
-            let mut observation = observation;
-            if observation.items.len() > remaining {
-                observation.items.truncate(remaining);
-                observation.total = None;
-                observation.reason =
-                    Some("the native list is partial; narrow it in the native program".to_owned());
-            }
-            remaining = remaining.saturating_sub(observation.items.len());
             sessions.push((source, observation));
         }
         let capture = Capture {
@@ -245,6 +266,7 @@ impl Engine {
         machine: Id,
         segment: Id,
     ) -> Result<NativeBackground, EngineError> {
+        let limits = self.background_read_limits(thread).await?;
         let mut cursor = None;
         let mut seen = HashSet::new();
         let mut combined: Option<NativeBackground> = None;
@@ -256,7 +278,8 @@ impl Engine {
                 &SessionBackground {
                     thread_id: thread,
                     segment_id: segment,
-                    cursor,
+                    cursor: cursor.clone(),
+                    limits,
                 },
             )?;
             let mut page: NativeBackground = match self.inner.commands.observe(command).await {
@@ -264,6 +287,16 @@ impl Engine {
                     serde_json::from_value(value).unwrap_or_else(|_| {
                         NativeBackground::unsupported("the native reply could not be read")
                     })
+                }
+                Ok(Outcome::Failed(error))
+                    if cursor.is_some()
+                        && error.code
+                            == orch_link_contract::commands::ErrorCode::Conflict.as_str() =>
+                {
+                    cursor = None;
+                    seen.clear();
+                    combined = None;
+                    continue;
                 }
                 _ => {
                     return Ok(NativeBackground {
@@ -285,13 +318,6 @@ impl Engine {
             let snapshot = combined
                 .as_mut()
                 .ok_or_else(|| EngineError::unreadable("no native snapshot was read"))?;
-            if snapshot.items.len() > SNAPSHOT_COMMANDS {
-                snapshot.items.truncate(SNAPSHOT_COMMANDS);
-                snapshot.total = None;
-                snapshot.reason =
-                    Some("the native list is partial; narrow it in the native program".to_owned());
-                break;
-            }
             let Some(next) = next else { break };
             if !seen.insert(next.clone()) {
                 snapshot.total = None;
@@ -429,6 +455,11 @@ impl Engine {
             capture,
             offset,
             limit,
+            idle: Duration::try_seconds(
+                i64::try_from(self.background_read_limits(thread).await?.idle_seconds)
+                    .unwrap_or(i64::MAX),
+            )
+            .unwrap_or(Duration::MAX),
         })
     }
 
@@ -447,6 +478,7 @@ impl Engine {
             capture,
             offset,
             limit,
+            idle,
         } = page;
         let now = self.inner.clock.now();
         if offset > roster.items.len() {
@@ -465,7 +497,12 @@ impl Engine {
         if end < full.len() {
             roster.next_cursor = Some(format!("{reference}/{end}"));
         }
-        let until = self.inner.clock.now() + REVIEW_IDLE;
+        let until = self
+            .inner
+            .clock
+            .now()
+            .checked_add_signed(idle)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
         roster.list_ref = Some(reference.clone());
         roster.expires_at = Some(Time::new(until));
         if serde_json::to_vec(&roster)?.len() > PAGE_BYTES {
@@ -475,11 +512,6 @@ impl Engine {
         }
         let mut reviews = lock(&self.inner.background.reviews);
         reviews.retain(|_, review| review.until > now);
-        if reviews.len() >= REVIEW_MAX && !reviews.contains_key(&reference) {
-            return Err(BackgroundError::Invalid(
-                "too many command reviews are open; close an earlier review",
-            ));
-        }
         reviews.insert(
             reference,
             Review {

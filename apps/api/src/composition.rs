@@ -241,10 +241,20 @@ pub async fn run(
     orch_api_core::routes::auth::oidc::install_kind(Arc::new(
         orch_identity_oidc::OidcKind::new().context("the client of the identity providers")?,
     ));
+    // The services that can be asked whether a person is one, when the system asks that of them.
+    let human_check_client =
+        Arc::new(orch_human_check::Http::new().context("the client of the human check")?);
+    let human_check: Arc<dyn orch_human_check::Transport> =
+        Arc::<orch_human_check::Http>::clone(&human_check_client);
+    orch_api_core::sign_in::human_check::install_providers(orch_human_check::builtin(&human_check));
+    // And the way the server looks at its own web edge, to see that the pages can reach the service.
+    orch_api_core::sign_in::human_check::install_edge_reader(human_check_client);
     // The ways out of the application that channels and destinations can be made from.
-    orch_api_core::routes::notifications::install_notifiers(
-        notifiers(&config, launch.secrets_dir).context("the notifiers")?,
-    );
+    let notifiers = notifiers(&config, launch.secrets_dir).context("the notifiers")?;
+    orch_worker_core::channel_setup::ensure_default_push(&db, &notifiers, clock.now())
+        .await
+        .context("setting up browser notifications")?;
+    orch_api_core::routes::notifications::install_notifiers(notifiers);
     let link = match &secrets {
         Some(secrets) => Link::new(LinkParts {
             db: db.clone(),
@@ -308,12 +318,12 @@ pub async fn run(
     // The last output of a person's shells is put away in it too, with the environment's secrets taken out.
     orch_api_core::recordings::install(
         blobs.store(),
-        db.clone(),
         secrets.as_ref().map(|each| each.master_key.clone()),
     );
     let cache = Cache::new(&config);
     let sampling = cache.collect_samples(&link);
     let app = Arc::new(AppState {
+        metrics_listener_failed: Default::default(),
         host_ports: Default::default(),
         db,
         config: Arc::clone(&config),
@@ -381,15 +391,16 @@ pub async fn run(
         let stop = stop.clone();
         async move {
             let mut every = tokio::time::interval(MEASUREMENTS_UPKEEP);
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     () = stop.cancelled() => return,
-                    _ = every.tick() => readings.upkeep(),
+                    _ = every.tick() => crate::upkeep::run(&readings).await,
                 }
             }
         }
     });
-    match tokio::net::TcpListener::bind(&config.api.metrics_bind).await {
+    match app.bind_metrics(&config.api.metrics_bind).await {
         Ok(listener) => {
             tracing::info!(bind = %config.api.metrics_bind, "serving measurements");
             let stop = stop.clone();
@@ -413,6 +424,18 @@ pub async fn run(
             .certificates()
             .keep_frontend_certificate(&config)
             .context("the web edge’s certificate")?;
+        let retry = app
+            .link
+            .certificates()
+            .publish_frontend_transport(&config)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.detail))
+            .context("the web edge’s HTTPS settings")?;
+        tokio::spawn(app.link.certificates().clone().keep_frontend_transport(
+            Arc::clone(&app.config),
+            stop.clone(),
+            retry,
+        ));
     }
     // The API's own certificate as its listeners show it, renewed in place while it runs.
     let identity = secrets
@@ -667,6 +690,14 @@ async fn stopped() {
 mod tests {
     use super::*;
     use orch_provider_contract::choice::{Keeper, SourceElement, default_source};
+
+    #[test]
+    fn every_shipped_provider_and_image_route_has_a_valid_eligibility_declaration() {
+        let sources = super::builtin_sources().unwrap();
+        let registry = sources.capabilities();
+        assert!(!registry.declarations().routes.is_empty());
+        registry.check_route_schemas().unwrap();
+    }
 
     #[test]
     fn the_program_registers_each_vendor_reader_and_a_key_at_its_address_reads_it_by_default() {

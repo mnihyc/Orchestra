@@ -52,6 +52,20 @@ def needs_node_connector(planned):
     return includes_node_tests(planned, NODE_LAB_TESTS)
 
 
+def needs_search_extensions(planned):
+    """Keep targeted API/engine databases equal to their full-CI deployment fixture."""
+    for command in planned:
+        if command[:2] != ["cargo", "test"]:
+            continue
+        arguments = command[2:command.index("--")] if "--" in command else command[2:]
+        packages = {arguments[index + 1] for index, argument in enumerate(arguments[:-1])
+                    if argument in {"-p", "--package"}}
+        if any(package == "orch-engine" or package.startswith("orch-api-") and package != "orch-api-contract"
+               for package in packages):
+            return True
+    return False
+
+
 def fixture_plan(planned):
     """Keep images off shards whose assigned cases never use them."""
     packages, targets = set(), set()
@@ -81,7 +95,7 @@ def target_commands(path):
 def describe_fixtures(planned):
     images, harness = fixture_plan(planned)
     return {"images": images, "harness": harness, "node_runner": needs_conformance_runner(planned),
-            "node_connector": needs_node_connector(planned)}
+            "node_connector": needs_node_connector(planned), "search_extensions": needs_search_extensions(planned)}
 
 
 def executable_path(value):
