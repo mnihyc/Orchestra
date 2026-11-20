@@ -1,0 +1,2 @@
+test -p orch-engine --lib
+test -p orch-api-core --lib --features test-observers

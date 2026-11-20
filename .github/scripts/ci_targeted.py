@@ -6,6 +6,8 @@ Each non-empty line that is not a comment is one check:
   contracts                     regenerate the generated contract files (`cargo xtask contracts`) and list what differed
   web <npm script>              e.g. `web lint`, `web typecheck`, `web test`, `web build`; `npm ci` runs once first
   web-e2e                       the end-to-end suites against the tests' fake API
+  release-checks                release helper tests, workflow lint and updater script fixtures
+  release-first-start           install the release of this checkout with the packaged first-start scenario
 
 The workflow uses --group rust and --group web on independent runners. With no group, run all checks.
 """
@@ -56,7 +58,7 @@ def main(path, group="all"):
     if not checks:
         print(f"{path} names no check", file=sys.stderr)
         return 2
-    known = {"test", "clippy", "doc", "fmt", "contracts", "web", "web-e2e"}
+    known = {"release-checks", "release-first-start", "test", "clippy", "doc", "fmt", "contracts", "web", "web-e2e"}
     unknown = [check for check in checks if check.partition(" ")[0] not in known]
     if unknown:
         for check in unknown:
@@ -86,6 +88,17 @@ def main(path, group="all"):
                 ))
             results.append((check, run(check, ["cargo", "test", "--locked", "--no-fail-fast", *shlex.split(rest)],
                                        env=fixture_environment)))
+        elif check == "release-checks":
+            for label, command in [
+                ("release helpers", [sys.executable, "-I", "-B", "-m", "unittest", "discover",
+                                     "-s", ".github/scripts", "-p", "test_release_*.py"]),
+                ("workflow lint", [sys.executable, ".github/scripts/workflow_lint.py"]),
+                ("updater doctor", ["bash", "scripts/smoke/update-doctor/run.sh"]),
+                ("deployment file updates", ["bash", "scripts/smoke/update-files/run.sh"]),
+            ]:
+                results.append((label, run(label, command)))
+        elif check == "release-first-start":
+            results.append((check, run(check, ["bash", "scripts/smoke/first-start/run.sh"])))
         elif word == "clippy":
             results.append((check, run(check, ["cargo", "clippy", "--workspace", "--all-targets", "--locked",
                                                "--keep-going", "--", "-D", "warnings"])))

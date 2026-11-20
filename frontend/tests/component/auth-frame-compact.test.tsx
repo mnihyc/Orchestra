@@ -1,5 +1,5 @@
 /** Auth has one product heading, one form action and compact language/theme names in every appearance. */
-import { cleanup, screen, within } from '@testing-library/react';
+import { act, cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as Admission from '@/shell/admission';
@@ -7,11 +7,14 @@ import { AuthCard, AuthFrame } from '@/features/auth/Frame';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { Button } from '@/ui/Button';
-import { meta } from '../doubles/fixtures';
+import { meta, me } from '../doubles/fixtures';
+import { createApiClient, type SessionState } from '@/api/client';
+import { SessionEndedNotice } from '@/features/auth/SessionEnded';
+import { createStore } from 'zustand/vanilla';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ title: vi.fn<(title: string) => void>(), preferences: vi.fn<ReturnType<typeof useAppearance.getState>['set']>() }));
-vi.mock('@/lib/title', () => ({ usePageTitle: calls.title }));
+vi.mock('@/lib/title', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePageTitle: calls.title }));
 vi.mock('@/shell/admission', async (original) => ({ ...await original<typeof Admission>(),
   admissionMetaQuery: { queryKey: ['compact-auth-meta'], queryFn: () => Promise.resolve(meta({ name: 'Workshop' })) },
 }));
@@ -31,6 +34,34 @@ const actions = {
   en: ['Sign in', 'Create account', 'Send recovery link', 'Verify code'],
   'zh-CN': ['登录', '创建账户', '发送恢复链接', '验证代码'],
 } as const;
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps a proven ended-session fact on its one notice without reading and retires it on sign-in in ${locale}`, async () => {
+  await setLocale(locale); const person = me(4, 'synthetic', 'Synthetic reader'), at = '2026-11-15T04:00:00Z';
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ type: 'orch:error:auth.invalid_token', code: 'auth.invalid_token', title: '', detail: 'private native data', status: 401, request_id: 'private-request',
+    session_end: { cause: 'revoked', at_if_known: at, user_id: 'private-id' } }, { status: 401 })));
+  const client = createApiClient({ baseUrl: 'http://synthetic.test/api/v1', fetch });
+  const grant = { user: person, access_token: 'synthetic-token', access_expires_at: new Date(Date.now() + 900_000).toISOString() };
+  client.adopt(grant); await client.renew(); show(<SessionEndedNotice session={client.session} />);
+  expect(screen.getByRole('status')).toHaveTextContent(locale === 'en' ? 'Session revoked' : '登录会话已撤销');
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = document.querySelector('[data-fact-disclosure-body]');
+  expect(body?.querySelector('time')).toHaveAttribute('datetime', at);
+  expect(body).not.toHaveTextContent(/private native data|private-request|private-id|auth\.invalid_token/); expect(fetch).toHaveBeenCalledOnce();
+  act(() => client.adopt({ ...grant, user: me(5, 'replacement', 'Replacement reader'), access_token: 'synthetic-replacement' }));
+  expect(screen.queryByRole('status')).not.toBeInTheDocument(); expect(document.querySelector('[data-fact-disclosure-body]')).toBeNull();
+});
+
+it.each(['en', 'zh-CN'] as const)('leaves an old unreported ended session generic rather than guessing an expiry in %s', async (locale) => {
+  await setLocale(locale);
+  const session = createStore<SessionState>(() => ({ status: 'signed_out', userId: null, accessEndsAt: null, sessionEnded: true }));
+  show(<SessionEndedNotice session={session} />);
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('auth.login.sessionEnded'));
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = document.querySelector<HTMLElement>('[data-fact-disclosure-body]');
+  if (body === null) throw new Error('A known old outcome must keep its uncaptured facts explicit');
+  expect(within(body).getAllByText(i18n.t('factDisclosure.notReported'))).toHaveLength(2);
+  expect(body.querySelector('time')).toBeNull();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(actions[locale])(`says %s once with the product as the only h1 in ${locale}/${theme}`, async (action) => {
