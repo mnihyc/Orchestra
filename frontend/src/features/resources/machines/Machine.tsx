@@ -183,9 +183,13 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
   const installation = machine.installation ?? installationOf(machine.facts);
   const sectionHref = (section: string) => `/resources/machines/${encodeURIComponent(machine.id)}?tab=${section}`;
 
+  const notices = <>
+    <UpdateNotice update={machine.software_update} action={primary?.id === 'update-now' ? primary : null} />
+    <MachineSandboxReadiness key={machine.id} values={machine.environment_sandboxes} />
+  </>;
   return (
     <Page>
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={machine.access?.admin_access} ownership={machine} opening={{ kind: 'machine', id: machine.id }}
         back={back}
         mark={
@@ -197,9 +201,7 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
         facts={[<MachineStatus key="state" machine={machine} />]}
         actions={<HeadingActs omit={primary?.id === 'update-now' ? ['update-now'] : []} admin={adminSpec(machine, ['machine.manage', 'host.manage'])} name={machine.name} primary={primary?.id === 'update-now' ? null : primary} edit={edit} menu={menu} />}
       />
-      <UpdateNotice update={machine.software_update} action={primary?.id === 'update-now' ? primary : null} />
-      <MachineSandboxReadiness key={machine.id} values={machine.environment_sandboxes} />
-      <Tabs
+      <Tabs frame={(navigation, panels) => <>{navigation}{notices}{panels}</>}
         label={t('machines.tabs.label')}
         value={shown}
         onValueChange={onTab}
@@ -213,7 +215,7 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
             panel: <DetailSections label={t('machines.tabs.registered')} value={registration} onValueChange={onTab} hrefOf={sectionHref} sections={[
               { value: 'registered', label: t('resourceDetails.layout.registered'), panel: <RegisteredHere machine={machine} /> },
               { value: 'programs', label: t('machinePrograms.title'), panel: <MachineProgramsTab machine={machine} /> },
-              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions harnesses={harnessesOfMachine(machine)} /> }]),
+              ...(harnessesOfMachine(machine).length === 0 ? [] : [{ value: 'sessions' as const, label: t('adopt.tab'), panel: <HarnessSessions scopeKey={"machine:" + machine.id} harnesses={harnessesOfMachine(machine)} /> }]),
             ]} />,
           },
           { value: 'storage', label: t('resourceDetails.layout.storage'), panel: <DetailSections label={t('resourceDetails.layout.storage')} sections={[
