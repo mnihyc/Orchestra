@@ -97,7 +97,7 @@ pub fn prepare_group(command: &mut std::process::Command) {
 }
 
 /// What kind of thing a directory entry is, without following a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     /// A regular file.
     File,
@@ -110,7 +110,7 @@ pub enum Kind {
 }
 
 /// What the system says of an entry, without following a link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
     /// What it is.
     pub kind: Kind,

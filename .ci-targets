@@ -1,0 +1,2 @@
+test -p orch-api-core --test notifications_routes -- first_setup_offers_browser_notifications_without_subscribing_the_administrator --exact
+test -p orch-worker-core --test channel_setup

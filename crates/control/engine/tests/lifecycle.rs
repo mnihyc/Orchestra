@@ -388,6 +388,31 @@ async fn a_removal_that_fails_is_tried_again_with_pauses_that_grow_and_the_reaso
     .await
     .unwrap();
     assert_eq!(failed, 2);
+    let attempts: Vec<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT plan->'lifecycle_wait' FROM jobs WHERE environment_id=$1
+         AND kind='environment_remove' AND state='failed' ORDER BY created_at,id",
+    )
+    .bind(environment)
+    .fetch_all(world.pool.pool())
+    .await
+    .unwrap();
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        let attempt =
+            attempt.expect("each actual failed removal retains its accepted retry boundary");
+        let at: chrono::DateTime<Utc> = attempt["last_attempt_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let retry: chrono::DateTime<Utc> = attempt["retry_eligible_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected = common::config().hosting.removal_first_pause * (1u32 << index);
+        assert_eq!(retry - at, chrono::Duration::from_std(expected).unwrap());
+        assert_eq!(attempt["reason_code"], "unsupported");
+    }
 }
 
 #[tokio::test]
