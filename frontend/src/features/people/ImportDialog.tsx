@@ -111,7 +111,7 @@ function NewImport({ target, onClose }: { target: Extract<ImportTarget, { kind: 
       if (!owns()) return;
       cache.setQueryData(exportKeys.job(job.id), job);
       watchImport(job, destination.place?.id ?? null, notify);
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
       setJobId(job.id);
       setStep('run');
     },
@@ -197,7 +197,7 @@ function NewImport({ target, onClose }: { target: Extract<ImportTarget, { kind: 
       {step === 'source' && <>
         <ImportSourceStep value={selection} onChange={(next) => void setSourceSelection(next)} onReadingChange={sourceReading} disabled={uploading || closing} />
         {facts?.mode === 'package' && <StateLine compact message={t('importWizard.dialog.package')} />}
-        {progress !== null && uploading && <><p role="status" className="text-sm text-text-muted tabular-nums">{t('importWizard.run.uploading', { done: formatNumber(progress.completed, locale), total: formatNumber(progress.files, locale), received: formatBytes(progress.received, locale), bytes: formatBytes(progress.bytes, locale) })}</p><Meter look="progress" value={uploadPercent} label={t('importWizard.steps.source')} /></>}
+        {progress !== null && uploading && <><p role="status" className="text-sm text-text-muted tabular-nums">{t('importWizard.run.uploading', { count: progress.files, done: formatNumber(progress.completed, locale), total: formatNumber(progress.files, locale), received: formatBytes(progress.received, locale), bytes: formatBytes(progress.bytes, locale) })}</p><Meter look="progress" value={uploadPercent} label={t('importWizard.steps.source')} /></>}
         {closing && <StateLine compact role="status" message={t('importWizard.dialog.cancelling')} />}
       </>}
       {step === 'destination' && <>

@@ -9,7 +9,7 @@ use orch_agent_contract::{
 };
 use orch_db::queries::{storage, thread_history, thread_history_cuts as cuts, threads};
 use orch_engine::commands::{Commands, CommandsError, Info, Outcome, Outgoing};
-use orch_link_contract::commands::{AgentReadSessionResult, RecordRef};
+use orch_link_contract::commands::{AgentReadSessionResult, Cmd, RecordRef};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::sync::{Notify, Semaphore};
 
@@ -236,6 +236,24 @@ impl NativePeer {
 }
 
 impl Rig {
+    async fn assert_original_work(&self, actual: &Cmd, original: &Outgoing) {
+        let info = self
+            .world
+            .commands
+            .as_engine()
+            .status(original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual.work,
+            Cmd::work_budget(
+                orch_types::Time::new(info.issued_at),
+                original.deadline.unwrap()
+            )
+        );
+    }
+
     /// Both real wire shapes reach one declared peer. The wrapper retains the
     /// actual received body and copies only the requested native range; a new
     /// controller thread/segment is never mistaken for that native ordinal.
@@ -363,6 +381,7 @@ impl Rig {
             });
         self.on_open(|open| {
             Ok(SessionOpenResult {
+                mcp: None,
                 native_session_ref: if matches!(open.mode, SessionMode::Resume | SessionMode::Adopt)
                 {
                     open.native_session_ref.clone().ok_or_else(|| {
@@ -503,7 +522,7 @@ impl Rig {
         assert_eq!(journal.cmd.id, saved.id);
         assert_eq!(journal.cmd.kind, CommandKind::SessionOpenFenced.as_str());
         assert!(journal.cmd.body == saved.body);
-        assert_eq!(Some(journal.cmd.deadline), saved.deadline);
+        self.assert_original_work(&journal.cmd, &saved).await;
         let body: orch_link_contract::continuations::SessionOpenFenced =
             serde_json::from_value(journal.cmd.body).unwrap();
         *body.session
@@ -722,7 +741,7 @@ async fn cancellation_after_real_native_success_retains_the_original_command_chi
         serde_json::from_value(entry.result().unwrap().outcome.clone().unwrap()).unwrap();
     assert_eq!(entry.cmd.id, saved.id);
     assert!(entry.cmd.body == saved.body);
-    assert_eq!(Some(entry.cmd.deadline), saved.deadline);
+    rig.assert_original_work(&entry.cmd, &saved).await;
     assert!(
         rig.job(job.id).await.plan.get("opened").is_none(),
         "pause is genuinely before prepared metadata publication"

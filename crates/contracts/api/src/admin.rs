@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::access::{PageChange, PagePreview, PermissionPage, Role};
 use crate::auth::SignInProof;
-use crate::common::{Page, PageQuery};
+use crate::common::{CollectionQuery, Page, PageQuery};
 use crate::documents::DeletedFilter;
 use crate::environment::{EnvironmentRef, NetworkState, TemplateRef};
 use crate::nodes::OrgType;
@@ -132,11 +132,14 @@ pub struct AdminTokenActivity {
 /// A bounded system credential inventory, newest first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdminTokenListQuery {
+    /// Words in the token's current name, matched before its page is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Select one actual owner; absent includes every account.
     pub owner_id: Option<Id>,
     /// Opaque continuation of this owner-filtered list.
     pub cursor: Option<String>,
-    /// Requested page size, bounded by the ordinary page limit.
+    /// Entries requested in one page, fifty by default; any positive u32 when supplied.
     pub limit: Option<u32>,
 }
 
@@ -292,9 +295,11 @@ pub struct PkiInfo {
     pub services: Vec<PkiService>,
     /// How many machines' certificates expire within 30 days.
     pub machines_expiring_30d: i64,
-    /// At most 50 active machines whose certificates end within 30 days, including those already
-    /// lapsed, soonest first. The count above includes machines beyond this list.
+    /// One searched expiry page of active machines, including already lapsed certificates, soonest first.
     pub machines_expiring: Vec<PkiInfoMachinesExpiring>,
+    /// Continue the same administrator, words and fixed expiry window; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machines_next_cursor: Option<String>,
 }
 
 /// The parts of the system that report their own health.
@@ -311,6 +316,14 @@ pub enum SystemComponentName {
     Database,
 }
 
+/// A diagnosed operational issue of a service that can still answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemComponentIssue {
+    /// The optional metrics listener could not bind; the API continues serving.
+    MetricsListenerUnavailable,
+}
+
 /// How one part of the system fares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SystemComponent {
@@ -320,6 +333,9 @@ pub struct SystemComponent {
     pub ok: bool,
     /// What is wrong, where something is.
     pub detail: Option<String>,
+    /// A known operational issue, separate from the component's own diagnostic text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<SystemComponentIssue>,
     /// When it last reported.
     pub seen_at: Option<Time>,
 }
@@ -352,6 +368,75 @@ pub struct SystemInfo {
     pub threads_running: i64,
     /// The queues.
     pub queues: SystemQueues,
+    /// Allowlisted running values captured at startup; absent when this process did not report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_configuration: Option<EffectiveConfiguration>,
+}
+
+/// Safe public names for process configuration; no credential, URL or path may enter this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConfigurationKey {
+    /// Pool acquisition, including opening and checking a connection.
+    #[serde(rename = "database.acquire_timeout_ms")]
+    DatabaseAcquireTimeout,
+    /// Statements of the API request pool.
+    #[serde(rename = "database.request_statement_timeout_ms")]
+    DatabaseRequestStatementTimeout,
+    /// Statements of a worker or maintenance pool, when that process reports them.
+    #[serde(rename = "database.background_statement_timeout_ms")]
+    DatabaseBackgroundStatementTimeout,
+    /// Idle transactions of the reporting process.
+    #[serde(rename = "database.idle_transaction_timeout_ms")]
+    DatabaseIdleTransactionTimeout,
+}
+
+/// An actual configured deadline; an unreported value never becomes indefinite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigurationValue {
+    /// Unsigned decimal millisecond text preserves the complete native range.
+    Finite {
+        /// The exact millisecond value, without rounding through a browser number.
+        milliseconds: String,
+    },
+    /// This deadline was explicitly disabled.
+    Indefinite,
+}
+
+/// When a changed configuration value reaches its consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationApplication {
+    /// This consumer is constructed at process startup.
+    Restart,
+    /// This consumer reads changes while running.
+    Live,
+}
+
+/// One safe running value and its captured provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfigurationValue {
+    /// A public name from the explicit allowlist.
+    pub public_key: ConfigurationKey,
+    /// The applied value, distinct from unreported data.
+    pub typed_value: ConfigurationValue,
+    /// Uncaptured provenance stays unreported.
+    pub origin: Option<crate::common::ConfigurationOrigin>,
+    /// How this consumer applies changes.
+    pub application: ConfigurationApplication,
+}
+
+/// A process observation, never the contents of its currently edited file or environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfiguration {
+    /// The actual reporting process; another service's loaded values are not inferred.
+    pub service: SystemComponentName,
+    /// Opaque identity of the captured startup configuration.
+    pub process_revision: String,
+    /// When the configuration was captured.
+    pub measured_at: Time,
+    /// Complete authorized page of safe rows, with native continuation when needed.
+    pub values: crate::common::Page<EffectiveConfigurationValue>,
 }
 
 /// A read-only lookup at the operator's configured release source.
@@ -1025,6 +1110,30 @@ pub struct AdminRuntimeListQuery {
     /// Only those of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UnitKind>,
+    /// Words of the visible unit, resource or template name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same host, kind and name search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl AdminRuntimeListQuery {
+    /// Its named collection page, with the existing unit selectors kept separately.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Which stored series to read. A span inside `[retention] metrics_fine_days` is answered from the
@@ -1212,6 +1321,75 @@ pub struct IdentityProviderTestReply {
     pub issuer_metadata: Option<Json>,
 }
 
+/// What a system admin may know of the human check's secret: whether there is one, never what it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckState {
+    /// Whether a secret is kept: hCaptcha's secret, reCAPTCHA's secret key, or the API key of a Google Cloud project.
+    pub secret_set: bool,
+    /// When it was last set.
+    pub secret_changed_at: Option<Time>,
+    /// What the web edge lets a page reach of the service that is chosen; none while no service is chosen.
+    pub edge: Option<HumanCheckEdge>,
+}
+
+/// Whether the web edge's content policy lets a page reach a service's widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckEdgeState {
+    /// The policy names the hosts the widget needs.
+    Allows,
+    /// The policy leaves some out: the browser blocks the widget, and nobody could pass the check.
+    Blocks,
+    /// The server could not read the policy.
+    Unknown,
+}
+
+/// Where the server read the web edge's policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckEdgeVia {
+    /// At the address people open, through any front of the operator's own: what a browser is given.
+    Public,
+    /// At the stack's own web edge, where a front of the operator's own is not seen.
+    Stack,
+}
+
+/// What the web edge's content policy lets a page reach of the chosen service, as the server reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckEdge {
+    /// What the policy allows.
+    pub state: HumanCheckEdgeState,
+    /// Where it was read; none where it could not be.
+    pub via: Option<HumanCheckEdgeVia>,
+    /// What the policy leaves out, as `<host> in <directive>`, where it blocks.
+    pub lacking: Vec<String>,
+}
+
+/// The secret of the human check, as it is given: it is sealed, kept, and never read back.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanCheckSecretBody {
+    /// hCaptcha's secret, reCAPTCHA's secret key, or the API key of the Google Cloud project; write-only.
+    pub secret: String,
+}
+
+impl std::fmt::Debug for HumanCheckSecretBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HumanCheckSecretBody")
+            .field("secret", &"[secret]")
+            .finish()
+    }
+}
+
+/// What a test of the human check found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckTestReply {
+    /// Whether the service was reached and accepted the keys: it refused the token of the test, as it should.
+    pub ok: bool,
+    /// What went wrong, in words an administrator can act on, when it did not work.
+    pub error: Option<String>,
+}
+
 /// Where an org's index of search by meaning stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1249,6 +1427,39 @@ pub struct SemanticGeneration {
     pub query_prefix: String,
     /// What was put before a document.
     pub document_prefix: String,
+}
+
+/// The actual next step chosen after an embedding batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRetryNext {
+    /// The same pieces were selected for an immediate smaller request.
+    Immediate,
+    /// Work waits for another indexer pass; no per-provider deadline was scheduled.
+    IndexerPass,
+    /// The retry's request finished; no next retry is promised.
+    Finished,
+}
+
+/// Batch and retry facts captured independently of later model or interval changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticIndexRetry {
+    /// Actual endpoint selected for this attempted batch.
+    pub provider_id: Id,
+    /// Model name selected for this attempted batch.
+    pub model_name: String,
+    /// Its embedding space, for matching the current index without displaying an identifier.
+    pub generation_id: Id,
+    /// Pieces selected for the batch, not a token allowance or admission promise.
+    pub batch_pieces: i64,
+    /// Recorded next-step decision.
+    pub next: SemanticRetryNext,
+    /// Only a captured immediate eligibility instant; a shared interval never fills this.
+    pub next_eligible_at: Option<Time>,
+    /// Safe native reason, never endpoint details or credentials.
+    pub reason: String,
+    /// When the outcome or next-step decision was observed.
+    pub observed_at: Time,
 }
 
 /// Where search by meaning stands for one root org.
@@ -1293,6 +1504,41 @@ pub struct SemanticSearchOrg {
     pub rebuild_bytes: Option<i64>,
     /// And the seconds it takes to make them at the measured rate.
     pub rebuild_seconds: Option<i64>,
+    /// Missing when no attempt facts were captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<SemanticIndexRetry>,
+}
+
+/// A capability definition directory, including the interface's public localized aliases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityListQuery {
+    /// Literal words in stored visible definition text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Positive entries per page; fifty by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same actor, words and public alias keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Comma-separated exact keys also matching a localized shipped capability name or description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<String>,
+}
+impl CapabilityListQuery {
+    /// The ordinary collection continuation, without losing its native alias intent.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// Search by meaning across the system.
@@ -1306,6 +1552,9 @@ pub struct SemanticSearchOverview {
     pub interval_secs: i64,
     /// The root orgs where it is on or that have an index, by name.
     pub orgs: Vec<SemanticSearchOrg>,
+    /// Continue the same administrator's root-org name search; absent at the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orgs_next_cursor: Option<String>,
 }
 
 /// Accepted administrative index work without disclosing its configuration or progress.
@@ -1384,7 +1633,7 @@ crate::endpoints! {
     AdminUserTokenActivityList: GET "/admin/users/{id}/tokens/{token_id}/activity", Session, query crate::auth::ApiTokenActivityQuery, none, json Page<AdminTokenActivity>, 200,
         operation Op::single(Read, &[Identity(I::Key)], Target::Resolved("token"));
     /// Lists the live browser sessions of this exact person.
-    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query PageQuery, none, json Page<AdminSession>, 200,
+    AdminUserSessionList: GET "/admin/users/{id}/sessions", Session, query crate::common::CollectionQuery, none, json Page<AdminSession>, 200,
         operation Op::single(Read, &[Identity(I::Session)], Target::ResolvedCollection("results"));
     /// Ends one session of this exact person and its access tokens.
     AdminUserSessionDelete: DELETE "/admin/users/{id}/sessions/{session_id}", Session, none, none, none, 204,
@@ -1436,13 +1685,13 @@ crate::endpoints! {
     AdminDefaultsPreview: POST "/admin/defaults/preview", Session, none, json PageChange, json PagePreview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists every host on the system; hosts themselves are managed through their own requests.
-    AdminHostList: GET "/admin/hosts", Session, none, none, json Vec<Host>, 200,
+    AdminHostList: GET "/admin/hosts", Session, query CollectionQuery, none, json Page<Host>, 200,
         operation Op::facets(&[
             Facet::required(Read, &[Object(K::Host)], Target::ResolvedCollection("results")),
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Environment)], Target::ResolvedCollection("names")),
         ]);
     /// Lists the runtimes of both pools, whoever's they are.
-    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Vec<Runtime>, 200,
+    AdminRuntimeList: GET "/admin/runtimes", Session, query AdminRuntimeListQuery, none, json Page<Runtime>, 200,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::Environment),Object(K::Provider)], Target::ResolvedCollection("results")),
             Facet::required(Manage, &[Object(K::Host),Object(K::Machine),Object(K::Template)], Target::ResolvedCollection("references")),
@@ -1455,10 +1704,10 @@ crate::endpoints! {
     AdminAgentCreate: POST "/admin/agents", Session, none, json OrgAgentCreateBody, json crate::resources::OrgAgentCreateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::agent_sources::SYSTEM_CREATE_FACETS));
     /// Lists the external implementations loaded anywhere, with how they fare.
-    AdminPluginList: GET "/admin/plugins", Session, none, none, json Vec<AdminPlugin>, 200,
+    AdminPluginList: GET "/admin/plugins", Session, query CollectionQuery, none, json Page<AdminPlugin>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the definitions of capabilities.
-    AdminCapabilityList: GET "/admin/capabilities", Session, none, none, json Vec<CapabilityDef>, 200,
+    AdminCapabilityList: GET "/admin/capabilities", Session, query CapabilityListQuery, none, json crate::common::Page<CapabilityDef>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Writes the definition of a capability, adding it or replacing it.
     AdminCapabilitySet: PUT "/admin/capabilities/{key}", Session, none, json CapabilityDef, json CapabilityDef, 200,
@@ -1546,7 +1795,7 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::Document),Object(K::DocumentContainer)],Target::ResolvedCollection("names")),
         ]));
     /// Lists the identity providers.
-    AdminIdentityProviderList: GET "/admin/identity-providers", Session, none, none, json Vec<IdentityProvider>, 200,
+    AdminIdentityProviderList: GET "/admin/identity-providers", Session, query CollectionQuery, none, json Page<IdentityProvider>, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds an identity provider.
     AdminIdentityProviderCreate: POST "/admin/identity-providers", Session, none, json IdentityProviderInput, json IdentityProviderCreateResponse, 200,
@@ -1560,11 +1809,23 @@ crate::endpoints! {
     /// Fetches the discovery document of an identity provider's issuer, to see that it works.
     AdminIdentityProviderTest: POST "/admin/identity-providers/{id}/test", Session, none, none, json IdentityProviderTestReply, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Says whether the human check has its secret.
+    AdminHumanCheckGet: GET "/admin/human-check", Session, none, none, json HumanCheckState, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Keeps the secret of the human check, sealed; it is never read back.
+    AdminHumanCheckSecretSet: PUT "/admin/human-check/secret", Session, none, json HumanCheckSecretBody, json HumanCheckState, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Takes the secret of the human check away.
+    AdminHumanCheckSecretDelete: DELETE "/admin/human-check/secret", Session, none, none, json HumanCheckState, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Asks the service of the human check, with a token that is not one, to see that it is reached and accepts the keys.
+    AdminHumanCheckTest: POST "/admin/human-check/test", Session, none, none, json HumanCheckTestReply, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads what the blob store holds.
     AdminStorageGet: GET "/admin/storage", Session, none, none, json StorageStats, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system's certificates.
-    AdminPkiGet: GET "/admin/pki", Session, none, none, json PkiInfo, 200,
+    AdminPkiGet: GET "/admin/pki", Session, query crate::common::CollectionQuery, none, json PkiInfo, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads the state of the system: its release, its parts and its queues.
     AdminSystemGet: GET "/admin/system", Session, none, none, json SystemInfo, 200,
@@ -1579,7 +1840,7 @@ crate::endpoints! {
     AdminBackupRestoreList: GET "/admin/backup-restore-list", Session, none, none, json Option<BackupRestoreList>, 200,
         operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Reads where search by meaning stands for each root org where it is on or that has an index.
-    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, none, none, json SemanticSearchOverview, 200,
+    AdminSemanticSearchGet: GET "/admin/semantic-search", Session, query crate::common::CollectionQuery, none, json SemanticSearchOverview, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Rebuilds a root org's index in place: its vectors are removed and made anew with the model named.
     AdminSemanticSearchRebuild: POST "/admin/semantic-search/{id}/rebuild", Session, none, none, json SemanticSearchResponse, 200,

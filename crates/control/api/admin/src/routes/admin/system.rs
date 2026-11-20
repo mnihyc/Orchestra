@@ -58,6 +58,7 @@ use orch_api_contract::admin::StorageEnvironment;
 use orch_api_contract::admin::StorageStats;
 
 use orch_api_contract::admin::SystemComponent;
+use orch_api_contract::admin::SystemComponentIssue;
 
 use orch_api_contract::admin::SystemComponentName;
 
@@ -79,6 +80,8 @@ use orch_db::queries::resources;
 
 use orch_pki::certificates::Certificate;
 
+use orch_types::Id;
+
 use orch_types::Time;
 
 use std::path::Path;
@@ -98,9 +101,6 @@ const TOP_ENVIRONMENTS: i64 = 10;
 
 /// How far ahead a machine's certificate is counted as about to end.
 const MACHINE_EXPIRY_WINDOW_DAYS: i64 = 30;
-
-/// Bounds the PKI attention list while its separate count covers every matching machine.
-const MACHINES_EXPIRING_LIMIT: i64 = 50;
 
 /// Where a deployment keeps its secrets when no directory was installed and the variable is not
 /// set: the default of the programs that read them.
@@ -175,6 +175,7 @@ fn component(
     };
     SystemComponent {
         name,
+        issue: None,
         ok,
         detail,
         seen_at: reported.map(|beat| Time::new(beat.seen_at)),
@@ -190,6 +191,12 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
     // The API answers, so it is well, and so is the database it has just read.
     let answering = |name| SystemComponent {
         name,
+        issue: (name == SystemComponentName::Api
+            && ctx
+                .app
+                .metrics_listener_failed
+                .load(std::sync::atomic::Ordering::Relaxed))
+        .then_some(SystemComponentIssue::MetricsListenerUnavailable),
         ok: true,
         detail: None,
         seen_at: Some(Time::new(ctx.now)),
@@ -223,6 +230,65 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
             commands_open: link::count_open_commands(&mut conn).await?,
             jobs_running: jobs::running_jobs(&mut conn).await?,
         },
+        effective_configuration: running_configuration(&ctx),
+    })
+}
+
+fn running_configuration(ctx: &Ctx) -> Option<orch_api_contract::admin::EffectiveConfiguration> {
+    use orch_api_contract::admin::{
+        ConfigurationApplication, ConfigurationKey, ConfigurationValue, EffectiveConfiguration,
+        EffectiveConfigurationValue,
+    };
+    use orch_api_contract::common::{ConfigurationOrigin, Page};
+    let captured = ctx.app.config.startup_facts.as_ref()?;
+    let applied = ctx.app.db.configured_limits()?;
+    let wanted = [
+        (
+            ConfigurationKey::DatabaseAcquireTimeout,
+            "database.acquire_timeout_ms",
+            applied.acquire_timeout,
+        ),
+        (
+            ConfigurationKey::DatabaseRequestStatementTimeout,
+            "database.request_statement_timeout_ms",
+            applied.statement.unwrap_or_default(),
+        ),
+        (
+            ConfigurationKey::DatabaseIdleTransactionTimeout,
+            "database.idle_transaction_timeout_ms",
+            applied.idle_in_transaction,
+        ),
+    ];
+    let values = wanted
+        .into_iter()
+        .map(|(public_key, key, applied)| {
+            let fact = captured.values.iter().find(|fact| fact.key == key)?;
+            if u128::from(fact.milliseconds) != applied.as_millis() {
+                return None;
+            }
+            Some(EffectiveConfigurationValue {
+                public_key,
+                typed_value: if fact.milliseconds == 0 {
+                    ConfigurationValue::Indefinite
+                } else {
+                    ConfigurationValue::Finite {
+                        milliseconds: fact.milliseconds.to_string(),
+                    }
+                },
+                origin: fact.origin.map(|origin| match origin {
+                    orch_config::observed::Origin::Compiled => ConfigurationOrigin::Compiled,
+                    orch_config::observed::Origin::File => ConfigurationOrigin::File,
+                    orch_config::observed::Origin::Environment => ConfigurationOrigin::Environment,
+                }),
+                application: ConfigurationApplication::Restart,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(EffectiveConfiguration {
+        service: SystemComponentName::Api,
+        process_revision: captured.revision.clone(),
+        measured_at: Time::new(chrono::DateTime::<chrono::Utc>::from(captured.observed_at)),
+        values: Page::last(values),
     })
 }
 
@@ -414,19 +480,87 @@ async fn service_certificates(dir: &Path) -> Vec<PkiService> {
 }
 
 /// The authority and the certificates that end soon.
-async fn pki(ctx: Ctx, (): (), (): ()) -> ApiResult<PkiInfo> {
+async fn pki(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<PkiInfo> {
     admin_of(&ctx)?;
     let ca = ctx.app.link.certificates().authority_certificate();
     let mut conn = ctx.app.db.acquire().await?;
-    let before = ctx.now + Duration::days(MACHINE_EXPIRY_WINDOW_DAYS);
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Position {
+        user: Id,
+        words: orch_types::Hash,
+        before: Time,
+        at: Time,
+        id: Id,
+    }
+    let words = orch_types::Hash::of(query.q.as_deref().unwrap_or("").trim().as_bytes());
+    let key = crate::routes::resources::sealing::installed_master_key()?;
+    let purpose = b"machine-certificate-page";
+    let previous = query
+        .cursor
+        .as_deref()
+        .map(|text| {
+            let bad =
+                || ApiError::invalid("cursor", "is not this certificate search's continuation");
+            let sealed = URL_SAFE_NO_PAD.decode(text).map_err(|_| bad())?;
+            let plain = key.open(&sealed, purpose).map_err(|_| bad())?;
+            let position: Position = serde_json::from_slice(&plain).map_err(|_| bad())?;
+            if position.user != ctx.user()?.id() || position.words != words {
+                return Err(bad());
+            }
+            Ok(position)
+        })
+        .transpose()?;
+    let before = previous.as_ref().map_or(
+        ctx.now + Duration::days(MACHINE_EXPIRY_WINDOW_DAYS),
+        |position| position.before.get(),
+    );
+    let size = query
+        .limit
+        .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT);
+    if size == 0 {
+        return Err(ApiError::invalid("limit", "must be greater than zero"));
+    }
     let machines_expiring_30d =
         resources::management::machines_with_certificates_ending_by(&mut conn, before).await?;
-    let expiring = resources::management::expiring_machine_certificates(
+    let mut expiring = resources::management::expiring_machine_certificates(
         &mut conn,
         before,
-        MACHINES_EXPIRING_LIMIT,
+        &orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or("")).like_patterns(),
+        previous
+            .as_ref()
+            .map(|position| (position.at.get(), position.id)),
+        i64::from(size) + 1,
     )
     .await?;
+    let more = expiring.len() > usize::try_from(size).map_err(ApiError::internal)?;
+    expiring.truncate(usize::try_from(size).map_err(ApiError::internal)?);
+    let machines_next_cursor = if more {
+        expiring
+            .last()
+            .map(|row| {
+                let plain = serde_json::to_vec(&Position {
+                    user: ctx.user()?.id(),
+                    words,
+                    before: Time::new(before),
+                    at: Time::new(row.not_after),
+                    id: row.id,
+                })
+                .map_err(ApiError::internal)?;
+                key.seal(&plain, purpose)
+                    .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+                    .map_err(ApiError::internal)
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let ids: Vec<_> = expiring.iter().map(|row| row.id).collect();
     let machines = machine_refs(&ctx.app, &mut conn, &ids).await?;
     let machines_expiring = expiring
@@ -451,6 +585,7 @@ async fn pki(ctx: Ctx, (): (), (): ()) -> ApiResult<PkiInfo> {
         services: service_certificates(&secrets_dir()).await,
         machines_expiring_30d,
         machines_expiring,
+        machines_next_cursor,
     })
 }
 

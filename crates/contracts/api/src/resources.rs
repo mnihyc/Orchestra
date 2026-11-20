@@ -26,10 +26,12 @@ use orch_types::{Field, Id, Json, Revision, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use orch_provider_contract::models::ProviderRelayOptions;
+
 use crate::access::{NewResourceAccess, ResourceAccess};
 use crate::approvals::{ApproverScope, Risk};
 use crate::binding::ArrangementType;
-use crate::common::{PageQuery, absent_or_null};
+use crate::common::{CollectionQuery, Page, PageQuery, absent_or_null};
 use crate::documents::Document;
 use crate::environment::{
     Amounts, Environment, EnvironmentRef, HostStorage, McpScope, PendingUpdate, Placement,
@@ -73,6 +75,9 @@ pub struct MachineRef {
     pub platform_os: MachineOs,
     /// Whether it is a person's own machine or one the system manages.
     pub placement: Placement,
+    /// The host of a managed machine, independent of the host's displayed name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<Id>,
 }
 
 /// A host, named wherever another thing points at one.
@@ -166,7 +171,8 @@ pub use orch_provider_contract::facts::{
 /// What a model can be run with at a provider, and a model as a list gives it, written once with the
 /// provider's contract.
 pub use orch_provider_contract::models::{
-    ModelOffered, ModelParameters, ModelReport, ModelSuggestion, Rate, RateAbove, ServiceTier,
+    ModelOffered, ModelParameters, ModelPurpose, ModelPurposeInfo, ModelReport, ModelSuggestion,
+    Rate, RateAbove, ServiceTier,
 };
 pub use orch_provider_contract::source::{
     SourceCredential, SourceDescriptor, SourceDescriptorFacts, SourceDescriptorModels,
@@ -197,6 +203,12 @@ pub enum MachineStatus {
 /// A machine that is registered with the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Machine {
+    /// Continuation of an explicitly selected child directory; absent for a complete or final read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// The machine's last out-of-band authoritative output storage observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spool: Option<SpoolStatus>,
     /// Management-visible apparent file sizes from the connector's regular observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_directory: Option<crate::storage::MachineDataInventory>,
@@ -257,9 +269,57 @@ pub struct Machine {
     pub environment_sandboxes: Vec<crate::environment::EnvironmentSandboxReadiness>,
 }
 
+/// Why authoritative output is held while the machine keeps its link available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpoolProblem {
+    /// The filesystem or its quota has no space.
+    Full,
+    /// A record cannot yet be written or rolled back.
+    Write,
+    /// Accepted writes have not yet passed durability forcing.
+    Sync,
+    /// Startup found damaged retained storage.
+    Damaged,
+    /// The current link cannot admit an authoritative event.
+    EventRejected,
+}
+
+/// Current output storage state, reported independently of the spool it diagnoses.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SpoolStatus {
+    /// Absent when no storage failure is holding output.
+    pub problem: Option<SpoolProblem>,
+    /// Events held by their publishers until storage and durability succeed.
+    pub waiting_events: u64,
+}
+
+impl SpoolStatus {
+    /// The same current reason for local commands and logs, without native text or file paths.
+    #[must_use]
+    pub const fn reason(&self) -> Option<&'static str> {
+        match self.problem {
+            None => None,
+            Some(SpoolProblem::Full) => Some("output paused: storage is full; writes will retry"),
+            Some(SpoolProblem::Write) => {
+                Some("output paused: storage writes failed; writes will retry")
+            }
+            Some(SpoolProblem::Sync) => {
+                Some("output paused: storage durability failed; forcing will retry")
+            }
+            Some(SpoolProblem::Damaged) => Some("retained output storage was damaged"),
+            Some(SpoolProblem::EventRejected) => {
+                Some("output paused: the current link cannot admit an event")
+            }
+        }
+    }
+}
+
 /// The running hello version compared with the server's recommendation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ComponentUpdate {
+    /// The pending request was automatic rather than an explicit Update action.
+    pub automatic: bool,
     /// Version reported by the currently executing program.
     pub running_version: String,
     /// Build served by this server and announced in ready.versions.
@@ -270,7 +330,7 @@ pub struct ComponentUpdate {
     pub status: String,
     /// A machine's refusal or verification failure, in its own words.
     pub detail: Option<String>,
-    /// The local command, including when local policy refuses the web action.
+    /// The explicit local verified update command, available independently of Auto.
     pub command: String,
 }
 
@@ -370,9 +430,11 @@ pub struct ProviderFacts {
     /// True only when the vendor authenticated this facts observation with the provider's credential.
     #[serde(default)]
     pub credential_verified: Option<bool>,
-    /// The last successfully discovered model list; suggestions remain separate from the accepted allowlist.
+    /// How many models the last successful discovery listed; null where no list was read. The list itself
+    /// is not part of a provider's view: it is read from `GET /providers/{id}/facts/models`, by the places
+    /// that draw it.
     #[serde(default)]
-    pub models: Option<Vec<ModelSuggestion>>,
+    pub models_count: Option<i64>,
     /// The last successful observation of each source group; absent groups were never observed.
     #[serde(default)]
     pub field_times: std::collections::BTreeMap<String, Time>,
@@ -631,6 +693,9 @@ impl HarnessKindName {
 /// What a form shows of the credential that an arrangement would let leave.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArrangementConsentForm {
+    /// Each copy reports its own expiry rather than promising a fixed duration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expires: bool,
     /// The adapter's name for what leaves.
     pub name: String,
     /// What it is called for people.
@@ -713,6 +778,9 @@ pub struct ProviderSetupRuntimeTemplate {
 /// Everything the page that adds a provider needs, for the caller, in one answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderSetup {
+    /// Existing environments the caller may use, with the services of their own connector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environments: Option<Vec<ProviderSetupEnvironment>>,
     /// Grouping of the actual resource references offered by this compound picker.
     #[serde(default)]
     pub grouping: Vec<crate::resource_groups::ResourceChoiceGrouping>,
@@ -721,9 +789,6 @@ pub struct ProviderSetup {
     pub machines: Option<Vec<ProviderSetupMachine>>,
     /// The harnesses a provider can be signed in to.
     pub subscriptions: Vec<ProviderSetupSubscription>,
-    /// Usable profiles whose sign-in capabilities have not been reported yet; never guessed by kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subscriptions_unreported: Option<Vec<AgentRef>>,
     /// Named programs which cannot be chosen for sign-in yet, with an actual reason and no guessed capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriptions_unavailable: Option<Vec<ProviderSetupUnavailableSubscription>>,
@@ -797,6 +862,15 @@ pub struct ProviderSetupMachine {
     pub harnesses: Vec<String>,
 }
 
+/// An existing environment offered by the same connection-location control as a machine or container.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderSetupEnvironment {
+    /// The environment whose availability and home keep the connection.
+    pub environment: crate::environment::EnvironmentRef,
+    /// Its own current connector and its declared services; absent if it has no current connector.
+    pub connector: Option<ProviderSetupMachine>,
+}
+
 /// A source a new provider's details may come from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderSetupSource {
@@ -828,9 +902,53 @@ pub enum ModelSource {
     Suggested,
 }
 
+/// A page of the provider's saved models.
+pub type ProviderModelPage = Page<ProviderModel>;
+/// A page of the source's proposals, optionally only those not saved on the provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelSuggestionListQuery {
+    /// Words of a visible model name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation from this same source and filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Omit names already saved on this provider before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlisted: Option<bool>,
+    /// Ask the source again instead of reading its last successful catalogue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+}
+impl ProviderModelSuggestionListQuery {
+    /// Its ordinary named-collection page.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+/// A page of model suggestions, retaining their original offered facts.
+pub type ModelSuggestionPage = Page<ModelSuggestion>;
+
 /// A model that a provider lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderModel {
+    /// Current read-only purpose and endpoint facts, independent of editable parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<ModelPurposeInfo>,
     /// The entry's identifier.
     pub id: Id,
     /// Its routing name: the exact name sent upstream, in whatever form that upstream takes
@@ -845,6 +963,9 @@ pub struct ProviderModel {
     /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub option_constraints: std::collections::BTreeMap<String, Json>,
+    /// Declared per-thread option forms, keyed by outgoing interface, shared by thread and place defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub parameter_forms: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// The groups its managers put it in (`frontier`, `small`): names of their own, by which a cap,
@@ -878,6 +999,7 @@ pub fn is_model_group_name(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NativeSession {
     /// The harness's own reference to it.
+    #[schemars(extend("x-storage-exact" = true))]
     pub native_session_ref: String,
     /// Its title.
     pub title: Option<String>,
@@ -887,6 +1009,50 @@ pub struct NativeSession {
     pub updated_at: Option<Time>,
     /// The thread that adopted it, if one did.
     pub adopted_thread_id: Option<Id>,
+}
+
+/// Search and continuation within one captured native-session catalogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSessionListQuery {
+    /// Words in the session title or folder, matched before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Entries in this page; 50 by default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::common::query_u32"
+    )]
+    pub limit: Option<u32>,
+    /// Continue the same captured source and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The source returned by the first page; omit to ask the native program afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Id>,
+}
+impl NativeSessionListQuery {
+    /// The common page, whose scope also includes its captured native source.
+    #[must_use]
+    pub fn collection(&self) -> CollectionQuery {
+        CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+/// Native source identity stays outside the row window and is checked again on every page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NativeSessionPage {
+    /// This page's readable sessions.
+    pub items: Vec<NativeSession>,
+    /// The next page of the same captured source and search.
+    pub next_cursor: Option<String>,
+    /// Its opaque captured catalogue; not authority to read a provider.
+    pub source: Id,
 }
 
 /// An environment that holds a provider's credential for a while.
@@ -948,6 +1114,10 @@ pub struct ProviderRuntime {
     pub renew_at: Option<Time>,
     /// A job on it now: its provision or its recreation.
     pub job: Option<JobRef>,
+    /// Why it stands where it does: a word the screen says in the reader's language (`provider_person_stop`,
+    /// `provider_forced_stop`, `provider_update_ended`, `provider_unit_unfinished`, ...) or, for a failure the host
+    /// reported, the host's own words. `null` when there is nothing to say.
+    pub detail: Option<String>,
 }
 
 /// How a harness process started for a provider stands.
@@ -967,6 +1137,9 @@ pub enum HarnessStatus {
 /// A harness process that was started for a provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HarnessState {
+    /// The actual start's home evidence, never recomputed from a later setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<orch_driver_contract::runtime::HarnessHome>,
     /// The profile it runs.
     pub agent: AgentRef,
     /// The machine it runs on.
@@ -998,6 +1171,9 @@ pub struct HarnessProgramError {
 /// The runtime's actual declaration and one reported machine-policy value, without a placement inference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderRuntimeSupport {
+    /// Resolved automatic retry delay after failed creation; Start may retry immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<i64>,
     /// Each resource's actual enforcement support on the runtime's hosting machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_limits: Option<orch_driver_contract::descriptor::ResourceLimitSupport>,
@@ -1035,11 +1211,31 @@ pub struct ProviderSignInSupport {
     pub allowed: bool,
 }
 
+/// The durable read attempt's current reuse window; ordinary page reads have no native effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderRefreshEligibility {
+    /// Whether the same ordinary claim may read now.
+    pub eligible: bool,
+    /// Next known eligibility; absent before the first attempt or outside representable time.
+    pub next_at: Option<Time>,
+    /// The source's declared minimum is at least as long as the deployment's interval.
+    pub source_minimum: bool,
+}
+
 /// A provider: a subscription the harness signs in to, or an API reached with a key. Every
 /// provider selects its credential keeper independently from its unit or directory runtime.
 /// Placement is a derived label for that runtime, rather than a stored capability or policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Provider {
+    /// Current explicit Refresh eligibility, computed without claiming an observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts_refresh: Option<ProviderRefreshEligibility>,
+    /// A key provider's public relay choice, under the same current configuration reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<ProviderRelayOptions>,
+    /// The environment keeping this connection, including its stopped or removed state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_environment: Option<crate::environment::EnvironmentRef>,
     /// Declared service choices visible with the provider's ordinary View; no endpoint or credential data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_catalogue: Option<Vec<ProviderServiceOffering>>,
@@ -1103,8 +1299,11 @@ pub struct Provider {
     pub config: Json,
     /// For a subscription, what its org accepts of it; `null` for an API provider.
     pub subscription: Option<ProviderSubscription>,
-    /// What it can serve: those protocols, and any that a registered translator adds.
+    /// Interfaces spoken directly by its endpoints.
     pub protocols: Vec<String>,
+    /// Permitted additional interfaces and their conversion limits; no credential or address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub translated_protocols: Vec<orch_provider_contract::models::ProtocolTranslation>,
     /// Whether it has a key; false also for an upstream that takes none.
     pub key_set: bool,
     /// For an API provider, the connected machine that keeps the key; `null` means the server does.
@@ -1132,6 +1331,8 @@ pub struct Provider {
     /// Who last used a reset, while its resulting windows still stand.
     #[serde(default)]
     pub last_reset: Option<ProviderLastReset>,
+    /// How many models it lists. A row of a list carries this and no models: the page of the provider reads them.
+    pub models_count: i64,
     /// The models it lists.
     pub models: Vec<ProviderModel>,
     /// How many turns run on it now.
@@ -1148,6 +1349,32 @@ pub struct Provider {
     pub updated_at: Time,
     /// What the caller holds on it.
     pub access: ResourceAccess,
+}
+
+impl Provider {
+    /// Leaves in the provider what the row of a list draws of it, and out what only its own page does. Its models are
+    /// not listed (`models_count` says how many), the seven days of how each performed and the descriptors of its
+    /// sources are left out, and so are its spending, its resets and its extra usage. The caps stay, for they say at a
+    /// glance that one is reached; the whole view is `GET /providers/{id}`.
+    pub fn thin_for_list(&mut self) {
+        self.models.clear();
+        if let Some(usage) = self.choice_usage.as_mut() {
+            usage.performance.clear();
+        }
+        self.plan_forecasts = None;
+        self.service_catalogue = None;
+        self.service_offerings.clear();
+        self.model_group_options.clear();
+        self.runtime_changes = None;
+        self.sources.facts.descriptor = None;
+        self.sources.models.descriptor = None;
+        if let Some(presenter) = self.sources.presenter.as_mut() {
+            presenter.descriptor = None;
+        }
+        self.facts.spend.clear();
+        self.facts.available_resets = None;
+        self.facts.extra_usage = None;
+    }
 }
 
 /// Safe service metadata and manager choices for the existing provider editor.
@@ -1273,6 +1500,9 @@ pub struct HostRunning {
 /// whoever its page names, wherever they work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
+    /// Continuation of an explicitly selected child directory; absent for a complete or final read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Protected origin and native contextual availability, beside home and owner.
     #[serde(default, flatten)]
     pub provenance: crate::resource_groups::ResourceProvenance,
@@ -1377,6 +1607,8 @@ pub struct HostKeptData {
 /// One environment generation's kept installed files, excluding its shared base image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HostKeptLayers {
+    /// The newest visible retained generation for this environment, independent of the chosen page.
+    pub latest: bool,
     pub environment_id: Id,
     pub environment: Option<crate::environment::EnvironmentRef>,
     pub generation: i64,
@@ -1764,6 +1996,9 @@ pub struct MachinePolicyKey {
 /// everybody, the owner and the admins included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachinePolicy {
+    /// Applicability certified by the same native supplier and current reader cut as these keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<MachineLimits>,
     /// Mutation acknowledgement for the open machine page, including readiness; avoids a second GET.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_view: Option<Machine>,
@@ -1776,6 +2011,36 @@ pub struct MachinePolicy {
     pub reported_at: Option<Time>,
     /// The keys.
     pub keys: Vec<MachinePolicyKey>,
+}
+
+/// Current applicability for the machine or unit through which policy is being read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineLimits {
+    /// The addressed machine is a runtime's unit, rather than its physical supplier.
+    pub unit_context: bool,
+    /// Only keys admitted by native role, capability and reader-section rules.
+    pub applicable_keys: Vec<MachinePolicyApplicability>,
+}
+
+/// A current key's native resource boundary and the authority that supplies its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachinePolicyApplicability {
+    /// The policy key, for matching its existing definition and control.
+    pub key: String,
+    /// The kind of resource governed by the enforcing catalogue's boundary.
+    pub governing_resource: PolicyBounds,
+    /// Physical local control or values handed to Orch; independent from this reader's write permission.
+    pub authority_source: MachinePolicyAuthority,
+}
+
+/// Where the actual policy value is controlled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MachinePolicyAuthority {
+    /// The operator of the physical program keeps the value locally.
+    PhysicalOperator,
+    /// The operator handed this key to the existing Orch policy authority.
+    Delegated,
 }
 
 pub use crate::admin::{MetricResolution, MetricSeries, Runtime};
@@ -1922,6 +2187,8 @@ pub enum Resource {
     Mount(Mount),
     /// A skill.
     Skill(crate::skills::Skill),
+    /// A configured resource pool.
+    Pool(crate::pools::Pool),
     /// A document.
     Document(Document),
     /// Document-only folder metadata, without an editable document payload.
@@ -1951,6 +2218,9 @@ pub enum ProviderListScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderListQuery {
+    /// Only providers whose connection runs through this existing environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_environment_id: Option<Id>,
     /// Only those whose home is that org or an org inside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
@@ -1998,9 +2268,9 @@ pub struct ProviderLoginStartBody {
 pub enum CreateProvider {
     /// A subscription that a harness signs in to.
     Subscription {
-        /// A declared directory machine for the runtime; omitted, a unit is made from its template.
+        /// The connection's location; omitted, a container is made from its template.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_machine_id: Option<Id>,
+        runtime_location: Option<ProviderConnectionLocation>,
         /// The native keeper; omitted, the profile's registered machine or its runtime keeps it.
         #[serde(
             default,
@@ -2035,9 +2305,9 @@ pub enum CreateProvider {
     },
     /// An API reached with a key.
     Api {
-        /// A declared directory machine for the runtime; omitted, a unit is made from its template.
+        /// The connection's location; omitted, a container is made from its template.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_machine_id: Option<Id>,
+        runtime_location: Option<ProviderConnectionLocation>,
         /// Its name.
         name: String,
         /// Its home: an org at any level.
@@ -2065,7 +2335,6 @@ pub enum CreateProvider {
         #[serde(
             default,
             rename = "keeper_machine_id",
-            alias = "key_machine_id",
             skip_serializing_if = "Option::is_none"
         )]
         key_machine_id: Option<Id>,
@@ -2075,12 +2344,33 @@ pub enum CreateProvider {
     },
 }
 
+/// The one location selection for a provider's connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderConnectionLocation {
+    /// A new container using the chosen runtime host and template.
+    Container,
+    /// A directory service on a person's machine.
+    Machine {
+        /// The person's machine that supplies the connection service.
+        machine_id: Id,
+    },
+    /// The connector in an existing environment, following its availability and persistent home.
+    Environment {
+        /// The existing environment whose connector supplies the connection.
+        environment_id: Id,
+    },
+}
+
 /// Changes a provider. A change its running runtime cannot take (its template, its host, its
 /// resources) is stored and listed in `Provider.runtime.updates`. Changing the arrangement types
 /// writes `provider.arrangements_changed`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUpdateBody {
+    /// Replaces a key provider's explicit public relay choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<ProviderRelayOptions>,
     /// Replaces manager choices for declared services; empty clears all service opt-ins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_offerings:
@@ -2128,6 +2418,11 @@ pub struct ProviderStartStopBody {
     /// Whether to go on although a turn runs on it; a stop is refused otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupt: Option<bool>,
+    /// For a stop: whether to settle it although the host does not confirm it. The work of the provider's own that is
+    /// in the way is ended (an update is undone, and left to be removed when its host does not answer in time), the
+    /// unit is stopped in the system's records, and the host is told to stop it, again and again, until it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Asks for a plan to update the runtimes of several providers.
@@ -2346,6 +2641,7 @@ pub struct ProviderThreadListReply {
 #[serde(deny_unknown_fields)]
 pub struct ProviderKeySetBody {
     /// The key. It is write-only.
+    #[schemars(extend("x-storage-exact" = true))]
     pub api_key: String,
 }
 
@@ -2354,6 +2650,7 @@ pub struct ProviderKeySetBody {
 #[serde(deny_unknown_fields)]
 pub struct ProviderSecretSetBody {
     /// The value. It is write-only.
+    #[schemars(extend("x-storage-exact"=true))]
     pub value: String,
 }
 
@@ -2362,6 +2659,7 @@ pub struct ProviderSecretSetBody {
 #[serde(deny_unknown_fields)]
 pub struct ProviderLoginInputBody {
     /// The answers, by field name (`LoginState.asks`).
+    #[schemars(extend("x-storage-exact"=true))]
     pub values: BTreeMap<String, String>,
 }
 
@@ -2438,6 +2736,42 @@ pub struct ProviderRefreshBody {
     /// Try the current refused credential immediately; this needs current provider.manage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<bool>,
+}
+
+/// The actual reservation or recorded outcome of the provider's single credential trial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTrialState {
+    Reserved,
+    Running,
+    Consumed,
+    NotReserved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderTrial {
+    pub state: ProviderTrialState,
+    pub at: Option<Time>,
+    /// Only within the current live thread/input read projection.
+    pub input_ref: Option<Id>,
+    pub thread_ref: Option<crate::nodes::NodeRef>,
+    pub reserved_for: Option<crate::users::UserRef>,
+}
+
+/// The ordinary provider fields with the actual recovery receipt, when one was requested.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderRefreshReply {
+    #[serde(flatten)]
+    pub provider: Provider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial: Option<ProviderTrial>,
+}
+
+impl std::ops::Deref for ProviderRefreshReply {
+    type Target = Provider;
+    fn deref(&self) -> &Self::Target {
+        &self.provider
+    }
 }
 
 /// Facts that are written in by hand and so win over what the harness or endpoint reports: any
@@ -2567,7 +2901,9 @@ pub struct ProviderModelCreateBody {
     pub display_name: Option<String>,
     /// What it can be run with here. A default (`default_effort`, `default_service_tier`,
     /// `default_access_program`) has to be among what is enabled; `context_max` may not be below
-    /// `context_window`; `default_context` is at most `context_max` and needs one.
+    /// `context_window`; `default_context` is at most `context_max` and needs one. Omitted uses
+    /// the catalogue defaults. An explicit object is the whole enabled definition; blank factual
+    /// window/efforts still use the catalogue, while cleared optional choices stay off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<ModelParameters>,
     /// The groups to put it in, within the home's configured limit, each named as [`is_model_group_name`]
@@ -2576,10 +2912,31 @@ pub struct ProviderModelCreateBody {
     pub groups: Option<Vec<String>>,
 }
 
+/// The exact routing name whose current catalogue defaults the add form shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelDefaultsQuery {
+    /// A provider catalogue name; an unlisted name returns unknown facts without a guessed window.
+    pub model_name: String,
+}
+
+/// The stored model definition on which an options or groups draft was based.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelState {
+    /// The enabled options read before editing.
+    pub parameters: ModelParameters,
+    /// The groups read before editing.
+    pub groups: Vec<String>,
+}
+
 /// Changes a model of a provider. A routing name is not changed: another model is added.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelUpdateBody {
+    /// A draft supplies its opening definition; a changed baseline refuses the whole save. Omitted is a deliberate unconditional replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<ProviderModelState>,
     /// A new display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -2596,9 +2953,10 @@ pub struct ProviderModelUpdateBody {
     pub enabled: Option<bool>,
 }
 
-/// Accepts models that discovery suggested. Each is added with what its suggestion says of it,
-/// except that the service tiers and access programs it lists and a context larger than the usual
-/// one become `parameters.offered`, and none of them is enabled.
+/// Accepts models that discovery suggested. Each is added with what its suggestion says of it, and what
+/// the organization chose to switch on (`models.add_switches_on`) is enabled: by default every effort, the
+/// window, every context size, speed and access program it lists. Whatever is left off stays under
+/// `parameters.offered`, and what a thread starts with is never taken from a suggestion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderModelSuggestionAcceptBody {
@@ -3096,6 +3454,50 @@ crate::common::full_or_receipt! {
     }
 }
 
+/// A path check never claims that it enumerated a directory's children.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MachineDirectoryRead {
+    /// Read one bounded page of directory choices.
+    #[default]
+    Choices,
+    /// Check this exact directory and its roots policy without enumerating children.
+    Inspect,
+}
+
+/// One directory level beneath an explicitly selected machine policy root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineDirectoryListQuery {
+    /// Inspect checks only the exact path; absent means a page of choices.
+    #[serde(default)]
+    pub read_kind: MachineDirectoryRead,
+    /// The exact environment.roots entry being browsed.
+    pub root: String,
+    /// Parent directory relative to that root; empty selects the root itself.
+    #[serde(default)]
+    pub path: String,
+    /// A directory-name prefix, never a recursive search.
+    #[serde(default)]
+    pub prefix: String,
+    /// JSON array of this reader's recent child names, ranked only if natively admitted.
+    pub recent: Option<String>,
+    /// Opaque continuation bound to the same directory, policy and filter.
+    pub cursor: Option<String>,
+    /// Positive page count; absent uses workspace.directory_entries at System.
+    pub limit: Option<u32>,
+}
+
+/// One bounded native directory page, without environment creation or file content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineDirectoryPage {
+    /// What the native machine actually read; an inspection is not an empty listing.
+    pub read_kind: MachineDirectoryRead,
+    /// Actual immediate directory names; no file or outside-root symlink target is returned.
+    pub entries: Vec<String>,
+    /// Native continuation; null means this admitted level is complete.
+    pub next_cursor: Option<String>,
+}
+
 /// A completed probe without disclosure of retained Machine facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineProbeReceipt {
@@ -3345,6 +3747,29 @@ pub struct HostRuntimeListQuery {
     /// Only those of this kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<UnitKind>,
+    /// Words in the admitted visible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Requested page size; any positive u32, defaulting to fifty.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+    /// The continuation returned for this collection and search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+impl HostRuntimeListQuery {
+    /// Shared native search and continuation.
+    pub fn collection(&self) -> crate::common::CollectionQuery {
+        crate::common::CollectionQuery {
+            q: self.q.clone(),
+            limit: self.limit,
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 /// The span of a host's load to read, as for the system's own metrics.
@@ -3367,6 +3792,11 @@ pub struct HostMetricsListQuery {
 pub struct HostRuntimeStopBody {
     /// Whether to interrupt what runs in it.
     pub interrupt: bool,
+    /// Whether to settle the stop although the host does not confirm it, ending the work of the provider's own that
+    /// is in the way; the host is told to stop the unit, again and again, until it answers. Only a provider's unit
+    /// is stopped by force; an environment's unit refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Which runtime to remove from a host.
@@ -3378,6 +3808,11 @@ pub struct HostRuntimeDeleteQuery {
     /// Whether to remove its volumes there too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<bool>,
+    /// Whether to remove a provider's unit although work of the provider's own is under way on it, which is ended
+    /// first (an update is undone); the unit is taken away from the host when the host can be told, and kept for that
+    /// as long as it takes. Only a provider's unit is removed by force; an environment's unit refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
 }
 
 /// Which host to remove.
@@ -3710,13 +4145,15 @@ const fn provider_setup_facets() -> [Facet; 8] {
     ]
 }
 
-/// Candidate input for the common capability backend picker at an actual governing node.
+/// Candidate input for the common capability backend picker.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CapabilityBackendQuery {
     /// Exact declared capability id; capabilities may share a backend setting.
     pub capability: String,
-    /// Actual org/project/topic/thread where the backend will be used.
-    pub place: Id,
+    /// Actual org/project/topic/thread where the backend will be used. Omitted only
+    /// for summary or Ask policy choices: metadata and provider Use, without starting work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Id>,
     /// Search the provider's offering names using the native supplier before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
@@ -3777,6 +4214,36 @@ crate::endpoints! {
             Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
             resource_read_context_facet(),
         ]);
+    /// Makes a Responses call through the provider's explicitly enabled public relay.
+    ProviderRelayResponses: POST "/providers/{id}/relay/responses", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Compacts conversation input through the provider's declared Responses interface.
+    ProviderRelayCompact: POST "/providers/{id}/relay/responses/compact", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Counts input tokens through the provider's declared Responses interface.
+    ProviderRelayInputTokens: POST "/providers/{id}/relay/responses/input_tokens", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Makes a Messages call through the provider's explicitly enabled public relay.
+    ProviderRelayMessages: POST "/providers/{id}/relay/v1/messages", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Counts input tokens through the provider's declared Messages interface.
+    ProviderRelayMessageCount: POST "/providers/{id}/relay/v1/messages/count_tokens", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Makes a Chat Completions call through the provider's declared interface.
+    ProviderRelayChat: POST "/providers/{id}/relay/chat/completions", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Makes a native Interactions call through the provider's explicitly enabled public relay.
+    ProviderRelayInteractions: POST "/providers/{id}/relay/interactions", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Makes an Embeddings call through the provider's declared interface.
+    ProviderRelayEmbeddings: POST "/providers/{id}/relay/embeddings", Permission("provider.relay"), none, json Json, raw, 200,
+        operation Op::single(Write, &[Object(K::Provider)], Target::PermissionObject);
+    /// Lists only opened and currently usable relay models in Responses format.
+    ProviderRelayModels: GET "/providers/{id}/relay/models", Permission("provider.relay"), none, none, raw, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::PermissionObject);
+    /// Lists only opened and currently usable relay models in Messages format.
+    ProviderRelayMessageModels: GET "/providers/{id}/relay/v1/models", Permission("provider.relay"), none, none, raw, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::PermissionObject);
     /// Reads the visible plan windows' current measurements, usage history and start-over markers.
     ProviderPlanGet: GET "/providers/{id}/plan", Permission("provider.view"), query ProviderPlanGetQuery, none, json crate::common::Page<ProviderHistorySeries>, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
@@ -3827,9 +4294,9 @@ crate::endpoints! {
             },
         ]));
     /// Deletes a provider that no thread is bound to, signing its harness out first and retiring its runtime.
-    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), none, none, none, 204;
+    ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), query crate::resource_facts::ResourceNotificationQuery, none, none, 204;
     /// Switches a provider off.
-    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200,
+    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourceStopQuery, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Switches a provider on again.
     ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200,
@@ -3852,13 +4319,13 @@ crate::endpoints! {
     ProviderRuntimeUpdateBatchCreate: POST "/providers/runtime/updates", Rule("provider.manage, on each provider"), query UpdateConfirmQuery, json ForkCreateBody, json ProviderBatchResponse, 202,
         operation Op::receipt(&Op::facets(&provider_runtime_batch_facets()));
     /// Lists the threads bound to a provider that the caller may view, of whatever org, and how many more there are.
-    ProviderThreadList: GET "/providers/{id}/threads", Rule("any permission on the provider"), query PageQuery, none, json ProviderThreadListReply, 200,
+    ProviderThreadList: GET "/providers/{id}/threads", Rule("any permission on the provider"), query CollectionQuery, none, json ProviderThreadListReply, 200,
         operation Op::facets(&provider_threads_read_facets());
     /// Restarts the harness of one agent profile on a provider; its sessions reopen at their next turn.
     ProviderHarnessRestart: POST "/providers/{id}/harnesses/{agent_id}/restart", Permission("provider.manage"), none, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the conversations a provider's harness already holds, for adapters that can discover them.
-    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), none, none, json Vec<NativeSession>, 200,
+    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), query NativeSessionListQuery, none, json NativeSessionPage, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::PermissionObject);
     /// Saves an API key, asks the configured facts/model sources, and returns the provider; never the key.
     ProviderKeySet: PUT "/providers/{id}/key", Permission("provider.manage"), none, json ProviderKeySetBody, json Provider, 200,
@@ -3898,7 +4365,16 @@ crate::endpoints! {
     ProviderLogout: POST "/providers/{id}/logout", Permission("provider.manage"), none, none, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Asks the provider's connector for its status and usage, and waits up to ten seconds for the answer.
-    ProviderRefresh: POST "/providers/{id}/refresh", Permission("provider.view"), none, json ProviderRefreshBody, json Provider, 200;
+    ProviderRefresh: POST "/providers/{id}/refresh", Permission("provider.view"), none, json ProviderRefreshBody, json ProviderRefreshReply, 200;
+    /// Reads the single credential-trial observation without refreshing or starting native work.
+    ProviderTrialGet: GET "/providers/{id}/credential-trial", Permission("provider.manage"), none, none, json Option<ProviderTrial>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) }),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_trial_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_trial_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_trial_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_trial_names_threads")),
+        ]);
     /// Uses the exact reset credit and available count explicitly confirmed by a current provider manager.
     ProviderResetConsume: POST "/providers/{id}/resets/consume", Rule("provider.manage; the exact current reset and available count must be confirmed"), none, json ProviderResetConsumeBody, json ProviderResetConsumeResponse, 200,
         operation Op::legacy_tokens(&[], &Op::receipt(&Op::returning(
@@ -3911,7 +4387,13 @@ crate::endpoints! {
     ProviderSourcesSet: PUT "/providers/{id}/sources", Permission("provider.manage"), none, json ProviderSourcesSetBody, json Provider, 200,
         operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the models a provider lists.
-    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
+    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), query CollectionQuery, none, json ProviderModelPage, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// The current catalogue defaults for adding one model, under the provider home's add policy, without discovery or a write.
+    ProviderModelDefaultsGet: GET "/providers/{id}/models/defaults", Permission("provider.manage"), query ProviderModelDefaultsQuery, none, json ModelParameters, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
+    /// Lists the models the provider's source last listed, as it kept them and not as the provider's own list; discovery suggests them and never adds one. Empty where no list was read; `facts_state.models` says why.
+    ProviderFactsModelsGet: GET "/providers/{id}/facts/models", Permission("provider.view"), none, none, json Vec<ModelSuggestion>, 200,
         operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Lists explicit capability backends of this provider at a governed place.
     ProviderCapabilityBackendList: GET "/providers/{id}/capability-backends", Permission("provider.view"), query CapabilityBackendQuery, none, json crate::common::Page<CapabilityBackendCandidate>, 200,
@@ -3925,7 +4407,7 @@ crate::endpoints! {
     /// Removes a model from a provider.
     ProviderModelDelete: DELETE "/providers/{id}/models/{model_id}", Permission("provider.manage"), none, none, none, 204;
     /// Lists the models that discovery suggests for a provider.
-    ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), none, none, json Vec<ModelSuggestion>, 200;
+    ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), query ProviderModelSuggestionListQuery, none, json ModelSuggestionPage, 200;
     /// Adds the suggested models that were chosen; the speeds, the access programs and the larger context they list are put under `offered`, and none of them is enabled.
     ProviderModelSuggestionAccept: POST "/providers/{id}/models/suggestions/accept", Permission("provider.manage"), none, json ProviderModelSuggestionAcceptBody, json ProviderModelSuggestionAcceptResponse, 200,
         operation Op::receipt(&Op::facets(&[
@@ -4052,7 +4534,7 @@ crate::endpoints! {
     McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServerUpdateResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mcp_sources::UPDATE_FACETS));
     /// Deletes an MCP server; one imported from a machine has that machine's connector forget its copy.
-    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204,
+    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), query crate::resource_facts::ResourceNotificationQuery, none, none, 204,
         operation Op::facets(&[
             Facet::required(Manage, &[Object(K::McpServer)], Target::Resolved("server_subject")),
             Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),
@@ -4073,7 +4555,7 @@ crate::endpoints! {
     MachineEnrollmentAgainTokenCreate: POST "/machines/{id}/enrollment-tokens", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineEnrollmentAgainResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Reads a machine.
-    MachineGet: GET "/machines/{id}", Rule("machine.view, or host.view on its node facade"), none, none, json Machine, 200,
+    MachineGet: GET "/machines/{id}", Rule("machine.view, or host.view on its node facade"), query crate::common::ChildCollectionQuery, none, json Machine, 200,
         operation Op::facets(&crate::machine_sources::GET_FACETS);
     /// Read installation readiness; creates no token or other resource.
     MachineEnrollmentInfoGet: GET "/machines/enrollment-options", User, none, none, json MachineEnrollmentInfo, 200,
@@ -4087,7 +4569,7 @@ crate::endpoints! {
     /// Saves delegated connector roles and reconnects after its answer is journaled.
     MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
-    /// Requests a verified physical connector update, drained under its local update.auto policy.
+    /// Requests an explicit verified physical connector update after its active work drains.
     MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineUpdateNowResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Requests the same verified procedure for a host's node, after its units finish their turns.
@@ -4111,6 +4593,9 @@ crate::endpoints! {
             Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
             Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
         ]));
+    /// Browses directories before registration through the same current machine Use authority.
+    MachineDirectoryList: GET "/machines/{id}/directories", Rule("machine.view and machine.use through its current physical page; native environment.roots is checked on every call"), query MachineDirectoryListQuery, none, json MachineDirectoryPage, 200,
+        operation Op::single(Read, &[Object(K::Machine)], crate::machine_sources::SUBJECT);
     /// Asks the machine for its facts again.
     MachineProbe: POST "/machines/{id}/probe", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineProbeResponse, 200,
         operation Op::receipt(&Op::facets(&crate::machine_sources::UPDATE_FACETS));
@@ -4138,13 +4623,13 @@ crate::endpoints! {
     HostEnrollmentTokenCreate: POST "/hosts/enrollment-tokens", Rule("its home is the caller's domain or an org inside it and the members of that home may add hosts there; else settings.manage on that org; a system admin when it has no home"), none, json HostEnrollmentTokenCreateBody, json EnrollmentToken, 200,
         operation Op::receipt(&Op::single(Manage, &[Object(K::Host)], Target::Resolved("home")));
     /// Reads a host.
-    HostGet: GET "/hosts/{id}", Rule("any permission on the host"), none, none, json Host, 200,
+    HostGet: GET "/hosts/{id}", Rule("any permission on the host"), query crate::common::ChildCollectionQuery, none, json Host, 200,
         operation Op::facets(&crate::resource_reads::HOST.facets::<7>(Target::Path("id")));
     /// Changes a host.
     HostUpdate: PATCH "/hosts/{id}", Permission("host.manage"), none, json HostUpdateBody, json Host, 200,
         operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Lists everything that runs on a host, whoever's it is.
-    HostRuntimeList: GET "/hosts/{id}/runtimes", Permission("host.manage"), query HostRuntimeListQuery, none, json Vec<Runtime>, 200;
+    HostRuntimeList: GET "/hosts/{id}/runtimes", Permission("host.manage"), query HostRuntimeListQuery, none, json crate::common::Page<Runtime>, 200;
     /// Reads a host's load over time: CPU, memory used, disk used and free.
     HostMetricsList: GET "/hosts/{id}/metrics", Permission("host.manage"), query HostMetricsListQuery, none, json Vec<MetricSeries>, 200;
     /// Stops a runtime of a host.
@@ -4222,7 +4707,7 @@ mod tests {
                     "balances": [{ "id": "plan", "label": "Plan credits", "unit": "credits", "remaining": "12.5",
                                    "total": null, "used": null, "unlimited": false, "parts": null, "expires_at": null }],
                     "spend": [],
-                    "ordinary_usage_allowed": null, "credential_verified": null, "models": null, "field_times": {}
+                    "ordinary_usage_allowed": null, "credential_verified": null, "models_count": null, "field_times": {}
                 },
                 "facts_state": {
                     "identity": "told", "credential": "told", "credential_verified": "not_read_yet", "plan": "told",
@@ -4264,7 +4749,7 @@ mod tests {
                     "token_estimate": { "ascii_prose_x100": 400, "ascii_structured_x100": 300, "other_x100": 100, "image_tokens": 1000, "measured": false },
                     "enabled": true, "source": "suggested"
                 }],
-                "running_threads": 3
+                "models_count": 1, "running_threads": 3
             }),
             json!({
                 "runtime": {
@@ -4280,7 +4765,8 @@ mod tests {
                     "template": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a17", "name": "Provider runtime", "owner": null },
                     "generation": 2,
                     "updates": [{ "what": "image", "name": "orch-provider", "from": "1.2.0", "to": "1.3.0" }],
-                    "update_required": false, "last_active_at": AT, "idle_stop_at": AT, "renew_at": null, "job": null
+                    "update_required": false, "last_active_at": AT, "idle_stop_at": AT, "renew_at": null, "job": null,
+                    "detail": null
                 },
                 "harnesses": [{
                     "agent": agent(), "machine": machine(), "status": "online", "status_detail": null,
@@ -4464,6 +4950,19 @@ mod tests {
     }
 
     #[test]
+    fn provider_creation_refuses_replaced_keeper_and_location_fields() {
+        let base = json!({"kind":"api","name":"Current connection","home_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a14","upstreams":[{"protocol":"openai-responses","base_url":"https://api.example/v1","options":{}}]});
+        for field in ["key_machine_id", "runtime_machine_id"] {
+            let mut request = base.clone();
+            request[field] = json!("0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a10");
+            assert!(
+                serde_json::from_value::<CreateProvider>(request).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
     fn a_provider_is_made_from_a_subscription_or_from_an_api_whose_key_is_kept_somewhere() {
         let subscription: CreateProvider = serde_json::from_value(json!({
             "kind": "subscription", "name": "Team Pro", "home_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a14",
@@ -4481,8 +4980,8 @@ mod tests {
         ));
         let on_a_machine: CreateProvider = serde_json::from_value(json!({
             "kind": "api", "name": "Gateway", "home_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a14",
-            "upstreams": [{ "protocol": "openai.responses", "base_url": "https://llm.example.com/v1", "options": { "auth": "bearer" } }],
-            "key_machine_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a10"
+            "upstreams": [{ "protocol": "openai-responses", "base_url": "https://llm.example.com/v1", "options": { "auth": "bearer" } }],
+            "keeper_machine_id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a10"
         }))
         .unwrap();
         assert!(matches!(

@@ -59,7 +59,6 @@ CREATE TABLE users (
     theme text DEFAULT 'system'::text NOT NULL,
     density text DEFAULT 'comfortable'::text NOT NULL,
     personal_org_id uuid,
-    inbox_seq bigint DEFAULT 0 NOT NULL,
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -80,6 +79,62 @@ CREATE TABLE users (
     CONSTRAINT users_org_invited_by_fkey FOREIGN KEY (org_invited_by) REFERENCES users(id)
 );
 
+CREATE TABLE personal_feed_state (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    seq bigint DEFAULT 0 NOT NULL
+);
+
+-- A transaction records its own changes while it still needs access pages or thread rows.
+-- The commit takes each reader's cursor after those rows, in reader order.
+CREATE UNLOGGED TABLE personal_feed_changes (
+    xact xid8 NOT NULL,
+    user_id uuid NOT NULL,
+    changes bigint NOT NULL,
+    PRIMARY KEY (xact, user_id)
+);
+
+CREATE FUNCTION public.orch_personal_mark(people uuid[]) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO personal_feed_changes (xact, user_id, changes)
+        SELECT pg_current_xact_id(), user_id, 1 FROM personal_feed_state WHERE user_id = ANY(people)
+        ON CONFLICT (xact, user_id) DO UPDATE SET changes = personal_feed_changes.changes + 1;
+    IF FOUND THEN
+        PERFORM orch_commit_arm();
+    END IF;
+END;
+$$;
+
+-- Profile sources are part of the first shell even when no live notice is emitted.
+-- Keep their committed order apart from credential locks and connection bookkeeping.
+CREATE FUNCTION stamp_personal_profile() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    before_person uuid;
+    after_person uuid;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        IF TG_TABLE_NAME = 'users' THEN before_person := OLD.id;
+        ELSE before_person := OLD.user_id;
+        END IF;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        IF TG_TABLE_NAME = 'users' THEN after_person := NEW.id;
+        ELSE after_person := NEW.user_id;
+        END IF;
+    END IF;
+    PERFORM orch_personal_mark(ARRAY[before_person, after_person]);
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER personal_profile_changed AFTER UPDATE ON users FOR EACH ROW
+    WHEN (ROW(OLD.username, OLD.display_name, OLD.avatar_color, OLD.kind, OLD.email, OLD.email_verified_at, OLD.password_hash, OLD.totp_enabled_at, OLD.email_code_at, OLD.is_system_admin, OLD.locale, OLD.timezone, OLD.timezone_mode, OLD.theme, OLD.density, OLD.personal_org_id, OLD.status, OLD.created_at)
+          IS DISTINCT FROM ROW(NEW.username, NEW.display_name, NEW.avatar_color, NEW.kind, NEW.email, NEW.email_verified_at, NEW.password_hash, NEW.totp_enabled_at, NEW.email_code_at, NEW.is_system_admin, NEW.locale, NEW.timezone, NEW.timezone_mode, NEW.theme, NEW.density, NEW.personal_org_id, NEW.status, NEW.created_at))
+    EXECUTE FUNCTION stamp_personal_profile();
+
 CREATE UNIQUE INDEX users_email_key ON users USING btree (lower(email)) WHERE (email IS NOT NULL);
 
 CREATE INDEX users_people_name_idx ON users USING gin ((((lower(username) || ' '::text) || lower(display_name))) gin_trgm_ops) WHERE ((kind = 'human'::text) AND (status = 'active'::text));
@@ -97,6 +152,23 @@ CREATE TRIGGER access_changed_insert AFTER INSERT ON users FOR EACH ROW EXECUTE 
 CREATE TRIGGER access_changed_update AFTER UPDATE OF status, is_system_admin ON users FOR EACH ROW WHEN (((old.status IS DISTINCT FROM new.status) OR (old.is_system_admin IS DISTINCT FROM new.is_system_admin))) EXECUTE FUNCTION access_changed();
 
 CREATE TRIGGER public_name_user AFTER INSERT OR UPDATE OF username ON users FOR EACH ROW EXECUTE FUNCTION orch_public_name_user();
+
+-- Notification cursors order only one person's Inbox. They share no writer row with credentials.
+CREATE TABLE user_inboxes (
+    user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    inbox_seq bigint DEFAULT 0 NOT NULL
+);
+
+CREATE FUNCTION public.orch_user_inbox_created() RETURNS trigger
+    LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO user_inboxes(user_id) VALUES(NEW.id);
+    INSERT INTO personal_feed_state(user_id) VALUES(NEW.id);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER user_inbox_created AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION orch_user_inbox_created();
 
 CREATE TABLE api_tokens (
     id uuid NOT NULL,
@@ -119,6 +191,11 @@ CREATE TABLE api_tokens (
     CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE INDEX api_tokens_name_search_idx ON api_tokens USING gin (name gin_trgm_ops) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_inventory_page_idx ON api_tokens (created_at DESC, id) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_owner_inventory_page_idx ON api_tokens (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
+CREATE INDEX api_tokens_active_user_idx ON api_tokens(user_id,id) WHERE revoked_at IS NULL;
+
 CREATE TABLE email_tokens (
     id uuid NOT NULL,
     user_id uuid NOT NULL,
@@ -134,6 +211,16 @@ CREATE TABLE email_tokens (
     CONSTRAINT email_tokens_token_hash_key UNIQUE (token_hash),
     CONSTRAINT email_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER personal_email_pending_created AFTER INSERT ON email_tokens FOR EACH ROW
+    WHEN (NEW.purpose = 'verify_email') EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_email_pending_removed AFTER DELETE ON email_tokens FOR EACH ROW
+    WHEN (OLD.purpose = 'verify_email') EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_email_pending_changed AFTER UPDATE ON email_tokens FOR EACH ROW
+    WHEN ((OLD.purpose = 'verify_email' OR NEW.purpose = 'verify_email') AND
+          ROW(OLD.user_id, OLD.purpose, OLD.email, OLD.expires_at, OLD.used_at)
+          IS DISTINCT FROM ROW(NEW.user_id, NEW.purpose, NEW.email, NEW.expires_at, NEW.used_at))
+    EXECUTE FUNCTION stamp_personal_profile();
 
 CREATE TABLE enrollment_tokens (
     token_hash bytea NOT NULL,
@@ -184,7 +271,7 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
     CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
-    CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
+    CONSTRAINT invitations_max_uses_check CHECK ((max_uses >= 1)),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT invitations_pkey PRIMARY KEY (id),
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),
@@ -248,6 +335,20 @@ CREATE TABLE sessions (
 );
 
 CREATE INDEX sessions_user_idx ON sessions USING btree (user_id) WHERE (revoked_at IS NULL);
+CREATE INDEX sessions_inventory_page_idx ON sessions (user_id, created_at DESC, id) WHERE revoked_at IS NULL;
+
+-- Security changes wait for the actions this session admitted; sliding its lifetime does not.
+CREATE FUNCTION orch_session_authority_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.user_id,NEW.refresh_hash,NEW.revoked_at,NEW.as_admin,NEW.second_step_at)
+       IS DISTINCT FROM ROW(OLD.user_id,OLD.refresh_hash,OLD.revoked_at,OLD.as_admin,OLD.second_step_at)
+     OR NEW.expires_at < OLD.expires_at THEN
+    PERFORM id FROM sessions WHERE id=OLD.id FOR UPDATE;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER sessions_authority_changed BEFORE UPDATE ON sessions
+  FOR EACH ROW EXECUTE FUNCTION orch_session_authority_changed();
 
 CREATE TABLE sign_in_codes (
     user_id uuid NOT NULL,
@@ -273,6 +374,13 @@ CREATE TABLE user_identities (
 
 CREATE INDEX user_identities_user_idx ON user_identities USING btree (user_id);
 
+CREATE TRIGGER personal_identity_linked AFTER INSERT OR DELETE ON user_identities FOR EACH ROW
+    EXECUTE FUNCTION stamp_personal_profile();
+CREATE TRIGGER personal_identity_changed AFTER UPDATE ON user_identities FOR EACH ROW
+    WHEN (ROW(OLD.identity_provider_id, OLD.subject, OLD.user_id, OLD.email, OLD.linked_at)
+          IS DISTINCT FROM ROW(NEW.identity_provider_id, NEW.subject, NEW.user_id, NEW.email, NEW.linked_at))
+    EXECUTE FUNCTION stamp_personal_profile();
+
 CREATE TABLE user_profiles (
     user_id uuid NOT NULL,
     bio text DEFAULT ''::text NOT NULL,
@@ -294,8 +402,8 @@ CREATE TABLE user_state (
     key text NOT NULL,
     value jsonb NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text]))),
-    CONSTRAINT user_state_value_check CHECK ((pg_column_size(value) <= 65536)),
+    CONSTRAINT user_state_key_check CHECK ((key = ANY (ARRAY['help'::text, 'layouts'::text, 'viewers'::text, 'timeline'::text, 'interface'::text, 'sidebar'::text, 'inbox'::text, 'keys'::text, 'project_views'::text, 'reactions'::text, 'picker_recents'::text, 'thread_setup'::text]))),
+    CONSTRAINT user_state_value_check CHECK ((key = 'picker_recents' OR pg_column_size(value) <= 65536)),
     CONSTRAINT user_state_pkey PRIMARY KEY (user_id, key),
     CONSTRAINT user_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -307,6 +415,8 @@ CREATE TABLE access_tokens (
     CONSTRAINT access_tokens_pkey PRIMARY KEY (token_hash),
     CONSTRAINT access_tokens_session_id_fkey FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+CREATE INDEX access_tokens_session_expiry_idx ON access_tokens (session_id,expires_at);
 
 CREATE TABLE api_token_refusals (
     token_id uuid NOT NULL,
@@ -372,3 +482,14 @@ CREATE TABLE sensitive_proofs (
 );
 
 CREATE INDEX sensitive_proofs_session_purpose_idx ON sensitive_proofs USING btree (session_id, purpose, expires_at);
+
+-- Personal model history is independent of other people and of a browser's storage.
+CREATE TABLE user_model_recents (
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id uuid NOT NULL,
+    model_name text NOT NULL CHECK (length(btrim(model_name)) > 0),
+    used_at timestamp with time zone NOT NULL,
+    position bigint GENERATED ALWAYS AS IDENTITY,
+    PRIMARY KEY (user_id, provider_id, model_name)
+);
+CREATE INDEX user_model_recents_order_idx ON user_model_recents(user_id, position DESC);

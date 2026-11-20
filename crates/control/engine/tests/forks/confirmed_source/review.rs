@@ -128,6 +128,8 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         .fetch_one(rig.world.pool.pool())
         .await
         .unwrap();
+    let opens_before = rig.world.commands.issued_of("session.open")
+        + rig.world.commands.issued_of("session.open.fenced");
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
     rig.say(side, "Resume the recovered side").await;
@@ -138,14 +140,17 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         third.text
     );
     assert_eq!(rig.world.segment_of(side).await, recovered);
-    let opens = rig.world.commands.issued_bodies("session.open");
-    let fenced = rig.world.commands.issued_bodies("session.open.fenced");
-    assert!(opens.iter().chain(fenced.iter()).any(|(_, body)| {
-        let body = body.get("session").unwrap_or(body);
-        body["segment_id"] == recovered.to_string()
-            && body["mode"] == "resume"
-            && body["native_session_ref"] == native
-    }));
+    // A restarted API verifies this exact recovered conversation by resume before trusting its native identity.
+    assert_eq!(
+        rig.world.commands.issued_of("session.open")
+            + rig.world.commands.issued_of("session.open.fenced"),
+        opens_before + 1
+    );
+    {
+        let peer = rig.native.lock().unwrap();
+        assert_eq!(peer.threads.get(&side), Some(&native));
+        assert!(peer.sessions.contains_key(&native));
+    }
     rig.world.shutdown().await;
 }
 
@@ -457,7 +462,7 @@ async fn observed_success(
     let entry: orch_link::journal::Entry = serde_json::from_slice(&entry_bytes).unwrap();
     assert_eq!(entry.cmd.id, original.id);
     assert!(entry.cmd.body == original.body);
-    assert_eq!(Some(entry.cmd.deadline), original.deadline);
+    rig.assert_original_work(&entry.cmd, &original).await;
     assert_eq!(entry.cmd.kind, original.kind.as_str());
     assert_eq!(entry.cmd.key, original.key.wire());
     let opened: SessionOpenResult =
@@ -1326,7 +1331,7 @@ async fn a_successful_child_with_a_legitimately_bounded_record_is_retained_and_r
     .unwrap();
     assert_eq!(entry.cmd.id, original.id);
     assert!(entry.cmd.body == original.body);
-    assert_eq!(Some(entry.cmd.deadline), original.deadline);
+    rig.assert_original_work(&entry.cmd, &original).await;
     assert_eq!(entry.cmd.kind, original.kind.as_str());
     assert_eq!(entry.cmd.key, original.key.wire());
     let native: SessionOpenResult =

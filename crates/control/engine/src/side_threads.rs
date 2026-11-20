@@ -24,7 +24,9 @@ use crate::sessions::SessionImport;
 use crate::unit::Unit;
 use orch_agent_contract::descriptor::SideReading;
 use orch_api_contract::nodes::{NodeKind, NodeRef};
-use orch_api_contract::threads::{ContentPart, Delivery, MarkerPayload, MarkerSideStarted};
+use orch_api_contract::threads::{
+    ContentPart, Delivery, MarkerPayload, MarkerSideStarted, ThreadSideCreateBody,
+};
 use orch_authz::{Act, Caller, Principal, nodes};
 use orch_db::queries::threads::{self, Binding, forking};
 use orch_link_contract::commands::{SessionMode, SessionOpenHistory};
@@ -70,6 +72,9 @@ pub enum SideError {
     /// The turn the request names is not one the thread completed.
     #[error("{0}")]
     Invalid(String),
+    /// An existing client request names a side already started with the other access mode.
+    #[error("This request already started a side thread with a different access mode.")]
+    DifferentAccess,
     /// The thread's harness has verified no way for a side conversation to read without acting: an aside
     /// is refused rather than opened with the tools of an ordinary thread.
     #[error("{0}")]
@@ -131,7 +136,7 @@ enum SidePreparation {
     Replay(Id),
     New {
         parent: Box<threads::ThreadRow>,
-        reading: SideReading,
+        reading: Option<SideReading>,
         from_turn: i32,
         name: String,
     },
@@ -184,7 +189,17 @@ impl Engine {
         to_turn: Option<i64>,
     ) -> Result<Started, SideError> {
         let value = self
-            .prepare_side_in(unit, caller, parent_id, content, client_id, to_turn)
+            .prepare_side_in(
+                unit,
+                caller,
+                parent_id,
+                ThreadSideCreateBody {
+                    acting: false,
+                    content,
+                    client_id,
+                    to_turn,
+                },
+            )
             .await?;
         self.apply_side_in(unit, caller, value).await
     }
@@ -195,10 +210,14 @@ impl Engine {
         unit: &mut Unit<'_>,
         caller: &Caller,
         parent_id: Id,
-        content: Vec<ContentPart>,
-        client_id: String,
-        to_turn: Option<i64>,
+        request: ThreadSideCreateBody,
     ) -> Result<PreparedSide, SideError> {
+        let ThreadSideCreateBody {
+            acting,
+            content,
+            client_id,
+            to_turn,
+        } = request;
         let now = unit.now();
         let person = caller.user();
         let transaction: i64 = sqlx::query_scalar("SELECT txid_current()::bigint")
@@ -262,10 +281,13 @@ impl Engine {
         {
             return Err(SideError::NotFound);
         }
-        if let Some(made) =
+        if let Some((made, was_acting)) =
             forking::side_thread_started_with(&mut *unit.conn, parent_id, person, &client_id)
                 .await?
         {
+            if was_acting != acting {
+                return Err(SideError::DifferentAccess);
+            }
             return Ok(PreparedSide {
                 parent: parent_id,
                 actor: person,
@@ -286,10 +308,13 @@ impl Engine {
                 "Its agent history is being removed; wait until that operation finishes.".into(),
             ));
         }
-        if let Some(made) =
+        if let Some((made, was_acting)) =
             forking::side_thread_started_with(&mut *unit.conn, parent_id, person, &client_id)
                 .await?
         {
+            if was_acting != acting {
+                return Err(SideError::DifferentAccess);
+            }
             return Ok(PreparedSide {
                 parent: parent_id,
                 actor: person,
@@ -328,10 +353,14 @@ impl Engine {
         if !allowed || i64::try_from(open.len()).unwrap_or(i64::MAX) >= max {
             return Err(SideError::Limit { open, max, allowed });
         }
-        // An aside reads and never acts: by the first mechanism its harness verified, or not at all.
-        let (reading, takes_history) = match aside_of(&mut *unit.conn, agent_id).await? {
-            Ok(aside) => aside,
-            Err(why) => return Err(SideError::NoReading(why)),
+        // A read-only request requires a mechanism verified by this profile.
+        let (reading, takes_history) = if acting {
+            (None, true)
+        } else {
+            match aside_of(unit.conn, agent_id).await? {
+                Ok((reading, takes_history)) => (Some(reading), takes_history),
+                Err(why) => return Err(SideError::NoReading(why)),
+            }
         };
         let last = orch_db::queries::thread_history_cuts::last_completed(
             unit.conn,
@@ -454,7 +483,12 @@ impl Engine {
             return Err(SideError::NotFound);
         }
         orch_db::queries::hierarchy::stamp(&mut *unit.conn, side).await?;
-        threads::set_side_reading(&mut *unit.conn, side, reading_word(reading)).await?;
+        threads::set_side_reading(
+            &mut *unit.conn,
+            side,
+            reading.map_or("acting", reading_word),
+        )
+        .await?;
         let seq = unit.stamp(side).await?;
         threads::set_binding(
             &mut *unit.conn,
@@ -717,6 +751,51 @@ impl Engine {
         Ok(closed)
     }
 
+    /// Supply the completed parent turns from the authorized cut to an independent session.
+    pub(crate) async fn acting_side_context(
+        &self,
+        snap: &crate::sessions::StartSnapshot,
+    ) -> Result<String, EngineError> {
+        let mut tx = self.db().begin().await?;
+        let now = self.inner.clock.now();
+        let cut = if snap.segment.ordinal == 1 {
+            history::authorize(self, &mut tx, &snap.thread, now).await?
+        } else {
+            history::authorize_recovery(self, &mut tx, &snap.thread, &snap.segment, now).await?
+        };
+        let window = snap
+            .model
+            .as_ref()
+            .and_then(|model| fork_history::model_window(&model.parameters));
+        let budget = fork_history::carry_budget(&mut tx, snap.thread.node_id, window)
+            .await?
+            .unwrap_or(fork_history::UNKNOWN_WINDOW_NEUTRAL_BYTES);
+        let recent = fork_history::newest(
+            &mut tx,
+            crate::history_pages::Source::Cut(&cut),
+            (i64::from(cut.first_turn.max(1)), i64::from(cut.last_turn)),
+            i64::from(cut.last_turn),
+            budget,
+        )
+        .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        let mut block = String::from(
+            "<orch>\nThis is an acting side conversation. You share the main thread's workspace.\n</orch>",
+        );
+        let transcript = fork_history::neutral_lines(&recent.selected);
+        if !transcript.is_empty() {
+            block.push_str("\n\n");
+            block.push_str(&crate::instructions::relayed(
+                true,
+                "main conversation",
+                "transcript",
+                &cut.captured_at.to_rfc3339(),
+                &transcript,
+            ));
+        }
+        Ok(block)
+    }
+
     /// How the session of a side thread begins, at its first turn: forked by the harness from its
     /// parent's through the turn it was taken at, where the adapter does that; the history as items,
     /// otherwise; nothing, for an aside that was taken before the parent had said anything. A side thread
@@ -787,6 +866,11 @@ impl Engine {
             return Err(EngineError::unreadable(
                 "An observed side session has no retained successful original creation; another child or input is not admitted.",
             ));
+        }
+        if snap.thread.side_reading.as_deref() == Some("acting") {
+            // Its first input carries the frozen context. Opening an ordinary session works even
+            // when the parent is busy or its adapter has no native history import.
+            return Ok(Some((SessionMode::New, SessionImport::default())));
         }
         let counted = {
             let mut conn = self.db().acquire().await?;
