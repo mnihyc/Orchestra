@@ -138,6 +138,66 @@ pub struct FactsDraft {
     pub plugins: Vec<MachineFactsPlugin>,
 }
 
+/// System-wide CPU and RAM sampling uses only aggregate counters, even for large workspaces.
+pub(crate) struct RoomSampler {
+    system: System,
+    last_cpu_read: std::time::Instant,
+    last: Option<orch_api_contract::environment::PlaceRoom>,
+}
+
+impl RoomSampler {
+    pub(crate) fn new() -> Self {
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        Self {
+            system,
+            last_cpu_read: std::time::Instant::now(),
+            last: None,
+        }
+    }
+
+    pub(crate) fn sample(
+        &mut self,
+        clock: &dyn orch_types::Clock,
+        clock_offset_ms: i64,
+    ) -> orch_api_contract::environment::PlaceRoom {
+        let ready = self.last_cpu_read.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
+        if !ready && let Some(last) = self.last {
+            return last;
+        }
+        let cpu_free_millis = if ready {
+            self.system.refresh_cpu_usage();
+            self.last_cpu_read = std::time::Instant::now();
+            let usage = f64::from(self.system.global_cpu_usage());
+            let cpus = u32::try_from(self.system.cpus().len()).ok();
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the measured idle share is in 0..=100 and rounded to millicores"
+            )]
+            let free = cpus
+                .filter(|count| *count > 0 && (0.0..=100.0).contains(&usage))
+                .map(|count| (f64::from(count) * (100.0 - usage) * 10.0).round() as u64);
+            free
+        } else {
+            None
+        };
+        self.system
+            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        let room = orch_api_contract::environment::PlaceRoom {
+            cpu_free_millis,
+            memory_free_bytes: (self.system.total_memory() > 0)
+                .then(|| self.system.available_memory()),
+            // Session start and host load times use the system clock.
+            observed_at: orch_types::Time::new(
+                clock.now() - chrono::Duration::milliseconds(clock_offset_ms),
+            ),
+        };
+        self.last = Some(room);
+        room
+    }
+}
+
 /// What the host is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
@@ -180,6 +240,7 @@ pub fn machine_facts(
     clock_offset_ms: i64,
 ) -> MachineFacts {
     MachineFacts {
+        room: None,
         data_directory: None,
         gateway: None,
         role_management: None,
@@ -264,12 +325,14 @@ mod tests {
                     kind: "existing".to_owned(),
                     path: existing.display().to_string(),
                     version: "unknown".to_owned(),
+                    sha256: None,
                     daemon: false,
                 },
                 MachineFactsHarness {
                     kind: "missing".to_owned(),
                     path: missing.display().to_string(),
                     version: "unknown".to_owned(),
+                    sha256: None,
                     daemon: false,
                 },
             ],

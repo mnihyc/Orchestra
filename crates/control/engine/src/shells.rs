@@ -101,9 +101,11 @@ pub trait Recordings: Send + Sync {
     /// one the shell's line points at: `kept` itself where nothing had to be replaced.
     async fn keep(
         &self,
+        conn: &mut orch_db::Conn,
         environment: Id,
         kept: BlobRef,
         mask: bool,
+        at: chrono::DateTime<chrono::Utc>,
     ) -> Result<BlobRef, RecordingFault>;
 
     /// The bytes of a blob that [`Recordings::keep`] returned; none where the store has no such blob.
@@ -583,6 +585,11 @@ impl Shells {
     ) -> Result<Option<TerminalNotAllowedReason>, EngineError> {
         if !setting(conn, place, keys::TERMINAL_ENABLED, true).await? {
             return Ok(Some(TerminalNotAllowedReason::DisabledByPolicy));
+        }
+        if orch_authz::file_reach::machine_bound(conn, site.id).await?
+            != orch_access_contract::permissions::FileReach::Machine
+        {
+            return Ok(Some(TerminalNotAllowedReason::MachinePolicy));
         }
         if !site.terminal {
             return Ok(Some(TerminalNotAllowedReason::EnvironmentSwitchOff));
@@ -1350,7 +1357,10 @@ impl Shells {
             return Ok(None);
         };
         let mask = setting(conn, place, keys::REDACTION_MASK_SECRETS, true).await?;
-        let put = match recordings.keep(environment, kept, mask).await {
+        let put = match recordings
+            .keep(conn, environment, kept, mask, self.now())
+            .await
+        {
             Ok(put) => put,
             Err(error) => {
                 tracing::warn!(%error, "the last output of a shell could not be put away");

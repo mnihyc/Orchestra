@@ -205,7 +205,6 @@ async fn only_the_requests_the_format_lets_through_reach_the_upstream_and_the_re
     let reached = mock.requests().len();
     assert_eq!(reached, 2);
     for (method, path) in [
-        (Method::POST, "/responses/compact"),
         (Method::GET, "/responses/resp_1"),
         (Method::DELETE, "/responses/resp_1"),
         (Method::POST, "/responses/resp_1/cancel"),

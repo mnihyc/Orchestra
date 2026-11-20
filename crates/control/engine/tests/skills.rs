@@ -411,6 +411,72 @@ async fn a_persons_own_skills_reach_the_threads_they_started_where_the_place_all
 }
 
 #[tokio::test]
+async fn publication_follows_the_same_locked_and_personal_choices_as_the_delivered_skill() {
+    let world = World::new().await;
+    let store = store().await;
+    let own = own_org(&world, world.ada).await;
+    let made = skill(&world, &store, own, world.ada, "publication-choice").await;
+    let id = made.skill.id;
+    let thread = world.thread("Receives my skill").await;
+    async fn follows(world: &World, id: Id, thread: Id) -> bool {
+        let mut conn = world.pool.acquire().await.unwrap();
+        resolve::latest_followers(&mut conn, id, &[thread])
+            .await
+            .unwrap()
+            .contains(&thread)
+    }
+    assert!(follows(&world, id, thread).await);
+    world
+        .set(
+            own,
+            "agents.skills",
+            json!({id.to_string():made.version.id}),
+        )
+        .await;
+    assert!(
+        !follows(&world, id, thread).await,
+        "the current latest can be pinned"
+    );
+    world.unset(own, "agents.skills").await;
+    world
+        .set(world.project, "agents.personal_skills", json!(false))
+        .await;
+    assert!(!follows(&world, id, thread).await);
+    world
+        .set(
+            world.root,
+            "agents.skills",
+            json!({id.to_string():"latest"}),
+        )
+        .await;
+    assert!(
+        follows(&world, id, thread).await,
+        "a place may give a skill without personal fallback"
+    );
+    world
+        .set(
+            world.topic,
+            "agents.skills",
+            json!({id.to_string():made.version.id}),
+        )
+        .await;
+    assert!(!follows(&world, id, thread).await);
+    set_as(
+        &world,
+        world.ada,
+        world.root,
+        "agents.skills",
+        json!({id.to_string():"latest"}),
+        true,
+    )
+    .await;
+    assert!(
+        follows(&world, id, thread).await,
+        "a locked Latest keeps the lower pin out"
+    );
+}
+
+#[tokio::test]
 async fn a_disabled_or_deleted_skill_or_a_version_of_another_is_left_out_with_why() {
     let world = World::new().await;
     let store = store().await;
