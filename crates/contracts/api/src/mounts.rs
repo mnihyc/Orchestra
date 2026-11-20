@@ -550,7 +550,7 @@ crate::endpoints! {
     MachineMountList: GET "/machines/{id}/mounts", Rule("the machine's owner, or host.view on its host; each mount and attached environment is independently readable"), none, none, json MachineMounts, 200,
         operation Op::facets(&crate::mount_sources::MACHINE_MOUNT_FACETS);
     /// Lists configured workspace roots and environment data on a machine.
-    MachineEnvironmentDataGet: GET "/machines/{id}/environment-data", Rule("the machine's owner or host.view/host.use on its host; only readable environment uses are named; roots are changed only through the machine's own environment.roots policy"), none, none, json MachineEnvironmentData, 200,
+    MachineEnvironmentDataGet: GET "/machines/{id}/environment-data", Rule("the machine's owner, machine.view and machine.use for registration, or host.view/host.use on its host; only readable environment uses are named; roots are changed only through the machine's own environment.roots policy"), none, none, json MachineEnvironmentData, 200,
         operation Op::facets(&crate::mount_sources::MACHINE_DATA_FACETS);
     /// Lists the mounts the caller may use or manage, of whatever org.
     MountList: GET "/mounts", User, query MountListQuery, none, json Vec<crate::common::Listed<Mount>>, 200,
@@ -565,7 +565,7 @@ crate::endpoints! {
     MountUpdate: PATCH "/mounts/{id}", Permission("mount.manage"), none, json MountUpdateBody, json Mount, 200,
         operation Op::returning(Manage, &[Object(K::Mount)], Target::PermissionObject);
     /// Deletes a mount that no scope enables.
-    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), none, none, none, 204;
+    MountDelete: DELETE "/mounts/{id}", Permission("mount.manage"), query crate::resource_facts::ResourceNotificationQuery, none, none, 204;
     /// Sets where a mount is on a machine: a path, or a volume on a host's storage.
     MountLocationSet: PUT "/mounts/{id}/locations/{machine_id}", Rule("management of the machine and mount.use; environment.roots bounds existing paths on every machine; owned data requires the machine's declared data-making support"), none, json MountLocationSetBody, json MountLocationSetResponse, 200,
         operation Op::receipt(&Op::facets(&crate::mount_location_sources::SET_FACETS));

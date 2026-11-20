@@ -6,35 +6,80 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { Installation } from '@/features/admin/Installation';
-import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, ReleaseCheck, ResolvedSetting } from '@/generated/api-types';
+import { Overview } from '@/features/admin/Overview';
+import { OverviewCharts } from '@/features/admin/Charts';
+import type { BackupRestoreList, DatabaseBackupRecord, InstallationRecords, Meta, MetricSeries, ReleaseCheck, ResolvedSetting, SystemInfo } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
+import { meta } from '../doubles/fixtures';
+import { useAppearance } from '@/lib/appearance';
 
 import { show } from './support';
 
-const { read, settings, check, restore } = vi.hoisted(() => ({
+const { read, settings, check, restore, readSystem, readMetrics, metaRead } = vi.hoisted(() => ({
   read: vi.fn<() => Promise<InstallationRecords>>(),
   settings: vi.fn<() => Promise<ResolvedSetting[]>>(),
   check: vi.fn<() => Promise<ReleaseCheck>>(),
   restore: vi.fn<() => Promise<BackupRestoreList | null>>(),
+  readSystem: vi.fn<() => Promise<SystemInfo>>(),
+  readMetrics: vi.fn<() => Promise<MetricSeries[]>>(),
+  metaRead: vi.fn<() => Promise<Meta>>(),
+}));
+vi.mock('@/api/auth', async (original) => ({ ...await original<object>(),
+  metaQuery: { queryKey: ['meta'], queryFn: metaRead },
 }));
 vi.mock('@/api/admin', async (original) => ({ ...await original<object>(),
   installationRecordsQuery: { queryKey: ['admin', 'installation-records'], queryFn: read },
   systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: settings },
   checkRelease: check,
   backupRestoreListQuery: { queryKey: ['admin', 'backup-restore-list'], queryFn: restore },
+  systemQuery: { queryKey: ['admin', 'system'], queryFn: readSystem },
+  metricsQuery: () => ({ queryKey: ['admin', 'metrics-fixture'], queryFn: readMetrics }),
 }));
+vi.mock('@/features/admin-messages/Sent', () => ({ MessagesSection: () => null }));
 
-afterEach(() => { vi.clearAllMocks(); });
+const appearance = useAppearance.getState();
+afterEach(async () => { vi.clearAllMocks(); useAppearance.setState(appearance); await setLocale('en'); });
 
 const BACKUP: DatabaseBackupRecord = { completed_at: '2026-10-12T08:02:00Z', database_at: '2026-10-12T08:00:00Z', release: '0.1.0', schema: '1', dump_name: 'orch-20261012-backup.dump', bytes: 65_536, hash: 'a'.repeat(64), cause: 'pre_update', database_only: true, last_failure: { at: '2026-10-14T08:00:00Z', reason: 'The backup disk is full.' } };
 const RELEASE: ReleaseCheck = { checked_at: '2026-10-12T09:00:00Z', installed_version: '0.1.0', offered_version: '0.2.0', newer: true, source: 'https://releases.example/latest/download/version.json', error: null, command: './update.sh v0.2.0' };
 const empty = (): InstallationRecords => ({ release: null, backup: null, backup_error: null, backup_warning: true });
 
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`keeps the API serving while naming its unavailable metrics listener in ${locale}/${theme}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
+  const info = { version: '0.1.3', build: 'fixture', started_at: new Date().toISOString(), machines_online: 0, threads_running: 0, queues: { outbox_pending: 0, commands_open: 0, jobs_running: 0 },
+    components: [{ name: 'api', ok: true, detail: null, issue: 'metrics_listener_unavailable', seen_at: new Date().toISOString() }] } as unknown as SystemInfo;
+  readSystem.mockResolvedValue(info); readMetrics.mockResolvedValue([]); read.mockResolvedValue(empty()); settings.mockResolvedValue([]); restore.mockResolvedValue(null);
+  show(<Overview search={{}} onSearch={vi.fn()} />);
+  const reason = await screen.findByText(locale === 'en' ? 'Metrics listener unavailable' : '指标监听不可用');
+  expect(reason).toBeVisible();
+  const part = reason.closest('[data-part="api"]');
+  expect(part).toHaveAttribute('data-ok', 'true');
+  expect(part).toHaveTextContent(i18n.t('admin.overview.well'));
+  expect(part).not.toHaveTextContent('metrics_listener_unavailable');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const resolution of ['minute', 'hour'] as const) it(`names the delivered ${resolution} metric resolution instead of guessing from the chosen period in ${locale}`, async () => {
+  await setLocale(locale); useAppearance.setState({ locale });
+  readMetrics.mockResolvedValue([{ name: 'threads', labels: { state: 'running' }, resolution, points: [[new Date(Date.now() - 60_000).toISOString(), 1]], peaks: null }]);
+  show(<OverviewCharts span="day" />);
+  const text = resolution === 'hour' ? locale === 'en' ? 'From hourly data' : '按小时数据汇总' : locale === 'en' ? 'From minute data' : '按分钟数据汇总';
+  expect(await screen.findByText(text, { exact: true })).toBeVisible();
+});
+
+it('does not invent a metric resolution when the selected range contains no readings', async () => {
+  readMetrics.mockResolvedValue([]); show(<OverviewCharts span="day" />);
+  expect(await screen.findAllByText('No readings in this range')).not.toHaveLength(0);
+  expect(screen.queryByText('From hourly data')).not.toBeInTheDocument();
+  expect(screen.queryByText('From minute data')).not.toBeInTheDocument();
+});
+
 function setting(key: string, value: number): ResolvedSetting {
   return { key, value, source: { scope: 'default', node: null }, own: null, locked_by: null, writable: true, parts: [] };
 }
 
-function draw() {
+function draw(metadata?: Meta) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  if (metadata !== undefined) client.setQueryData(['meta'], metadata);
   settings.mockResolvedValue([setting('release.check_days', 0), setting('backup.warn_days', 2)]);
   restore.mockResolvedValue(null);
   const result = show(<QueryClientProvider client={client}><Installation /></QueryClientProvider>);
@@ -42,6 +87,21 @@ function draw() {
 }
 
 describe('installation records', () => {
+  it.each(['en', 'zh-CN'] as const)('names the certificate-free address from held facts without a new read and clears its exception for HTTPS in %s', async (locale) => {
+    await setLocale(locale);
+    try {
+      read.mockResolvedValue(empty());
+      const { client } = draw(meta({ public_url: 'http://edge.example/' }));
+      expect(await screen.findByText('http://edge.example/')).toBeVisible();
+      expect(screen.getByText(locale === 'en' ? 'No certificate at this address · slower over long lines' : '此地址没有证书 · 跨地区访问较慢')).toBeVisible();
+      act(() => { client.setQueryData(['meta'], meta({ public_url: 'https://edge.example/' })); });
+      expect(await screen.findByText('https://edge.example/')).toBeVisible();
+      expect(screen.queryByText(locale === 'en' ? /No certificate at this address/ : /此地址没有证书/)).not.toBeInTheDocument();
+      expect(metaRead).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally { await setLocale('en'); }
+  });
+
   it('keeps checks off until asked and shows an absent backup without a completion claim', async () => {
     read.mockResolvedValue(empty());
     draw();
@@ -92,6 +152,41 @@ describe('installation records', () => {
     expect(screen.getByRole('button', { name: 'Copy update command' })).toBeVisible();
     expect(screen.queryByRole('button', { name: /Install|Run update|Update now/ })).not.toBeInTheDocument();
     expect(await screen.findByText('Automatic checks are off')).toBeVisible();
+  });
+
+  it.each(['en', 'zh-CN'] as const)('shows the running release check and keeps the last offer in %s', async (locale) => {
+    await setLocale(locale);
+    read.mockResolvedValue({ ...empty(), release: RELEASE });
+    check.mockRejectedValueOnce(new ApiError({
+      type: 'orch:error:conflict.concurrent_change', code: 'conflict.concurrent_change', status: 409,
+      title: 'Conflict', detail: 'A concurrent change interrupted the operation.', request_id: 'release',
+      reason: 'release_check_in_progress',
+    }, null));
+    check.mockResolvedValueOnce(RELEASE);
+    draw();
+    const button = await screen.findByRole('button', { name: i18n.t('installationRecords.check') });
+    await userEvent.click(button);
+    const notice = locale === 'en' ? 'A release check is already running. Check again for the result.' : '已有版本检查正在进行。请稍后再次查看结果。';
+    const message = await screen.findByText(notice);
+    expect(message).toBeVisible();
+    expect(message.closest('[role="status"]')).not.toBeNull();
+    expect(screen.getByText('./update.sh v0.2.0')).toBeVisible();
+    await userEvent.click(button);
+    await waitFor(() => expect(screen.queryByText(notice)).not.toBeInTheDocument());
+  });
+
+  it.each(['en', 'zh-CN'] as const)('explains an older release offer even before the first successful lookup in %s', async (locale) => {
+    await setLocale(locale);
+    const failure = { ...RELEASE, error: 'release.source_older' };
+    read.mockResolvedValue({ ...empty(), release: { ...failure, offered_version: null, newer: null, command: null } });
+    const { client, container } = draw();
+    expect(await screen.findByText(locale === 'en' ? 'The release source lists an older version.' : '更新源列出的版本较旧。')).toBeVisible();
+    expect(screen.queryByText('release.source_older')).not.toBeInTheDocument();
+    const previous = i18n.t('installationRecords.previousOffer');
+    expect(screen.queryByText(previous)).not.toBeInTheDocument();
+    act(() => { client.setQueryData(['admin', 'installation-records'], { ...empty(), release: failure }); });
+    expect(await screen.findByText(previous)).toBeVisible();
+    expect(container.querySelector(`time[datetime="${RELEASE.checked_at}"]`)).toBeVisible();
   });
 
   it('dates a retained successful offer after a fetch failure, rather than claiming a new successful check', async () => {

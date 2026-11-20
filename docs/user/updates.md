@@ -3,91 +3,52 @@ group: operations
 title: Update Orch and its machines
 screens: /resources/machines, /resources/machines/$id, /resources/hosts, /resources/hosts/$id, /resources/environments, /resources/environments/$id, /admin/$section
 keywords: Update now, update available, updating, version, release, upgrade, node, connector, update.auto, orch-node update, orch-connector update, server, SSH
-summary: Compare running and recommended builds, then update machines, nodes or managed units.
+summary: Compare the running and the recommended builds, then update machines, nodes or managed environments.
 ---
 
 # Update Orch and its machines
 
-A machine or node compares its **running version** with the build recommended
-by its own Orch server. **Update available** marks a newer recommendation in
-the list; the page names both versions. A downloaded file is not reported as
-the running version: that changes when the new process reconnects.
+A machine or a node compares its **running version** with the build that its own Orch server recommends. **Update available** marks a newer recommendation in the list, and the page names both versions. A file that was downloaded is not reported as the running version. That changes when the new process reconnects. This page shows how to update a machine or a node, what a machine can refuse, how environments and managed providers update, and how the server itself is updated.
 
 ## Machines and nodes
 
-People with Machine Manage, or Host Manage for a node, can choose **Update
-now** on its page or in the row's actions. Orch holds new turns and waits
-until every running turn using the machine ends. For a node this includes
-turns in every unit it hosts. The program downloads its platform's build from
-its own server, checks its size and SHA-256, and swaps the executable
-atomically. Its service manager starts the new program. Existing turns are
-not interrupted by this procedure.
+People with **Machine Manage**, or **Host Manage** for a node, can choose **Update now** on its page or in the actions of its row.
 
-The row says **Updating…** while the request waits, downloads, installs and
-reconnects. It clears when the new process reports its version. A refused or
-failed update keeps its reason on the row and page. A damaged download leaves
-the running program in place. Requests, including automatic ones, are audited.
+1. Orch holds new turns and waits until every running turn that uses the machine ends. For a node this includes the turns in every container it hosts.
+2. The program downloads the build for its platform from its own server, checks its size and its SHA-256, and replaces the executable in one step.
+3. The service manager starts the new program. This does not interrupt turns that exist.
 
-Physical connectors and nodes also request the recommended build automatically
-on their hourly check while `update.auto` permits it. They use the same drain,
-verification and installation as the button. An internal connector in an
-environment or provider runtime does not replace itself.
+The row says **Updating…** while the request waits, downloads, installs and reconnects. It clears when the new process reports its version. An update that is refused or fails keeps its reason on the row and on the page. A download that is damaged leaves the running program in place. Requests are recorded in the audit trail, automatic ones included.
+
+Connectors and nodes on machines also request the recommended build by themselves on their hourly check, while the setting for automatic updates allows it. They use the same wait, verification and installation as the button. A connector inside an environment or a managed provider does not replace itself.
 
 ## When local policy refuses
 
-The person at the machine keeps the last word. A local `update.auto = false`
-refuses a web request; the refusal names that key and gives the local command:
+The person at the machine controls automatic updates with `update.auto`. Explicit Update remains available while Auto is off and does not enable automatic updates. The operator can also request the same verified update locally:
 
 ```sh
 orch-connector update
 orch-node update
 ```
 
-Use the command for the program on that machine. It is explicit local consent
-to install the verified build even when automatic updates are off. It does
-not change the saved `update.auto` value. An offline machine must reconnect
-before Orch can send it a command. Below the server's accepted minimum build,
-an update is required before normal work can resume. A node can obtain that
-update while its ordinary connection is refused, after the server has waited
-for every hosted turn to end. It never assumes that an empty local harness
-list means its units are idle. If the programs no longer speak a common link
-protocol, the operator uses `orch-node update` on the host.
+Use the command for the program on that machine. It leaves the saved `update.auto` value unchanged. Below the server's accepted minimum build, an authenticated program can obtain an idle update grant without a normal connection. The server first holds new turns and waits for all work using that machine, including every hosted unit. A machine disconnected for another reason must be able to reach its server again. An empty local program list is not proof that the hosted units are idle. If the programs no longer speak a common link protocol, the operator runs the local update command on that machine.
 
-## Environments and provider runtimes
+Below the minimum build that the server accepts, an update is required before normal work can resume. A node can get that update while its usual connection is refused, after the server has waited for every turn it hosts to end. It never takes an empty local list of agent programs to mean that its containers are idle. If the programs no longer speak a link protocol in common, the operator uses `orch-node update` on the host.
 
-An environment keeps its existing **Update** workflow. Its preflight shows
-the image, connector and other pending changes and the running work that
-blocks replacement. The environment manager reviews that plan and starts its
-job. Updating the host node does not silently replace a unit's image or its
-connector. Provider runtimes likewise take their connector through their own
-runtime update or next start. A directory's connector belongs to its physical
-machine and follows that machine's policy.
+## Environments and managed providers
+
+An environment keeps its own **Update** workflow. Its check beforehand shows the image, the connector and the other changes that are pending, and the running work that blocks a replacement. The manager of the environment reviews that plan and starts its job. Updating the node of the host does not replace the image or the connector of a container quietly. Managed providers likewise take their connector through the update of their container or at their next start. The connector of a directory belongs to its machine and follows the policy of that machine.
 
 ## The server
 
-**Management → System** shows the running server version, the latest release
-read from the operator's release address, its notes link, and the exact command
-to run on the server's host, for example:
+**Management → System** shows the version of the server that runs, the latest release read from the release address of the operator, a link to its notes, and the exact command to run on the host of the server, for example:
 
 ```sh
 ./update.sh v1.2.3
 ```
 
-The default address is this repository's GitHub releases. An operator can set
-`[release] url` in `config/orch.toml` or `ORCH_RELEASE_URL` to use another
-compatible release source. Reads are cached by the server for at least an
-hour, including failed lookups. Scheduled notices remain controlled by
-`release.check_days`; opening System reads the same hourly cache. If a lookup
-fails, its reason is shown beside any previously successful, dated result.
+The default address is the GitHub releases of this project. An operator can set `[release] url` in `config/orch.toml`, or `ORCH_RELEASE_URL`, to use another release source that is compatible. The server caches reads for at least an hour, lookups that failed included. Scheduled notices stay under the control of `release.check_days`, and opening **System** reads the same hourly cache. If a lookup fails, its reason is shown beside the last result that succeeded, with its date. If another check is running, **Check now** tells you so and keeps the previous offer visible. Check again for the result.
 
-The server has no web button that installs its own update. Such a button would
-need authority over the host's files or Docker socket. The operator runs the
-transactional `update.sh` command on that host; it verifies the release, takes
-the database backup and rolls back if the new services fail readiness. The
-operator's upgrades and recovery guide covers backups and rollback.
+The server has no button on the web that installs its own update, because it would need permission over the files of the host or its Docker socket. The operator runs the command `update.sh` on that host. It runs as one transaction: it verifies the release, takes the backup of the database, and rolls back if the new services do not become ready. The operator guide, “Update and roll back”, covers backups and rollback.
 
-The web edge stays available while the API updates its database. An open page
-shows the active migration, completed steps, any row counts the database can
-report, and elapsed time, then reconnects when the server is ready. The same
-steps are printed in the API's update log. Counts remain unknown when the
-database cannot report them.
+The web edge stays available while the API updates its database. A page that is open shows the migration that is active, the steps completed, any counts of rows that the database can report, and the time elapsed, then reconnects when the server is ready. The same steps are printed in the update log of the API. Counts stay unknown when the database cannot report them.

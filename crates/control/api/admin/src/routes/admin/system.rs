@@ -58,6 +58,7 @@ use orch_api_contract::admin::StorageEnvironment;
 use orch_api_contract::admin::StorageStats;
 
 use orch_api_contract::admin::SystemComponent;
+use orch_api_contract::admin::SystemComponentIssue;
 
 use orch_api_contract::admin::SystemComponentName;
 
@@ -175,6 +176,7 @@ fn component(
     };
     SystemComponent {
         name,
+        issue: None,
         ok,
         detail,
         seen_at: reported.map(|beat| Time::new(beat.seen_at)),
@@ -190,6 +192,12 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
     // The API answers, so it is well, and so is the database it has just read.
     let answering = |name| SystemComponent {
         name,
+        issue: (name == SystemComponentName::Api
+            && ctx
+                .app
+                .metrics_listener_failed
+                .load(std::sync::atomic::Ordering::Relaxed))
+        .then_some(SystemComponentIssue::MetricsListenerUnavailable),
         ok: true,
         detail: None,
         seen_at: Some(Time::new(ctx.now)),
@@ -252,7 +260,13 @@ async fn check_release(
     .await
     .map_err(ApiError::internal);
     installation_read_authority(&ctx).await?;
-    result?.ok_or_else(|| ApiError::internal("another release check is in progress; retry shortly"))
+    result?.ok_or_else(|| {
+        ApiError::new(
+            ErrorCode::ConflictConcurrentChange,
+            "A release check is already running.",
+        )
+        .with("reason", "release_check_in_progress")
+    })
 }
 
 async fn installation_records(

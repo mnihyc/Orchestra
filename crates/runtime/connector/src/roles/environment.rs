@@ -113,6 +113,14 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsUnwatch,
     CommandKind::FsStat,
     CommandKind::FsFetch,
+    CommandKind::FsRelayDescribe,
+    CommandKind::FsRelaySend,
+    CommandKind::FsRelayArchiveRead,
+    CommandKind::FsRelayReceive,
+    CommandKind::FsRelayVerify,
+    CommandKind::FsRelayPrepare,
+    CommandKind::FsRelayCommit,
+    CommandKind::FsRelayAbort,
     CommandKind::FsWrite,
     CommandKind::FsMkdir,
     CommandKind::FsRename,
@@ -135,6 +143,7 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsRestore,
     CommandKind::WorkspaceObserve,
     CommandKind::FsMaterialize,
+    CommandKind::FsMaterializeIfAbsent,
     CommandKind::GitStatus,
     CommandKind::GitPrepare,
     CommandKind::GitPrepareCleanup,
@@ -244,6 +253,7 @@ fn internal(what: impl std::fmt::Display) -> CommandError {
 /// The limits the host is given from the policy of the machine.
 fn gates_of(policy: &LocalPolicy) -> Gates {
     Gates {
+        files_reach: policy.environment_files_reach,
         remote_write: policy.environment_remote_write,
         deliver_files: policy.environment_deliver_files,
         terminal: policy.environment_terminal,
@@ -335,8 +345,6 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     let tunables = &services.config.envhost;
     settings.limits.rescan = Duration::from_secs(tunables.rescan_secs);
     settings.limits.manifest_interval = Duration::from_secs(tunables.manifest_interval_secs);
-    settings.limits.index_max_entries = tunables.index_max_entries;
-    settings.limits.index_scan_max = std::time::Duration::from_secs(tunables.index_scan_max_secs);
     settings.mcp_restarts = tunables.mcp_restarts;
     settings.mcp_restart_window = Duration::from_secs(tunables.mcp_restart_window_secs);
     if let Some(scope) = parts.process_scope {
@@ -358,18 +366,21 @@ struct JobProgressSink {
     queue: Option<watch::Sender<Option<HostJobProgress>>>,
     latest: Arc<Mutex<(Option<HostJobProgress>, std::time::Instant)>>,
     started: std::time::Instant,
+    deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
 }
 
 impl JobProgressSink {
     fn new(
         queue: Option<watch::Sender<Option<HostJobProgress>>>,
         clock: Arc<dyn orch_types::Clock>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> Self {
         Self {
             queue,
             clock,
             latest: Arc::new(Mutex::new((None, std::time::Instant::now()))),
             started: std::time::Instant::now(),
+            deadline,
         }
     }
 }
@@ -392,6 +403,7 @@ impl Progress for JobProgressSink {
             eta_seconds: None,
             message: None,
             activity: Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: None,
                 waiting_for: None,
                 updated_at: self.clock.time(),
                 stall_after_seconds: 0,
@@ -402,6 +414,20 @@ impl Progress for JobProgressSink {
     }
     fn report(&self, progress: &HostJobProgress) {
         let mut progress = progress.clone();
+        if let Some(deadline) = &self.deadline {
+            let activity =
+                progress
+                    .activity
+                    .get_or_insert(orch_api_contract::workspace::JobActivity {
+                        captured_deadline: None,
+                        waiting_for: None,
+                        updated_at: deadline.accepted_at,
+                        stall_after_seconds: 0,
+                        directories_done: None,
+                        stopping: false,
+                    });
+            activity.captured_deadline = Some(deadline.clone());
+        }
         let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(before) = &latest.0
             && before.phase == progress.phase
@@ -582,7 +608,7 @@ impl EnvironmentRole {
             TunnelKind::Exec | TunnelKind::Mcp => {
                 crate::tool_tunnels::serve(&self.relay, incoming).await;
             }
-            TunnelKind::Llm => incoming.refuse(
+            TunnelKind::Llm | TunnelKind::Program => incoming.refuse(
                 OpenErrorCode::NoSuchService,
                 "this machine does not serve tunnels of that kind",
             ),
@@ -896,10 +922,11 @@ impl EnvironmentRole {
         command: Id,
         environment_id: Id,
         job: Option<Id>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> (JobProgressSink, JoinHandle<()>) {
         let Some(job_id) = job else {
             return (
-                JobProgressSink::new(None, Arc::clone(&self.services.clock)),
+                JobProgressSink::new(None, Arc::clone(&self.services.clock), None),
                 tokio::spawn(async {}),
             );
         };
@@ -925,10 +952,27 @@ impl EnvironmentRole {
                 }
             }
         });
-        (
-            JobProgressSink::new(Some(queue), Arc::clone(&self.services.clock)),
-            task,
-        )
+        let progress = JobProgressSink::new(
+            Some(queue),
+            Arc::clone(&self.services.clock),
+            deadline.clone(),
+        );
+        if let Some(deadline) = deadline {
+            progress.report(&HostJobProgress {
+                phase: deadline.phase,
+                phases: Vec::new(),
+                percent: 0,
+                files_done: 0,
+                files_total: None,
+                bytes_done: 0,
+                bytes_total: None,
+                rate_bps: None,
+                eta_seconds: None,
+                message: None,
+                activity: None,
+            });
+        }
+        (progress, task)
     }
 }
 
@@ -937,7 +981,12 @@ impl EnvironmentRole {
         clippy::too_many_lines,
         reason = "one arm for each command of the role is the clearest form of the table"
     )]
-    async fn carry_out(&self, id: Id, command: Command) -> Result<CommandResult, CommandError> {
+    async fn carry_out(
+        &self,
+        id: Id,
+        command: Command,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
+    ) -> Result<CommandResult, CommandError> {
         if let Command::UnitAfterUp(body) = &command {
             if body.provider_id.is_some() || body.agent_id.is_some() {
                 return Err(CommandError::new(
@@ -1121,10 +1170,61 @@ impl EnvironmentRole {
             Command::FsFetch(body) => {
                 CommandResult::FsFetch(self.host.fs_fetch(&body, &blobs).await?)
             }
+            Command::FsRelayDescribe(body) => {
+                CommandResult::FsRelayDescribe(self.host.fs_relay_describe(&body).await?)
+            }
+            Command::FsRelaySend(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                self.host.fs_relay_send(&body, &relay).await?;
+                CommandResult::FsRelaySend(Empty {})
+            }
+            Command::FsRelayArchiveRead(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayArchiveRead(
+                    self.host.fs_relay_archive_read(&body, &relay).await?,
+                )
+            }
+            Command::FsRelayReceive(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayReceive(self.host.fs_relay_receive(&body, &relay).await?)
+            }
+            Command::FsRelayVerify(body) => {
+                CommandResult::FsRelayVerify(self.host.fs_relay_verify(&body).await?)
+            }
+            Command::FsRelayPrepare(body) => {
+                self.host.fs_relay_prepare(&body).await?;
+                CommandResult::FsRelayPrepare(Empty {})
+            }
+            Command::FsRelayCommit(body) => {
+                CommandResult::FsRelayCommit(self.host.fs_relay_commit(&body).await?)
+            }
+            Command::FsRelayAbort(body) => {
+                self.host.fs_relay_abort(&body).await?;
+                CommandResult::FsRelayAbort(Empty {})
+            }
             Command::FsWrite(body) => {
                 if let Some(work) = &body.work {
-                    let (progress, task) =
-                        self.job_progress(id, body.environment_id, Some(work.job_id));
+                    let (progress, task) = self.job_progress(
+                        id,
+                        body.environment_id,
+                        Some(work.job_id),
+                        deadline.clone(),
+                    );
                     let mut reported = HostJobProgress {
                         phase: work.phase.clone(),
                         phases: vec![orch_api_contract::workspace::JobPhase {
@@ -1195,7 +1295,7 @@ impl EnvironmentRole {
             }
             Command::FsRestore(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_restore(&body, &blobs),
@@ -1216,6 +1316,7 @@ impl EnvironmentRole {
                     id,
                     body.environment_id,
                     body.work.as_ref().map(|work| work.job_id),
+                    deadline.clone(),
                 );
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
@@ -1228,7 +1329,7 @@ impl EnvironmentRole {
             }
             Command::FsDataExport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_export(&body, &blobs, &progress),
@@ -1240,7 +1341,7 @@ impl EnvironmentRole {
             }
             Command::FsDataImport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_import(&body, &blobs, &progress),
@@ -1252,7 +1353,7 @@ impl EnvironmentRole {
             }
             Command::FsSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_snapshot(&body, &blobs, &progress),
@@ -1262,8 +1363,21 @@ impl EnvironmentRole {
                 let _ = task.await;
                 CommandResult::FsSnapshot(outcome?)
             }
+            Command::FsMaterializeIfAbsent(body) => {
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
+                let outcome = orch_envhost::snapshot::with_transfer_progress(
+                    Arc::new(progress.clone()),
+                    self.host.fs_materialize_if_absent(&body, &blobs),
+                )
+                .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::FsMaterializeIfAbsent(outcome?)
+            }
             Command::FsMaterialize(body) => {
-                let (progress, task) = self.job_progress(id, body.environment_id, body.job_id);
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, body.job_id, deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_materialize(&body, &blobs, &progress),
@@ -1286,9 +1400,21 @@ impl EnvironmentRole {
                         .map(|credential| BTreeMap::from([("repository".to_owned(), credential)]))
                         .unwrap_or_default();
                     let opened = self.unseal(id, &sealed)?;
-                    self.host
-                        .git_prepare(&body, opened.get("repository").map(String::as_str))
-                        .await?
+                    let (progress, publisher) = self.job_progress(
+                        id,
+                        body.environment_id,
+                        body.work.as_ref().map(|work| work.job_id),
+                        None,
+                    );
+                    let outcome = orch_envhost::snapshot::with_transfer_progress(
+                        Arc::new(progress.clone()),
+                        self.host
+                            .git_prepare(&body, opened.get("repository").map(String::as_str)),
+                    )
+                    .await;
+                    drop(progress);
+                    let _ = publisher.await;
+                    outcome?
                 };
                 CommandResult::GitPrepare(result)
             }
@@ -1312,7 +1438,7 @@ impl EnvironmentRole {
             }
             Command::GitWorktreeSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let result = self
                     .host
                     .git_worktree_snapshot(&body, &blobs, &progress)
@@ -1424,12 +1550,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1478,22 +1607,43 @@ impl RoleHandler for EnvironmentRole {
     }
 
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError> {
-        orch_envhost::error::with_cancellation(call.context.cancel.clone(), async {
+        let relayed = matches!(
+            &command,
+            Command::FsRelayReceive(_) | Command::FsRelaySend(_) | Command::FsRelayArchiveRead(_)
+        );
+        let cancel = call.context.cancel.clone();
+        let allowance =
+            u64::try_from((call.context.deadline.get() - self.services.clock.now()).num_seconds())
+                .unwrap_or(1);
+        let operation = orch_envhost::error::with_cancellation(cancel.clone(), async {
             if crate::reconciliation::environments::Desired::retains(&command) {
                 let _action = self.lifecycle.lock().await;
                 let command = self.services.policy.gate(command)?.command;
-                self.carry_out(call.context.id, command).await
+                self.carry_out(call.context.id, command, call.work_deadline.clone())
+                    .await
             } else {
-                self.carry_out(call.context.id, command).await
+                self.carry_out(call.context.id, command, call.work_deadline.clone())
+                    .await
             }
-        })
-        .await
+        });
+        if relayed {
+            crate::content::stoppable(&cancel, allowance, operation).await
+        } else {
+            operation.await
+        }
     }
 
     fn contribute(&self, facts: &mut FactsDraft) {
         if let Some(policy) = self.services.policy.policy() {
             if facts.build_fetch.is_none() {
-                facts.build_fetch=Some(orch_driver_contract::descriptor::OperationSupport {supported:false,reason:Some("this machine uses installed harnesses; downloading requested builds is not available".into())});
+                facts.build_fetch = Some(orch_driver_contract::descriptor::OperationSupport {
+                    supported: self.services.build_cache.is_some(),
+                    reason: self
+                        .services
+                        .build_cache
+                        .is_none()
+                        .then(|| "this connector cannot fetch named harness builds".into()),
+                });
             }
             facts.environment_data_storage = Some(orch_driver_contract::descriptor::EnvironmentDataStorage {
                 made_by_orch: (orch_envhost::RUNTIME_VERIFIED && !crate::storages::facts(&self.services.config,&policy).is_empty()).then_some(orch_driver_contract::descriptor::MadeDataKind::Directory),
@@ -1527,7 +1677,7 @@ impl RoleHandler for EnvironmentRole {
             }
             if self.host.environment(saved.environment).is_err() {
                 let attached = match self.services.policy.gate(saved.attach.command.clone()) {
-                    Ok(gated) => self.carry_out(saved.attach.id, gated.command).await,
+                    Ok(gated) => self.carry_out(saved.attach.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 if attached.is_err() {
@@ -1546,7 +1696,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1561,7 +1711,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1625,7 +1775,9 @@ async fn publish_reports(
             HostReport::BrowserState(state) => Some(Event::BrowserState(state)),
             HostReport::DisplayState(state) => Some(Event::DisplayState(state)),
             HostReport::Facts(facts) => Some(Event::EnvFacts(*facts)),
-            HostReport::Manifest(manifest) => Some(Event::EnvManifest(manifest)),
+            HostReport::Manifest(manifest) | HostReport::ManifestTransfer(manifest) => {
+                Some(Event::EnvManifest(manifest))
+            }
             HostReport::PtyExited(ended) => Some(Event::PtyExited(ended)),
             HostReport::FsChanged(changed) => {
                 link.report(&stream, at, &LinkReport::FsChanged(changed));
@@ -1740,6 +1892,7 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
 /// Looks again, every so often, at the tool servers the harnesses here have configured, for each
 /// environment that is attached.
 async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationToken) {
+    let changes = role.upgrade().and_then(|role| role.imports.changes());
     let mut ticker = tokio::time::interval(DISCOVERY_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -1747,6 +1900,10 @@ async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationTo
         tokio::select! {
             () = stop.cancelled() => return,
             _ = ticker.tick() => {}
+            () = async {
+                if let Some(changes) = &changes { changes.notified().await; }
+                else { std::future::pending::<()>().await; }
+            } => {}
         }
         let Some(role) = role.upgrade() else {
             return;
@@ -1831,7 +1988,7 @@ mod progress_tests {
     #[tokio::test]
     async fn a_million_updates_keep_one_pending_sample_and_flush_the_last_on_close() {
         let (queue, mut reports) = watch::channel(None);
-        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock));
+        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock), None);
         for done in 1..=1_000_000 {
             progress.counting(done, done * 4096, done / 10);
         }

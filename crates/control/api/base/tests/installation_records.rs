@@ -181,6 +181,50 @@ async fn checks_ship_off_manual_checks_name_the_offer_once_and_enabled_checks_wa
 }
 
 #[tokio::test]
+async fn a_second_release_check_reports_the_running_lookup_and_keeps_the_last_offer() {
+    let site = Site::new().await;
+    let mut config = ServerConfig::default();
+    config.release = site.config.clone();
+    let world = World::with(config).await;
+    let people = admin_support::cast(&world).await;
+    let db = &world.app.app.db;
+    let other = orch_db::queries::job_leases::Lease::for_run("release_check", Duration::minutes(5));
+    let mut previous = None;
+
+    for expected_calls in 0..2 {
+        assert!(other.hold(db, world.now()).await.unwrap());
+        let reply = world
+            .app
+            .call(AdminReleaseCheck, &[])
+            .token(&people.root.token)
+            .send()
+            .await;
+        assert_eq!(reply.status, 409);
+        let problem = reply.problem();
+        assert_eq!(problem.code, ErrorCode::ConflictConcurrentChange);
+        assert_eq!(problem.extra["reason"], "release_check_in_progress");
+        assert_eq!(site.calls.load(Ordering::SeqCst), expected_calls);
+        let stored = {
+            let mut conn = db.acquire().await.unwrap();
+            releases::read(&mut conn).await.unwrap()
+        };
+        assert_eq!(stored, previous);
+        other.release(db).await.unwrap();
+
+        let finished = world
+            .app
+            .call(AdminReleaseCheck, &[])
+            .token(&people.root.token)
+            .send()
+            .await
+            .ok();
+        assert_eq!(finished.offered_version.as_deref(), Some("1.2.3"));
+        previous = Some(finished);
+        world.advance(Duration::hours(1));
+    }
+}
+
+#[tokio::test]
 async fn installation_reads_finish_with_one_pool_slot_without_holding_a_guard_over_external_work() {
     let site = Site::new().await;
     let records = tempfile::tempdir().unwrap();
@@ -288,12 +332,12 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
         .send()
         .await
         .ok();
-    for reply in [
-        (200, "not JSON".to_owned(), 0),
-        (200, "x".repeat(1_048_577), 0),
-        (302, String::new(), 0),
-        (200, manifest("0.1.0"), 0),
-        (200, manifest("2.0.0"), 2000),
+    for (reply, older) in [
+        ((200, "not JSON".to_owned(), 0), false),
+        ((200, "x".repeat(1_048_577), 0), false),
+        ((302, String::new(), 0), false),
+        ((200, manifest("0.1.0"), 0), true),
+        ((200, manifest("2.0.0"), 2000), false),
     ] {
         *site.reply.lock().unwrap() = reply;
         world.advance(Duration::hours(1));
@@ -305,6 +349,10 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
             .await
             .ok();
         assert!(failed.error.is_some());
+        assert_eq!(
+            failed.error.as_deref() == Some("release.source_older"),
+            older
+        );
         assert_eq!(failed.checked_at, first.checked_at);
         assert_eq!(failed.offered_version, first.offered_version);
         let shown = world

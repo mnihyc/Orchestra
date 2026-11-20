@@ -41,7 +41,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await page.setViewportSize({ width, height: 900 });
       await expect(page.getByText(unknown, { exact: true })).toBeVisible();
       await expect(page.getByText(counted, { exact: true })).toBeVisible();
-      await expect(page.getByText(locale === 'en' ? 'Codex reported different managed launch settings.' : 'Codex 报告的受管启动设置与要求不同。', { exact: true })).toBeVisible();
+      await expect(page.getByText(locale === 'en' ? 'Codex reported managed launch settings that differ from the required ones.' : 'Codex 报告的受管启动设置与要求不同。', { exact: true })).toBeVisible();
       await expect(page.getByText('Codex emitted a malformed protocol frame: {broken fixture', { exact: true })).toBeVisible();
       await expect(page.getByText('private payload', { exact: false })).toHaveCount(0);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

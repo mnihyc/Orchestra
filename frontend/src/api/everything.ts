@@ -13,6 +13,8 @@ export interface ResourceFilter {
   view?: ProviderListScope;
   home?: string;
   details?: boolean;
+  /** Each row is what a table of the kind draws of it, not the whole view (a provider's has no models). */
+  rows?: boolean;
 }
 
 export interface EverythingFilter {
@@ -83,6 +85,7 @@ export const everythingQuery = (reader: string, parent: string | null, filter: E
       ...(filter.createdTo === '' ? {} : { created_to: `${filter.createdTo}T23:59:59.999Z` }),
       ...(filter.activeFrom === undefined || filter.activeFrom === '' ? {} : { active_from: `${filter.activeFrom}T00:00:00.000Z` }),
       ...(filter.resource?.details === true ? { resource_details: true } : {}),
+      ...(filter.resource?.rows === true ? { resource_rows: true } : {}),
       ...(filter.resource?.state === undefined ? {} : { resource_state: filter.resource.state }),
       ...(filter.resource?.kind === undefined ? {} : { resource_kind: filter.resource.kind }),
       ...(filter.resource?.harness === undefined ? {} : { harness: filter.resource.harness }),
