@@ -71,7 +71,7 @@ test('I show a port to a colleague in the project with its current audience coun
   await open(page); const dialog = await more(page, 'Place');
   await dialog.getByLabel('Find a place', { exact: true }).fill('Web');
   await dialog.getByRole('treeitem', { name: 'Web', exact: true }).click();
-  await expect(dialog.getByText('7 people can enter. No other environment door is given.')).toBeVisible();
+  await expect(dialog.getByText('7 . This gives no other access to the environment.')).toBeVisible();
   await expect(dialog.getByText('Everyone who may view Web, including guests, can use this port after signing in.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Allow the place' }).click();
   await expect(card(page).getByTestId('opening-place')).toBeVisible();

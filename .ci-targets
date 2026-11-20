@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-core --test provider_creation_scopes --test machine_registration --test providers --test provider_managed
+test -p orch-link --test streams --test large_messages
+test -p orch-connector-core --lib
+test -p orch-connector-core --test agent_role --test sign_in --test retained_native_record
+web typecheck
+web lint
+web test -- tests/component/provider-create-locations.test.tsx tests/component/provider-signin-availability.test.tsx tests/component/agent-program-create.test.tsx tests/component/machine-enrollment.test.tsx tests/component/machine-spool.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

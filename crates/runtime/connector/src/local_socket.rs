@@ -466,6 +466,10 @@ impl LocalState {
             ),
             LinkStatus::Stopped => (false, None, "stopped".to_owned()),
         };
+        let storage = self.link.spool_status().borrow().clone();
+        let link = storage.reason().map_or(link.clone(), |reason| {
+            format!("{link}; {reason} ({} waiting)", storage.waiting_events)
+        });
         Status {
             connected,
             endpoint,
@@ -545,8 +549,10 @@ impl LocalState {
                 continue;
             }
             let root = environment.facts().workspace_root;
-            for found in role.imports().found(&[root]).await {
-                candidates.push((environment.id(), found));
+            for found in role.imports().found(std::slice::from_ref(&root)).await {
+                if let Some(found) = crate::mcp_import::in_workspace(found, Path::new(&root)) {
+                    candidates.push((environment.id(), found));
+                }
             }
         }
         let (environment, found) = match choose_import(candidates, name, from, place) {
@@ -554,6 +560,7 @@ impl LocalState {
             Err(message) => return Reply::Error { message },
         };
         let request = orch_link_contract::mcp_import::McpImportAsk {
+            profile: found.profile,
             request_id: orch_types::new_id(),
             environment_id: environment,
             source: found.source,
@@ -627,7 +634,15 @@ fn choose_import(
             && from.is_none_or(|from| found.source == from)
             && place.is_none_or(|place| found.directory.as_deref().unwrap_or("user") == place)
     }) {
-        if !choices.iter().any(|(_, previous)| previous == &found) {
+        if !choices.iter().any(
+            |(_, previous): &(Id, orch_agent_contract::discovery::McpFound)| {
+                let mut previous = previous.clone();
+                previous.profile = None;
+                let mut current = found.clone();
+                current.profile = None;
+                previous == current
+            },
+        ) {
             choices.push((environment, found));
         }
     }
