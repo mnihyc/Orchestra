@@ -1,0 +1,9 @@
+fmt
+test -p orch-api-core --test admin_catalogue --test threads_settings --test harness_checks
+test -p orch-api-core --lib
+test -p orch-engine --test approval_review
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-connector-core --lib
+test -p orch-db --lib -- programs::admin::tests::
+test -p orch-api-core --test runtime_updates -- the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_another_processor
+test -p orch-api-core --test connected_program_versions

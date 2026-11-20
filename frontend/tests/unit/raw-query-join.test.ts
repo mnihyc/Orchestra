@@ -1,5 +1,5 @@
 /** Actual observers + the one socket, with synthetic HTTP barriers; no native execution is claimed. */
-import { CancelledError, InfiniteQueryObserver } from '@tanstack/react-query';
+import { CancelledError, InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client, ApiError } from '@/api/client';
 import { queryClient } from '@/api/query';
@@ -76,9 +76,9 @@ function observationOptions(ref: ThreadReadRef, segment: string, barrier?: Publi
     structuralSharing: (previous, next) => { barrier.beforeCommit?.(); return sharing(previous, next); },
   };
 }
-function observe(ref: ThreadReadRef, segment = 'segment-one', follow = false, barrier?: PublicationBarrier) {
+function observe(ref: ThreadReadRef, segment = 'segment-one', follow = false, barrier?: PublicationBarrier, cache: QueryClient = queryClient) {
   let options = observationOptions(ref, segment, barrier);
-  const observer = new InfiniteQueryObserver(queryClient, options);
+  const observer = new InfiniteQueryObserver(cache, options);
   const off = observer.subscribe(() => undefined);
   let key = JSON.stringify(options.queryKey);
   // The real UI's inherited-scope hook rebuilds pure options after a verified owner transition.
@@ -152,6 +152,16 @@ it('coalesces equal-source observers and does not let an unmount cancel the rema
   reply(read, left, [event(1)]); await settled(two); expect(numbers(two)).toEqual([1]);
   two.close(); await vi.advanceTimersByTimeAsync(0);
   expect(wire.sent.filter((frame) => frame.op === 'unsub')).toHaveLength(1);
+});
+
+it('uses the installed raw transport through a kept view of the same query cache', async () => {
+  const server = rawServer(); await open(left, B); const { wire } = transport();
+  const scoped = new QueryClient({ queryCache: queryClient.getQueryCache() });
+  const view = observe(left, 'segment-one', false, undefined, scoped);
+  const sub = await wire.subscriptions.next(); ack(wire, sub, scopeOf(left));
+  const reading = await server.issued.next();
+  reply(reading, left, [event(1)]); await settled(view);
+  expect(numbers(view)).toEqual([1]); expect(server.reads).toHaveLength(1);
 });
 
 it('coalesces native sources across owners while keeping their cancellation and query windows independent', async () => {
