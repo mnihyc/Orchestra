@@ -62,6 +62,7 @@ use orch_api_contract::threads::UploadSessionCreateBody;
 
 use orch_api_contract::threads::UploadSessionCreateReply;
 
+use orch_api_contract::threads::UploadSessionGet;
 use orch_api_contract::threads::UploadSessionPut;
 
 use orch_api_contract::threads::UploadSessionPutQuery;
@@ -101,7 +102,16 @@ pub fn mount(registry: &mut Registry) {
             crate::key_operations::native::selected::<blob_source::Blobs>,
             upload_get,
         )
-        .on(UploadSessionCreate, session_create)
+        .on_with_operation(
+            UploadSessionCreate,
+            crate::key_operations::native::effects::prepare::<uploads::Begin>,
+            session_create,
+        )
+        .on_snapshot_read_with_optional_operation(
+            UploadSessionGet,
+            crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
+            crate::key_operations::native::stored_read::<uploads::session_operation::Sessions>,
+        )
         .on_raw_query_with_optional_operation(
             UploadSessionPut,
             crate::key_operations::native::stored::<uploads::session_operation::Sessions, _, _>,
@@ -176,6 +186,7 @@ fn raw_creation() -> crate::middleware::idempotency::RawCreation<(), UploadedBlo
                     .ok_or_else(|| ApiError::internal("the supplied upload has no media type"))?
                     .to_owned();
                 let reply = UploadedBlob {
+                    relay: None,
                     blob,
                     size,
                     name,
@@ -252,10 +263,11 @@ async fn create(ctx: Ctx, (): (), body: Body) -> ApiResult<Response> {
         .store_stream(body.into_data_stream(), IMAGE_UPLOAD_MAX_BYTES)
         .await
         .map_err(uploads::stored_badly)?;
-    uploads::register_named(&ctx, meta, Some(&name), Some(&media_type)).await?;
+    uploads::register_named(&ctx, &meta, Some(&name), Some(&media_type)).await?;
     json_reply(
         StatusCode::OK,
         &UploadedBlob {
+            relay: None,
             blob: meta.hash,
             size: meta.size,
             media_type,
@@ -275,26 +287,18 @@ async fn session_create(
 
 /// Takes the next piece of an upload in pieces.
 async fn session_put(ctx: Ctx, query: UploadSessionPutQuery, body: Body) -> ApiResult<Response> {
-    let piece = axum::body::to_bytes(
-        body,
-        usize::try_from(uploads::chunk_bytes()).unwrap_or(usize::MAX) + 1,
-    )
-    .await
-    .map_err(|_| {
-        ApiError::new(
-            ErrorCode::RequestTooLarge,
-            "a piece carries at most four mebibytes",
-        )
-        .with("limit", uploads::chunk_bytes())
-    })?;
-    let reply = uploads::put_piece(&ctx, ctx.id("upload_id")?, query.offset, &piece).await?;
+    let reply = uploads::put_body(&ctx, ctx.id("upload_id")?, query.offset, body).await?;
     crate::key_operations::publication::receipt(&ctx, &reply)?;
     json_reply(StatusCode::OK, &reply)
 }
 
 /// Ends an upload in pieces.
-async fn session_complete(ctx: Ctx, (): (), (): ()) -> ApiResult<UploadedBlob> {
-    uploads::complete(&ctx, ctx.id("upload_id")?).await
+async fn session_complete(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::threads::UploadSessionCompletion> {
+    uploads::complete_session(&ctx, ctx.id("upload_id")?).await
 }
 
 async fn session_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
@@ -481,7 +485,7 @@ async fn blob_get(ctx: Ctx, query: ThreadBlobGetQuery, _: Body) -> ApiResult<Res
 
 /// A private draft reads only a hash the caller independently holds, never somebody else's unfinished input.
 async fn upload_get(ctx: Ctx, query: UploadBlobGetQuery, _: Body) -> ApiResult<Response> {
-    let selected = crate::key_operations::native::selected_read::<blob_source::Blobs>(
+    let selected = crate::key_operations::native::selected_value::<blob_source::Blobs>(
         ctx.clone(),
         query.clone(),
         (),
@@ -529,16 +533,44 @@ pub(crate) async fn serve_completed(
             )
                 .into_response());
         }
-        let list = crate::archives::list(
-            &ctx.app.blobs,
-            meta,
-            query.inside.as_deref(),
-            usize::try_from(orch_api_contract::workspace::ARCHIVE_LIST_LIMIT_DEFAULT)
-                .unwrap_or(usize::MAX),
-            crate::archives::READ_TIME,
-        )
-        .await
-        .map_err(|error| ApiError::new(ErrorCode::CapabilityUnsupported, error.to_string()))?;
+        let mut conn = ctx.app.db.acquire().await?;
+        let policy =
+            orch_engine::environments::workspace_limits_at(&mut conn, orch_settings::Place::System)
+                .await
+                .map_err(ApiError::internal)?;
+        drop(conn);
+        let limit = query
+            .limit
+            .unwrap_or(u32::try_from(policy.archive_results).unwrap_or(u32::MAX));
+        if limit == 0 {
+            return Err(ApiError::invalid("limit", "must be at least 1"));
+        }
+        let list = ctx
+            .app
+            .cache
+            .archive_reads()
+            .list(
+                &ctx.app.blobs,
+                crate::archives::ArchiveRead {
+                    meta,
+                    inside: query.inside.clone(),
+                    query: query.q.clone(),
+                    cursor: query.cursor.clone(),
+                    limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                },
+                &policy,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::archives::ArchiveError::Stale => {
+                    ApiError::new(ErrorCode::ConflictStaleRevision, error.to_string())
+                        .with("restart", true)
+                }
+                crate::archives::ArchiveError::Busy => {
+                    ApiError::new(ErrorCode::EnvironmentUnavailable, error.to_string())
+                }
+                _ => ApiError::new(ErrorCode::CapabilityUnsupported, error.to_string()),
+            })?;
         return json_reply(StatusCode::OK, &list);
     }
     if query.preview == Some(true) {
