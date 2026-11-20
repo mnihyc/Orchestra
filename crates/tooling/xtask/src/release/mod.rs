@@ -9,6 +9,7 @@
 pub mod archive;
 pub mod connectors;
 pub mod container;
+pub mod deploy_files;
 mod font_names;
 pub mod identity;
 pub mod image;

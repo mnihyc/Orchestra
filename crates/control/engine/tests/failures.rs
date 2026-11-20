@@ -12,9 +12,10 @@ use orch_authz::Caller;
 use orch_engine::commands::{
     Commands, CommandsError, Info, Outcome, Outgoing, RetainedCommand, Stage,
 };
-use orch_link_contract::commands::{CommandError, CommandKind, ErrorCode};
+use orch_link_contract::commands::{Cmd, CommandError, CommandKind, ErrorCode};
 use orch_link_contract::events::TurnOutcome;
-use orch_types::{Clock, Id};
+use orch_types::{Clock, Id, Time};
+use serde_json::json;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -66,6 +67,8 @@ impl Commands for AdmissionGap {
                     && matches!(row.kind.as_str(), "turn.start" | "turn.start.fenced")
             })
             .map(|row| Info {
+                work_started_at: None,
+                completed_at: None,
                 stage: Stage::Queued,
                 issued_at: row.created_at,
                 outcome: None,
@@ -136,6 +139,7 @@ async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reaso
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: reason.into(),
                 },
             ),
@@ -176,6 +180,7 @@ async fn an_unexpected_session_exit_fails_the_running_turn_and_retains_its_reaso
         world
             .say_of_harness_taken_in(orch_link_contract::events::Event::HarnessStatus(
                 orch_link_contract::events::HarnessStatus {
+                    home: None,
                     status: status.into(),
                     detail,
                     harness_version: Some("1.0.0".into()),
@@ -210,6 +215,7 @@ async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "the session exited".into(),
                 },
             ),
@@ -240,6 +246,98 @@ async fn a_session_lost_before_the_turn_begins_keeps_its_input_for_retry() {
     world.wait_state(thread, "idle").await;
     assert_eq!(world.input_state(first.input.id).await.0, "delivered");
     assert_eq!(world.input_state(second.input.id).await.0, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_keeps_its_admitted_waits_after_a_setting_edit_and_restart() {
+    let world = World::tuned(|config| {
+        config.start_timeout = orch_engine::config::TURN_START_TIMEOUT;
+        config.started_wait = orch_engine::config::TURN_STARTED_WAIT;
+    })
+    .await;
+    let thread = world.thread("Captured start wait").await;
+    world
+        .set(
+            thread,
+            "threads.start_acceptance_seconds",
+            serde_json::json!(120),
+        )
+        .await;
+    world
+        .set(
+            thread,
+            "threads.start_confirmation_seconds",
+            serde_json::json!(180),
+        )
+        .await;
+    world.machine.handler.hold(CommandKind::TurnStart);
+    let sent = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Keep the accepted deadline"),
+        )
+        .await
+        .unwrap();
+    world.wait_began(CommandKind::TurnStart, 1).await;
+    let original = world
+        .sync(thread)
+        .await
+        .turns
+        .into_iter()
+        .find(|turn| turn.input_id == sent.input.id)
+        .unwrap();
+    let wait = serde_json::to_value(&original).unwrap()["start_wait"].clone();
+    assert_eq!(wait["stage"], "acceptance");
+    assert_eq!(wait["after_millis"], 120_000);
+    assert_eq!(wait["admitted_default_source"], "thread");
+    assert!(wait["deadline"].as_str().is_some());
+    world
+        .set(
+            thread,
+            "threads.start_acceptance_seconds",
+            serde_json::json!(600),
+        )
+        .await;
+    world
+        .set(
+            thread,
+            "threads.start_confirmation_seconds",
+            serde_json::json!(900),
+        )
+        .await;
+    world.restart_api().await;
+    let retained = world
+        .sync(thread)
+        .await
+        .turns
+        .into_iter()
+        .find(|turn| turn.id == original.id)
+        .unwrap();
+    assert_eq!(serde_json::to_value(retained).unwrap()["start_wait"], wait);
+    world.machine.handler.release();
+    let native = world.turn_start(thread, 0).await;
+    common::eventually("the captured confirmation wait is published", || async {
+        let row = world
+            .sync(thread)
+            .await
+            .turns
+            .into_iter()
+            .find(|turn| turn.id == original.id)
+            .unwrap();
+        let fact = serde_json::to_value(row).unwrap()["start_wait"].clone();
+        fact["stage"] == "start"
+            && fact["after_millis"] == 180_000
+            && fact["admitted_default_source"] == "thread"
+    })
+    .await;
+    assert_eq!(world.commands.issued_of("turn.start"), 1);
+    world.say(thread, common::turn_began(native.turn_id)).await;
+    world
+        .say(thread, turn_ended(native.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_input(sent.input.id, "delivered").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -305,8 +403,13 @@ async fn an_admitted_but_unissued_start_is_adopted_after_restart_with_its_origin
     })
     .await;
     world.engine().stop();
-    let (id, body, deadline): (Id, serde_json::Value, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "SELECT id,body,deadline_at FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
+    let (id, body, issued_at, deadline): (
+        Id,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
+        "SELECT id,body,created_at,deadline_at FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
     )
     .bind(thread)
     .fetch_one(world.pool.pool())
@@ -338,7 +441,10 @@ async fn an_admitted_but_unissued_start_is_adopted_after_restart_with_its_origin
     assert_eq!(issued.len(), 1);
     assert_eq!(issued[0].1.id, id);
     assert_eq!(issued[0].1.body, body);
-    assert_eq!(issued[0].1.deadline.get(), deadline);
+    assert_eq!(
+        issued[0].1.work,
+        Cmd::work_budget(Time::new(issued_at), Time::new(deadline))
+    );
     assert_eq!(world.began(CommandKind::TurnStart), 1);
     world.say(thread, common::turn_began(start.turn_id)).await;
     world
@@ -374,8 +480,13 @@ async fn an_admitted_but_unissued_start_is_adopted_without_reconnecting_the_mach
         attempts.load(Ordering::SeqCst) > 0
     })
     .await;
-    let (id, body): (Id, serde_json::Value) = sqlx::query_as(
-        "SELECT id,body FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
+    let (id, body, issued_at, deadline): (
+        Id,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
+        "SELECT id,body,created_at,deadline_at FROM commands WHERE kind='turn.start' AND body->>'thread_id'=$1::text AND state='queued'",
     )
     .bind(thread)
     .fetch_one(world.pool.pool())
@@ -388,6 +499,10 @@ async fn an_admitted_but_unissued_start_is_adopted_without_reconnecting_the_mach
     assert_eq!(issued.len(), 1);
     assert_eq!(issued[0].1.id, id);
     assert_eq!(issued[0].1.body, body);
+    assert_eq!(
+        issued[0].1.work,
+        Cmd::work_budget(Time::new(issued_at), Time::new(deadline))
+    );
     assert_eq!(world.began(CommandKind::TurnStart), 1);
     world.say(thread, common::turn_began(start.turn_id)).await;
     world
@@ -397,7 +512,123 @@ async fn an_admitted_but_unissued_start_is_adopted_without_reconnecting_the_mach
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoption() {
+async fn a_chosen_short_acceptance_wait_also_bounds_native_dispatch() {
+    let clock = Arc::new(orch_testkit::clock::manual());
+    let world = World::with_clock(clock).await;
+    world.set_config(|waits| waits.start_timeout = orch_engine::config::TURN_START_TIMEOUT);
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("Chosen dispatch wait").await;
+    world
+        .set(thread, "threads.start_acceptance_seconds", json!(1))
+        .await;
+    let submitted = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("My chosen wait"),
+        )
+        .await
+        .unwrap();
+    common::eventually("the chosen start to be admitted", || async {
+        attempts.load(Ordering::SeqCst) > 0
+    })
+    .await;
+    world.engine().stop();
+    let same_deadline: bool = sqlx::query_scalar(
+        "SELECT c.deadline_at=(t.start_wait->>'deadline')::timestamptz FROM commands c JOIN turns t ON c.body->>'turn_id'=t.id::text WHERE t.input_id=$1 AND c.kind='turn.start'",
+    )
+    .bind(submitted.input.id)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert!(
+        same_deadline,
+        "the native line honors the chosen short wait"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_start_with_no_acceptance_wait_never_reaches_native_dispatch() {
+    let world = World::new().await;
+    world.set_config(|waits| waits.start_timeout = Duration::ZERO);
+    let reject = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let db = world.pool.clone();
+    world
+        .restart_api_using(|inner| {
+            Arc::new(AdmissionGap {
+                inner,
+                db: db.clone(),
+                clock: world.clock.clone(),
+                reject: reject.clone(),
+                attempts: attempts.clone(),
+            })
+        })
+        .await;
+    let thread = world.thread("No acceptance wait").await;
+    let submitted = world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Keep my input"))
+        .await
+        .unwrap();
+    common::eventually("the expired start to fail before dispatch", || async {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE input_id=$1 AND state='failed' AND error->>'code'='start_timeout')",
+        )
+        .bind(submitted.input.id)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap()
+    })
+    .await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(world.began(CommandKind::TurnStart), 0);
+    world.wait_input(submitted.input.id, "pending").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_expired_unissued_start_runs_the_original_input_once_under_a_new_admission() {
+    expired_admission(Intervention::None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stop_recorded_during_the_outage_holds_the_expired_input_after_restart() {
+    expired_admission(Intervention::Stop).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_edit_during_the_outage_holds_the_revised_words_for_the_person() {
+    expired_admission(Intervention::Edit).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withdrawal_during_the_outage_prevents_readmission() {
+    expired_admission(Intervention::Withdraw).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Intervention {
+    None,
+    Stop,
+    Edit,
+    Withdraw,
+}
+
+async fn expired_admission(intervention: Intervention) {
     let clock = Arc::new(orch_testkit::clock::manual());
     let world = World::with_clock(clock.clone()).await;
     world.set_config(|waits| waits.start_timeout = Duration::from_secs(2));
@@ -415,7 +646,7 @@ async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoptio
             })
         })
         .await;
-    let thread = world.thread("Expired admission").await;
+    let thread = world.thread("Delayed admission").await;
     let submitted = world
         .engine()
         .submit_input(&Caller::session(world.ada), thread, queued("Original work"))
@@ -439,6 +670,12 @@ async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoptio
     .fetch_one(world.pool.pool())
     .await
     .unwrap();
+    let (issued_at, deadline): (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT created_at,deadline_at FROM commands WHERE id=$1")
+            .bind(command)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
     // The link's retained command deadline is still ahead, while the engine's
     // shorter test start timeout has elapsed.
     clock.advance(chrono::Duration::seconds(3));
@@ -450,6 +687,48 @@ async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoptio
             .await
             .unwrap();
     assert!(retained_deadline_is_ahead);
+    if intervention == Intervention::Edit {
+        world
+            .engine()
+            .edit_input(
+                &Caller::session(world.ada),
+                thread,
+                submitted.input.id,
+                Some(queued("Revised words").content),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    if intervention == Intervention::Withdraw {
+        world
+            .engine()
+            .cancel_input(&Caller::session(world.ada), thread, submitted.input.id)
+            .await
+            .unwrap();
+    }
+    if intervention == Intervention::Stop {
+        let continuation = world
+            .scalar(
+                "SELECT active_continuation_id FROM threads WHERE node_id=$1",
+                thread,
+            )
+            .await;
+        orch_db::queries::threads::record_stop(
+            &mut world.pool.acquire().await.unwrap(),
+            &orch_db::queries::threads::NewStop {
+                id: orch_types::new_id(),
+                thread_id: thread,
+                turn_id: Some(turn),
+                input_id: submitted.input.id,
+                continuation_id: continuation,
+                requested_by: world.ada,
+                requested_at: clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
     world
         .restart_api_using(|inner| {
             Arc::new(AdmissionGap {
@@ -463,22 +742,91 @@ async fn an_unissued_start_past_its_engine_deadline_is_cancelled_without_adoptio
         .await;
     reject.store(false, Ordering::SeqCst);
     world.engine().wake(thread);
-    world.wait_turn(turn, "failed").await;
-    world.wait_input(submitted.input.id, "pending").await;
-    let error: Option<String> = sqlx::query_scalar("SELECT error->>'code' FROM turns WHERE id=$1")
-        .bind(turn)
-        .fetch_one(world.pool.pool())
-        .await
-        .unwrap();
-    let state: String = sqlx::query_scalar("SELECT state FROM commands WHERE id=$1")
-        .bind(command)
-        .fetch_one(world.pool.pool())
-        .await
-        .unwrap();
-    assert_eq!(error.as_deref(), Some("start_timeout"));
-    assert_eq!(state, "cancelled");
-    assert_eq!(world.commands.issued_of("turn.start"), 0);
-    assert_eq!(world.began(CommandKind::TurnStart), 0);
+    common::eventually(
+        "the old admission was cancelled before native dispatch",
+        || async {
+            world
+                .scalar::<String>("SELECT state FROM commands WHERE id=$1", command)
+                .await
+                == "cancelled"
+        },
+    )
+    .await;
+    if intervention == Intervention::Withdraw {
+        world.wait_input(submitted.input.id, "cancelled").await;
+        assert_eq!(world.commands.issued_of("turn.start"), 0);
+        return;
+    }
+    if intervention != Intervention::None {
+        world
+            .wait_turn(
+                turn,
+                if intervention == Intervention::Stop {
+                    "interrupted"
+                } else {
+                    "failed"
+                },
+            )
+            .await;
+        world.wait_input(submitted.input.id, "pending").await;
+        assert!(
+            world
+                .scalar::<bool>(
+                    "SELECT queue_held FROM thread_inputs WHERE id=$1",
+                    submitted.input.id
+                )
+                .await
+        );
+        assert_eq!(world.commands.issued_of("turn.start"), 0);
+        assert_eq!(world.began(CommandKind::TurnStart), 0);
+        return;
+    }
+    let start = world.turn_start(thread, 0).await;
+    assert_ne!(start.turn_id, turn);
+    let new_turn = start.turn_id;
+    let input: Id = world
+        .scalar("SELECT input_id FROM turns WHERE id=$1", new_turn)
+        .await;
+    assert_eq!(input, submitted.input.id);
+    let issued = world.commands.issued_commands("turn.start");
+    assert_eq!(issued.len(), 1);
+    assert_ne!(issued[0].1.id, command);
+    let replacement = issued[0].1.id;
+    let (new_issue, new_due): (chrono::DateTime<chrono::Utc>,chrono::DateTime<chrono::Utc>)=sqlx::query_as("SELECT c.created_at,(t.start_wait->>'deadline')::timestamptz FROM commands c JOIN turns t ON t.id=$2 WHERE c.id=$1").bind(replacement).bind(new_turn).fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(new_issue, clock.now());
+    assert!(new_due >= new_issue + chrono::Duration::seconds(2));
+    assert!(
+        world
+            .scalar::<bool>(
+                "SELECT (start_wait->>'restarted_after_recovery')::bool FROM turns WHERE id=$1",
+                new_turn
+            )
+            .await
+    );
+    assert_eq!(
+        issued[0].1.work,
+        Cmd::work_budget(Time::new(issued_at), Time::new(deadline)),
+        "waiting for adoption spends none of the original native work grant"
+    );
+    world.say(thread, common::turn_began(new_turn)).await;
+    world.wait_state(thread, "running").await;
+    // This fixture's journal owns results; its explicit wait also projects the
+    // actual native receipt into the reconstructed dispatcher storage half.
+    assert!(matches!(
+        world.commands.as_engine().wait(replacement).await.unwrap(),
+        Outcome::Succeeded(_)
+    ));
+    assert_eq!(
+        world
+            .scalar::<String>("SELECT state FROM commands WHERE id=$1", replacement)
+            .await,
+        "succeeded"
+    );
+    assert_eq!(world.began(CommandKind::TurnStart), 1);
+    world
+        .say(thread, turn_ended(new_turn, TurnOutcome::Completed))
+        .await;
+    world.wait_input(submitted.input.id, "delivered").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -608,6 +956,7 @@ async fn an_idle_session_exit_still_leaves_its_reason_in_the_conversation() {
             thread,
             orch_link_contract::events::Event::SessionLost(
                 orch_link_contract::events::SessionLost {
+                    uncertain: false,
                     reason: "idle server exited unexpectedly".into(),
                 },
             ),
@@ -1004,4 +1353,30 @@ async fn a_turn_the_harness_took_and_never_began_is_given_up_and_the_next_start_
     meanwhile(Duration::from_millis(300)).await;
     assert_eq!(world.turn_starts(thread).len(), 3);
     assert_eq!(world.input_state(first.input.id).await.0, "delivered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unavailable_restart_recovery_preserves_the_admitted_turn_without_retrying_its_input() {
+    let world = World::new().await;
+    let thread = world.thread("Retained native work").await;
+    let (turn, _) = world.running_turn(thread, "Admitted exactly once").await;
+    world.say(thread,orch_link_contract::events::Event::decode("session.lost",json!({"reason":"Native history remains, but its admitted turn cannot be reattached yet","uncertain":true})).unwrap()).await;
+    world.wait_state(thread, "blocked").await;
+    let state: String = world
+        .scalar("SELECT state FROM turns WHERE id=$1", turn.turn_id)
+        .await;
+    assert_eq!(state, "running");
+    assert_eq!(
+        turns_of(&world, thread).await.len(),
+        1,
+        "no implicit replay or fresh turn"
+    );
+    let reason: Option<String> = world
+        .scalar(
+            "SELECT blocked_detail FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    assert!(reason.unwrap().contains("history remains"));
+    world.shutdown().await;
 }

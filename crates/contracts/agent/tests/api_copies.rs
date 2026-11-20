@@ -138,12 +138,47 @@ one_shape!(
     question_option: events::QuestionOption => approvals::QuestionOption,
     reasoning_payload: events::ReasoningPayload => threads::ReasoningPayload,
     subagent_state: events::SubagentState => threads::SubagentState,
-    tool_call_payload: events::ToolCallPayload => threads::ToolCallPayload,
     tool_payload: events::ToolPayload => threads::ToolPayload,
     turn_phase_kind: events::TurnPhaseKind => threads::TurnPhaseKind,
     web_action: events::WebAction => threads::WebAction,
     web_search_result: events::WebSearchResult => threads::WebSearchResult,
 );
+
+/// A tool call is written with its raw form and shown without it, so that the thread's timeline does not carry the same
+/// content twice: the API's member is optional where the agent's is required, and in every other member the two agree.
+#[test]
+fn tool_call_payload_has_the_shape_of_the_apis_but_for_its_optional_raw_form() {
+    let without_raw = |mut schema: Json| {
+        schema["properties"].as_object_mut().unwrap().remove("raw");
+        schema["required"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|name| name != "raw");
+        schema
+    };
+    assert_eq!(
+        without_raw(shape::<events::ToolCallPayload>()),
+        without_raw(shape::<threads::ToolCallPayload>()),
+        "ToolCallPayload no longer has the shape of the API's but for its raw form"
+    );
+    let written = shape::<events::ToolCallPayload>();
+    assert!(
+        written["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "raw"),
+        "a harness's call always says what it was"
+    );
+    assert!(
+        !shape::<threads::ToolCallPayload>()["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "raw"),
+        "the timeline's call may leave it out"
+    );
+}
 
 #[test]
 fn web_actions_preserve_legacy_rows_and_unknown_actions_are_not_searches()
