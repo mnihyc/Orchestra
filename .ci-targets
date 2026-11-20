@@ -1,0 +1,5 @@
+test -p orch-engine --test provider_on_key
+test -p orch-db --test provider_keeper
+test -p orch-api-core --test real_connector -- a_model_call_of_a_harness_on_another_machine_passes_the_forwarder_of_a_real_connector_and_is_one_row_of_the_ledger
+test -p orch-api-core --test binding_options --test binding_readiness
+test -p orch-engine --lib -- preflight::
