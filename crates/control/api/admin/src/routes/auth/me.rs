@@ -8,13 +8,11 @@
 
 use crate::key_operations::credentials::key_info as token_info;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
 use crate::middleware::authentication::Authed;
 
 use crate::middleware::authentication::Via;
 
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_key;
 
 use crate::middleware::authentication::token_hash;
 
@@ -1792,8 +1790,7 @@ async fn token_create(
             .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
             .await?;
     }
-    let id = orch_types::new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let (id, secret) = new_api_key();
     let name = asked.name.as_str();
     identity::create_api_token_scoped(
         &mut tx,
