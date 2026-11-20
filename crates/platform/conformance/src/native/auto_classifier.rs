@@ -18,7 +18,7 @@ pub(super) async fn exercise(
         .approval_modes
         .contains(&ApprovalMode::Auto)
     {
-        return Err("Auto is unavailable; classifier observations require explicit candidate admission until real proof".into());
+        return Err("The program did not declare Auto for its native classifier check.".into());
     }
     let first = recipe
         .cases
@@ -45,8 +45,12 @@ pub(super) async fn exercise(
     for case in &recipe.cases {
         // The same opaque command must actually ask under On request before an effect can prove
         // the classifier route. Each phase has a fresh session, process and event stream.
-        phase(adapter, fixture, check, protocol, recipe, case, true).await?;
-        phase(adapter, fixture, check, protocol, recipe, case, false).await?;
+        phase(adapter, fixture, check, protocol, recipe, case, true)
+            .await
+            .map_err(|error| format!("{} (On request): {error}", case.name))?;
+        phase(adapter, fixture, check, protocol, recipe, case, false)
+            .await
+            .map_err(|error| format!("{} (Auto): {error}", case.name))?;
     }
     Ok(())
 }

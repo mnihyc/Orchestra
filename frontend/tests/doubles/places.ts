@@ -1548,8 +1548,8 @@ export class Places {
     if (this.rootIsPersonal(root)) throw new Refusal(409, 'org.closed', 'a personal org takes no members');
     const email = typeof body.email === 'string' && body.email !== '' ? body.email : null;
     if (email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) this.invalid('email', 'is not an address');
-    const hours = typeof body.expires_in_hours === 'number' ? body.expires_in_hours : 168;
-    if (hours > 720) this.invalid('expires_in_hours', 'at most 720 hours are allowed here');
+    const minutes = typeof body.expires_in_minutes === 'number' ? body.expires_in_minutes : 10080;
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 43200) this.invalid('expires_in_minutes', 'from 1 to 43200 minutes are allowed here');
     const token = `inv_${randomUUID()}`;
     const role = (ROLES as readonly string[]).includes(String(body.role)) ? (body.role as Role) : 'viewer';
     const row = this.must(orgId);
@@ -1566,7 +1566,7 @@ export class Places {
       max_uses: email === null ? Number(body.max_uses ?? 1) : 1,
       uses: 0,
       note: typeof body.note === 'string' ? body.note : '',
-      expires_at: new Date(Date.now() + hours * 3_600_000).toISOString(),
+      expires_at: new Date(Math.floor(Date.now() / 60_000 + minutes) * 60_000).toISOString(),
       revoked: false,
       created_by: userRef(person.me),
       created_at: new Date().toISOString(),

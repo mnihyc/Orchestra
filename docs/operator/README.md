@@ -1,36 +1,56 @@
 # Operator guide
 
-How to install, check, back up, update and recover an Orch system on one Docker host. The pages say what was
-run, with the commands that were typed; the scripts that run them again are in
-[scripts/smoke](../../scripts/smoke/README.md).
+How to install, secure, update, back up and keep an Orch system running on Docker hosts. The pages say what you need, give the steps, show how to check that they worked, and say what to do when they did not. The scripts that run the same checks again are in [scripts/smoke](../../scripts/smoke/README.md).
 
-- [Deployment](deployment.md): from the files of a release to a running system and its first administrator
-- [Running without internet access](offline.md): gather, carry in, install, update and use internal sources
-- [Configuration](configuration.md): service configuration, database warning thresholds, logs and blob grace
-- [File previews and agent delivery](file-previews.md): preview/viewer settings, disposable caching, formats and native-image policy
-- [Uploads and private drafts](uploads.md): size and context settings, attachment retention and upload outcomes
-- [Import and export](import-and-export.md): package imports, limits, permissions and undo retention
-- [Import and export limits](import-and-export-limits.md): the archive limits, how an import is bounded and checked, and where its records live
-- [Person notifications](person-notifications.md): explicit notice limits, access checks and audit records
-- [Monitoring](monitoring.md): private metrics listeners, scrape configuration, readiness and alerts
-- [HTTPS and WebSocket edge](edge.md): what the front you run must do, an apache2 example, and `orchctl doctor --url`
-- [Backup and restore](backup-and-restore.md): what to keep, and putting a system back
-- [Agent programs](agent-programs.md): manifests, where builds come from and how each is verified and checked, and adding a program
-- [Programs of the Agent Client Protocol](acp-programs.md): DeepSeek Harness, how a session of such a program runs, its privacy rules, and adding another
-- [Upgrades and recovery](upgrades.md): releases, agent program versions, going back, and finishing what an interruption left
-- [Publishing releases](releases.md): CI, verified assets, repackaging and approved images
-- [Storage cleanup](storage-cleanup.md): cache retention, restore dependencies, unused releases and dumps
-- [Incident diagnosis](incidents.md): readiness, link/provider failures, host recovery and scoped cleanup
-- [Model call recovery](model-call-recovery.md): inherited rules, candidate eligibility, repeat guards, deadlines and authority
-- [Lost machines](lost-machines.md): declaring permanent loss, recovering environments and taking restored volumes back
-- [Node hooks and unit networks](node-hooks.md): operator programs at start/stop, their documents and the worked VPN recipe
-- [Agent build checks](harness-build-checks.md): native history support, disabled features and rechecking a build
-- [Codex history and carries](codex-history.md) ([简体中文](zh-CN/codex-history.md)): homes, native fork checks and bounded carries
-- [Driver policy and host scope](driver-policy.md): shared image ceilings, driver-owned options and pool measurements
-- [Recommended host setups](recommended-host-setups.md): plain Docker, gVisor without KVM, Kata with KVM, and the optional scripts that set a host up
-- [Skills and live work](skills-and-live-work.md): versioned executable content, stuck refreshes, progress, cancellation and database-update observations
+## Start here
 
-What the files of [deploy/](../../deploy/README.md) are, and how the updater works, is on its own page.
+1. [Install Orch](deployment.md): from the files of a release to a running system and its first administrator.
+2. [Run the HTTPS front](edge.md): put HTTPS in front of the web edge and check it.
+3. [Secure an installation](security.md): what you do, and leave alone, for the security model to hold.
+4. [Back up and restore Orch](backup-and-restore.md): a daily backup and a practised restore.
 
-- [Semantic search](semantic-search.md): embeddings providers, accountable use, disk limits, model changes and diagnosis.
-- [Document links](document-links.md): where references come from, the seven settings, what a reader can and cannot see, and tuning the checks
+To report a vulnerability, see the [security policy](../../SECURITY.md).
+
+## Keep it running
+
+- [Monitor an installation](monitoring.md): check the stack, scrape its measurements, and set the first alerts.
+- [Diagnose a problem](incidents.md): a table of symptoms, with the repair for each.
+- [Update and roll back](upgrades.md): update a release, go back, and finish what an interruption left.
+- [Clean up storage and uninstall](storage-cleanup.md): caches, old releases and dumps, and removing an instance or the stack.
+- [Recover after a host is lost](lost-machines.md): restore volumes and re-create environments on a new host.
+- [Run Orch without internet access](offline.md): gather, carry in, install and update on a disconnected network.
+
+## Configure the system
+
+- [Human check](human-check.md) ([简体中文](zh-CN/human-check.md)).
+
+- [Configure Orch](configuration.md): where each kind of setting lives, the addresses, the stack's `.env` and `orch.toml`.
+- [Uploads and private drafts](uploads.md): size and context settings, attachment retention and upload results.
+- [Set file preview limits](file-previews.md): preview and viewer limits, and how images reach agents.
+- [Set import and export limits](import-and-export-limits.md): how large an import or an export may be.
+- [Set up semantic search](semantic-search.md): an embeddings provider, the index and its disk share.
+- [Tune document links](document-links.md): how much the **Links** section shows and checks.
+- [Set how access requests and timed access work](access-requests.md): grant durations, pending limits and expiry.
+- [Read the resource library's counts and set paste delivery](resource-library.md): what the counts mean, and the paste setting.
+- [Use the API with a key](api-with-a-key.md): call the API from a script, and what stays with the browser.
+- [Person notifications](person-notifications.md): limits on explicit notices, and their access checks and audit records.
+
+## Hosts, machines and gateways
+
+- [Choose and set up a host runtime](recommended-host-setups.md): plain Docker, gVisor or Kata, and the optional scripts.
+- [Restrict what a host's drivers may do](driver-policy.md): image and account ceilings and driver options.
+- [Run a program when a container starts or stops](node-hooks.md): host routing, firewall or monitoring hooks, with a VPN recipe.
+- [Run regional gateways](regional-gateways.md): a gateway near each group of machines.
+
+## Agent programs, providers and models
+
+- [Choose where agent program builds come from](agent-programs.md): build policies, channels, mirrors and checks.
+- [Run DeepSeek Harness](acp-programs.md): the program of the Agent Client Protocol that ships with Orch.
+- [Read why a DeepSeek Harness extra is off](deepseek-harness-plugin.md): the extras and their reasons.
+- [Codex history and carries](codex-history.md) ([简体中文](zh-CN/codex-history.md)): homes, checks of the program's own fork, and bounded carries.
+- [Managed agent history](agent-history.md): how long the program's own session files are kept.
+- [Set the rules for failed model calls](model-call-recovery.md): wait, continue, fail over or ask a person.
+- [Limit a provider's request options](provider-options.md): tiers, access programs and request schemas.
+- [Operate skills and live work](skills-and-live-work.md): versioned executable content, stuck refreshes and progress.
+
+The files of [deploy/](../../deploy/README.md) and how the updater works are on their own page.

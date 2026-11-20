@@ -13,7 +13,7 @@ use chrono::Duration;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::chats::{ChatLevel, ChatStateSet, ChatStateSetBody, OrgChatsRead};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -32,11 +32,12 @@ fn writes(ids: &[Id]) -> Vec<Json> {
 async fn key(room: &Room, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.bea.id(),
             name: "Native all-read fixture",
             token_hash: &token_hash(&secret),
@@ -189,12 +190,13 @@ async fn empty_all_read_keeps_native_view_and_its_own_checked_empty_write_withou
     )
     .await;
     assert_eq!(mark(&room, &wrong).await.status, StatusCode::FORBIDDEN);
-    let outsider = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let outsider = new_api_token(issued_key_id);
     let scope = json!({"rules":[rule("OrgChatsRead","write","org",room.root,"subtree")]});
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.eve.id(),
             name: "No native org view",
             token_hash: &token_hash(&outsider),
@@ -409,11 +411,12 @@ async fn legacy_all_read_keeps_its_native_root_view_gate_without_a_new_content_r
     let room = Room::new().await;
     let chat = room.direct(&room.bea, &room.cai).await.base.id;
     room.say(&room.cai, chat, "Native legacy bookkeeping").await;
-    let legacy = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let legacy = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: room.bea.id(),
             name: "Legacy all-read root view",
             token_hash: &token_hash(&legacy),
