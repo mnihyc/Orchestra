@@ -92,7 +92,7 @@ for (const locale of ['en', 'zh-CN'] as const) test(`permanent thread keeps the 
   await page.keyboard.press('Escape');
   await box.fill('Use the explicit model'); await box.press('Enter');
   await expect.poll(() => sends.length).toBe(1); await expect(box).toHaveValue('');
-  expect(sends[0]?.model?.model).toBe('ask-readable');
+  expect(sends[0]?.model?.backend.offering?.offering).toBe('ask-readable');
   await page.getByRole('button', { name: t('ask.model'), exact: true }).click();
   await page.getByRole('menuitemradio', { name: t('ask.defaultModel'), exact: true }).click();
   await page.keyboard.press('Escape');
