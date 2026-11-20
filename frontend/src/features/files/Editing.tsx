@@ -23,7 +23,7 @@ import type { ReadOnlyReason } from './viewers';
 /** Unsaved text is not kept beyond a week: longer than a weekend away, short enough that forgotten text does not sit on a machine. */
 export const UNSAVED_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 
-const PREFIX = (userId: string) => `orch.${userId}.unsaved.`;
+const PREFIX = (userId: string) => `orch.${userId}.file-drafts.`;
 
 /** What was typed into a file and not saved. */
 export interface KeptText {
@@ -34,26 +34,26 @@ export interface KeptText {
   at: number;
 }
 
-const keyOf = (userId: string, environmentId: string, path: string) => `${PREFIX(userId)}${environmentId}.${path}`;
+const keyOf = (userId: string, environmentId: string, path: string, binding: string | null) => `${PREFIX(userId)}${JSON.stringify([environmentId, binding, path])}`;
 
-export function keepUnsaved(userId: string | null, environmentId: string, path: string, kept: Omit<KeptText, 'at'>, now: number = Date.now()): void {
+export function keepUnsaved(userId: string | null, environmentId: string, path: string, binding: string | null, kept: Omit<KeptText, 'at'>, now: number = Date.now()): void {
   if (userId === null) return;
   try {
-    localStorage.setItem(keyOf(userId, environmentId, path), JSON.stringify({ ...kept, at: now }));
+    localStorage.setItem(keyOf(userId, environmentId, path, binding), JSON.stringify({ ...kept, at: now }));
   } catch {
     // A device that keeps nothing (full, or private) loses the text with the tab, which is all it can do.
   }
 }
 
 /** The text kept for a file, unless it is older than a week, in which case it is removed. */
-export function readUnsaved(userId: string | null, environmentId: string, path: string, now: number = Date.now()): KeptText | null {
+export function readUnsaved(userId: string | null, environmentId: string, path: string, binding: string | null, now: number = Date.now()): KeptText | null {
   if (userId === null) return null;
   try {
-    const raw = localStorage.getItem(keyOf(userId, environmentId, path));
+    const raw = localStorage.getItem(keyOf(userId, environmentId, path, binding));
     if (raw === null) return null;
     const kept = JSON.parse(raw) as Partial<KeptText>;
     if (typeof kept.text !== 'string' || typeof kept.at !== 'number' || now - kept.at > UNSAVED_KEPT_MS) {
-      localStorage.removeItem(keyOf(userId, environmentId, path));
+      localStorage.removeItem(keyOf(userId, environmentId, path, binding));
       return null;
     }
     return { base: typeof kept.base === 'string' ? kept.base : null, text: kept.text, at: kept.at };
@@ -62,10 +62,10 @@ export function readUnsaved(userId: string | null, environmentId: string, path: 
   }
 }
 
-export function forgetUnsaved(userId: string | null, environmentId: string, path: string): void {
+export function forgetUnsaved(userId: string | null, environmentId: string, path: string, binding: string | null): void {
   if (userId === null) return;
   try {
-    localStorage.removeItem(keyOf(userId, environmentId, path));
+    localStorage.removeItem(keyOf(userId, environmentId, path, binding));
   } catch {
     // Nothing was kept that could be removed.
   }
@@ -91,8 +91,9 @@ export function countUnsaved(userId: string | null, now: number = Date.now()): n
 // ---------------------------------------------------------------- what the tab says
 
 /** The layout owns the mark until a file is saved or its tab closes, including while its body is paused. */
-export function useUnsavedMark(tabId: string, dirty: boolean): void {
+export function useUnsavedMark(tabId: string | undefined, dirty: boolean): void {
   useEffect(() => {
+    if (tabId === undefined) return;
     useWorkbench.getState().setUnsaved(tabId, dirty);
   }, [tabId, dirty]);
 }
@@ -103,9 +104,6 @@ export function ReadOnlyNote({ reason }: { reason: ReadOnlyReason }) {
   const format = useFormatContext();
   let text: string;
   switch (reason.kind) {
-    case 'small_screen':
-      text = t('craftFiles.readOnly');
-      break;
     case 'permission':
       text = t('files.edit.why.permission', { permission: workspacePermissionLabel(t, 'files.manage') });
       break;

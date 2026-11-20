@@ -5,16 +5,18 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyChanges } from '@/api/acts';
-import { systemKey, systemQuery } from '@/api/admin';
+import { storageKey, systemKey, systemQuery } from '@/api/admin';
 import { ApiError, client } from '@/api/client';
 import { AdminModeControl, useAdminMode, useManagementAvailable } from '@/features/access/AdminMode';
+import { FrameReadiness } from '@/shell/FrameReadiness';
+import { PageHeader } from '@/shell/Page';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
 import { NoAccess } from '@/features/access/NoAccess';
 import { AllChats } from '@/features/chat/AllChats';
 import { Management } from '@/features/admin/Management';
 import { ResourceNav } from '@/features/resources/ResourceNav';
 import { TraceActor } from '@/features/trace/Requests';
-import type { AdminMode, Chat, Me } from '@/generated/api-types';
+import type { AdminMode, Chat, Me, StorageStats } from '@/generated/api-types';
 import type { ChatListFilter } from '@/api/chats';
 import { i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
@@ -24,27 +26,32 @@ import { useCapturedAction } from '@/features/workbench/lossActions';
 import { makeGroup } from '@/features/workbench/layout';
 
 const calls = vi.hoisted(() => ({
+  storage: vi.fn<() => Promise<StorageStats>>(),
   read: vi.fn<() => Promise<AdminMode>>(),
   write: vi.fn<(enabled: boolean) => Promise<AdminMode>>(),
   me: vi.fn<() => Promise<Pick<Me, 'is_system_admin'>>>(),
   chats: vi.fn<(root: string, filter: ChatListFilter) => Promise<{ items: Pick<Chat, 'id' | 'name'>[]; next_cursor: null }>>(),
 }));
-vi.mock('@/api/adminMode', () => ({
+vi.mock('@/api/adminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   adminModeKey: ['admin-mode'],
   adminModeQuery: { queryKey: ['admin-mode'], queryFn: () => calls.read() },
   setAdminMode: (enabled: boolean) => calls.write(enabled),
 }));
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/api/admin', async (loadOriginal) => {
+  const actual = await loadOriginal<typeof import('@/api/admin')>();
+  return { ...actual, storageQuery: { ...actual.storageQuery, queryFn: () => calls.storage() } };
+});
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   useRouter: () => ({ invalidate: () => Promise.resolve() }),
   useNavigate: () => vi.fn(),
   useLocation: (options?: { select: (location: { pathname: string }) => string }) => options?.select === undefined ? { pathname: '/resources/machines' } : options.select({ pathname: '/resources/machines' }),
   Link: ({ to, className, children }: { to: string; className?: string; children?: ReactNode }) => <a href={to} className={className}>{children}</a>,
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/features/admin/Overview', () => ({ Overview: () => <p>System overview</p> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
-vi.mock('@/api/chats', () => ({ orgChatsQuery: (root: string, filter: ChatListFilter) => ({
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
+vi.mock('@/api/chats', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgChatsQuery: (root: string, filter: ChatListFilter) => ({
   queryKey: ['chats', root, filter], initialPageParam: null, queryFn: () => calls.chats(root, filter), getNextPageParam: () => undefined,
 }) }));
 vi.mock('@/features/chat/ChatRow', () => ({ ChatRow: ({ chat }: { chat: Pick<Chat, 'id' | 'name'> }) => <li><a href={`/chat/${chat.id}`}>{chat.name}</a></li> }));
@@ -90,6 +97,18 @@ afterEach(() => {
 });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the current admin mode once above a page reached as system admin in ${locale}`, async () => {
+    await setLocale(locale);
+    state = { available: true, as_admin: true };
+    draw(<><header><AdminModeControl /></header><main><PageHeader title="Orch" adminAccess={{ place: 'system', private: false }} /></main></>);
+    const label = i18n.t('adminReach.mode.label', { state: i18n.t('adminReach.mode.stateOn') });
+    expect(await screen.findByRole('switch', { name: label })).toBeChecked();
+    const page = screen.getByRole('main');
+    expect(within(page).getByRole('heading', { name: 'Orch' })).toBeVisible();
+    expect(page.querySelector('[data-as-admin-mark]')).toBeNull();
+    expect(page).not.toHaveTextContent(i18n.t('adminReach.mark.system'));
+  });
+
   it('explains the pending admin switch in '+locale, async () => {
     await setLocale(locale);
     let finish: () => void = () => { throw new Error('The mode write has not started'); };
@@ -225,8 +244,10 @@ describe('the one human-session admin mode', () => {
     draw(<AdminModeControl />);
     await user.click(await screen.findByRole('switch', { name: ADMIN_MODE_NAME }));
     await waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    });
   });
 });
 
@@ -344,4 +365,37 @@ it('retires mode-only readers before repairing the ordinary view after confirmed
   await userEvent.click(screen.getByRole('switch', { name: 'As admin: Off' }));
   expect(await screen.findByText('Fresh administrative overview')).toBeVisible();
   expect(adminRead).toHaveBeenCalledTimes(1);
+});
+
+const storageSample: StorageStats = { blob_count: 817, blob_bytes: 5, pinned_bytes: 2, cache_bytes: 3, disk_free_bytes: 20, top_environments: [] };
+
+function storagePage(ready: boolean) {
+  return <FrameReadiness value={{ ready, pageReady: true, pending: null }}><Management section="storage" search={{}} onSection={vi.fn()} onSearch={vi.fn()} /></FrameReadiness>;
+}
+
+it('opens Storage with its own current answer while the rest of Management is still loading', async () => {
+  state = { available: true, as_admin: true };
+  cache.setQueryData(storageKey, { ...storageSample, blob_count: 714 });
+  let answer!: (value: StorageStats) => void;
+  calls.storage.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  const page = draw(storagePage(false));
+  await waitFor(() => expect(calls.storage).toHaveBeenCalledTimes(1));
+  expect(calls.read).not.toHaveBeenCalled();
+  expect(screen.queryByText('714')).toBeNull();
+  await act(async () => { answer(storageSample); });
+  expect(await screen.findByText('817')).toBeVisible();
+  page.rerender(storagePage(true));
+  await waitFor(() => expect(calls.read).toHaveBeenCalled());
+  expect(await screen.findByText('817')).toBeVisible();
+  expect(calls.storage).toHaveBeenCalledTimes(1);
+});
+
+it('keeps cached storage totals private when the signed-in session is refused', async () => {
+  cache.setQueryData(storageKey, storageSample);
+  calls.storage.mockRejectedValueOnce(new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', title: 'Access denied',
+    status: 403, request_id: 'storage-refused', detail: 'Storage needs admin mode.' }, null));
+  draw(storagePage(false));
+  expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('errors.authz.denied'));
+  expect(screen.queryByText('817')).toBeNull();
+  expect(calls.read).not.toHaveBeenCalled();
 });

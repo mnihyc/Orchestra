@@ -11,6 +11,7 @@ import { Ban, CirclePlay } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { NotifyPeople } from '@/features/notifications/NotifyPeople';
 import { resourceImpactQuery } from '@/api/resource-impact';
 import { ImpactCounts } from '@/features/storage/Impact';
 import { useResourceEnable } from '@/features/storage/Enable';
@@ -30,8 +31,11 @@ export function DisableProviderDialog({ provider, open, onClose }: { provider: P
   const { t } = useTranslation();
   const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}),enabled:open});
   const [note,setNote]=useState('');
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==null&&review!==undefined)setNotifyChoice({review,value});};
   const disable = useMutation({
-    mutationFn: () => note.trim()===''?disableProvider(provider.id):disableProvider(provider.id,note.trim()),
+    mutationFn: () => notify ? disableProvider(provider.id,note.trim()||undefined,{notify:true,...(impact.data?.notification?.preview_id===undefined||impact.data.notification.preview_id===null?{}:{notification_review:impact.data.notification.preview_id})}) : note.trim()===''?disableProvider(provider.id):disableProvider(provider.id,note.trim()),
     onSuccess: () => {
       toast({ tone: 'success', title: t('providers.danger.disabled', { name: provider.name }) });
       onClose();
@@ -45,6 +49,7 @@ export function DisableProviderDialog({ provider, open, onClose }: { provider: P
       admin={adminSpec(provider, 'provider.manage')}
       confirmLabel={t('providers.danger.disableConfirm', { name: provider.name })}
       danger
+      footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={disable.isPending||impact.isFetching}/>}
       pending={disable.isPending}
       error={disable.error ?? undefined}
       disabled={impact.isPending||impact.isError}
@@ -59,8 +64,11 @@ export function DeleteProviderDialog({ provider, open, onClose, afterDelete }: {
   const { t } = useTranslation();
   const impact=useQuery({...resourceImpactQuery({object:{kind:'provider',id:provider.id},model_id:null}),enabled:open});
   const [typed,setTyped]=useState('');
+  const [notifyChoice,setNotifyChoice]=useState<{review:string;value:boolean}|null>(null);
+  const notify=notifyChoice!==null&&notifyChoice.review===impact.data?.notification?.preview_id?notifyChoice.value:impact.data?.notification?.default_on??false;
+  const setNotify=(value:boolean)=>{const review=impact.data?.notification?.preview_id;if(review!==null&&review!==undefined)setNotifyChoice({review,value});};
   const remove = useMutation({
-    mutationFn: () => deleteProvider(provider.id),
+    mutationFn: () => notify ? deleteProvider(provider.id,{notify:true,...(impact.data?.notification?.preview_id===undefined||impact.data.notification.preview_id===null?{}:{notification_review:impact.data.notification.preview_id})}) : deleteProvider(provider.id),
     onSuccess: () => {
       toast({ tone: 'success', title: t('providers.danger.deleted', { name: provider.name }) });
       onClose();
@@ -75,6 +83,7 @@ export function DeleteProviderDialog({ provider, open, onClose, afterDelete }: {
       admin={adminSpec(provider, 'provider.manage')}
       confirmLabel={t('providers.danger.deleteConfirm', { name: provider.name })}
       danger
+      footerStart={<NotifyPeople plan={impact.data?.notification} value={notify} onChange={setNotify} disabled={remove.isPending||impact.isFetching}/>}
       pending={remove.isPending}
       error={remove.error ?? undefined}
       disabled={impact.isPending||impact.isError||typed!==(impact.data.name)}

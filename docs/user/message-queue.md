@@ -8,6 +8,8 @@ summary: Edit and reorder waiting messages, then choose when they reach the agen
 
 # The message queue
 
+Messages that cannot reach the agent yet wait in one queue above the composer. This page shows how to find them, correct or remove them, choose when they reach the agent, and put them in order.
+
 ## 1. Find messages waiting to run
 
 Waiting inputs appear in one queue above the composer, including the first input and messages
@@ -18,7 +20,7 @@ first meaningful line; hover or focus it to read the full preview.
 
 Use **Edit** on a pending message you wrote. Save in place with the button or Ctrl+Enter
 (Command+Enter on macOS); Cancel keeps the previous text. Attachments stay with the message.
-Someone who may drive the thread can remove a pending message. Held messages remain editable
+Someone who may send to the thread can remove a pending message. Held messages remain editable
 and removable; the thread's reason for waiting is not a reason to lose your draft.
 Once ordinary delivery has begun, the row says **Sending** and its pending edit controls stop accepting changes.
 An in-flight steer has the separate **Steering…** state described below.
@@ -45,7 +47,7 @@ the waiting input goes first.
 
 Drag a pending row by its handle, use its up/down arrows, or focus the row and press Alt+Up
 or Alt+Down. These keys reorder the message rather than moving to another conversation.
-Controls are offered according to your rights; only the author edits their text.
+You see only the controls you may use, and only the author can edit the text of a message.
 If a change fails, read the row's error and retry without composing a duplicate message.
 
 ## 5. Put an untaken steer back
@@ -66,25 +68,25 @@ See [Paste and upload](paste-and-upload.md#pasted-text) for folded text and priv
 
 Reading or writing a thread does not by itself allow use of its model, nor of
 the environment it runs in: a message to the agent has it act there for the
-sender, so sending one needs Interact on the thread, Use of its provider with
-the model and effort, and Use of its environment (**Use Environment**). With
-the shipped Held for approval policy, your input keeps its queue position and
+sender, so sending one needs **Interact** on the thread, **Use** of its provider with
+the model and effort, and **Use Environment** on its environment. With
+the default policy, **Held for approval**, your input keeps its place in the queue and
 says **Waiting for someone who may use <model> and <environment>** (or only the
 model, for a thread in no environment). Other eligible inputs can go ahead. You
 can still edit or remove your held input under the ordinary rules.
 
 A steer checks the provider, model and effort of the turn running now. A changed model setting applies to the next turn.
 
-Someone who may drive the thread and use its current provider, model and effort
+Someone who may send to the thread and use its current provider, model and effort
 and its environment can choose **Run it**. The turn runs on that person's current access and usage,
 with your authorship retained and their approval recorded. The action checks
-their rights again; it cannot borrow permission from the original sender.
+their permissions again; it cannot borrow permission from the original sender.
 One decision settles every request copy, records who decided and when, and removes
 it from pending and unread counts. Another attempt shows that recorded outcome.
 The [approval rules](how-approvals-work.md#who-can-decide) determine who is told
 and who may decide.
 
-A place can instead choose Refused, which explains the missing use before
-sending, or Allowed, which checks the thread's first owner. These choices
-belong to `thread.inputs_without_use` and can be locked. Granting provider or
-environment access and approving one held input are separate actions.
+A place can instead choose **Refused**, which explains the missing use before
+sending, or **Allowed**, which checks the first owner of the thread. These choices
+belong to the setting for inputs without use, and they can be locked. Giving access to a provider or an
+environment and approving one held input are separate acts.
