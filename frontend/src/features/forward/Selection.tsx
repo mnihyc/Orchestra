@@ -39,14 +39,15 @@ export interface Selection<Id> {
 export function useSelection<Id extends string>(order: readonly Id[]): Selection<Id> {
   const [picked, setPicked] = useState<ReadonlySet<Id> | null>(null);
   const [last, setLast] = useState<Id | null>(null);
+  const selectedOrder = picked === null && last === null ? null : order;
 
   const toggle = useCallback(
     (id: Id, range: boolean) => {
       setPicked((before) => {
         const next = new Set(before ?? []);
-        if (range && last !== null) {
+        if (range && last !== null && selectedOrder !== null) {
           const on = !(before?.has(id) ?? false);
-          for (const between_ of between(order, last, id)) {
+          for (const between_ of between(selectedOrder, last, id)) {
             if (on) next.add(between_);
             else next.delete(between_);
           }
@@ -56,13 +57,13 @@ export function useSelection<Id extends string>(order: readonly Id[]): Selection
       });
       setLast(id);
     },
-    [last, order],
+    [last, selectedOrder],
   );
 
   return useMemo(
     () => ({
       active: picked !== null,
-      ids: order.filter((id) => picked?.has(id) ?? false),
+      ids: picked === null || selectedOrder === null ? [] : selectedOrder.filter((id) => picked.has(id)),
       has: (id) => picked?.has(id) ?? false,
       toggle,
       start: (id) => {
@@ -79,7 +80,7 @@ export function useSelection<Id extends string>(order: readonly Id[]): Selection
         setLast(null);
       },
     }),
-    [picked, order, toggle],
+    [picked, selectedOrder, toggle],
   );
 }
 

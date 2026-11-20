@@ -6,8 +6,6 @@ use super::*;
 
 use crate::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
 use crate::middleware::authentication::authenticate_on;
 
 use crate::middleware::authentication::new_token;
@@ -45,11 +43,11 @@ async fn original_raw_and_accepted_key_deadlines_survive_a_real_native_preparati
         );
         let user = new_id();
         let credential = new_id();
-        let secret = new_token(if key {
-            API_TOKEN_PREFIX
+        let secret = if !key {
+            new_token(ACCESS_TOKEN_PREFIX)
         } else {
-            ACCESS_TOKEN_PREFIX
-        });
+            crate::middleware::authentication::new_api_token(credential)
+        };
         let mut conn = db.pool.acquire().await.unwrap();
         identity::testing::insert_user(&mut conn, user, "native-deadline-owner")
             .await

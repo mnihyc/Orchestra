@@ -7,7 +7,7 @@
  * says what undoing means. When the link is lost the bar stays where it was seen, and says that it is looking again.
  */
 import { Check, Circle, LoaderCircle } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { transferCleanup, type TransferFacts } from '@/features/change/environmentTransfer';
 import { Hint } from '@/features/help/Hint';
 
@@ -20,6 +20,8 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { CallRecoveryStatus } from '@/features/calls/Status';
 import { CallHelp } from '@/features/calls/Help';
+import { RelativeTime } from '@/ui/RelativeTime';
+import { JobFacts } from './JobFacts';
 
 /** Whether a job is past the point after which nothing is undone: its commit has happened. */
 export function committed(job: Job): boolean {
@@ -92,11 +94,17 @@ export function JobActivityLine({ job, transfer }: { job: Job; transfer?: Transf
   const directories = job.progress.activity?.directories_done;
   const title = [directories === null || directories === undefined ? null : t('liveWork.directories', { count: directories, value: formatNumber(directories, format.locale) }), job.progress.message].filter((part) => part !== null && part !== '').join(SEPARATOR);
   const delayedStop = stopping && stalled && waiting?.type === 'machine';
+  const eligible = job.lifecycle_wait?.retry_eligible_at;
+  const phase = job.lifecycle_wait?.phase;
+  const retryPhase = phase === 'cleanup' ? t('placeFacts.cleanup') : phase === undefined ? t('factDisclosure.notReported') : t(`change.phase.${phase}.short`, { defaultValue: t('factDisclosure.notReported') });
+  const coordination = active && eligible?.state === 'at' ? <Trans i18nKey="placeFacts.phaseRetry" values={{ phase: retryPhase }} components={{ when: <RelativeTime at={eligible.at} /> }} />
+    : active && job.lifecycle_wait?.phase === 'cleanup' && job.lifecycle_wait.recovering === true ? t('placeFacts.recoveringCleanup') : line;
   return <p className="text-sm text-text-muted tabular-nums" aria-live="polite" title={title || undefined} data-job-activity>
-    <span data-job-line className={delayedStop ? 'text-warning-text' : undefined}>{delayedStop ? t('liveWork.stoppingOn', { machine: waiting.name }) : job.call_recovery === null || job.call_recovery === undefined ? line : <CallRecoveryStatus recovery={job.call_recovery} service />}</span>
+    <span data-job-line className={delayedStop ? 'text-warning-text' : undefined}>{delayedStop ? t('liveWork.stoppingOn', { machine: waiting.name }) : job.call_recovery === null || job.call_recovery === undefined ? coordination : <CallRecoveryStatus recovery={job.call_recovery} service />}</span>
     {Number.isFinite(elapsed) && <span data-job-elapsed className="inline-block min-w-[11ch]">{SEPARATOR}{formatSpan(elapsed, format, 'clock')}</span>}
     {recovering && <CallHelp section="services" />}
     {stalled && !stopping && <span className="text-warning-text" data-job-stalled>{SEPARATOR}{t('liveWork.unchanged', { time: formatTimeOfDay(updated, format, now) })}</span>}
+    {' '}<JobFacts job={job} />
   </p>;
 }
 

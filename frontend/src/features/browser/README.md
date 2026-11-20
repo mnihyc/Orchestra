@@ -20,7 +20,7 @@ seed one before its HTTP capability facts arrive. Malformed later support cannot
 Environment Tools keeps its section navigation outside each selected content boundary, so a failed
 browser view leaves Terminal, Ports and the other tools reachable. Regression sources cover the
 actual EnvironmentScreen/query, cold and warm feed shapes, Retry/Look again and picture faults in
-EN/ZH and both themes; executable/rendered proof belongs to the integrator.
+EN/ZH and both themes.
 
 Not built: the small picture on the tool's row, the warning mark on the view's tab (the workbench's tabs
 carry no mark yet), the picker of the environment's files for a request (a path is typed), and saying that
