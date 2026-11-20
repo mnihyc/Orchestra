@@ -20,6 +20,7 @@ use orch_access_contract::roles::{self, NodeKind};
 use orch_db::Conn;
 use orch_db::queries::hierarchy;
 use orch_types::Id;
+use std::collections::{HashMap, HashSet};
 
 use crate::engine::{Frame, Graph, NodeFacts, Site};
 use crate::{Act, Error, Policy, Principal, missing};
@@ -68,7 +69,10 @@ pub(crate) fn every_permission(kinds: impl IntoIterator<Item = ObjectKind>) -> V
 /// it by what their pages and roles give them, within what their token
 /// carries and reaches, and the site's archive leaves it for the act.
 fn holds_for_act(frame: &Frame<'_>, site: &Site, permission: Permission, act: Act) -> bool {
-    !frame.ways(site, permission).is_empty()
+    let principal = frame.principal();
+    !principal.suspension().applies(&site.orgs)
+        && principal.caller().reaches(site.path.as_deref())
+        && !frame.ways(site, permission).is_empty()
         && (!site.is_archived() || archive_allows(permission, act))
 }
 
@@ -147,13 +151,14 @@ async fn decide(
     if !caller.reaches(site.path.as_deref()) {
         return Ok(Decision::Refused(Refusal::of(first, object, Vec::new())));
     }
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
         permissions,
+        &[],
     )
     .await?;
     let mut through: Vec<Through> = Vec::new();
@@ -174,13 +179,14 @@ async fn decide(
         }
         let graph = frame.graph().clone();
         let everything = every_permission([site.kind]);
-        let frame = Frame::load(
+        let frame = Frame::load_with_participation(
             conn,
             principal,
             policy,
             graph,
             std::slice::from_ref(&site),
             &everything,
+            &[],
         )
         .await?;
         let refusal = missing::refusal(conn, &frame, &site, required, &lacking).await?;
@@ -219,11 +225,7 @@ pub struct Listed {
 fn listed_for(frame: &Frame<'_>, site: &Site, name: PermissionName, act: Act) -> Option<Listed> {
     let kind = site.kind.node()?;
     let permission = name.on(site.kind)?;
-    let principal = frame.principal();
-    if principal.suspension().applies(&site.orgs)
-        || !principal.caller().reaches(site.path.as_deref())
-        || !holds_for_act(frame, site, permission, act)
-    {
+    if !holds_for_act(frame, site, permission, act) {
         return None;
     }
     Some(Listed {
@@ -254,6 +256,87 @@ fn permissions_for(sites: &[Site], name: PermissionName) -> Vec<Permission> {
     wanted
 }
 
+fn requested_sites(graph: &Graph, ids: &[Id]) -> Vec<Site> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter(|id| seen.insert(**id))
+        .filter_map(|id| graph.site_of(*id))
+        .collect()
+}
+
+/// The same permission cut as a node list when the reader only needs its IDs.
+pub async fn holding_ids(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    permission: Permission,
+    act: Act,
+    policy: Policy,
+) -> Result<Vec<Id>, Error> {
+    let graph = Graph::load(conn, ids).await?;
+    let sites = requested_sites(&graph, ids);
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted = permissions_for(&sites, PermissionName::Exact(permission));
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &wanted).await?;
+    Ok(sites
+        .iter()
+        .filter(|site| {
+            permission.exists_on(site.kind) && holds_for_act(&frame, site, permission, act)
+        })
+        .map(|site| site.id)
+        .collect())
+}
+
+/// How a node may appear in a tree window before its visible details are projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeAccess {
+    /// The caller may read the node.
+    View,
+    /// The caller may inspect its access page and see its minimal row.
+    Inspection,
+}
+
+/// Checks both ways into a tree row using the graph read to scope this window.
+pub async fn tree_access(
+    conn: &mut Conn,
+    principal: &Principal,
+    graph: Graph,
+    ids: &[Id],
+) -> Result<HashMap<Id, TreeAccess>, Error> {
+    let sites = requested_sites(&graph, ids);
+    if sites.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let manage = Permission::AccessManage;
+    let wanted = permissions_for(&sites, PermissionName::Exact(manage));
+    let frame = Frame::for_permissions(
+        conn,
+        principal,
+        Policy::default(),
+        graph,
+        &sites,
+        &[],
+        &wanted,
+    )
+    .await?;
+    Ok(sites
+        .iter()
+        .filter_map(|site| {
+            let view = NodePermission::View.on(site.kind.node()?)?;
+            if holds_for_act(&frame, site, view, Act::Use) {
+                Some((site.id, TreeAccess::View))
+            } else if manage.exists_on(site.kind) && holds_for_act(&frame, site, manage, Act::Use) {
+                Some((site.id, TreeAccess::Inspection))
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
 /// Which of the nodes `ids` the caller holds the permission `name` on, for
 /// `act`, in the order they were asked: nodes that are not there, are
 /// deleted, or are closed to the caller are left out. The statements are
@@ -266,15 +349,11 @@ pub async fn holding(
     act: Act,
     policy: Policy,
 ) -> Result<Vec<Listed>, Error> {
-    let graph = Graph::load(conn, ids).await?;
-    let mut sites: Vec<Site> = Vec::new();
-    for id in ids {
-        if let Some(site) = graph.site_of(*id)
-            && !sites.iter().any(|seen| seen.id == site.id)
-        {
-            sites.push(site);
-        }
+    if ids.is_empty() {
+        return Ok(Vec::new());
     }
+    let graph = Graph::load(conn, ids).await?;
+    let sites = requested_sites(&graph, ids);
     let wanted = permissions_for(&sites, name);
     let frame = Frame::load(conn, principal, policy, graph, &sites, &wanted).await?;
     Ok(sites
@@ -470,7 +549,8 @@ pub async fn effective_many(
         return Ok(Vec::new());
     }
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &everything).await?;
     Ok(sites
         .iter()
         .map(|site| Effective {
@@ -501,12 +581,13 @@ pub async fn is_restricted(
         .and_then(|kind| NodePermission::View.on(kind))
         .into_iter()
         .collect::<Vec<_>>();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         &view,
     )
     .await?;
@@ -539,7 +620,7 @@ pub async fn restricted_below(
             views.push(view);
         }
     }
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &views).await?;
+    let frame = Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &views).await?;
     Ok(sites
         .iter()
         .filter(|site| frame.restricted_below(site, place))

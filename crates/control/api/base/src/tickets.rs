@@ -352,6 +352,7 @@ pub mod tests {
                 node,
                 machine,
                 PortTicketClaims {
+                    machine_reach: false,
                     environment_id: environment,
                     generation: 1,
                     port: 3000,

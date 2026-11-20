@@ -26,12 +26,13 @@ pub(super) async fn holders(
         .await
         .map_err(ApiError::internal)?;
     let site = graph.site_of(chat.org_id).ok_or_else(ApiError::not_found)?;
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         std::slice::from_ref(&site),
+        &[],
         &[Permission::DirectsView],
     )
     .await

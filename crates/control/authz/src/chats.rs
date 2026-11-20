@@ -206,12 +206,13 @@ pub async fn people_chat_access(
         .iter()
         .filter_map(|place| graph.site_of(*place))
         .collect();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         &sites,
+        &[],
         &[Permission::DirectsView],
     )
     .await?;
@@ -678,12 +679,13 @@ async fn inspector_org(
         .iter()
         .filter_map(|id| graph.site_of(*id))
         .collect();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         &sites,
+        &[],
         &[Permission::DirectsView],
     )
     .await?;
@@ -746,12 +748,13 @@ pub async fn inspection_orgs(
     }
     let graph = Graph::load(conn, orgs).await?;
     let sites: Vec<_> = orgs.iter().filter_map(|org| graph.site_of(*org)).collect();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         &sites,
+        &[],
         &[Permission::DirectsView],
     )
     .await?;

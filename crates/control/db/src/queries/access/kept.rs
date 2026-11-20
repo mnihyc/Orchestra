@@ -21,8 +21,8 @@ use orch_types::Id;
 /// entry of a page begins or stops counting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
-    database: i64,
-    snapshot: String,
+    pub(super) database: i64,
+    pub(super) snapshot: String,
     /// The latest moment, at or before the one asked about, at which a role or an entry stopped counting.
     from: Option<DateTime<Utc>>,
     /// The first moment after the one asked about at which a role or an entry stops counting.
@@ -143,16 +143,8 @@ pub async fn holder_sets(
     kept: Option<&Stamp>,
 ) -> Result<Option<HolderSets>, DbError> {
     let row: Row = sqlx::query_as(
-        "WITH kept AS MATERIALIZED (
-             SELECT $4::text IS NOT NULL
-                AND COALESCE((SELECT oid::int8 FROM pg_database WHERE datname = current_database()) = $5, false)
-                AND pg_snapshot_xmin($4::pg_snapshot) > COALESCE((SELECT floor FROM access_changes_floor WHERE id), '0'::xid8)
-                AND pg_snapshot_xmax($4::pg_snapshot) <= pg_snapshot_xmax(pg_current_snapshot())
-                AND NOT EXISTS (SELECT 1 FROM pg_snapshot_xip(pg_current_snapshot()) AS running(xid)
-                                 WHERE pg_visible_in_snapshot(running.xid, $4::pg_snapshot))
-                AND NOT EXISTS (SELECT 1 FROM access_changes c WHERE c.xid >= pg_snapshot_xmax($4::pg_snapshot))
-                AND NOT EXISTS (SELECT 1 FROM access_changes c
-                                 WHERE c.xid = ANY (ARRAY(SELECT pg_snapshot_xip($4::pg_snapshot)))) AS holds
+        concat!("WITH kept AS MATERIALIZED (
+             ",include_str!("stamp_holds.sql")," AS holds
          ), held AS MATERIALIZED (
              -- Not worked out at all where the kept sets hold: a filter of the whole scan, decided once.
              SELECT kind, id, role FROM access_holders($1, $2, $3) WHERE NOT (SELECT holds FROM kept)
@@ -185,7 +177,7 @@ pub async fn holder_sets(
                     WHERE removed_at IS NULL AND expires_at IS NOT NULL AND expires_at > $2),
                   (SELECT min(expires_at) FROM permission_entries
                     WHERE removed_at IS NULL AND expires_at IS NOT NULL AND object_kind IN ('system','node')
-                      AND expires_at > $2)) AS valid_until",
+                      AND expires_at > $2)) AS valid_until"),
     )
     .bind(user)
     .bind(at)

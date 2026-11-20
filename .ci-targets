@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- light_load:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- page_budgets:: --nocapture --test-threads=1
+test -p orch-db --lib --test participation_summaries
+test -p orch-authz --lib --test kept_holders
+test -p orch-api-core --test hierarchy_native_scopes --test node_list_operation_scopes --test chat_reader_scopes --test node_chat_opening_scopes
+test -p orch-api-core --test access --test access_previews --test thread_opening_scopes
+test -p orch-api-core --test accounts -- the_first_password_sign_in_after_setup_works_on_a_two_mib_stack --nocapture

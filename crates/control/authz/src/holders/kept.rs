@@ -39,6 +39,19 @@ type HolderCache = HashMap<(Id, bool), Arc<Kept>>;
 /// The sets kept, by person and whether their flag of system admin counted.
 static KEPT: LazyLock<Mutex<HolderCache>> = LazyLock::new(Mutex::default);
 
+fn candidate(key: (Id, bool), now: Time) -> Option<Arc<Kept>> {
+    KEPT.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .filter(|found| found.made.elapsed() < LONGEST && found.sets.stamp.covers(now.get()))
+        .cloned()
+}
+
+/// The assignment statement validates this ordinary set against its own database snapshot.
+pub(crate) fn ordinary_candidate(user: Id, now: Time) -> Option<Arc<HolderSets>> {
+    candidate((user, false), now).map(|record| Arc::clone(&record.sets))
+}
+
 /// The holder sets of `user` at `now`, `system` saying whether their flag of system admin counts: the kept ones when
 /// they still hold, else worked out now. One statement either way.
 pub(super) async fn holder_sets(
@@ -48,12 +61,7 @@ pub(super) async fn holder_sets(
     system: bool,
 ) -> Result<Arc<HolderSets>, Error> {
     let key = (user, system);
-    let found = KEPT
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-        .filter(|found| found.made.elapsed() < LONGEST && found.sets.stamp.covers(now.get()))
-        .cloned();
+    let found = candidate(key, now);
     let Some(sets) = kept::holder_sets(
         conn,
         user,
