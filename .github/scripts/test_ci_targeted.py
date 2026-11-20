@@ -21,6 +21,26 @@ class TargetedJobs(unittest.TestCase):
                 result = ci_targeted.main(targets, group)
         return result, run.call_args_list, prepare.call_args_list
 
+    def test_named_environment_checks_run_on_native_platforms_without_docker_or_a_connector_build(self):
+        target = "test -p orch-envhost --test native_process_tree --test terminal"
+        result, calls, fixtures = self.invoke(target + "\ntest -p orch-api-core --lib\nweb lint\nfmt\n", "platform")
+        self.assertEqual(result, 0)
+        self.assertEqual(fixtures, [])
+        self.assertEqual([call.args[0] for call in calls], [target])
+        self.assertEqual(calls[0].args[1], ["cargo", "test", "--locked", "--no-fail-fast", "-p", "orch-envhost", "--test", "native_process_tree", "--test", "terminal"])
+
+    def test_the_native_connector_turn_runs_on_each_platform_from_its_own_named_case(self):
+        target = "test -p orch-connector --test program -- platform_observations::a_connected_machine_completes_a_turn_with_its_own_registered_agent_program"
+        self.assertEqual(ci_targeted.native_checks([target, "test -p orch-connector --test program"]), [target])
+        platform = "test -p orch-connector --test program -- platform_observations::a_machine_reviews_its_native_build_before_it_serves_a_shared_directory"
+        self.assertEqual(ci_targeted.native_checks([platform]), [platform])
+
+    def test_platform_selection_never_turns_a_mixed_or_other_package_into_a_native_environment_run(self):
+        for target in ("test -p orch-api-core --lib", "test -p orch-envhost-extra --lib", "test -p orch-envhost -p orch-api-core --lib"):
+            result, calls, fixtures = self.invoke(target + "\n", "platform")
+            self.assertEqual((result, calls, fixtures), (0, [], []))
+        self.assertEqual(ci_targeted.native_checks(["fmt", "web lint", "test -p orch-envhost --lib"]), ["test -p orch-envhost --lib"])
+
     def test_independent_jobs_keep_every_target_and_web_never_starts_rust_or_fixtures(self):
         targets = "test -p orch-api-core --test skills\ncontracts\nweb typecheck\nweb lint\nweb-e2e tests/e2e/history.spec.ts\n"
         rust_result, rust, rust_fixtures = self.invoke(targets, "rust")
@@ -37,6 +57,18 @@ class TargetedJobs(unittest.TestCase):
         self.assertFalse(set(rust_labels) & {"web typecheck", "web lint", "install the browser"})
         self.assertTrue(all(call.args[1][0] not in {"cargo", ci_targeted.sys.executable} for call in web))
         self.assertEqual(sum(label == "npm ci" for label in web_labels), 1)
+
+    def test_release_checks_can_run_without_publishing_a_tag(self):
+        targets = "release-checks\nrelease-first-start\n"
+        result, checks, fixtures = self.invoke(targets, "rust")
+        self.assertEqual(result, 0)
+        self.assertFalse(fixtures)
+        self.assertEqual([call.args[1][-1] for call in checks], [
+            "test_release_*.py", ".github/scripts/workflow_lint.py",
+            "scripts/smoke/update-doctor/run.sh", "scripts/smoke/update-files/run.sh",
+            "scripts/smoke/first-start/run.sh",
+        ])
+        self.assertEqual(self.invoke(targets, "web"), (0, [], []))
 
     def test_group_with_no_selected_work_succeeds_without_starting_any_tool(self):
         for targets, group in (("web typecheck\n", "rust"), ("fmt\n", "web")):

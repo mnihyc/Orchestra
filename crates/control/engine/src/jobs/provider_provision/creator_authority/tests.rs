@@ -156,6 +156,7 @@ impl Fixture {
                     name: "Actual copied source",
                     owner_id: world.ada,
                     home_id: world.root,
+                    home_overridden: false,
                     upstreams: &json!([{"protocol":"openai-responses","base_url":"https://api.example.test/v1","options":{}}]),
                     protocols: &["openai-responses".into()],
                     machine_id: copy_keeper.as_ref().map(|keeper|keeper.id),
@@ -434,6 +435,7 @@ impl Fixture {
                 world.clock.now(),
             )
             .await?;
+            crate::jobs::runtime_commands::capture(&mut tx, row.id, runtime).await?;
             assert!(
                 orch_db::queries::resources::hosting::adopt_machine(
                     &mut tx,
@@ -618,6 +620,8 @@ impl Fixture {
         orch_db::queries::link::insert_command(
             &mut tx,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -1863,10 +1867,12 @@ async fn a_provider_move_cannot_end_its_source_after_raw_closure_or_changed_revi
                     .await?;
             }
             "source" => {
-                sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
-                    .bind(source)
-                    .execute(s.world.pool.pool())
-                    .await?;
+                sqlx::query(
+                    "UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1",
+                )
+                .bind(source)
+                .execute(s.world.pool.pool())
+                .await?;
             }
             "scope" => {
                 let mut scope = s.policy.clone();
@@ -1993,6 +1999,8 @@ async fn a_subscription_move_startup_keeps_the_actual_move_and_rechecks_its_raw_
         .await?;
     let serial = command.key.wire();
     let queued = orch_db::queries::link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),
@@ -2111,6 +2119,8 @@ async fn owned_sign_in_return_needs_the_genuine_forward_receipt_and_cannot_reviv
     orch_db::queries::link::insert_command(
         &mut tx,
         &orch_db::queries::link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id: issued.id,
             machine_id: issued.machine,
             kind: issued.kind.as_str(),

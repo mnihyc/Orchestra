@@ -8,7 +8,7 @@ mod places;
 mod support;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::nodes::{OrgTreeGet, OrgTreeGetQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -16,11 +16,12 @@ use support::World;
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native hierarchy",
             token_hash: &token_hash(&secret),
@@ -93,6 +94,24 @@ async fn tree_scope_filters_before_the_native_window_without_borrowing_another_s
     assert_eq!(result["nodes"][0]["name"], "Selected leaf");
     assert!(result["next_cursor"].is_null());
     assert!(result["settings"].is_null());
+    let branch = value(
+        world
+            .app
+            .call(OrgTreeGet, &[&org])
+            .token(&scoped)
+            .query(&OrgTreeGetQuery {
+                parent_id: Some(org),
+                ..Default::default()
+            })
+            .send_bytes()
+            .await,
+    );
+    assert_eq!(branch["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(branch["nodes"][0]["id"], json!(selected));
+    assert!(
+        branch["settings"].is_null(),
+        "a branch default grants no settings read"
+    );
     let whole = key(
         &world,
         owner.id(),
@@ -142,6 +161,7 @@ async fn incremental_tree_scope_keeps_native_gone_markers_and_never_names_unsele
     )
     .await;
     let query = OrgTreeGetQuery {
+        parent_id: None,
         since: Some(0),
         ..Default::default()
     };

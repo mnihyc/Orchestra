@@ -251,3 +251,12 @@
 :where([role='treeitem'][aria-selected='true'], [data-bar-scroll] [aria-current='page']:not([role='treeitem'] [aria-current='page'], [data-shortcut] [aria-current='page']), [data-navigation-strip] [aria-current='page']) {
   box-shadow: inset 2px 0 0 var(--accent);
 }
+
+/*
+ * reCAPTCHA's badge is hidden where a human check runs unseen: Google allows it when the page says that the
+ * site is protected by reCAPTCHA, which the sign-in screens do under their button. Nothing else on a page has
+ * this class, and a page that loads no reCAPTCHA has no such element.
+ */
+.grecaptcha-badge {
+  visibility: hidden;
+}

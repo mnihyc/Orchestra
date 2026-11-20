@@ -8,6 +8,9 @@ import type { Problem } from '@/generated/api-types';
 import { useForm } from '@/lib/forms';
 import { Input, PasswordInput } from '@/ui/Input';
 import { Select } from '@/ui/Select';
+import { Button } from '@/ui/Button';
+import { IconButton } from '@/ui/IconButton';
+import { PathLink } from '@/shell/TrailLink';
 import { useState } from 'react';
 
 import { show } from './support';
@@ -139,4 +142,33 @@ describe('a form', () => {
     expect(secret).toHaveAttribute('type', 'text');
     expect(screen.getByRole('button', { name: 'Hide Secret' })).toHaveAttribute('aria-pressed', 'true');
   });
+});
+
+
+it('keeps ordinary controls from submitting their surrounding form when their type is unset', async () => {
+  const submitted = vi.fn(), pressed = vi.fn();
+  show(<form onSubmit={(event) => { event.preventDefault(); submitted(); }}>
+    <Button type={undefined} onClick={pressed}>Ordinary action</Button>
+    <IconButton type={undefined} label="Icon action" onClick={pressed} />
+  </form>);
+  await userEvent.click(screen.getByRole('button', { name: 'Ordinary action' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Icon action' }));
+  expect(pressed).toHaveBeenCalledTimes(2);
+  expect(submitted).not.toHaveBeenCalled();
+});
+
+it('retains the click of a button rendered as a link without submitting a form', async () => {
+  const pressed = vi.fn(), submitted = vi.fn();
+  show(<form onSubmit={(event) => { event.preventDefault(); submitted(); }}><Button asChild onClick={pressed}><PathLink href="/inbox">Linked action</PathLink></Button></form>);
+  await userEvent.click(screen.getByRole('link', { name: 'Linked action' }));
+  expect(pressed).toHaveBeenCalledTimes(1); expect(submitted).not.toHaveBeenCalled();
+});
+
+it.each([{ disabled: true }, { blocked: true }, { pending: true }])('keeps an unavailable button rendered as a link from acting (%j)', async (state) => {
+  const pressed = vi.fn();
+  show(<Button asChild {...state} onClick={pressed}><PathLink href="/inbox">Unavailable action</PathLink></Button>);
+  const link = screen.getByRole('link', { name: 'Unavailable action' });
+  expect(link).toHaveAttribute('aria-disabled', 'true');
+  await userEvent.click(link);
+  expect(pressed).not.toHaveBeenCalled();
 });

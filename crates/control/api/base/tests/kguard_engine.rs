@@ -16,7 +16,7 @@ use chrono::Duration;
 use futures::stream;
 use http::{Request, StatusCode};
 use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::{Machine, Played};
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -28,9 +28,9 @@ use orch_link_contract::commands::{Cmd, CommandError, CommandKind};
 use orch_types::{Id, Json, ManualClock, Time, new_id};
 use places::{Who, join, make_org, person};
 use serde_json::json;
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration as Wait;
 use support::World;
 use tower::ServiceExt;
@@ -101,7 +101,11 @@ fn a_request_is_left_outside_the_guard_only_when_nobody_is_signed_in_to_ask() {
     }
 }
 
+type NativeUnits =
+    Arc<Mutex<BTreeMap<Id, (orch_link_contract::native_target::RuntimeSource, bool)>>>;
+
 struct Scene {
+    native_units: NativeUnits,
     world: World,
     owner: Who,
     writer: Who,
@@ -116,11 +120,24 @@ impl Scene {
         let home = make_org(&world, &owner, "Office", "office").await.base.id;
         join(&world, home, home, &writer, "viewer", &owner).await;
         Self {
+            native_units: Arc::default(),
             world,
             owner,
             writer,
             home,
         }
+    }
+
+    fn remember_native(
+        &self,
+        runtime: Id,
+        source: orch_link_contract::native_target::RuntimeSource,
+    ) -> orch_link_contract::native_target::RuntimeSource {
+        self.native_units
+            .lock()
+            .unwrap()
+            .insert(runtime, (source, true));
+        source
     }
 
     async fn resource(&self, kind: ResourceKind, home: Id, owner: Id) -> Id {
@@ -251,6 +268,23 @@ impl Scene {
                 .execute(&mut *conn)
                 .await
                 .unwrap();
+            drop(conn);
+            let source = self.remember_native(
+                runtime,
+                orch_link_contract::native_target::RuntimeSource {
+                    incarnation: Some(new_id()),
+                },
+            );
+            let mut tx = self.world.db.pool.begin().await.unwrap();
+            provider_runtime::lock(&mut tx, provider).await.unwrap();
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut tx, host, runtime, source, false
+                )
+                .await
+                .unwrap()
+            );
+            tx.commit().await.unwrap();
         }
         (provider, agent, machine)
     }
@@ -303,28 +337,63 @@ impl Scene {
             .execute(&mut *conn)
             .await
             .unwrap();
+        drop(conn);
+        let source = self.remember_native(
+            runtime,
+            orch_link_contract::native_target::RuntimeSource {
+                incarnation: Some(new_id()),
+            },
+        );
+        let mut tx = self.world.db.pool.begin().await.unwrap();
+        hosting::lock_environment(&mut tx, environment)
+            .await
+            .unwrap();
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(&mut tx, host, runtime, source, false)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
         (environment, runtime)
     }
 
     fn play(&self, machine: Id) -> Played {
+        self.play_until(machine, None)
+    }
+
+    fn play_until(&self, machine: Id, authority_until: Option<Time>) -> Played {
         self.world.app.play(
             machine,
             Arc::new(Answer {
+                native_units: self.native_units.clone(),
                 pool: self.world.db.pool.clone(),
                 signed_out: AtomicBool::new(false),
+                authority_until,
             }),
         )
     }
 }
 
 struct Answer {
+    native_units: NativeUnits,
     pool: sqlx::PgPool,
     signed_out: AtomicBool,
+    authority_until: Option<Time>,
 }
 
 #[async_trait]
 impl Machine for Answer {
     async fn run(&self, command: &Cmd) -> Result<Json, CommandError> {
+        if let Some(until) = self.authority_until
+            && command.kind == CommandKind::NodeRuntimeStop.as_str()
+        {
+            assert_eq!(
+                command.authority_until,
+                Some(until),
+                "the actual original key expiry reaches the native frame independently from its work budget"
+            );
+            assert_ne!(command.deadline, until);
+        }
         let provider = command
             .body
             .get("provider_id")
@@ -371,7 +440,21 @@ impl Machine for Answer {
                 .await
                 .unwrap();
                 assert!(accepted, "the host sees a committed stop decision");
-                json!({})
+                let source = {
+                    let mut units = self.native_units.lock().unwrap();
+                    let unit = units.get_mut(&runtime).ok_or_else(|| {
+                        CommandError::new(
+                            orch_link_contract::commands::ErrorCode::NotFound,
+                            "the fixture native unit is absent",
+                        )
+                    })?;
+                    if command.native_target.as_ref().is_some_and(|target|matches!(target,orch_link_contract::native_target::NativeTarget::Lifecycle(target) if !target.matches_source(unit.0.incarnation))) {
+                        return Err(CommandError::new(orch_link_contract::commands::ErrorCode::Conflict,"the fixture actual native source changed"));
+                    }
+                    unit.1 = false;
+                    unit.0
+                };
+                json!(orch_link_contract::commands::NodeRuntimeStopResult::Stopped { source })
             }
             _ => json!({}),
         })
@@ -428,6 +511,7 @@ async fn reply(response: axum::response::Response) -> (StatusCode, Json) {
 }
 
 async fn delayed(scene: &Scene, method: &str, path: &str, value: Json) -> (StatusCode, Json) {
+    use tracing::instrument::WithSubscriber;
     let clock = scene.world.app.clock.clone();
     let body = Body::from_stream(stream::once(async move {
         clock.advance(Duration::seconds(2));
@@ -436,6 +520,12 @@ async fn delayed(scene: &Scene, method: &str, path: &str, value: Json) -> (Statu
     reply(
         router(&scene.world, &scene.writer.token)
             .oneshot(request(&scene.writer, method, path, body))
+            .with_subscriber(
+                tracing_subscriber::fmt()
+                    .with_test_writer()
+                    .with_max_level(tracing::Level::ERROR)
+                    .finish(),
+            )
             .await
             .unwrap(),
     )
@@ -595,6 +685,33 @@ async fn a_host_manager_whose_body_outlasts_manage_stops_nothing_and_a_current_m
                     .unwrap();
                 (environment, runtime)
             };
+            // The native producer, including a kept unit, names the physical start it owns.
+            let mut facts = scene.world.db.pool.begin().await.unwrap();
+            hosting::lock_environment(&mut facts, environment)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE environments SET generation=1 WHERE id=$1")
+                .bind(environment)
+                .execute(&mut *facts)
+                .await
+                .unwrap();
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut facts,
+                    host,
+                    runtime,
+                    scene.remember_native(
+                        runtime,
+                        orch_link_contract::native_target::RuntimeSource {
+                            incarnation: Some(new_id())
+                        }
+                    ),
+                    false,
+                )
+                .await
+                .unwrap()
+            );
+            facts.commit().await.unwrap();
             let before: Json =
                 sqlx::query_scalar("SELECT to_jsonb(e) FROM environments e WHERE id = $1")
                     .bind(environment)
@@ -631,14 +748,364 @@ async fn a_host_manager_whose_body_outlasts_manage_stops_nothing_and_a_current_m
                 assert_eq!(current["status"], "stopped");
                 assert_eq!(
                     played.seen_of(CommandKind::NodeRuntimeStop).len(),
-                    usize::from(live)
+                    1,
+                    "a kept physical unit has the same exact Stop action"
                 );
                 let at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT at FROM audit_log WHERE object_id = $1 AND details->>'decision' = 'accepted'")
-                    .bind(environment).fetch_one(&scene.world.db.pool).await.unwrap();
+                    .bind(if live {environment}else{host}).fetch_one(&scene.world.db.pool).await.unwrap();
                 assert_eq!(at, scene.world.now());
             }
         }
     }
+}
+
+#[tokio::test]
+async fn a_provider_manager_stops_its_original_unit_with_a_stop_only_key_and_no_host_permission() {
+    let mut scene = Scene::new().await;
+    let (provider, _, _) = scene.provider(true).await;
+    scene
+        .grant("provider", provider, "provider.manage", false)
+        .await;
+    let (runtime, host, node): (Id, Id, Id) = sqlx::query_as(
+        "SELECT r.id,r.host_id,h.machine_id FROM runtimes r JOIN hosts h ON h.id=r.host_id
+         WHERE r.provider_id=$1 AND r.state='running'",
+    )
+    .bind(provider)
+    .fetch_one(&scene.world.db.pool)
+    .await
+    .unwrap();
+    let original = new_id();
+    let mut tx = scene.world.db.pool.begin().await.unwrap();
+    provider_runtime::lock(&mut tx, provider)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(
+            &mut tx,
+            host,
+            runtime,
+            scene.remember_native(
+                runtime,
+                orch_link_contract::native_target::RuntimeSource {
+                    incarnation: Some(original)
+                }
+            ),
+            false,
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let volumes: Json = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let token = new_id();
+    scene.writer.token = new_token(API_TOKEN_PREFIX);
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"provider","id":provider,"reach":"self"},
+            "allow":[{"operation":"ProviderStop","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    identity::create_api_token_scoped(
+        &mut *scene.world.conn().await,
+        &NewApiToken {
+            id: token,
+            user_id: scene.writer.id(),
+            name: "Original provider Stop only",
+            token_hash: &token_hash(&scene.writer.token),
+            scopes: &[],
+            node_id: None,
+            at: scene.world.now(),
+            expires_at: Some(scene.world.now() + Duration::hours(1)),
+        },
+        Some(&json!(policy)),
+    )
+    .await
+    .unwrap();
+    let played = scene.play(node);
+    let (status, value) = delayed(
+        &scene,
+        "POST",
+        &format!("/providers/{provider}/stop"),
+        json!({"interrupt":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(
+        value,
+        json!({"projection":"receipt","provider_id":provider})
+    );
+    let sent = played.seen_of(CommandKind::NodeRuntimeStop);
+    assert_eq!(
+        sent.len(),
+        1,
+        "the actual Provider Stop still reaches its selected host"
+    );
+    assert_eq!(sent[0].body["runtime_id"], json!(runtime));
+    let authority =
+        orch_db::queries::link::command_authority(&mut *scene.world.conn().await, sent[0].id)
+            .await
+            .unwrap()
+            .expect("the original Provider operation survives its deferred native queue");
+    assert_eq!(authority["kind"], "http_origin");
+    assert_eq!(
+        authority["authority"]["original"]["origin"]["operation"],
+        "ProviderStop"
+    );
+    assert_eq!(
+        authority["authority"]["original"]["credential"]["kind"],
+        "token"
+    );
+    assert_eq!(
+        authority["authority"]["original"]["credential"]["id"],
+        json!(token)
+    );
+    let facts = orch_db::queries::session_dependencies::command_tool_session(
+        &mut *scene.world.conn().await,
+        sent[0].id,
+    )
+    .await
+    .unwrap()
+    .expect("the native command retains its original factual target");
+    let target: orch_link_contract::native_target::NativeTarget =
+        serde_json::from_value(facts["native_target"].clone()).unwrap();
+    let orch_link_contract::native_target::NativeTarget::Lifecycle(target) = target else {
+        panic!("a unit Stop cannot borrow a session target");
+    };
+    assert_eq!(
+        target.subject,
+        orch_link_contract::native_target::LifecycleSubject::Runtime {
+            runtime_id: runtime
+        }
+    );
+    assert_eq!(target.observed, Some(original));
+    assert_eq!(target.opening, None);
+    let kept: Json = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, volumes);
+    assert!(played.seen_of(CommandKind::NodeRuntimeRemove).is_empty());
+    assert!(played.seen_of(CommandKind::NodeVolumeRemove).is_empty());
+}
+
+#[tokio::test]
+async fn a_host_manager_stops_its_selected_kept_environment_unit_without_following_its_replacement()
+{
+    let mut scene = Scene::new().await;
+    let old_host = scene
+        .resource(ResourceKind::Host, scene.home, scene.owner.id())
+        .await;
+    let new_host = scene
+        .resource(ResourceKind::Host, scene.home, scene.owner.id())
+        .await;
+    scene.grant("host", old_host, "host.manage", false).await;
+    let token = new_id();
+    scene.writer.token = new_token(API_TOKEN_PREFIX);
+    let policy: orch_access_contract::key_scope::KeyScope =
+        serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"host","id":old_host,"reach":"self"},
+            "allow":[{"operation":"HostRuntimeStop","actions":["manage"]}]
+        }]}))
+        .unwrap();
+    assert!(policy.validate().is_empty());
+    identity::create_api_token_scoped(
+        &mut *scene.world.conn().await,
+        &NewApiToken {
+            id: token,
+            user_id: scene.writer.id(),
+            name: "Selected unit Stop only",
+            token_hash: &token_hash(&scene.writer.token),
+            scopes: &[],
+            node_id: None,
+            at: scene.world.now(),
+            expires_at: Some(scene.world.now() + Duration::hours(1)),
+        },
+        Some(&json!(policy)),
+    )
+    .await
+    .unwrap();
+    let driver = json!({"test":{"name":"test","version":"1","title":"Test","spec_schemas":{"environment":{}}}});
+    sqlx::query("UPDATE hosts SET drivers=$2 WHERE id=ANY($1)")
+        .bind([old_host, new_host].as_slice())
+        .bind(&driver)
+        .execute(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let old_node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(old_host)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let new_node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(new_host)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let old_played = scene.play_until(
+        old_node,
+        Some(Time::new(scene.world.now() + Duration::hours(1))),
+    );
+    let new_played = scene.play(new_node);
+    let mut tx = scene.world.db.pool.begin().await.unwrap();
+    let environment = fixtures::insert_environment(
+        &mut tx,
+        scene.owner.id(),
+        Some(scene.home),
+        "Moved work",
+        "managed",
+    )
+    .await
+    .unwrap();
+    let template: Id = sqlx::query_scalar("SELECT template_id FROM environments WHERE id=$1")
+        .bind(environment)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let (old, current, original) = (new_id(), new_id(), new_id());
+    for (runtime, host, generation) in [(old, old_host, 1), (current, new_host, 2)] {
+        hosting::insert_runtime(
+            &mut tx,
+            &NewRuntime {
+                id: runtime,
+                host_id: host,
+                unit_name: if runtime == old {
+                    "old-environment-unit"
+                } else {
+                    "current-environment-unit"
+                },
+                environment_id: environment,
+                driver: "test",
+                template_id: template,
+                spec_hash: &[0; 32],
+                generation,
+                volumes: &json!({}),
+            },
+            scene.world.now(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE runtimes SET state=$2 WHERE id=$1")
+            .bind(runtime)
+            .bind(if runtime == old { "retired" } else { "running" })
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert!(
+            orch_db::queries::runtime_incarnations::observe(
+                &mut tx,
+                host,
+                runtime,
+                scene.remember_native(
+                    runtime,
+                    orch_link_contract::native_target::RuntimeSource {
+                        incarnation: Some(if runtime == old { original } else { new_id() })
+                    }
+                ),
+                false
+            )
+            .await
+            .unwrap()
+        );
+    }
+    sqlx::query("UPDATE environments SET status='running',generation=2 WHERE id=$1")
+        .bind(environment)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let before: Json = sqlx::query_scalar("SELECT to_jsonb(r) FROM runtimes r WHERE id=$1")
+        .bind(current)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    let (status, value) = delayed(
+        &scene,
+        "POST",
+        &format!("/hosts/{old_host}/runtimes/{old}/stop"),
+        json!({"interrupt":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(
+        value,
+        json!({"projection":"receipt","host_id":old_host,"runtime_id":old}),
+        "a Stop-only key receives its actual request identities without reading stored runtime content"
+    );
+    let stopped = old_played.seen_of(CommandKind::NodeRuntimeStop);
+    assert_eq!(
+        stopped.len(),
+        1,
+        "the selected kept unit still has its Stop action"
+    );
+    assert_eq!(stopped[0].body["runtime_id"], json!(old));
+    let authority =
+        orch_db::queries::link::command_authority(&mut *scene.world.conn().await, stopped[0].id)
+            .await
+            .unwrap()
+            .expect(
+                "the actual host operation and original key must survive the deferred native queue",
+            );
+    assert_eq!(authority["kind"], "http_origin");
+    assert_eq!(
+        authority["authority"]["original"]["origin"]["operation"],
+        "HostRuntimeStop"
+    );
+    assert_eq!(
+        authority["authority"]["original"]["credential"]["kind"],
+        "token"
+    );
+    assert_eq!(
+        authority["authority"]["original"]["credential"]["id"],
+        json!(token)
+    );
+    assert!(
+        new_played.seen().is_empty(),
+        "the original host operation never reaches another host's replacement"
+    );
+    let after: Json = sqlx::query_scalar("SELECT to_jsonb(r) FROM runtimes r WHERE id=$1")
+        .bind(current)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let environment_status: String =
+        sqlx::query_scalar("SELECT status FROM environments WHERE id=$1")
+            .bind(environment)
+            .fetch_one(&scene.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(environment_status, "running");
+    let wrong_history: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE object_id=$1 AND action='environment.stopped'",
+    )
+    .bind(environment)
+    .fetch_one(&scene.world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        wrong_history, 0,
+        "stopping a kept host unit never announces that its replacement environment stopped"
+    );
+    let accepted_host: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE object_id=$1 AND details->>'runtime'=$2 AND details->>'decision'='accepted'")
+        .bind(old_host).bind(old.to_string()).fetch_one(&scene.world.db.pool).await.unwrap();
+    assert_eq!(accepted_host, 1);
+    assert_eq!(value["runtime_id"], json!(old));
+    let kept_state: String = sqlx::query_scalar("SELECT state FROM runtimes WHERE id=$1")
+        .bind(old)
+        .fetch_one(&scene.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        kept_state, "retired",
+        "the actual selected unit stays kept without disclosing its stored state to a Stop-only key"
+    );
 }
 
 #[tokio::test]
@@ -707,13 +1174,28 @@ async fn a_start_and_an_empty_host_removal_use_the_guard_clock_and_caller_after_
     }
 }
 
-struct TimePassesOnStop(ManualClock);
+struct TimePassesOnStop(ManualClock, NativeUnits);
 
 #[async_trait]
 impl Machine for TimePassesOnStop {
     async fn run(&self, command: &Cmd) -> Result<Json, CommandError> {
         if command.kind.parse::<CommandKind>().unwrap() == CommandKind::NodeRuntimeStop {
             self.0.advance(Duration::seconds(2));
+            let runtime: Id = serde_json::from_value(command.body["runtime_id"].clone()).unwrap();
+            let source = {
+                let mut units = self.1.lock().unwrap();
+                let unit = units.get_mut(&runtime).ok_or_else(|| {
+                    CommandError::new(
+                        orch_link_contract::commands::ErrorCode::NotFound,
+                        "the fixture native unit is absent",
+                    )
+                })?;
+                unit.1 = false;
+                unit.0
+            };
+            return Ok(json!(
+                orch_link_contract::commands::NodeRuntimeStopResult::Stopped { source }
+            ));
         }
         Ok(json!({}))
     }
@@ -745,7 +1227,10 @@ async fn a_recycle_rechecks_authority_for_each_stop_after_an_earlier_unit_took_t
                 .unwrap();
             let played = scene.world.app.play(
                 node,
-                Arc::new(TimePassesOnStop(scene.world.app.clock.clone())),
+                Arc::new(TimePassesOnStop(
+                    scene.world.app.clock.clone(),
+                    scene.native_units.clone(),
+                )),
             );
             let path = if on_host {
                 format!("/hosts/{host}/recycle")
@@ -842,6 +1327,28 @@ async fn a_host_manager_stops_the_selected_provider_unit_with_current_authority_
                 successor = Some(next);
             }
             scene.grant("host", host, "host.manage", ends).await;
+            let mut facts = scene.world.db.pool.begin().await.unwrap();
+            provider_runtime::lock(&mut facts, provider)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                orch_db::queries::runtime_incarnations::observe(
+                    &mut facts,
+                    host,
+                    runtime,
+                    scene.remember_native(
+                        runtime,
+                        orch_link_contract::native_target::RuntimeSource {
+                            incarnation: Some(new_id())
+                        }
+                    ),
+                    false
+                )
+                .await
+                .unwrap()
+            );
+            facts.commit().await.unwrap();
             let node: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
                 .bind(host)
                 .fetch_one(&scene.world.db.pool)
@@ -879,6 +1386,21 @@ async fn a_host_manager_stops_the_selected_provider_unit_with_current_authority_
                 assert_eq!(stopped[0].body["runtime_id"], runtime.to_string());
                 assert_eq!(value["state"], if kept { "retired" } else { "stopped" });
                 if let Some(next) = successor {
+                    assert_eq!(
+                        current, before,
+                        "a kept unit Stop changes no field of the Provider served by its replacement"
+                    );
+                    let authority = orch_db::queries::link::command_authority(&mut *scene.world.conn().await,stopped[0].id)
+                        .await.unwrap().expect("the kept provider unit Stop retains its actual host operation and browser identity");
+                    assert_eq!(authority["kind"], "http_origin");
+                    assert_eq!(
+                        authority["authority"]["original"]["origin"]["operation"],
+                        "HostRuntimeStop"
+                    );
+                    assert_eq!(
+                        authority["authority"]["original"]["credential"]["kind"],
+                        "session"
+                    );
                     assert_eq!(current["machine_id"], before["machine_id"]);
                     let next_state: String =
                         sqlx::query_scalar("SELECT state FROM runtimes WHERE id=$1")
@@ -1187,7 +1709,7 @@ async fn a_subscription_registered_from_a_machine_requires_the_callers_current_a
             .await
             .unwrap();
         let token = new_id();
-        scene.writer.token = new_token(API_TOKEN_PREFIX);
+        scene.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scene.world.conn().await,
             &NewApiToken {

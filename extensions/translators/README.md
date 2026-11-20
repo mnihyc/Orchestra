@@ -1,10 +1,8 @@
-# Model translation seam
+# Model translators
 
-The home of the translation contract's external implementations. Orch itself
-is a plain relay and builds no translator in. The neutral descriptor,
-compatibility and translation interface belong to `crates/contracts/model`;
-external translator hosting belongs to `crates/platform/plugin` and the
-connector's provider role. No concrete translator ships in the current scope.
-A translator must preserve streaming, tools, usage and failure semantics or
-declare its fidelity limits. Its contract suite belongs in `crates/platform/conformance`.
-The [plain-text example](../../examples/plugins/translator/README.md) demonstrates the seam; nothing installs or offers it.
+The shipped responses-messages extension implements Responses to Messages and Messages to Responses through the neutral
+model contract. Its fidelity declarations also supply provider formats, binding choices and generation route inspection.
+Additional external translators use the same contract, hosted by the plugin runtime beside the credential.
+
+The outgoing wire protocol presents the key and observes upstream usage before conversion. Direct endpoint matches take
+priority. A translated pairing is chosen through normal binding and held to the inherited translation policy.

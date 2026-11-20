@@ -1,4 +1,5 @@
 /** A dry run brings its choices, people, conflicts and omissions together before an import starts. */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useQuery } from '@tanstack/react-query';
 import { Eye, FileText, Folder, MessageSquare } from 'lucide-react';
 import { useState } from 'react';
@@ -79,8 +80,8 @@ export function ImportReview({ node, request, plan, rows, hasMore, firstPage = t
   const packageSource = plan.source.mode === 'package';
   const sharingReason = !plan.access.carried ? t('importWizard.review.sharingNone') : !plan.access.allowed ? t('importWizard.review.sharingNeedsManage') : null;
   const reason = (value: { code: string; message: string }) => importReason(value, t, locale);
-  const setSelectedTab = (next: ReviewTab) => { setTab(next); rememberTab(next); };
-  const setSelectedKind = (next: KindFilter) => { setKind(next); rememberKind(next); };
+  const setSelectedTab = carryDeviceChoice((next: ReviewTab) => { setTab(next); rememberTab(next); }, rememberTab);
+  const setSelectedKind = carryDeviceChoice((next: KindFilter) => { setKind(next); rememberKind(next); }, rememberKind);
   const shownRows = rows.filter((row) => (tab !== 'conflicts' || row.existing !== null || row.blocked !== null)
     && (kind === 'all' || (kind === 'places' ? row.kind === 'org' || row.kind === 'project' || row.kind === 'topic' : row.kind === kind)));
   const actionOptions = (allowed: readonly ImportAction[]) => allowed.map((action) => ({ value: action, label: t(`importWizard.review.${action}`) }));

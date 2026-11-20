@@ -41,7 +41,8 @@ use chrono::{DateTime, Duration, Utc};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::threads::{
-    AnnouncementCategory, AnnouncementFrom, AnnouncementSeverity, ThreadMention,
+    AnnouncementCategory, AnnouncementFrom, AnnouncementSeverity, Delivery as InputDelivery,
+    InputDeliveryResolution, InputDeliveryResolutionReason, InputFallbackOrigin, ThreadMention,
 };
 use orch_api_contract::topics::{
     Announcement, AnnouncementAudience, AnnouncementDelivered, AnnouncementDelivery,
@@ -80,6 +81,10 @@ pub const MESSAGE_KEY: &str = "announcement";
 /// The settings of a topic that say how an announcement reaches its threads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Broadcast {
+    /// Effective fallback origin, captured from this settings snapshot.
+    pub fallback_origin: InputFallbackOrigin,
+    /// Exact origin retained privately for later authorized source projection.
+    pub fallback_source_node: Option<Id>,
     /// What happens to a thread that has an active turn.
     pub delivery: AnnouncementDelivery,
     /// Used instead of `steer` when the receiving agent cannot be steered.
@@ -120,7 +125,16 @@ impl Broadcast {
             Some("interrupt") => AnnouncementFallback::Interrupt,
             _ => AnnouncementFallback::NextTurn,
         };
+        let origin = snapshot
+            .view(definition_of(keys::BROADCAST_FALLBACK)?)
+            .resolved
+            .source;
         Ok(Self {
+            fallback_origin: InputFallbackOrigin::Setting {
+                value: fallback,
+                scope: serde_json::from_value(serde_json::to_value(origin.scope)?)?,
+            },
+            fallback_source_node: origin.node,
             delivery,
             fallback,
             wake_idle: setting(&snapshot, keys::BROADCAST_WAKE_IDLE)?.unwrap_or(true),
@@ -233,6 +247,10 @@ pub enum Reach {
 /// An announcement as it is delivered into one topic.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Explicit fallback choice or the actual inherited policy used by this send.
+    pub fallback_origin: InputFallbackOrigin,
+    /// Private captured setting-node identity, never a displayed identifier.
+    pub fallback_source_node: Option<Id>,
     /// A notice or a milestone.
     pub category: AnnouncementCategory,
     /// What happened.
@@ -667,22 +685,58 @@ impl Engine {
                     (Treatment::Steer, Some(turn)) => Arrival::Steer { turn: turn.id },
                     _ => Arrival::Front,
                 };
-                self.queue_announcement_input(
-                    unit,
-                    thread_id,
-                    ids::derived(
-                        "announcement.input",
-                        &[
-                            row.id.as_bytes().as_slice(),
-                            thread_id.as_bytes().as_slice(),
-                        ],
-                    ),
-                    text,
-                    &crate::tools::thread_message::file_parts(&row.files),
-                    arrival,
-                    operation.map(|(caller, place)| (caller, place, row)),
-                )
-                .await?;
+                let input_id = ids::derived(
+                    "announcement.input",
+                    &[
+                        row.id.as_bytes().as_slice(),
+                        thread_id.as_bytes().as_slice(),
+                    ],
+                );
+                let created = self
+                    .queue_announcement_input(
+                        unit,
+                        thread_id,
+                        input_id,
+                        text,
+                        &crate::tools::thread_message::file_parts(&row.files),
+                        arrival,
+                        operation.map(|(caller, place)| (caller, place, row)),
+                    )
+                    .await?;
+                // Repeated delivery keeps its original resolution, even after a policy or agent change.
+                if created
+                    && matches!(
+                        thread.state.as_str(),
+                        thread_state::STARTING
+                            | thread_state::RUNNING
+                            | thread_state::WAITING_APPROVAL
+                    )
+                    && plan.delivery == AnnouncementDelivery::Steer
+                    && !steerable
+                {
+                    let applied = match doing {
+                        Treatment::Interrupt => InputDelivery::Interrupt,
+                        _ => InputDelivery::Queue,
+                    };
+                    let receipt = InputDeliveryResolution {
+                        requested: InputDelivery::Steer,
+                        applied,
+                        reason: if plan.fallback == AnnouncementFallback::Interrupt && !may_reach {
+                            InputDeliveryResolutionReason::SteerUnavailableAndReachLimited
+                        } else {
+                            InputDeliveryResolutionReason::SteerUnavailable
+                        },
+                        source: plan.fallback_origin.clone(),
+                        resolved_at: Time::new(now),
+                    };
+                    let mut stored = serde_json::to_value(receipt)?;
+                    stored["source_node"] = json!(plan.fallback_source_node);
+                    sqlx::query("UPDATE thread_inputs SET delivery_resolution = $2 WHERE id = $1 AND delivery_resolution IS NULL")
+                        .bind(input_id)
+                        .bind(stored)
+                        .execute(&mut *unit.conn)
+                        .await.map_err(orch_db::DbError::from)?;
+                }
                 Ok(Some(match doing {
                     Treatment::Interrupt => INTERRUPTED,
                     Treatment::Steer => STEERED,
@@ -774,6 +828,25 @@ impl Engine {
         });
         if let Some(how) = delivered_as {
             payload["delivered_as"] = json!(how);
+        }
+        let input_id = ids::derived(
+            "announcement.input",
+            &[
+                row.id.as_bytes().as_slice(),
+                thread_id.as_bytes().as_slice(),
+            ],
+        );
+        let resolution: Option<Json> =
+            sqlx::query_scalar("SELECT delivery_resolution FROM thread_inputs WHERE id = $1")
+                .bind(input_id)
+                .fetch_optional(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?
+                .flatten();
+        if let Some(resolution) = resolution {
+            // The retained private source pointer is not part of a conversation's public payload.
+            let public: InputDeliveryResolution = serde_json::from_value(resolution)?;
+            payload["delivery_resolution"] = serde_json::to_value(public)?;
         }
         crate::ingest::add_item(
             unit,
@@ -996,6 +1069,8 @@ impl Engine {
             (resolution, stored)
         };
         let plan = Plan {
+            fallback_origin: broadcast.fallback_origin.clone(),
+            fallback_source_node: broadcast.fallback_source_node,
             category,
             title: arguments.title.clone(),
             body,
@@ -1141,6 +1216,8 @@ impl Engine {
                     .filter(|_| plan.delivery != broadcast.delivery)
                     .map_or(broadcast.delivery, |_| plan.delivery);
                 here.fallback = broadcast.fallback;
+                here.fallback_origin = broadcast.fallback_origin.clone();
+                here.fallback_source_node = broadcast.fallback_source_node;
                 here.wake_idle = match broadcast.wake_for(arguments.wake_idle) {
                     Ok(wake) => wake,
                     Err(refusal) => return Ok(Err(refusal)),
@@ -1407,6 +1484,15 @@ impl Engine {
 
     fn plan_of(request: &PersonAnnouncement, broadcast: &Broadcast) -> Result<Plan, AnnounceError> {
         Ok(Plan {
+            fallback_origin: request.fallback.map_or_else(
+                || broadcast.fallback_origin.clone(),
+                |value| InputFallbackOrigin::Request { value },
+            ),
+            fallback_source_node: if request.fallback.is_some() {
+                None
+            } else {
+                broadcast.fallback_source_node
+            },
             category: request.category.unwrap_or(AnnouncementCategory::Notice),
             title: request.title.clone(),
             body: request.body.clone(),

@@ -47,27 +47,19 @@ pub enum VapidError {
 pub struct Vapid {
     key: SigningKey,
     public_key: String,
-    contact: String,
 }
 
 impl std::fmt::Debug for Vapid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Vapid")
             .field("public_key", &self.public_key)
-            .field("contact", &self.contact)
             .finish_non_exhaustive()
     }
 }
 
 impl Vapid {
-    /// Reads the key from `secret` and names the sender by `contact`, an
-    /// `https://` address or a `mailto:` one, which a push service may use to
-    /// reach whoever runs this system.
-    pub fn read(secret: &str, contact: &str) -> Result<Self, VapidError> {
-        let contact = contact.trim();
-        if !(contact.starts_with("https://") || contact.starts_with("mailto:")) {
-            return Err(VapidError::NoContact);
-        }
+    /// Reads only the sender's key. Each signature is given its current contact separately.
+    pub fn read(secret: &str) -> Result<Self, VapidError> {
         let text = secret.trim();
         let secret = if text.contains("-----BEGIN") {
             SecretKey::from_pkcs8_pem(text)
@@ -86,7 +78,6 @@ impl Vapid {
         Ok(Self {
             public_key: URL_SAFE_NO_PAD.encode(key.verifying_key().to_sec1_point(false).as_bytes()),
             key,
-            contact: contact.to_owned(),
         })
     }
 
@@ -98,7 +89,16 @@ impl Vapid {
     }
 
     /// The authorization for this endpoint's origin, signed with the sender's key.
-    pub(crate) fn sign_for(&self, endpoint: &Url, clock: &dyn Clock) -> Result<String, VapidError> {
+    pub(crate) fn sign_for(
+        &self,
+        endpoint: &Url,
+        contact: &str,
+        clock: &dyn Clock,
+    ) -> Result<String, VapidError> {
+        let contact = contact.trim();
+        if !(contact.starts_with("https://") || contact.starts_with("mailto:")) {
+            return Err(VapidError::NoContact);
+        }
         let expires = clock
             .now()
             .timestamp()
@@ -107,7 +107,7 @@ impl Vapid {
         let claims = json!({
             "aud": endpoint.origin().ascii_serialization(),
             "exp": expires,
-            "sub": self.contact,
+            "sub": contact,
         });
         let claims = serde_json::to_vec(&claims).map_err(|_| VapidError::CannotSign)?;
         let unsigned = format!(
@@ -131,6 +131,35 @@ impl Vapid {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_sender_keeps_its_key_while_each_delivery_names_the_current_contact() {
+        let vapid = Vapid::read(PRIVATE_BASE64).unwrap();
+        let endpoint = Url::parse("https://push.example/device").unwrap();
+        let clock = orch_types::ManualClock::new(
+            "2026-10-14T01:00:00Z"
+                .parse::<orch_types::Time>()
+                .unwrap()
+                .get(),
+        );
+        for contact in ["https://first.example", "https://changed.example"] {
+            let authorization = vapid.sign_for(&endpoint, contact, &clock).unwrap();
+            let token = authorization
+                .strip_prefix("vapid t=")
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap();
+            let claims: serde_json::Value = serde_json::from_slice(
+                &URL_SAFE_NO_PAD
+                    .decode(token.split('.').nth(1).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(claims["sub"], contact);
+            assert!(authorization.ends_with(PUBLIC_BASE64));
+        }
+    }
+
     /// A published VAPID test key, whose public value browsers subscribe with.
     const PRIVATE_BASE64: &str = "IQ9Ur0ykXoHS9gzfYX0aBjy9lvdrjx_PFUXmie9YRcY";
     const PUBLIC_BASE64: &str =
@@ -138,10 +167,10 @@ mod tests {
 
     #[test]
     fn a_key_written_as_base64_gives_the_public_key_a_browser_subscribes_with() {
-        let vapid = Vapid::read(PRIVATE_BASE64, "https://orch.example").unwrap();
+        let vapid = Vapid::read(PRIVATE_BASE64).unwrap();
         assert_eq!(vapid.public_key(), PUBLIC_BASE64);
         assert_eq!(
-            Vapid::read(&format!("{PRIVATE_BASE64}\n"), "mailto:ops@orch.example")
+            Vapid::read(&format!("{PRIVATE_BASE64}\n"))
                 .unwrap()
                 .public_key(),
             PUBLIC_BASE64,
@@ -153,35 +182,33 @@ mod tests {
     fn what_is_not_a_key_or_names_no_contact_is_refused() {
         for bytes in [[0; PRIVATE_VALUE_BYTES], [u8::MAX; PRIVATE_VALUE_BYTES]] {
             assert_eq!(
-                Vapid::read(&URL_SAFE_NO_PAD.encode(bytes), "https://orch.example").unwrap_err(),
+                Vapid::read(&URL_SAFE_NO_PAD.encode(bytes)).unwrap_err(),
                 VapidError::NotAKey,
                 "a scalar outside the curve's range is refused without panicking"
             );
         }
+        assert_eq!(Vapid::read("not a key").unwrap_err(), VapidError::NotAKey);
+        assert_eq!(Vapid::read("").unwrap_err(), VapidError::NotAKey);
         assert_eq!(
-            Vapid::read("not a key", "https://orch.example").unwrap_err(),
-            VapidError::NotAKey
-        );
-        assert_eq!(
-            Vapid::read("", "https://orch.example").unwrap_err(),
-            VapidError::NotAKey
-        );
-        assert_eq!(
-            Vapid::read("AAAA", "https://orch.example").unwrap_err(),
+            Vapid::read("AAAA").unwrap_err(),
             VapidError::NotAKey,
             "too short"
         );
         assert_eq!(
-            Vapid::read(
-                "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----",
-                "https://orch.example"
-            )
-            .unwrap_err(),
+            Vapid::read("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----")
+                .unwrap_err(),
             VapidError::NotAKey
         );
         for contact in ["", "ops@orch.example", "http://orch.example", "ftp://x"] {
             assert_eq!(
-                Vapid::read(PRIVATE_BASE64, contact).unwrap_err(),
+                Vapid::read(PRIVATE_BASE64)
+                    .unwrap()
+                    .sign_for(
+                        &Url::parse("https://push.example/device").unwrap(),
+                        contact,
+                        &orch_types::SystemClock
+                    )
+                    .unwrap_err(),
                 VapidError::NoContact,
                 "{contact:?}"
             );
@@ -190,10 +217,7 @@ mod tests {
 
     #[test]
     fn the_debug_form_shows_the_public_key_and_never_the_private_one() {
-        let shown = format!(
-            "{:?}",
-            Vapid::read(PRIVATE_BASE64, "https://orch.example").unwrap()
-        );
+        let shown = format!("{:?}", Vapid::read(PRIVATE_BASE64).unwrap());
         assert!(shown.contains(PUBLIC_BASE64) && !shown.contains(PRIVATE_BASE64));
     }
 
@@ -207,12 +231,7 @@ mod tests {
             secret.to_pkcs8_pem(LineEnding::LF).unwrap(),
             secret.to_sec1_pem(LineEnding::LF).unwrap(),
         ] {
-            assert_eq!(
-                Vapid::read(&pem, "mailto:ops@orch.example")
-                    .unwrap()
-                    .public_key(),
-                PUBLIC_BASE64
-            );
+            assert_eq!(Vapid::read(&pem).unwrap().public_key(), PUBLIC_BASE64);
         }
     }
 
@@ -223,14 +242,16 @@ mod tests {
 
         let at = "2026-10-14T01:00:00.000Z".parse::<Time>().unwrap().get();
         let clock = ManualClock::new(at);
-        let vapid = Vapid::read(PRIVATE_BASE64, "mailto:ops@orch.example").unwrap();
+        let vapid = Vapid::read(PRIVATE_BASE64).unwrap();
         for origin in [
             "https://push.example",
             "https://push.example:8443",
             "https://[2001:db8::1]:8443",
         ] {
             let endpoint = Url::parse(&format!("{origin}/push/device?secret=example")).unwrap();
-            let authorization = vapid.sign_for(&endpoint, &clock).unwrap();
+            let authorization = vapid
+                .sign_for(&endpoint, "mailto:ops@orch.example", &clock)
+                .unwrap();
             let token = authorization
                 .strip_prefix("vapid t=")
                 .unwrap()
