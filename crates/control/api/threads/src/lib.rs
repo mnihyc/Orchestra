@@ -96,6 +96,8 @@ pub fn install_interfaces() {
 
     routes::threads::view::__api_install_a3c1635f6e();
 
+    routes::threads::view::__api_install_a108d28ec4();
+
     routes::threads::__api_install_6de5279cdb();
 
     routes::threads::__api_install_0eb3ad3c68();

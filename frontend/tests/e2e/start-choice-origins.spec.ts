@@ -67,7 +67,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
       const payload: unknown = await response.json();
       const offered = payload as BindingOptions;
       await route.fulfill({ response, json: { ...offered,
-        defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locked: false },
+        defaults: { provider_id: null, agent_id: null, model_name: null, effort: null, locks: { provider: false, agent: false, model: false, effort: false } },
         environments: offered.environments.map((row) => ({ ...row, is_default: false })),
       } });
     });

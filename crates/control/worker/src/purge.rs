@@ -50,14 +50,6 @@ const FAILED_KEPT: Duration = Duration::days(30);
 /// backlog goes over the runs that follow without one run holding the tables.
 const ROWS_PER_RUN: i64 = 10_000;
 
-/// For how many days an Inbox keeps a notification where the setting has no
-/// value: the setting's own default.
-const DEFAULT_INBOX_DAYS: i64 = 90;
-
-/// The fewest days an Inbox keeps a notification, whatever a row of the
-/// database says: a value that is not a number of days never empties it now.
-const LEAST_INBOX_DAYS: i64 = 1;
-
 /// Why a run of `purge_expired` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum PurgeError {
@@ -119,9 +111,11 @@ pub async fn expired(
     let legacy_before = now
         .checked_sub_signed(ttl_of_keys(config))
         .unwrap_or(DateTime::<Utc>::MIN_UTC);
-    let idempotency_keys = idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
+    let mut idempotency_keys =
+        idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
+    idempotency_keys += orch_db::queries::thread_history_cuts::purge_requests(db).await?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;
     // This metadata holds no authority. Purge it after the exclusive sign-in
     // transaction, using the existing bounded upkeep batch and cadence.
@@ -147,18 +141,10 @@ pub async fn expired(
 async fn deliveries_and_inbox(db: &Db, now: DateTime<Utc>) -> Result<(u64, u64), PurgeError> {
     let mut tx = transaction_guard::scope(false, db.begin()).await?;
     transaction_guard::lock_action(&mut tx).await?;
-    let days = orch_settings::get::<i64>(&mut tx, Place::System, keys::RETENTION_INBOX_DAYS)
-        .await?
-        .unwrap_or(DEFAULT_INBOX_DAYS)
-        .max(LEAST_INBOX_DAYS);
+    let policy = orch_settings::retention::inbox(&mut tx, now).await?;
     let deliveries =
         upkeep::purge_outbox(&mut tx, now - SETTLED_KEPT, now - FAILED_KEPT, ROWS_PER_RUN).await?;
-    let inbox = upkeep::purge_inbox(
-        &mut tx,
-        now - spans::days(days.unsigned_abs()),
-        ROWS_PER_RUN,
-    )
-    .await?;
+    let inbox = upkeep::purge_inbox(&mut tx, policy.expires_before, ROWS_PER_RUN).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok((deliveries, inbox))
 }
