@@ -1,7 +1,33 @@
 //! Environment services and the policy of their hosting machine, resolved without placement assumptions.
 
 use crate::{Conn, DbError};
+use orch_access_contract::permissions::Placement;
 use orch_types::{Id, Json};
+use std::cell::RefCell;
+
+// Consecutive reads of a thread share its single environment. A list still runs the batch query.
+#[derive(Default)]
+struct LastEnvironment {
+    machine: Option<(Id, EnvironmentMachine)>,
+    profile: Option<(Id, Placement)>,
+}
+
+tokio::task_local! { static LAST: (usize, RefCell<LastEnvironment>); }
+
+pub(crate) async fn sharing<T>(connection: usize, work: impl Future<Output = T>) -> T {
+    LAST.scope((connection, RefCell::default()), work).await
+}
+
+fn with_last<T>(conn: &Conn, use_facts: impl FnOnce(&mut LastEnvironment) -> T) -> Option<T> {
+    if !crate::pool::read_facts_unchanged() {
+        return None;
+    }
+    LAST.try_with(|(connection, facts)| {
+        (*connection == std::ptr::from_ref(conn).addr()).then(|| use_facts(&mut facts.borrow_mut()))
+    })
+    .ok()
+    .flatten()
+}
 
 /// The policy member of one machine report; null alone means no policy was reported.
 /// Call `machine`/`of` first when the supplied identity may belong to a unit connector.
@@ -71,10 +97,15 @@ pub fn environment_delegated(policy: Option<&Json>) -> bool {
 pub async fn access_profiles(
     conn: &mut Conn,
     environments: &[Id],
-) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
-    use orch_access_contract::permissions::Placement;
+) -> Result<Vec<(Id, Placement)>, DbError> {
     if environments.is_empty() {
         return Ok(Vec::new());
+    }
+    if let [id] = environments
+        && let Some(row) =
+            with_last(conn, |last| last.profile.filter(|(known, _)| known == id)).flatten()
+    {
+        return Ok(vec![row]);
     }
     let units: Vec<(Id, bool)> = sqlx::query_as(
         "SELECT id, placement='managed' OR template_id IS NOT NULL FROM environments WHERE id=ANY($1)",
@@ -88,7 +119,7 @@ pub async fn access_profiles(
     } else {
         of_many(conn, &directories).await?.into_iter().collect()
     };
-    Ok(units
+    let profiles: Vec<_> = units
         .into_iter()
         .map(|(id, unit)| {
             let reported = facts.get(&id);
@@ -111,7 +142,11 @@ pub async fn access_profiles(
                 },
             )
         })
-        .collect())
+        .collect();
+    if let [profile] = profiles.as_slice() {
+        let _ = with_last(conn, |last| last.profile = Some(*profile));
+    }
+    Ok(profiles)
 }
 
 /// Current environment services; a unit connector never substitutes its policy for its host's.
@@ -130,6 +165,17 @@ pub async fn of_many(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
+    if let [id] = environments
+        && let Some(row) = with_last(conn, |last| {
+            last.machine
+                .as_ref()
+                .filter(|(known, _)| known == id)
+                .cloned()
+        })
+        .flatten()
+    {
+        return Ok(vec![row]);
+    }
     type ReportRow = (Id, Option<Id>, Option<Json>, Option<Json>, Option<String>);
     let rows:Vec<ReportRow> = sqlx::query_as(
         "SELECT e.id,CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END AS machine_id,
@@ -167,8 +213,8 @@ pub async fn of_many(
                ORDER BY target.schedulable DESC,target.id LIMIT 1) offered ON true
            LEFT JOIN machines m ON m.id=CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END
           WHERE e.id=ANY($1)",
-    ).bind(environments).fetch_all(conn).await?;
-    Ok(rows
+    ).bind(environments).fetch_all(&mut *conn).await?;
+    let machines: Vec<_> = rows
         .into_iter()
         .map(|(id, machine_id, descriptor, policy, runtime)| {
             (
@@ -187,7 +233,11 @@ pub async fn of_many(
                 },
             )
         })
-        .collect())
+        .collect();
+    if let [machine] = machines.as_slice() {
+        let _ = with_last(conn, |last| last.machine = Some(machine.clone()));
+    }
+    Ok(machines)
 }
 
 /// The host that is the facade of the physical machine `machine`, if it is one.

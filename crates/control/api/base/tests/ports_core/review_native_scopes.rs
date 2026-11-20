@@ -3,7 +3,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, jobs::forks};
 use orch_types::Json;
 
@@ -18,7 +18,7 @@ async fn key_record(world: &World, user: Id, rules: Vec<Json>) -> (Id, String) {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -261,11 +261,12 @@ async fn review_creation_rechecks_its_key_after_the_actual_environment_lock() {
 }
 
 async fn legacy(world: &World, user: Id) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Independent ordinary confirmation",
             token_hash: &token_hash(&secret),
@@ -492,6 +493,7 @@ async fn review_host_content_needs_its_actual_publisher_read_and_no_fabricated_h
     let (world, manager, _, env, project, machine) = setup().await;
     port_policy(&world, "port_host", "ask").await;
     let ports = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "review-native-publisher.example.test".into(),

@@ -1,0 +1,14 @@
+fmt
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- showing_more_messages_in_a_team_opening --nocapture
+test -p orch-api-core --test everything_scale -- read_facts:: --test-threads=1
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test threads_read
+test -p orch-api-core --test thread_continuation_reads
+test -p orch-engine --test preflight
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test
+web build

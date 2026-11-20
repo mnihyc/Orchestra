@@ -173,6 +173,59 @@ fn node_ref(id: Id, places: &[PlaceRow]) -> Option<NodeRef> {
     })
 }
 
+/// Versioned native operation facts become words before either shipped or owned templates.
+fn operation_words(notification: &Snapshot, language: &str) -> Option<(String, String)> {
+    if notification.kind != "environment.attention"
+        || notification
+            .data
+            .get("operation_version")
+            .and_then(Json::as_u64)
+            != Some(1)
+    {
+        return None;
+    }
+    let chinese = language.to_ascii_lowercase().starts_with("zh");
+    let (english, chinese_title) = match notification
+        .data
+        .get("operation_kind")
+        .and_then(Json::as_str)
+    {
+        Some("host_delete") => ("Host removal", "移除主机"),
+        Some("provider_delete") => ("Provider removal", "移除提供方"),
+        Some("provider_disable") => ("Provider pause", "停用提供方"),
+        Some("mcp_delete") => ("MCP server removal", "移除 MCP 服务器"),
+        Some("mount_delete") => ("Mount removal", "移除挂载"),
+        Some("lost") => ("Permanent loss", "永久丢失"),
+        Some("recover" | "provider_recover") => ("Recovery", "恢复"),
+        Some("move") => ("Move", "迁移"),
+        Some("switch") => ("Thread switch", "切换线程"),
+        _ => ("Resource operation", "资源操作"),
+    };
+    let caption = if chinese { chinese_title } else { english };
+    let name = notification
+        .data
+        .get("name")
+        .and_then(Json::as_str)
+        .unwrap_or_default();
+    let title = if name.is_empty() {
+        caption.to_owned()
+    } else if chinese {
+        format!("{name}：{caption}")
+    } else {
+        format!("{name}: {caption}")
+    };
+    let (english, chinese_body) = match notification.data.get("state").and_then(Json::as_str) {
+        Some("running") => ("In progress", "进行中"),
+        Some("done") => ("Completed", "已完成"),
+        Some("failed") => ("Could not complete", "未能完成"),
+        _ => ("Updated", "已更新"),
+    };
+    Some((
+        title,
+        if chinese { chinese_body } else { english }.to_owned(),
+    ))
+}
+
 /// The notification as a notifier that builds its own message is given it.
 fn body_of(
     notification: &Snapshot,
@@ -189,12 +242,13 @@ fn body_of(
         id,
         kind,
         at: notification.at,
-        title: notification.title.clone(),
+        title: operation_words(notification, rendering.language)
+            .map_or_else(|| notification.title.clone(), |words| words.0),
         body: body_with_requested_end(
             notification,
             rendering.language,
-            rendering.recipient.map_or(Tz::UTC, |person| {
-                crate::quiet_hours::zone_of(&person.timezone)
+            rendering.recipient.map_or(Some(Tz::UTC), |person| {
+                crate::quiet_hours::zone_of(&person.timezone).ok()
             }),
         ),
         url: absolute(
@@ -212,7 +266,10 @@ fn body_of(
 }
 
 /// A proposed access end is part of the message, in the recipient's time zone and language.
-fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Tz) -> String {
+fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Option<Tz>) -> String {
+    if let Some((_, body)) = operation_words(notification, language) {
+        return body;
+    }
     if !matches!(
         notification.kind.as_str(),
         "access.requested" | "access.decided"
@@ -233,7 +290,13 @@ fn body_with_requested_end(notification: &Snapshot, language: &str, zone: Tz) ->
         .as_str()
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
     {
-        let date = instant.with_timezone(&zone).format("%Y-%m-%d %H:%M %Z");
+        let date = match zone {
+            Some(zone) => instant
+                .with_timezone(&zone)
+                .format("%Y-%m-%d %H:%M %Z")
+                .to_string(),
+            None => instant.to_rfc3339(),
+        };
         if chinese {
             format!("申请至 {date}")
         } else {
@@ -260,14 +323,15 @@ fn derived_id(row_id: Id, index: usize) -> Id {
     Id::from_bytes(bytes)
 }
 
-fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Tz) -> Item {
+fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Option<Tz>) -> Item {
     let location = notification
         .node_id
         .and_then(|node| rendering.places.iter().find(|place| place.id == node))
         .map(|place| place.path.join("/"))
         .unwrap_or_default();
     Item {
-        title: notification.title.clone(),
+        title: operation_words(notification, rendering.language)
+            .map_or_else(|| notification.title.clone(), |words| words.0),
         body: body_with_requested_end(notification, rendering.language, zone),
         url: absolute(
             rendering.public_url,
@@ -276,12 +340,15 @@ fn item_of(notification: &Snapshot, rendering: &Rendering<'_>, zone: Tz) -> Item
         kind: notification.kind.clone(),
         location,
         actor: actor_of(notification),
-        time: notification
-            .at
-            .get()
-            .with_timezone(&zone)
-            .format("%Y-%m-%d %H:%M")
-            .to_string(),
+        time: match zone {
+            Some(zone) => notification
+                .at
+                .get()
+                .with_timezone(&zone)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            None => notification.at.get().to_rfc3339(),
+        },
     }
 }
 
@@ -367,8 +434,8 @@ fn render_selected(
             Err(RenderFault::NoText)
         };
     };
-    let zone = rendering.recipient.map_or(Tz::UTC, |person| {
-        crate::quiet_hours::zone_of(&person.timezone)
+    let zone = rendering.recipient.map_or(Some(Tz::UTC), |person| {
+        crate::quiet_hours::zone_of(&person.timezone).ok()
     });
     let values = Values {
         items: rendering
@@ -509,6 +576,40 @@ mod tests {
                 public_url: "https://orch.example/",
             },
         )
+    }
+
+    #[test]
+    fn grouped_operations_use_human_localized_words_in_shipped_and_owned_messages() {
+        let descriptor = orch_notifier_email::descriptor();
+        for (language, title, body) in [
+            ("en", "Build host: Host removal", "Completed"),
+            ("zh-CN", "Build host：移除主机", "已完成"),
+        ] {
+            let notification = snapshot(
+                "Build host: host_delete",
+                "done",
+                json!({"kind":"environment.attention","data":{"operation_version":1,"operation_kind":"host_delete","state":"done","name":"Build host"}}),
+            );
+            for own in [
+                json!({}),
+                json!({"*":{"single":{"subject":"{{title}}","body":"{{title}} / {{body}}"},"digest":{"subject":"{{count}}","body":"{{#notifications}}{{title}} / {{body}}{{/notifications}}"}}}),
+            ] {
+                let message = render_with(
+                    &descriptor,
+                    &own,
+                    language,
+                    std::slice::from_ref(&notification),
+                    &[],
+                )
+                .unwrap();
+                assert!(message.body.contains(title), "{}", message.body);
+                assert!(message.body.contains(body), "{}", message.body);
+                assert!(!message.body.contains("host_delete"));
+                assert!(!message.body.contains("done"));
+                assert_eq!(message.notifications[0].title, title);
+                assert_eq!(message.notifications[0].body, body);
+            }
+        }
     }
 
     #[test]

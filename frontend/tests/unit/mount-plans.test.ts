@@ -52,7 +52,7 @@ describe('mounts in a plan', () => {
       home: null, private_views: [], file_states: { roots: 2, objects: 3, total_bytes: 4096, journals: 1, complete: true } };
     expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'plain', text: 'Recorded file states always go along: 2 saved roots, 4 KiB' });
     files.file_states = { ...files.file_states!, complete: false };
-    expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'warning', text: 'The recorded file-state store could not be measured; this move cannot start' });
+    expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'warning', text: 'Orch could not measure the saved file history this move needs, so it cannot start. Try again in a moment.' });
   });
 
   it('says what a copy carries, where it lands and what the person still has to choose there', () => {
