@@ -35,11 +35,12 @@ it('binds the Admin edit to the native ordered replacement and opaque revision',
 
 it('rereads the advertised catalogue for review without writing a replacement', async () => {
   show(<Gateways />);
-  await screen.findByText(i18n.t('regionalGateways.revision', { revision: catalogue.revision }));
+  await screen.findByRole('button', { name: i18n.t('regionalGateways.edit') });
+  expect(screen.queryByText(catalogue.revision, { exact: false })).not.toBeInTheDocument();
   calls.catalogue.mockResolvedValue({ ...catalogue, revision: 'changed-elsewhere' });
   await userEvent.click(screen.getByRole('button', { name: i18n.t('regionalGateways.refresh') }));
-  await screen.findByText(i18n.t('regionalGateways.revision', { revision: 'changed-elsewhere' }));
-  expect(calls.catalogue).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(calls.catalogue).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText('changed-elsewhere', { exact: false })).not.toBeInTheDocument();
   expect(calls.save).not.toHaveBeenCalled();
 });
 

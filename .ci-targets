@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test personal -- --nocapture --test-threads=1
+test -p orch-api-core --test transaction_guards --test session_others --test account_key_proofs
+test -p orch-api-core --test everything_scale -- --nocapture --test-threads=1
+test -p orch-db --test approval_settlement -- a_person_receives_an_inbox_item_while_their_account_write_is_open

@@ -243,6 +243,8 @@ pub struct Ctx {
     retained_source: Arc<crate::key_operations::resolver::RetainedSource>,
     /// Final transport lifetime and immutable native-source checks, independent of replanning.
     pub publication: Arc<crate::key_operations::publication::State>,
+    /// Entry into the HTTP request, before authentication or database reads.
+    pub arrived: std::time::Instant,
     /// The request's identifier, as in its answer.
     pub request_id: String,
     /// The moment the handler was prepared, after JSON decoding; action checks
@@ -258,6 +260,19 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Ordinary browser openings have a read-only projection and independent visit bookkeeping.
+    pub fn ordinary_browser_opening(&self) -> bool {
+        self.route.name == "ThreadOpeningGet"
+            && self.surface == Some(HttpSurface::Browser)
+            && self.ask_read.is_none()
+            && !self.inspect_deleted
+            && self.inspection.is_none()
+            && self.operation_ceiling().is_none()
+            && self
+                .user()
+                .is_ok_and(|user| user.is_session() && !user.as_admin)
+    }
+
     /// Retain this authenticated entry's restrictions for a native preparation source.
     /// This is not a complete operation capture or a business-effect checkpoint.
     pub async fn capture_http_preparation(
@@ -307,6 +322,7 @@ impl Ctx {
             operation_initial: Arc::default(),
             retained_source: Arc::default(),
             publication: Arc::default(),
+            arrived: std::time::Instant::now(),
             request_id: format!("tool:{id}"),
             now,
             headers: HeaderMap::new(),
@@ -833,8 +849,8 @@ pub(crate) fn changes_standing(route: &Route) -> bool {
     )
 }
 
-// Credential changes conflict with their own person's actions. A fresh child
-// cannot revoke authority on an existing object, and pins its parent instead.
+// Personal writers order changes to the account's credentials. Each changed credential
+// orders the actions using it. A fresh child pins its parent.
 fn lock_scope(ctx: &Ctx) -> orch_db::queries::transaction_guard::Scope {
     use orch_db::queries::transaction_guard::Scope;
     if changes_authority(&ctx.route) {
@@ -1104,19 +1120,42 @@ pub(crate) fn decode_body<B: DeserializeOwned>(route: &Route, bytes: &[u8]) -> A
     } else {
         bytes
     };
-    let mut json = serde_json::Deserializer::from_slice(bytes);
+    let normalized = if bytes.windows(6).any(|part| part == b"\\u0000") {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| faults_of("", &error.to_string()))?;
+        if storable_body::normalize(route, &mut value) != 0 {
+            Some(serde_json::to_vec(&value).map_err(ApiError::internal)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut json = serde_json::Deserializer::from_slice(normalized.as_deref().unwrap_or(bytes));
     serde_path_to_error::deserialize(&mut json)
         .map_err(|error| faults_of(&error.path().to_string(), &error.inner().to_string()))
 }
 
+fn source_text_replacements(route: &Route, bytes: &[u8]) -> u64 {
+    if !bytes.windows(6).any(|part| part == b"\\u0000") {
+        return 0;
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .map(|mut value| storable_body::normalize(route, &mut value))
+        .unwrap_or_default()
+}
+
 /// Whether a request whose commit was refused because who may do what changed meanwhile is
 /// served once more, deciding again under the new authority: an ordinary write or a change that only
-/// grants, which has done nothing outside its transaction that a second serving would repeat. Any other
-/// change of authority, a personal credential and a raw body are answered as they failed
-/// (`conflict.stale_revision`).
+/// grants, or a permission-page writer whose effects all belong to its refused transaction.
+/// These do nothing outside that transaction that a second serving would repeat. Other
+/// changes of authority, personal credentials and raw bodies are answered as they failed
+/// (`conflict.concurrent_change`).
 fn retried_after_refusal(route: &Route) -> bool {
     route.method.as_str() != "GET"
-        && (!changes_authority(route) || only_grants(route))
+        && (!changes_authority(route)
+            || only_grants(route)
+            || matches!(route.name, "PermissionPageUpdate" | "NodeDefaultsUpdate"))
         && matches!(
             route.access,
             Access::User | Access::Session | Access::Permission(_) | Access::Rule(_)
@@ -1131,6 +1170,21 @@ async fn open(
     typed_operation: bool,
     deferred_creation: bool,
 ) -> ApiResult<Ctx> {
+    let arrived = std::time::Instant::now();
+    // A TLS resumption replay may repeat a safe read, never an act. Refuse before authentication,
+    // activity, body parsing or the handler can make an effect; a completed handshake can retry.
+    if (!parts.method.is_safe() || route.path.starts_with("/auth/oidc/"))
+        && parts.headers.get_all("early-data").iter().any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| value.split(',').any(|part| part.trim() == "1"))
+        })
+    {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::RequestTooEarly,
+            "the secure handshake must finish before this action; retry without early data",
+        ));
+    }
     let ask_read = parts
         .extensions
         .get::<Arc<crate::ask::tools::ReadRequest>>()
@@ -1265,6 +1319,7 @@ async fn open(
         operation_initial: Arc::default(),
         retained_source: Arc::default(),
         publication: Arc::default(),
+        arrived,
         request_id: request_id.to_owned(),
         now,
         headers: parts.headers.clone(),
@@ -2089,8 +2144,9 @@ impl Registry {
                                 let ctx: Ctx = $ctx;
                                 let scope = lock_scope(&ctx);
                                 let work = Box::pin(handler(ctx, $query, $body));
-                                orch_db::pool::serving_watched(
+                                orch_db::pool::serving_watched_with_text(
                                     route.name,
+                                    source_text_replacements(&route,&body_bytes),
                                     transaction_guard::watch(orch_db::audit::scope_origin(
                                         audit_origin.clone(),
                                         orch_db::queries::transaction_guard::request_scope(
@@ -2300,8 +2356,9 @@ impl Registry {
         Fut: Future<Output = ApiResult<Response>> + Send + 'static,
     {
         assert!(
-            E::ROUTE.method != Method::GET && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw),
-            "a raw changing query operation retains its actual raw body declaration"
+            E::ROUTE.method != Method::GET
+                && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw | Shape::Json(_)),
+            "a raw changing query operation retains its actual body declaration"
         );
         self.on_raw_configured(
             endpoint,
@@ -2769,6 +2826,9 @@ impl Registry {
 
 #[path = "registry/contextual_read.rs"]
 pub mod contextual_read;
+
+#[path = "registry/storable_body.rs"]
+mod storable_body;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "registry/action_guard_state_tests.rs"]
