@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- light_load:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- page_budgets:: --nocapture --test-threads=1
+test -p orch-api-core --test node_presentation --test node_presentation_feed --test hierarchy_native_scopes --test node_list_operation_scopes -- --nocapture --test-threads=1
+test -p orch-authz --lib --test kept_holders

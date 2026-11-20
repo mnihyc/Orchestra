@@ -278,12 +278,13 @@ impl Ctx {
             .map_err(ApiError::internal)?;
         let site = graph.site_of(node).ok_or_else(ApiError::not_found)?;
         let kind = KeyTargetKind::Object(site.kind);
-        let frame = orch_authz::engine::Frame::load(
+        let frame = orch_authz::engine::Frame::for_permissions(
             conn,
             principal,
             orch_authz::Policy::default(),
             graph,
             std::slice::from_ref(&site),
+            &[],
             &[],
         )
         .await

@@ -53,12 +53,13 @@ pub async fn may_share(
     policy: Policy,
 ) -> Result<bool, Error> {
     let (graph, site) = things::site(conn, thing).await?;
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         Permission::ALL,
     )
     .await?;
@@ -111,12 +112,13 @@ pub async fn already_held(
         std::slice::from_ref(&site),
     )
     .await?;
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         Permission::ALL,
     )
     .await?;
@@ -284,7 +286,8 @@ async fn take(
     sites: &[Site],
 ) -> Result<Taken, Error> {
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, sites, &everything).await?;
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, sites, &[], &everything).await?;
     let now = frame.now();
     let mut keys: HashMap<(Id, Permission), HashSet<Key>> = HashMap::new();
     let mut entries: HashMap<Id, BTreeSet<(&'static str, String)>> = HashMap::new();

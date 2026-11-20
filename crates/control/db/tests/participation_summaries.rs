@@ -91,6 +91,7 @@ async fn marks(conn: &mut Conn, f: &Fixture, focus: &Focus) -> BTreeSet<(String,
         focus.subtree,
         &[f.root],
         false,
+        None,
     )
     .await
     .unwrap()
@@ -108,6 +109,37 @@ fn expected(f: &Fixture, parent: Id) -> BTreeSet<(String, Id)> {
     .into_iter()
     .map(|(kind, id)| (kind.to_owned(), id))
     .collect()
+}
+
+#[tokio::test]
+async fn a_tree_clock_and_document_edit_do_not_wait_for_unrelated_assignment_upkeep() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    let mut held = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT object_id FROM participation_object_facts ORDER BY object_kind,object_id FOR UPDATE")
+        .fetch_all(&mut *held).await.unwrap();
+    // The other transaction deliberately retains every projection row until this check ends.
+    // A lock timeout detects a dependency, independently of the runner's query execution speed.
+    sqlx::query("SET lock_timeout='1s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET tree_seq=tree_seq+1 WHERE id=$1")
+        .bind(f.deep)
+        .execute(&mut *conn)
+        .await
+        .expect("a tree clock changes no assignment or path");
+    sqlx::query("UPDATE documents SET doc_seq=doc_seq+1,title='An edited document' WHERE id=$1")
+        .bind(f.document)
+        .execute(&mut *conn)
+        .await
+        .expect("document content changes no assignment or home");
+    held.rollback().await.unwrap();
+    let facts: (Id, Id, bool) = sqlx::query_as(
+        "SELECT home_id,org_id,live FROM participation_object_facts WHERE object_kind='document' AND object_id=$1",
+    ).bind(f.document).fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(facts, (f.deep, f.root, true));
 }
 
 #[tokio::test]
@@ -366,6 +398,7 @@ async fn provider_marks(
         focus.subtree,
         &[f.root],
         selected,
+        None,
     )
     .await
     .unwrap();
@@ -492,4 +525,77 @@ async fn selected_provider_marks_match_full_owner_group_and_scope_boundaries() {
         assert_eq!(full, expected);
         assert_eq!(selected, full);
     }
+}
+
+#[tokio::test]
+async fn role_assignments_recheck_a_kept_holder_set_after_a_grant_and_its_removal() {
+    async fn destination(
+        conn: &mut Conn,
+        f: &Fixture,
+        candidate: &access::kept::HolderSets,
+    ) -> bool {
+        access::participation::marks(
+            conn,
+            f.person,
+            &[],
+            &[f.root],
+            f.at,
+            &[f.destination],
+            &[PageKey::new("node", f.destination, "live")],
+            &[f.root],
+            &[],
+            None,
+            &[f.root],
+            false,
+            Some(candidate),
+        )
+        .await
+        .unwrap()
+        .iter()
+        .any(|mark| mark.kind == "node" && mark.id == f.destination)
+    }
+
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    sqlx::query(
+        "INSERT INTO node_roles(id,node_id,subject_kind,subject_id,subject_role,role,created_by)
+        VALUES(gen_random_uuid(),$1,'role',$2,'developer','developer',$3)",
+    )
+    .bind(f.destination)
+    .bind(f.deep)
+    .bind(f.person)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let before = access::kept::holder_sets(&mut conn, f.person, f.at.get(), false, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.stamp.keepable());
+    assert!(!destination(&mut conn, &f, &before).await);
+    let grant = access::testing::give_role(
+        &mut conn,
+        f.deep,
+        "user",
+        f.person,
+        "developer",
+        f.person,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(destination(&mut conn, &f, &before).await);
+    let after = access::kept::holder_sets(&mut conn, f.person, f.at.get(), false, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(destination(&mut conn, &f, &after).await);
+    sqlx::query("UPDATE node_roles SET removed_at=$2 WHERE id=$1")
+        .bind(grant)
+        .bind(f.at.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(!destination(&mut conn, &f, &after).await);
 }

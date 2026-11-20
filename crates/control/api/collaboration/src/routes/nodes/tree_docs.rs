@@ -1,37 +1,5 @@
-//! Reading the document rows of many tree nodes with a fixed number of access statements.
+//! Reading a tree's visible nodes and document counts from the same permission data.
 
-use orch_access_contract::permissions::Permission;
+pub(crate) use orch_authz::nodes::tree_rows;
 
-use orch_access_contract::permissions::PermissionName;
-
-use orch_authz::Act;
-
-use orch_authz::Policy;
-
-use orch_authz::Principal;
-
-use orch_db::Conn;
-
-use orch_types::Id;
-
-use std::collections::HashSet;
-/// Nodes whose following documents the reader may read through the node's documents row.
-pub(crate) async fn readable(
-    conn: &mut Conn,
-    principal: &Principal,
-    nodes: &[Id],
-) -> Result<HashSet<Id>, orch_authz::Error> {
-    Ok(orch_authz::nodes::holding(
-        conn,
-        principal,
-        nodes,
-        PermissionName::Exact(Permission::DocView),
-        Act::Use,
-        Policy::default(),
-    )
-    .await?
-    .into_iter()
-    .map(|node| node.id)
-    .collect())
-}
 orch_api_base::__api_bind_f52fcb6b67!();

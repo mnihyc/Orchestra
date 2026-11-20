@@ -41,19 +41,17 @@ pub(super) async fn visible_origins(
     principal: &Principal,
     chat: &ChatRow,
 ) -> ApiResult<Vec<Id>> {
-    use orch_access_contract::permissions::PermissionName;
     let candidates = rows::posting::origins(conn, chat.id, principal.now().get()).await?;
-    let visible = nodes::holding(
+    nodes::holding_ids(
         conn,
         principal,
         &candidates,
-        PermissionName::Exact(Permission::ThreadView),
+        Permission::ThreadView,
         Act::Use,
         Policy::default(),
     )
     .await
-    .map_err(ApiError::internal)?;
-    Ok(visible.into_iter().map(|thread| thread.id).collect())
+    .map_err(ApiError::internal)
 }
 
 /// Current roster facts retained for the same snapshot's final projection.

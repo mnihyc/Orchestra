@@ -8,12 +8,12 @@ use crate::registry::OperationPlan;
 
 use orch_access_contract::key_scope::KeyTargetKind;
 #[derive(Debug, Clone, Copy)]
-struct Destination {
-    node: Id,
-    new_topic: bool,
+pub(super) struct Destination {
+    pub(super) node: Id,
+    pub(super) new_topic: bool,
 }
 
-async fn source(
+pub(super) async fn source(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
@@ -61,7 +61,7 @@ async fn may(
     ))
 }
 
-async fn destination(
+pub(super) async fn destination(
     ctx: &Ctx,
     conn: &mut Conn,
     principal: &Principal,
@@ -221,15 +221,62 @@ async fn history_range(
 pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<api::AskKeepReply> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let row = source(&ctx, &mut tx, guard.principal(), ctx.id("id")?, true).await?;
-    let person = guard.user().id();
-    if row.state != "ready" {
-        return Err(denied("Stop Ask before keeping it as a thread"));
-    }
-    let range = history_range(&mut tx, &row, body.to_turn).await?;
     let destination = *guard.operation_data::<Destination>()?;
-    let copy_boundary = crate::routes::duplicates::copy_boundary(
+    guard.check_deadline(&ctx)?;
+    let receipt = copy_in(
+        &ctx,
         &mut tx,
         guard.principal(),
+        guard.user().id(),
+        Copy {
+            row: &row,
+            body: &body,
+            destination,
+            private: true,
+        },
+    )
+    .await?;
+    super::creation::observe_keep(
+        &mut tx,
+        guard.user().id(),
+        row.id,
+        receipt.thread_id,
+        receipt.topic_id,
+    )
+    .await?;
+    guard.check_deadline(&ctx)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    crate::key_operations::publication::receipt(&ctx, &receipt)?;
+    Ok(receipt)
+}
+
+pub(super) struct Copy<'a> {
+    pub row: &'a rows::Conversation,
+    pub body: &'a api::AskKeepBody,
+    pub destination: Destination,
+    pub private: bool,
+}
+
+pub(super) async fn copy_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    person: Id,
+    copy: Copy<'_>,
+) -> ApiResult<api::AskKeepReply> {
+    let Copy {
+        row,
+        body,
+        destination,
+        private,
+    } = copy;
+    if row.state != "ready" {
+        return Err(denied("Stop the conversation before copying it"));
+    }
+    let range = history_range(conn, row, body.to_turn).await?;
+    let copy_boundary = crate::routes::duplicates::copy_boundary(
+        &mut *conn,
+        principal,
         orch_engine::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
             kind: ObjectKind::Thread,
             id: row.id,
@@ -237,11 +284,10 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         Some(destination.node),
     )
     .await?;
-    guard.check_deadline(&ctx)?;
     let topic = if destination.new_topic {
         let id = new_id();
         hierarchy::create(
-            &mut tx,
+            &mut *conn,
             &hierarchy::NewNode {
                 id,
                 kind: "topic",
@@ -256,7 +302,7 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         )
         .await?;
         orch_authz::pages::start(
-            &mut tx,
+            &mut *conn,
             orch_access_contract::pages::StoredKind::Node,
             id,
             person,
@@ -264,7 +310,7 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         )
         .await
         .map_err(ApiError::internal)?;
-        orch_engine::binding::finish_node_birth(&mut tx, id, destination.node, person, ctx.now)
+        orch_engine::binding::finish_node_birth(&mut *conn, id, destination.node, person, ctx.now)
             .await
             .map_err(ApiError::engine)?;
         id
@@ -279,27 +325,45 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
             "Choose a bounded nonempty thread title",
         ));
     }
-    if !threads::insert_thread(&mut tx, thread, topic, title, person, ctx.now).await? {
+    if !threads::insert_thread(&mut *conn, thread, topic, title, person, ctx.now).await? {
         return Err(ApiError::not_found());
     }
-    start_private(&mut tx, thread, person, guard.principal(), ctx.now).await?;
+    if private {
+        start_private(&mut *conn, thread, person, principal, ctx.now).await?;
+    } else {
+        orch_authz::pages::start(
+            conn,
+            orch_access_contract::pages::StoredKind::Node,
+            thread,
+            person,
+            Time::new(ctx.now),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    // A copy is a new conversation: its future knowledge and governance come from its actual destination.
+    let root = hierarchy::node(&mut *conn, thread)
+        .await?
+        .ok_or_else(ApiError::not_found)?
+        .org_id;
+    let same_root = root == row.root_org_id;
     rows::bind_kept(
-        &mut tx,
+        &mut *conn,
         thread,
-        row.root_org_id,
-        row.model.as_ref(),
-        row.payer_id,
+        root,
+        if same_root { row.model.as_ref() } else { None },
+        if same_root { row.payer_id } else { None },
         ctx.now,
     )
     .await?;
     if let Some(source_segment) = row.segment {
-        let binding = rows::segment_binding(&mut tx, row.id, source_segment)
+        let binding = rows::segment_binding(&mut *conn, row.id, source_segment)
             .await?
             .ok_or_else(|| {
                 ApiError::internal("The retained conversation segment has no provider")
             })?;
         let segment = new_id();
-        let mut unit = orch_engine::unit::Unit::new(&mut tx, ctx.now);
+        let mut unit = orch_engine::unit::Unit::new(&mut *conn, ctx.now);
         let seq = unit.stamp(thread).await.map_err(ApiError::internal)?;
         rows::segment(unit.conn, segment, thread, &binding, person, ctx.now, seq).await?;
         orch_engine::fork_history::copy_conversation(
@@ -314,20 +378,20 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         .map_err(ApiError::internal)?;
         unit.finish().await.map_err(ApiError::internal)?;
     }
-    rows::copy_files(&mut tx, row.id, thread, ctx.now).await?;
+    rows::copy_files(&mut *conn, row.id, thread, ctx.now).await?;
     if row.temporary {
-        rows::kept(&mut tx, row.id, thread).await?;
+        rows::kept(&mut *conn, row.id, thread).await?;
         let days = retention(
-            &mut tx,
+            &mut *conn,
             row.root_org_id,
             Some(u32::try_from(row.retention_days).map_err(ApiError::internal)?),
         )
         .await?;
-        let updated = rows::get(&mut tx, row.id, false)
+        let updated = rows::get(&mut *conn, row.id, false)
             .await?
             .ok_or_else(ApiError::not_found)?;
         rows::emit(
-            &mut tx,
+            &mut *conn,
             row.id,
             &serde_json::to_value(api::AskEventData::Conversation {
                 conversation: Box::new(header(&updated, false, days)?),
@@ -336,29 +400,24 @@ pub(super) async fn keep(ctx: Ctx, (): (), body: api::AskKeepBody) -> ApiResult<
         )
         .await?;
     }
-    orch_engine::binding::finish_thread_birth(&mut tx, thread, topic, person, ctx.now)
+    orch_engine::binding::finish_thread_birth(&mut *conn, thread, topic, person, ctx.now)
         .await
         .map_err(ApiError::engine)?;
-    super::creation::observe_keep(&mut tx, guard.user().id(), row.id, thread, topic).await?;
     if let Some(boundary) = copy_boundary {
         orch_engine::copy_out::record(
-            &mut tx,
+            &mut *conn,
             boundary,
             orch_db::audit::Actor::User(person),
-            &crate::sign_in::origin(&ctx),
+            &crate::sign_in::origin(ctx),
             thread,
             ctx.now,
         )
         .await
         .map_err(ApiError::engine)?;
     }
-    guard.check_deadline(&ctx)?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    let receipt = api::AskKeepReply {
+    Ok(api::AskKeepReply {
         conversation_id: row.id,
         thread_id: thread,
         topic_id: topic,
-    };
-    crate::key_operations::publication::receipt(&ctx, &receipt)?;
-    Ok(receipt)
+    })
 }

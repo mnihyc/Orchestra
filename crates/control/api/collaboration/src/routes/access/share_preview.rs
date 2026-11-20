@@ -505,7 +505,7 @@ async fn requested(
         Thing::Node(id) => vec![PageRef::defaults_of(PlaceRef::Node(id))],
         _ => Vec::new(),
     };
-    let frame = Frame::load_with(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,

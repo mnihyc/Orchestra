@@ -31,8 +31,6 @@ use crate::realtime::Inner;
 
 use crate::routes::nodes::tree as tree_rows;
 
-use orch_access_contract::permissions::NodePermission;
-
 use orch_access_contract::permissions::Permission;
 
 use orch_access_contract::permissions::PermissionName;
@@ -45,7 +43,7 @@ use orch_api_contract::nodes::TREE_SYNC_MAX_CHANGES;
 
 use orch_api_contract::nodes::TopicStatus;
 
-use orch_api_contract::nodes::TreeChat;
+use orch_api_contract::nodes::TreeNodeChat;
 
 use orch_api_contract::nodes::TreeNode;
 
@@ -120,6 +118,7 @@ pub(crate) async fn head(inner: &Inner, org: Id, since: Option<Seq>) -> Result<O
 /// deleted, with nothing else of it.
 fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
     TreeNode {
+        folded: None,
         activity_at: None,
         admin_access: None,
         participating: false,
@@ -138,9 +137,9 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
         tree_seq: row.tree_seq,
         topic: None,
         thread: None,
-        chat: TreeChat {
+        chat: TreeNodeChat {
             id: row.chat_id.unwrap_or_else(Id::nil),
-            seq: 0,
+            seq: None,
         },
     }
 }
@@ -167,20 +166,10 @@ pub(crate) async fn read(
         return Ok(Rows::Nothing);
     };
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-    let readable_docs =
-        crate::routes::nodes::tree_docs::readable(&mut conn, &principal, &ids).await?;
-    let listed: HashMap<Id, access::Listed> = access::holding(
-        &mut conn,
-        &principal,
-        &ids,
-        PermissionName::OfNode(NodePermission::View),
-        Act::Use,
-        Policy::default(),
-    )
-    .await?
-    .into_iter()
-    .map(|each| (each.id, each))
-    .collect();
+    let access::TreeRows {
+        listed,
+        readable_docs,
+    } = crate::routes::nodes::tree_docs::tree_rows(&mut conn, &principal, &ids).await?;
     // A private node the subscriber administers and may not view is its minimal row, as over HTTP.
     let unseen = tree_rows::unviewed(&rows, &listed);
     let managed = if unseen.is_empty() {
@@ -257,6 +246,16 @@ pub(crate) async fn read(
     )
     .await
     .map_err(Fail::other)?;
+    let chat_rows = orch_db::queries::chats::chats(
+        &mut conn,
+        &rows
+            .iter()
+            .filter_map(|row| row.chat_id)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let readable_chats =
+        orch_authz::chats::listed_access(&mut conn, &principal, &chat_rows).await?;
     let nodes: Vec<Listed<TreeNode>> = rows
         .into_iter()
         .filter_map(|row| {
@@ -268,6 +267,7 @@ pub(crate) async fn read(
                 return Some(Listed::visible(gone(&row, kind)));
             };
             Some(Listed::visible(TreeNode {
+                folded: None,
                 activity_at: Some(orch_types::Time::new(row.activity_at)),
                 admin_access: each
                     .admin_access
@@ -307,9 +307,12 @@ pub(crate) async fn read(
                         tree_rows::thread_of(&row, waiting.get(&row.id), displays.get(&row.id))
                     })
                     .flatten(),
-                chat: TreeChat {
+                chat: TreeNodeChat {
                     id: row.chat_id.unwrap_or_else(Id::nil),
-                    seq: row.chat_seq,
+                    seq: row
+                        .chat_id
+                        .filter(|id| readable_chats.contains_key(id))
+                        .map(|_| row.chat_seq),
                 },
             }))
         })
