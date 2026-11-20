@@ -62,6 +62,7 @@ async fn the_harness_lists_its_sessions(s: &Scene) {
     declares["capabilities"]["discover_sessions"] = json!(true);
     s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".to_owned(),
             descriptor: serde_json::from_value(declares.clone()).unwrap(),
@@ -404,6 +405,7 @@ fn the_machine_opens_sessions_under_the_names_it_is_given(s: &Scene) -> Opens {
                 .unwrap()
                 .push((open.mode, open.native_session_ref.clone()));
             Ok(CommandResult::SessionOpen(SessionOpenResult {
+                mcp: None,
                 native_session_ref: open
                     .native_session_ref
                     .clone()

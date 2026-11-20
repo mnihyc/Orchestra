@@ -56,7 +56,7 @@ async function currentSection(page: Page, id: string, title: string) {
 /** Keep the native update warning visible exactly once when its column folds under the unit name. */
 async function captureRuntimeWarnings(page: Page, info: TestInfo, width: number) {
   await page.setViewportSize({ width, height: 900 });
-  const table = page.getByRole('table', { name: 'Runtimes', exact: true }); await table.scrollIntoViewIfNeeded();
+  const table = page.getByRole('table', { name: 'Containers', exact: true }); await table.scrollIntoViewIfNeeded();
   await page.evaluate(async () => {
     await document.fonts.ready;
     await Promise.all(document.getAnimations().filter((animation) => { const end = animation.effect?.getComputedTiming().endTime;
@@ -265,7 +265,7 @@ test.describe('Users', () => {
 
     await openMenu(page, 'Ada Lovelace');
     await page.getByRole('menuitem', { name: 'Remove system admin…' }).click();
-    const unmake = page.getByRole('dialog', { name: /^Take away the system admin role of Ada Lovelace/ });
+    const unmake = page.getByRole('dialog', { name: /^Remove the system admin role from Ada Lovelace/ });
     await unmake.getByRole('checkbox', { name: /^This person is a system admin/ }).check();
     await unmake.getByRole('button', { name: /^Take away the role of Ada Lovelace/ }).click();
     await expect(unmake.getByText('The last system administrator cannot be removed. Name another one first.')).toBeVisible();
@@ -275,7 +275,7 @@ test.describe('Users', () => {
     await openMenu(page, 'Grace Hopper');
     await page.getByRole('menuitem', { name: 'Make system admin…' }).click();
     const grant = page.getByRole('dialog', { name: 'Make Grace Hopper a system admin?' });
-    await expect(grant.getByText('A system admin is an Admin of every org here.')).toBeVisible();
+    await expect(grant.getByText('A system admin is an Admin of every organization here.')).toBeVisible();
     await expect(grant.getByRole('button', { name: 'Make Grace Hopper a system admin' })).toBeDisabled();
     await grant.getByRole('checkbox', { name: /^I understand that a system admin can read and change everything/ }).check();
     await grant.getByRole('button', { name: 'Make Grace Hopper a system admin' }).click();
@@ -283,7 +283,7 @@ test.describe('Users', () => {
 
     await openMenu(page, 'Ada Lovelace');
     await page.getByRole('menuitem', { name: 'Remove system admin…' }).click();
-    const second = page.getByRole('dialog', { name: /^Take away the system admin role of Ada Lovelace/ });
+    const second = page.getByRole('dialog', { name: /^Remove the system admin role from Ada Lovelace/ });
     await second.getByRole('checkbox', { name: /^This person is a system admin/ }).check();
     await second.getByRole('button', { name: /^Take away the role of Ada Lovelace/ }).click();
     await expect(notices(page).getByText('Ada Lovelace is no system admin')).toBeVisible();
@@ -449,14 +449,17 @@ test.describe('Sign-in', () => {
     // Somebody who may not make a team org reads why, and is offered to join one.
     await page.getByRole('button', { name: 'Join an org' }).click();
     await expect(page.getByRole('menuitem', { name: /New org/ })).toBeDisabled();
-    await expect(page.getByText('A system admin can invite you to make a team org here')).toBeVisible();
+    await expect(page.getByText('A system admin can invite you to make a team organization here')).toBeVisible();
     await expect(page.getByRole('menuitem', { name: 'Join with a link…' })).toBeEnabled();
   });
 
   test('keeps the other settings where they are shown: confirming addresses, passwords, and what a code by mail may be for with the lock', async ({ page }) => {
     await open(page, '/admin/sign-in');
-    await page.getByRole('switch', { name: 'Ask new people to confirm their address' }).click();
-    await expect(page.getByRole('switch', { name: 'Ask new people to confirm their address' })).toBeChecked();
+    const verification = page.getByRole('switch', { name: 'Require a confirmed address to sign in' });
+    await verification.hover();
+    await expect(page.getByRole('tooltip')).toContainText('System administrators and people without an email address can sign in without confirmation. Existing sessions stay signed in.');
+    await verification.click();
+    await expect(verification).toBeChecked();
 
     // A code by mail: the two ticks are the system's own value, and the lock holds every org to it.
     const code = page.getByRole('group', { name: 'A code by mail', exact: true });
@@ -487,7 +490,7 @@ test.describe('Sign-in', () => {
     const set = page.getByText('Set for this system');
     const before = await set.count();
     expect(before).toBeGreaterThan(0);
-    await page.getByRole('button', { name: 'Put back what Orch ships' }).first().click();
+    await page.getByRole('button', { name: 'Restore the Orch default' }).first().click();
     await expect(set).toHaveCount(before - 1);
   });
 
@@ -564,7 +567,7 @@ test.describe('Hosts and runtimes', () => {
     await expect(main).toContainText('24 GiB of 64 GiB');
 
     // The system's word, changed where it is shown: every host that says nothing of its own follows it.
-    await page.getByRole('combobox', { name: 'Where a host says nothing of its own, being full' }).click();
+    await page.getByRole('combobox', { name: 'When a host is full and has no setting of its own' }).click();
     await page.getByRole('option', { name: 'Block', exact: true }).click();
     await expect(row(page, /build-box/)).toContainText('Takes nothing more');
     await expect(row(page, /build-box/)).not.toContainText('(its own choice)');
@@ -575,7 +578,7 @@ test.describe('Hosts and runtimes', () => {
     await expect(page.getByText('A whole number from 1 to 100.')).toBeVisible();
     await percent.fill('30');
     await expect(row(page, /^main/)).toContainText('Full');
-    await page.getByRole('button', { name: 'Put back what Orch ships' }).first().click();
+    await page.getByRole('button', { name: 'Restore the Orch default' }).first().click();
     await expect(page.getByRole('spinbutton', { name: 'A host counts as full from' })).toHaveValue('90');
     await expect(row(page, /^main/)).not.toContainText('Full');
   });
@@ -585,7 +588,7 @@ test.describe('Hosts and runtimes', () => {
     await expect(row(page, /Main/).first()).toContainText('Running');
     await expect(row(page, /GPU lab/).first()).toContainText('The image could not be pulled: unauthorized');
     await expect(row(page, /Claude Max runtime/)).toContainText('Behind in 2 things');
-    await expect(page.getByText('2 units are behind. Open one by its name to update it.')).toBeVisible();
+    await expect(page.getByText('2 containers are behind. Open one by its name to update it.')).toBeVisible();
     const initialViewport = page.viewportSize();
     for (const width of [1440, 400]) await captureRuntimeWarnings(page, info, width);
     if (initialViewport !== null) await page.setViewportSize(initialViewport);
@@ -717,7 +720,7 @@ test.describe('the rest of Management', () => {
     await page.getByRole('button', { name: 'New profile' }).click();
     const dialog = page.getByRole('dialog', { name: 'New profile' });
     await dialog.getByRole('textbox', { name: 'Name' }).fill('Codex for everybody');
-    await dialog.getByRole('combobox', { name: 'Adapter' }).click();
+    await dialog.getByRole('combobox', { name: 'Agent program' }).click();
     await page.getByRole('option', { name: 'Codex' }).click();
     await dialog.getByRole('button', { name: 'Make the profile' }).click();
     await expect(page.getByRole('link', { name: 'Codex for everybody' })).toBeVisible();
@@ -727,7 +730,7 @@ test.describe('the rest of Management', () => {
     await open(page, '/admin/settings');
     await expect(page.getByLabel('Search the settings')).toBeVisible();
     const sections = await currentSection(page, 'settings', 'Settings');
-    for (const [id, name] of [['email', 'Channels'], ['templates', 'System templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
+    for (const [id, name] of [['email', 'Email and channels'], ['templates', 'System templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
       const link = sections.locator(`a[data-section-id="${id}"]`);
       await expect(link).toHaveText(name); await expect(link).toHaveAttribute('href', `/admin/${id}`);
     }

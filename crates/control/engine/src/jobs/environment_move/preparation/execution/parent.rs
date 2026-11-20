@@ -446,7 +446,11 @@ pub(super) async fn host_principal(
         .filter_map(|(object, _)| {
             matches!(
                 object.kind,
-                ObjectKind::Host | ObjectKind::Template | ObjectKind::Machine | ObjectKind::Mount
+                ObjectKind::Host
+                    | ObjectKind::Template
+                    | ObjectKind::Machine
+                    | ObjectKind::Mount
+                    | ObjectKind::Pool
             )
             .then_some(*object)
         })
@@ -510,7 +514,11 @@ pub(super) async fn host_principal(
     for (object, permission) in needs {
         if matches!(
             object.kind,
-            ObjectKind::Host | ObjectKind::Template | ObjectKind::Machine | ObjectKind::Mount
+            ObjectKind::Host
+                | ObjectKind::Template
+                | ObjectKind::Machine
+                | ObjectKind::Mount
+                | ObjectKind::Pool
         ) && !orch_authz::resources::check(
             conn,
             &principal,

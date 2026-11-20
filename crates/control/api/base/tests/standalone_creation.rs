@@ -14,7 +14,7 @@ use orch_api_contract::{
     environment::{EnvironmentCreate, EnvironmentCreateResponse},
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     registry::Registry,
     testing::TestApp,
 };
@@ -41,7 +41,7 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
             orch_config::ServerConfig::default(),
         );
         let id = new_id();
-        let secret = new_token(API_TOKEN_PREFIX);
+        let secret = new_api_token(id);
         let scope = json!({"rules":[
             {"target":{"kind":"org","id":world.root,"reach":"self"},"resources":["environment"],"allow":[{"operation":"EnvironmentCreate","actions":["manage"]}]},
             {"target":{"kind":"template","id":template,"reach":"self"},"resources":["template"],"allow":[{"operation":"EnvironmentCreate","actions":["read"]}]},
@@ -76,7 +76,7 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
                 name: Some("Standalone native proof".into()),
                 home_node_id: Some(world.root),
                 template_id: Some(template),
-                host_id: Some(Some(host.id)),
+                host_id: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 ..NewEnvironment::default()
             })
             .send()
@@ -127,16 +127,38 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
                 .execute(world.pool.pool())
                 .await
                 .unwrap();
+            let mut source = world.pool.begin().await.unwrap();
+            let denied = orch_engine::jobs::provision::creator_checkpoint(
+                &mut source,
+                &row,
+                world.clock.as_ref(),
+                world.access.as_ref(),
+            )
+            .await;
+            assert!(matches!(
+                denied,
+                Err(orch_engine::EngineError::BeforeEffect(_))
+            ));
+            source.rollback().await.unwrap();
             host.added.machine.handler.release();
             let (state, _, error) = hosting::wait_over(&world, made.job_id).await;
             assert_eq!(state, "failed", "{error:?}");
+            assert_eq!(
+                error.as_ref().and_then(|error| error["code"].as_str()),
+                Some("access.denied")
+            );
             assert_eq!(
                 host.count(CommandKind::NodeRuntimeStart),
                 0,
                 "the closed origin cannot launch its next native effect"
             );
         } else {
-            host.wait_for(CommandKind::NodeRuntimeStart, 1).await;
+            tokio::select! {
+                () = host.wait_for(CommandKind::NodeRuntimeStart, 1) => {},
+                (state, _, error) = hosting::wait_over(&world, made.job_id) => {
+                    panic!("standalone provisioning ended before its native start: {state}, {error:?}");
+                }
+            }
             let runtime = host.started().unwrap();
             let _unit = hosting::enroll(&world, runtime).await;
             let (state, _, error) = hosting::wait_over(&world, made.job_id).await;
@@ -150,4 +172,154 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
             assert!(!actual.is_nil());
         }
     }
+}
+
+#[tokio::test]
+async fn losing_a_host_pool_reference_cannot_turn_an_accepted_standalone_creation_into_direct_host_use()
+ {
+    use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+    use orch_authz::ownership::{NewAccess, start_resource};
+    use orch_provider_contract::pools::{Kind, Target};
+    let clock = orch_testkit::clock::manual();
+    let world = common::World::with_clock(Arc::new(clock.clone())).await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "Retained standalone host", 32768).await;
+    let template = hosting::template(&world).await;
+    world.engine().stop();
+    let mut conn = world.pool.acquire().await.unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(world.ada),
+        Some(world.root),
+        "Retained standalone pool",
+    )
+    .await
+    .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ObjectKind::Pool,
+            id: pool,
+        },
+        world.ada,
+        NewAccess::OnlyMe,
+        world.clock.time(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}}))
+        .execute(&mut *conn).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":host.id}}))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    let token = new_id();
+    let secret = new_token(API_TOKEN_PREFIX);
+    identity::create_api_token_scoped(&mut conn, &NewApiToken {
+        id: token, user_id: world.ada, name: "Retained standalone source", token_hash: &token_hash(&secret), scopes: &[], node_id: None,
+        at: world.clock.now(), expires_at: Some(world.clock.now() + chrono::Duration::hours(1)),
+    }, Some(&json!({"rules":[{"target":{"kind":"org","id":world.root,"reach":"subtree"},"resources":["environment","template","host","pool"],"allow":[{"operation":"EnvironmentCreate","actions":["manage","read","write"]}]}]}))).await.unwrap();
+    drop(conn);
+    let mut registry = Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let app = TestApp::with_config(
+        orch_db::Db::from_pool(world.pool.pool().clone()),
+        clock,
+        registry,
+        orch_config::ServerConfig::default(),
+    );
+    let made = app
+        .call(EnvironmentCreate, &[])
+        .token(&secret)
+        .body(&NewEnvironment {
+            name: Some("Retained standalone source".into()),
+            home_node_id: Some(world.root),
+            template_id: Some(template),
+            host_id: Some(Some(Target::Pool {
+                id: pool,
+                kind: Kind::Host,
+            })),
+            ..NewEnvironment::default()
+        })
+        .send()
+        .await
+        .ok();
+    let environment = match made {
+        EnvironmentCreateResponse::Full(environment) => environment.base.id,
+        EnvironmentCreateResponse::Receipt(receipt) => receipt.environment_id,
+    };
+    let job: Id = world
+        .scalar(
+            "SELECT id FROM jobs WHERE environment_id=$1 AND kind='environment_provision'",
+            environment,
+        )
+        .await;
+    let original = orch_db::queries::jobs::job(&mut world.pool.acquire().await.unwrap(), job)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.plan["pool_choice"], json!(environment));
+    for remove_required_marker in [false, true] {
+        sqlx::query("UPDATE jobs SET plan=$2 WHERE id=$1")
+            .bind(job)
+            .bind(&original.plan)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        let mut tx = world.pool.begin().await.unwrap();
+        let row = orch_db::queries::jobs::job(&mut tx, job)
+            .await
+            .unwrap()
+            .unwrap();
+        let before = orch_engine::jobs::provision::creator_checkpoint(
+            &mut tx,
+            &row,
+            world.clock.as_ref(),
+            world.access.as_ref(),
+        )
+        .await
+        .unwrap()
+        .expect("the real accepted creator source is live");
+        before.check(world.clock.as_ref()).unwrap();
+        tx.rollback().await.unwrap();
+        let mut broken = original.plan.clone();
+        broken.as_object_mut().unwrap().remove("pool_choice");
+        if remove_required_marker {
+            broken
+                .as_object_mut()
+                .unwrap()
+                .remove("pool_choice_required");
+        }
+        sqlx::query("UPDATE jobs SET plan=$2 WHERE id=$1")
+            .bind(job)
+            .bind(broken)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        let mut tx = world.pool.begin().await.unwrap();
+        let row = orch_db::queries::jobs::job(&mut tx, job)
+            .await
+            .unwrap()
+            .unwrap();
+        let closed = orch_engine::jobs::provision::creator_checkpoint(
+            &mut tx,
+            &row,
+            world.clock.as_ref(),
+            world.access.as_ref(),
+        )
+        .await;
+        assert!(
+            closed.is_err(),
+            "missing pool evidence cannot borrow direct Host Use; required marker removed: {remove_required_marker}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    assert_eq!(host.count(CommandKind::NodeRuntimeCreate), 0);
 }

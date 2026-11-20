@@ -613,6 +613,9 @@ pub struct ProviderView {
 /// Same route result supplies dispatch planning, the inspector and the derived matrix.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Resolution {
+    /// The actual generation interface conversion, captured with this resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<crate::models::ProtocolTranslation>,
     /// Capability id.
     pub capability: String,
     /// Human capability name.
@@ -665,6 +668,8 @@ pub struct FallbackView {
     pub scope: String,
     /// Failure kind, or any when unconstrained.
     pub when: String,
+    /// An unresolved pool intent; the preview discloses neither members nor private configuration.
+    pub pool_kind: Option<crate::pools::Kind>,
     /// Provider reference only where the SAME context says it may be read.
     pub provider: Option<ProviderView>,
     /// Offering only where readable; private backend configuration is never included.
