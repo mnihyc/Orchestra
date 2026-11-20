@@ -28,7 +28,7 @@ use orch_link_contract::events::{
 };
 use orch_link_contract::streams::Stream;
 use orch_types::Id;
-use sysinfo::{MemoryRefreshKind, System};
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::ledger::Record;
 use crate::storages::Storages;
@@ -385,6 +385,7 @@ impl LoadSampler {
         if let Some(resources) = storages.pool_resources() {
             let resources = resources.ok()?;
             return Some(NodeLoad {
+                pids: None,
                 cpu_percent: resources.cpu_percent?,
                 memory_used_mb: resources.memory_used_mb?,
                 disk_used_gb: resources.disk_used_gb?,
@@ -394,8 +395,14 @@ impl LoadSampler {
         self.system.refresh_cpu_usage();
         self.system
             .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
         let (capacity, free) = storages.disk();
         Some(NodeLoad {
+            pids: i64::try_from(self.system.processes().len()).ok(),
             cpu_percent: f64::from(self.system.global_cpu_usage()) * self.cpus,
             memory_used_mb: i64::try_from(self.system.used_memory() / BYTES_PER_MB)
                 .unwrap_or(i64::MAX),
@@ -565,6 +572,9 @@ mod tests {
             runtime_id: id,
             kind: RuntimeKind::Environment,
             driver: "memory".into(),
+            system: "test".into(),
+            template: Some(serde_json::json!({})),
+            tools: vec![],
             unit: UnitRef {
                 reference: String::new(),
                 name: id.to_string(),
@@ -605,6 +615,7 @@ mod tests {
 
     fn load(cpu: f64, memory: i64, disk: i64) -> NodeLoad {
         NodeLoad {
+            pids: None,
             cpu_percent: cpu,
             memory_used_mb: memory,
             disk_used_gb: disk,

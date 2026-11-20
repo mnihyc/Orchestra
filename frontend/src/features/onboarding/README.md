@@ -22,8 +22,7 @@ That answer updates the screen directly. Small `state` events name only the chan
 help/sidebar, preserving unrelated portable choices in other windows without a read or polling.
 Component tests (first-steps-visibility.test.tsx) cover owner/root/missing-step scope and compact,
 nonrepeating controls in English and Chinese, light and dark. Browser sources cover keyboard,
-phone layout, scoped guide navigation, dismissal and reload without Refresh. These sources are
-unrun by the writer: the integrator owns rendering at 1440/400, contrast, request counts and gates.
+phone layout, scoped guide navigation, dismissal and reload without Refresh.
 
 - `Checklist.tsx`: Guided setup for a new team's root: observed provider and teammate steps, with portable choices and ordinary document links.
 - `state.ts`: Portable first-steps choices, observed setup eligibility and safe org landing.

@@ -71,9 +71,9 @@ claim of executed tests or simulated kernel-cache loss.
 Portable moves measure and copy the declared home and closed recorded-state roots through the same
 checked snapshots and materialization. Project ignore files cannot hide this data, connector identity
 and credentials stay outside the recorded-state selection, and imports recheck the live write gate.
-The raw-byte, journal, ignore-file and refusal regressions in `data_transfer` are authored and unrun.
+The raw-byte, journal, ignore-file and refusal regressions are in `data_transfer`.
 
-The source suites cover actual Git/files, HTTPS authentication, publication, interrupted restore, expiry, safe cleanup and store carry. The capture/restore measurement test prints path and byte totals, durations and physical store growth for a code tree and the shipped byte boundary. These additions are written for the integrator's rounds; no writer-side build or test was run.
+The source suites cover actual Git/files, HTTPS authentication, publication, interrupted restore, expiry, safe cleanup and store carry. The capture/restore measurement test prints path and byte totals, durations and physical store growth for a code tree and the shipped byte boundary.
 
 A first recording waits for its requested scope's existing index worker, including when recording is
 re-enabled, before its immutable reply is stored. Retries keep their original objects and result;

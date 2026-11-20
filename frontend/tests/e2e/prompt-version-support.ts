@@ -93,7 +93,6 @@ export async function versions(page: Page, existing = true, options: { windowed?
           active_continuation_id: active, execution_revision: execution },
         items: items.slice(-200), turns: [], segments: [], inputs: queue(id),
         prompt_summaries: [prompt], inputs_next_after: null, inputs_queue_revision: queueRevision, complete: true, has_older: items.length > 200 };
-      data.outline = { entries: [], next_before: null, seq: sequence, projection: scoped };
       latestThread = data.sync.thread;
       await route.fulfill({ json: data }); return;
     }
