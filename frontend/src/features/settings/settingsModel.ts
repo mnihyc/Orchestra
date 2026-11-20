@@ -200,9 +200,12 @@ export type Shape =
 const numberOrNull = (value: unknown): number | null => (typeof value === 'number' ? value : null);
 
 /** A served capability list narrows the registry's enum, including a set of enum members. */
-export function availableShape(shape: Shape, available: readonly string[] | null | undefined): Shape {
+export function availableShape(shape: Shape, available: readonly string[] | null | undefined,
+  choices?: readonly { mode: string; available: boolean; reason: string | null }[] | null): Shape {
   if (available === null || available === undefined) return shape;
-  if (shape.type === 'choice') return { ...shape, values: shape.values.filter((value) => available.includes(value)) };
+  if (shape.type === 'choice') return { ...shape, values: shape.values.filter((value) => available.includes(value)),
+    unavailable: [...(shape.unavailable ?? []).filter((held) => choices?.some((choice) => choice.mode === held.value) !== true),
+      ...(choices ?? []).filter((choice) => !choice.available).map((choice) => ({ value: choice.mode, reason: choice.reason ?? 'not_supported_by_build' }))] };
   if (shape.type === 'list') return { ...shape, item: availableShape(shape.item, available) };
   if (shape.type === 'nullable') return { ...shape, of: availableShape(shape.of, available) };
   return shape;

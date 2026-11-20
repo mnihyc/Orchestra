@@ -18,8 +18,8 @@ export function AskStatus({ conversation, stopped }: { conversation: AskConversa
 export function AskGovernance({ conversation }: { conversation: AskConversation }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  return <><span>{t('ask.retention', { days: formatNumber(conversation.retention_days, locale) })} · {t('ask.expires')} <RelativeTime at={conversation.expires_at} /></span>
-    {conversation.admin_inspectable && <span>{t('ask.adminNotice')}</span>}{conversation.inspecting && <span>{t('ask.inspection')}</span>}</>;
+  return <><span>{t('ask.retention', { count: conversation.retention_days, days: formatNumber(conversation.retention_days, locale) })} · {t('ask.expires')} <RelativeTime at={conversation.expires_at} /></span>
+    {conversation.inspecting && <span>{t('ask.inspection')}</span>}</>;
 }
 export function AskEmptyState({ loading, error, deleted, retry, fresh }: { loading: boolean; error: unknown; deleted: boolean; retry: () => void; fresh: () => void }) {
   const { t } = useTranslation();

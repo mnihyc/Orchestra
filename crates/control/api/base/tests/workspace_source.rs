@@ -138,6 +138,8 @@ async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReade
         &mut conn,
         snapshot,
         &FsRecordResult {
+            indexing: None,
+
             state: RecordState::Complete,
             tree_ref: Some("retained-native-root".into()),
             repository_head: None,
@@ -321,6 +323,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         token: None,
         creator_origin: None,
         scheduled_input: None,
+        workspace_edits: Vec::new(),
+        prepared_source: None,
         action: Action::Prepare {
             directory: thread.workspace_dir,
             source: frozen.clone(),
@@ -347,6 +351,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         .body(&EnvironmentSourcePrepareBody {
             thread_id: site.thread,
             source: None,
+            workspace_edits: None,
+            workspace_edit_revision: None,
         })
         .send()
         .await
@@ -589,6 +595,7 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
@@ -622,6 +629,7 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),

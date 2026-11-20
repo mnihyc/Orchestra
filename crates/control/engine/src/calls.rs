@@ -926,23 +926,9 @@ pub(crate) async fn apply_override(
     node: Id,
     settings: &mut crate::resolved::Resolved,
 ) -> Result<(), EngineError> {
-    let Some(row) = read(conn, node, Purpose::Agent)
-        .await?
-        .filter(|row| row.context["candidate_active"] == true && row.state != "dismissed")
-    else {
+    let Some(row) = current_override(conn, node).await? else {
         return Ok(());
     };
-    let Some(value) = row.context.get("candidate") else {
-        return Ok(());
-    };
-    let Some(thread) = threads::thread(conn, node).await? else {
-        return Ok(());
-    };
-    if row.context.get("choice").is_some()
-        && row.context["choice"] != choice_of(conn, &thread).await?
-    {
-        return Ok(());
-    }
     if row.state == "completed"
         && Policy::load(conn, node).await?.return_next
         && let Some(original) = row.context.get("original")
@@ -950,7 +936,7 @@ pub(crate) async fn apply_override(
     {
         return Ok(());
     }
-    let candidate: Candidate = serde_json::from_value(value.clone())?;
+    let candidate: Candidate = serde_json::from_value(row.context["candidate"].clone())?;
     settings.model = Some(candidate.model);
     if let Some(effort) = candidate.params.get("effort") {
         settings.effort = effort.as_str().map(str::to_owned);
@@ -964,6 +950,71 @@ pub(crate) async fn apply_override(
     Ok(())
 }
 
+async fn current_override(conn: &mut Conn, node: Id) -> Result<Option<Recovery>, EngineError> {
+    let Some(row) = read(conn, node, Purpose::Agent)
+        .await?
+        .filter(|row| row.context["candidate_active"] == true && row.state != "dismissed")
+    else {
+        return Ok(None);
+    };
+    if row.context.get("candidate").is_none() {
+        return Ok(None);
+    }
+    let Some(thread) = threads::thread(conn, node).await? else {
+        return Ok(None);
+    };
+    if row.context.get("choice").is_some()
+        && row.context["choice"] != choice_of(conn, &thread).await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(row))
+}
+
+/// Current logical route facts from the same stale-choice fence as admission; no parameters are disclosed.
+pub async fn thread_call_route(
+    conn: &mut Conn,
+    node: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<orch_api_contract::threads::ThreadCallRoute>, EngineError> {
+    use orch_api_contract::threads::{CallReturnState, CallRouteChoice, ThreadCallRoute};
+    let Some(row) = current_override(conn, node).await? else {
+        return Ok(None);
+    };
+    let candidate: Candidate = serde_json::from_value(row.context["candidate"].clone())?;
+    let original = row.context.get("original").and_then(|original| {
+        Some(CallRouteChoice {
+            provider_id: id(original, "provider_id")?,
+            model: original["model"].as_str()?.to_owned(),
+            display_name: original["display_name"].as_str().map(str::to_owned),
+        })
+    });
+    let origin_known = original.is_some();
+    let return_next = Policy::load(conn, node).await?.return_next;
+    Ok(Some(ThreadCallRoute {
+        configured: original.clone(),
+        active_override: CallRouteChoice {
+            provider_id: candidate.provider_id,
+            model: candidate.model,
+            display_name: row.context["candidate_display_name"]
+                .as_str()
+                .map(str::to_owned),
+        },
+        original,
+        return_policy: if return_next { "next_turn" } else { "stay" }.to_owned(),
+        return_state: if row.context["returning"] == true {
+            CallReturnState::Returning
+        } else if return_next && !origin_known {
+            CallReturnState::Unreported
+        } else if return_next {
+            CallReturnState::WhenReady
+        } else {
+            CallReturnState::StayOnFailover
+        },
+        observed_at: Time::new(now),
+    }))
+}
+
 /// Parameters explicitly requested by a candidate must remain eligible rather than disappear silently.
 pub(crate) fn parameters_ready(
     descriptor: &orch_agent_contract::descriptor::AgentDescriptor,
@@ -973,6 +1024,7 @@ pub(crate) fn parameters_ready(
     opening: bool,
 ) -> bool {
     use orch_agent_contract::parameters::{ParameterApply, Resolution};
+    let features = descriptor.feature_values(&settings.features);
     params.as_object().is_some_and(|params| {
         params.iter().all(|(key, value)| {
             if key == "effort" {
@@ -992,7 +1044,7 @@ pub(crate) fn parameters_ready(
                 .is_some_and(|parameter| {
                     (parameter.apply == ParameterApply::NextTurn
                         || (opening && parameter.apply == ParameterApply::NewSession))
-                        && match parameter.resolve(context, &settings.features, Some(value)) {
+                        && match parameter.resolve(context, &features, Some(value)) {
                             Resolution::Send(sent) => sent == *value,
                             Resolution::SendNothing => value.is_null(),
                             _ => false,
@@ -1947,6 +1999,7 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: crate::access::provider_purpose(purpose),
                     person: caller.user(),
                     node,
                     provider: candidate.provider_id,
@@ -1995,10 +2048,19 @@ impl Engine {
             } else {
                 None
             };
-            row.context["original"] = json!({"provider_id":thread.provider_id,"agent_id":thread.agent_id,"model":settings.model,"effort":settings.effort,"params":settings.params,"failure_kind":row.failure["code"],"rule_id":row.rule["id"],"provider_revision":provider.as_ref().map(|provider|provider.revision),"model_parameters":model.as_ref().map(|model|&model.parameters),"model_enabled":model.as_ref().map(|model|model.enabled)});
+            row.context["original"] = json!({"provider_id":thread.provider_id,"agent_id":thread.agent_id,"model":settings.model,"effort":settings.effort,"params":settings.params,"failure_kind":row.failure["code"],"rule_id":row.rule["id"],"provider_revision":provider.as_ref().map(|provider|provider.revision),"model_parameters":model.as_ref().map(|model|&model.parameters),"model_enabled":model.as_ref().map(|model|model.enabled),"display_name":model.as_ref().map(|model|&model.display_name)});
             row.context["return_next"] =
                 json!(Policy::load(unit.conn, thread.node_id).await?.return_next);
         }
+        row.context["candidate_display_name"] = json!(
+            orch_db::queries::resources::thread_engine::model(
+                unit.conn,
+                candidate.provider_id,
+                &candidate.model
+            )
+            .await?
+            .map(|model| model.display_name)
+        );
         row.context["candidate"] = json!(candidate);
         sqlx::query(
             "UPDATE model_call_recovery SET context=$2 WHERE node_id=$1 AND purpose='agent'",
