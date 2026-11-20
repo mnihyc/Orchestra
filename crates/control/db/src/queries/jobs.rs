@@ -120,12 +120,16 @@ pub struct JobRow {
     /// Where it stands.
     pub state: String,
     /// What it was asked to do, and what its runner keeps in it: the lease and a request to cancel.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub plan: Json,
     /// How far it has come.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub progress: Json,
     /// What it produced.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub result: Option<Json>,
     /// Why it failed.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub error: Option<Json>,
     /// Who made it.
     pub created_by: Option<Id>,
@@ -254,8 +258,8 @@ pub async fn insert(
     .bind(job.node_id)
     .bind(job.environment_id)
     .bind(job.provider_id)
-    .bind(job.plan)
-    .bind(job.progress)
+    .bind(orch_types::storable::encode_exact(job.plan))
+    .bind(orch_types::storable::encode_exact(job.progress))
     .bind(job.created_by)
     .bind(topic_seq)
     .bind(env_seq)
@@ -509,7 +513,15 @@ pub async fn claim(
     let taken = sqlx::query(
         "UPDATE jobs
             SET plan = jsonb_set(plan, '{runner}',
-                                 jsonb_build_object('id', $2::text, 'until', to_jsonb($3::timestamptz))),
+                                 jsonb_build_object('id', $2::text, 'until', to_jsonb($3::timestamptz),
+                                    'attempted_at', CASE WHEN plan->'runner'->>'id'=$2::text
+                                        THEN plan->'runner'->'attempted_at' ELSE to_jsonb($4::timestamptz) END,
+                                    'recovered', CASE WHEN plan->'runner'->>'id'=$2::text
+                                        THEN plan->'runner'->'recovered' ELSE to_jsonb(state<>'queued') END,
+                                    'cleanup_recovered', CASE WHEN plan->'runner'->>'id'=$2::text
+                                        THEN plan->'runner'->'cleanup_recovered'
+                                        ELSE to_jsonb(state<>'queued' AND plan ? 'abort') END,
+                                    'observed_at',to_jsonb($4::timestamptz))),
                 state = 'running', started_at = COALESCE(started_at, $4), updated_at = $4,
                 error = NULL, finished_at = NULL
           WHERE id = $1 AND (state IN ('queued', 'running') OR
@@ -526,6 +538,70 @@ pub async fn claim(
     .await?
     .rows_affected();
     Ok(taken > 0)
+}
+
+/// Publishes the current owner's renewed lease without waiting behind native work.
+/// A false result leaves the caller to roll back its opportunistic row locks.
+pub async fn publish_claim(
+    conn: &mut Conn,
+    id: Id,
+    runner: Id,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let about: Option<(Option<Id>, Option<Id>)> = sqlx::query_as(
+        "SELECT environment_id,node_id FROM jobs WHERE id=$1 AND state='running'
+         AND plan->'runner'->>'id'=$2::text AND (plan->'runner'->>'until')::timestamptz>$3
+         FOR UPDATE SKIP LOCKED",
+    )
+    .bind(id)
+    .bind(runner)
+    .bind(at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((environment, thread)) = about else {
+        return Ok(false);
+    };
+    if let Some(thread) = thread {
+        let topic: Option<Id> = sqlx::query_scalar(
+            "SELECT topic_id FROM threads WHERE node_id=$1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(thread)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(topic) = topic else {
+            return Ok(false);
+        };
+        if sqlx::query_scalar::<_, Id>(
+            "SELECT id FROM nodes WHERE id=$1 FOR NO KEY UPDATE SKIP LOCKED",
+        )
+        .bind(topic)
+        .fetch_optional(&mut *conn)
+        .await?
+        .is_none()
+            || sqlx::query_scalar::<_, Id>(
+                "SELECT node_id FROM topics WHERE node_id=$1 FOR UPDATE SKIP LOCKED",
+            )
+            .bind(topic)
+            .fetch_optional(&mut *conn)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+    }
+    if let Some(environment) = environment
+        && sqlx::query_scalar::<_, Id>(
+            "SELECT id FROM environments WHERE id=$1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(environment)
+        .fetch_optional(&mut *conn)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    stamp_job(conn, id, environment, thread, at).await?;
+    Ok(true)
 }
 
 /// Gives up the lease that `runner` holds on a job, so that another may take it at once.
@@ -556,7 +632,7 @@ pub async fn merge_plan(
 ) -> Result<(), DbError> {
     sqlx::query("UPDATE jobs SET plan = plan || $2, updated_at = $3 WHERE id = $1")
         .bind(id)
-        .bind(members)
+        .bind(orch_types::storable::encode_exact(members))
         .bind(at)
         .execute(conn)
         .await?;
@@ -576,7 +652,9 @@ pub async fn initial_files_request(
     )
     .bind(environment)
     .fetch_optional(conn)
-    .await?)
+    .await?
+    .map(orch_types::storable::decode_exact)
+    .transpose()?)
 }
 
 /// Writes how far a job has come, published on its thread, topic and environment feeds. A job that is over is
@@ -592,7 +670,7 @@ pub async fn save_progress(
           WHERE id = $1 AND state IN ('queued', 'running') RETURNING environment_id, node_id",
     )
     .bind(id)
-    .bind(progress)
+    .bind(orch_types::storable::encode_exact(progress))
     .bind(at)
     .fetch_optional(&mut *conn)
     .await?;
@@ -651,9 +729,9 @@ pub async fn finish(
     )
     .bind(id)
     .bind(to)
-    .bind(progress)
-    .bind(result)
-    .bind(error)
+    .bind(orch_types::storable::encode_exact(progress))
+    .bind(result.map(orch_types::storable::encode_exact))
+    .bind(error.map(orch_types::storable::encode_exact))
     .bind(at)
     .fetch_optional(&mut *conn)
     .await?;
@@ -872,8 +950,8 @@ pub mod forks {
         .bind(job.thread)
         .bind(job.environment)
         .bind(job.batch)
-        .bind(job.plan)
-        .bind(job.progress)
+        .bind(orch_types::storable::encode_exact(job.plan))
+        .bind(orch_types::storable::encode_exact(job.progress))
         .bind(job.created_by)
         .bind(topic_seq)
         .bind(env_seq)
@@ -992,7 +1070,15 @@ pub mod forks {
         let taken = sqlx::query(
             "UPDATE jobs
                 SET plan = jsonb_set(plan, '{runner}',
-                                     jsonb_build_object('id', $2::text, 'until', to_jsonb($3::timestamptz))),
+                                     jsonb_build_object('id', $2::text, 'until', to_jsonb($3::timestamptz),
+                                        'attempted_at', CASE WHEN plan->'runner'->>'id'=$2::text
+                                            THEN plan->'runner'->'attempted_at' ELSE to_jsonb($4::timestamptz) END,
+                                        'recovered', CASE WHEN plan->'runner'->>'id'=$2::text
+                                            THEN plan->'runner'->'recovered' ELSE to_jsonb(state<>'queued') END,
+                                        'cleanup_recovered', CASE WHEN plan->'runner'->>'id'=$2::text
+                                            THEN plan->'runner'->'cleanup_recovered'
+                                            ELSE to_jsonb(state<>'queued' AND plan ? 'abort') END,
+                                        'observed_at',to_jsonb($4::timestamptz))),
                     state = 'running', started_at = COALESCE(started_at, $4), updated_at = $4
               WHERE id = $1 AND state IN ('queued', 'running')
                 AND (plan -> 'runner' IS NULL
@@ -1041,6 +1127,7 @@ pub mod forks {
         /// Who asked for it.
         pub created_by: Id,
         /// The request, the plan as it was answered, and what carrying it out needs.
+        #[sqlx(try_from = "crate::storage::ExactJson")]
         pub plan: Json,
         /// When it goes out of date.
         pub expires_at: DateTime<Utc>,
@@ -1059,7 +1146,7 @@ pub mod forks {
         .bind(row.node_id)
         .bind(row.environment_id)
         .bind(row.created_by)
-        .bind(&row.plan)
+        .bind(orch_types::storable::encode_exact(&row.plan))
         .bind(row.expires_at)
         .bind(row.created_at)
         .execute(conn)
@@ -1368,23 +1455,45 @@ pub mod provider_jobs {
             return Ok(Queued::Running(Box::new(running)));
         }
         let progress = initial_progress(making.phases);
-        Ok(Queued::Made(Box::new(
-            super::insert(
-                conn,
-                &super::NewJob {
-                    id: orch_types::new_id(),
-                    kind: making.kind,
-                    node_id: None,
-                    environment_id: None,
-                    provider_id: Some(making.provider),
-                    plan: &making.plan,
-                    progress: &progress,
-                    created_by: making.created_by,
-                },
-                now,
+        let mut job = super::insert(
+            conn,
+            &super::NewJob {
+                id: orch_types::new_id(),
+                kind: making.kind,
+                node_id: None,
+                environment_id: None,
+                provider_id: Some(making.provider),
+                plan: &making.plan,
+                progress: &progress,
+                created_by: making.created_by,
+            },
+            now,
+        )
+        .await?;
+        if making.kind == PROVISION
+            && matches!(
+                making.plan.get("mode").and_then(Json::as_str),
+                Some("start" | "renew")
             )
-            .await?,
-        )))
+            && making.phases.iter().any(|(name, _)| *name == "start")
+        {
+            let runtime =
+                crate::queries::resources::provider_runtime::live_runtime(conn, making.provider)
+                    .await?
+                    .map(|runtime| runtime.id);
+            job.plan["runtime"] = serde_json::json!(runtime);
+            super::merge_plan(conn, job.id, &serde_json::json!({"runtime":runtime}), now).await?;
+            if let Some(runtime) = runtime {
+                crate::queries::runtime_controls::accept_job(
+                    conn,
+                    runtime,
+                    orch_types::new_id(),
+                    job.id,
+                )
+                .await?;
+            }
+        }
+        Ok(Queued::Made(Box::new(job)))
     }
 
     /// Queues the job that starts a stopped runtime so that its harness looks at the sign-in it holds,
@@ -1597,9 +1706,29 @@ mod tests {
             "a lease that has not run out is not taken"
         );
         assert!(
-            claim(&mut conn, job, one, until, now).await.unwrap(),
+            claim(
+                &mut conn,
+                job,
+                one,
+                until,
+                now + chrono::Duration::seconds(1)
+            )
+            .await
+            .unwrap(),
             "its holder renews it"
         );
+        let renewed: Json = sqlx::query_scalar("SELECT plan->'runner' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let attempted: DateTime<Utc> = renewed["attempted_at"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            attempted.timestamp_micros(),
+            now.timestamp_micros(),
+            "renewing does not replace the accepted attempt time"
+        );
+        assert_eq!(renewed["recovered"], false);
         assert!(
             runnable(&mut conn, &[kind::ENVIRONMENT_PROVISION], now, 10)
                 .await
@@ -1624,6 +1753,14 @@ mod tests {
             .await
             .unwrap()
         );
+        let recovered: Json = sqlx::query_scalar("SELECT plan->'runner' FROM jobs WHERE id=$1")
+            .bind(job)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let attempted: DateTime<Utc> = recovered["attempted_at"].as_str().unwrap().parse().unwrap();
+        assert_eq!(attempted.timestamp_micros(), later.timestamp_micros());
+        assert_eq!(recovered["recovered"], true);
         release(&mut conn, job, two, later).await.unwrap();
         assert!(claim(&mut conn, job, one, until, later).await.unwrap());
     }
@@ -1805,6 +1942,32 @@ pub mod changes {
         ).bind(provider).fetch_optional(conn).await?)
     }
 
+    /// A job that holds a provider's runtime and is not the provider's own work on it: a thread's fork, the move,
+    /// update or restart of an environment a thread of the provider is in, or a job of another kind about the
+    /// provider. Forcing a stop or a removal does not end such a job.
+    pub async fn provider_hold_besides_own(
+        conn: &mut Conn,
+        provider: Id,
+    ) -> Result<Option<JobRow>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT j.* FROM jobs j WHERE j.state IN ('queued','running') AND
+             ((j.provider_id = $1 AND NOT (j.kind = ANY($2))) OR EXISTS
+                (SELECT 1 FROM threads t WHERE t.provider_id = $1 AND
+                  ((j.kind = 'thread_fork' AND j.node_id = t.node_id)
+                   OR (j.kind IN ('environment_move','environment_recreate','environment_restart') AND j.environment_id = t.environment_id))))
+             ORDER BY j.created_at, j.id LIMIT 1",
+        )
+        .bind(provider)
+        .bind(
+            super::provider_jobs::ONE_AT_A_TIME
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>(),
+        )
+        .fetch_optional(conn)
+        .await?)
+    }
+
     /// Threads affected by a runtime change, locked in identifier order by its confirmation.
     pub async fn threads(
         conn: &mut Conn,
@@ -1892,13 +2055,13 @@ pub mod changes {
             };
         if let Some(spec)=saved.as_mut()
             && let Some(resources)=sqlx::query_scalar::<_,Json>("SELECT body->'resources' FROM commands WHERE kind='node.resources.apply' AND body->>'runtime_id'=$1::text AND state='succeeded' ORDER BY created_at DESC,id DESC LIMIT 1").bind(runtime).fetch_optional(&mut *conn).await? {spec["resources"]=resources;}
-        Ok(saved)
+        Ok(saved.map(orch_types::storable::decode_exact).transpose()?)
     }
 
     /// Builds recorded by the job that created this unit, including its connector.
     pub async fn tools_of(conn: &mut Conn, runtime: Id) -> Result<Option<Json>, DbError> {
         Ok(sqlx::query_scalar("SELECT plan -> 'tools' FROM jobs WHERE plan ->> 'runtime' = $1::text AND plan -> 'tools' IS NOT NULL AND state IN ('running','succeeded') ORDER BY created_at DESC,id DESC LIMIT 1")
-            .bind(runtime).fetch_optional(conn).await?)
+            .bind(runtime).fetch_optional(conn).await?.map(orch_types::storable::decode_exact).transpose()?)
     }
 
     /// Gives a queued replacement the move's phases and destination in the same transaction.
@@ -1910,7 +2073,7 @@ pub mod changes {
         now: DateTime<Utc>,
     ) -> Result<JobRow, DbError> {
         Ok(sqlx::query_as("UPDATE jobs SET kind = 'environment_move', plan = $2, progress = $3, updated_at = $4 WHERE id = $1 AND state = 'queued' RETURNING *")
-            .bind(id).bind(plan).bind(progress).bind(now).fetch_one(conn).await?)
+            .bind(id).bind(orch_types::storable::encode_exact(plan)).bind(orch_types::storable::encode_exact(progress)).bind(now).fetch_one(conn).await?)
     }
 
     /// The stored definitions of several runtime units, read together for fleet views.
@@ -1918,31 +2081,48 @@ pub mod changes {
         conn: &mut Conn,
         runtimes: &[Id],
     ) -> Result<Vec<(Id, Option<Json>)>, DbError> {
-        Ok(sqlx::query_as("SELECT r.id, frozen.spec || CASE WHEN live.resources IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('resources',live.resources) END
+        let rows:Vec<(Id,Option<Json>)> = sqlx::query_as("SELECT r.id, frozen.spec || CASE WHEN live.resources IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('resources',live.resources) END
           FROM runtimes r CROSS JOIN LATERAL (SELECT COALESCE(
             (SELECT c.body FROM commands c WHERE c.kind = 'node.runtime.create' AND c.body ->> 'runtime_id' = r.id::text AND c.state IN ('queued','sent','accepted','succeeded') ORDER BY c.created_at DESC,c.id DESC LIMIT 1),
             (SELECT j.plan -> 'created_spec' FROM jobs j WHERE j.plan ->> 'runtime' = r.id::text AND j.plan -> 'created_spec' IS NOT NULL ORDER BY j.created_at DESC,j.id DESC LIMIT 1))
           AS spec) frozen
           LEFT JOIN LATERAL (SELECT c.body->'resources' AS resources FROM commands c WHERE c.kind='node.resources.apply' AND c.body->>'runtime_id'=r.id::text AND c.state='succeeded' ORDER BY c.created_at DESC,c.id DESC LIMIT 1) live ON true
           WHERE r.id = ANY($1)")
-            .bind(runtimes).fetch_all(conn).await?)
+            .bind(runtimes).fetch_all(conn).await?;
+        rows.into_iter()
+            .map(|(id, value)| {
+                Ok((
+                    id,
+                    value.map(orch_types::storable::decode_exact).transpose()?,
+                ))
+            })
+            .collect()
     }
 
-    /// Every unit's frozen build list, using the same successful or running producer as a single read.
+    /// The unit, physical host machine and frozen build list from its last successful or running producer.
     pub async fn tools_among(
         conn: &mut Conn,
         runtimes: &[Id],
-    ) -> Result<Vec<(Id, Option<Json>)>, DbError> {
-        Ok(sqlx::query_as(
-            "SELECT r.id,
+    ) -> Result<Vec<(Id, Id, Option<Json>)>, DbError> {
+        let rows: Vec<(Id, Id, Option<Json>)> = sqlx::query_as(
+            "SELECT r.id, h.machine_id,
             (SELECT j.plan->'tools' FROM jobs j WHERE j.plan->>'runtime'=r.id::text
                 AND j.plan->'tools' IS NOT NULL AND j.state IN ('running','succeeded')
                 ORDER BY j.created_at DESC,j.id DESC LIMIT 1)
-            FROM runtimes r WHERE r.id=ANY($1)",
+            FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE r.id=ANY($1)",
         )
         .bind(runtimes)
         .fetch_all(conn)
-        .await?)
+        .await?;
+        rows.into_iter()
+            .map(|(id, machine, value)| {
+                Ok((
+                    id,
+                    machine,
+                    value.map(orch_types::storable::decode_exact).transpose()?,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -2022,11 +2202,17 @@ pub async fn document_notices_page(
         .bind(by).bind(document).bind(after).bind(limit).fetch_all(conn).await?)
 }
 
+macro_rules! runnable_document_notice {
+    () => {
+        "SELECT id FROM jobs WHERE kind='document_notices' AND state IN ('queued','running')
+         AND (plan#>>'{runner,until}' IS NULL OR (plan#>>'{runner,until}')::timestamptz <= $1)"
+    };
+}
 /// One next notification job; only four valid leases can precede a queued row under the durable slots.
-pub const DOCUMENT_NOTICE_RUNNABLE_SQL: &str =
-    "SELECT id FROM jobs WHERE kind='document_notices' AND state IN ('queued','running')
-    AND (plan#>>'{runner,until}' IS NULL OR (plan#>>'{runner,until}')::timestamptz <= $1)
-    ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED";
+pub const DOCUMENT_NOTICE_RUNNABLE_SQL: &str = concat!(
+    runnable_document_notice!(),
+    " ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED"
+);
 
 /// Claims work only into the four durable slots. Caller holds one transaction; concurrent engines skip its slots.
 pub async fn claim_document_notices(
@@ -2034,6 +2220,16 @@ pub async fn claim_document_notices(
     now: DateTime<Utc>,
     until: DateTime<Utc>,
 ) -> Result<Vec<(Id, Id)>, DbError> {
+    // An idle sweep does not reserve slots. A job committed after this snapshot
+    // is eligible on the next sweep. The locked claim below rechecks eligibility.
+    let runnable: bool =
+        sqlx::query_scalar(concat!("SELECT EXISTS(", runnable_document_notice!(), ")"))
+            .bind(now)
+            .fetch_one(&mut *conn)
+            .await?;
+    if !runnable {
+        return Ok(Vec::new());
+    }
     let slots: Vec<i16> = sqlx::query_scalar(
         "SELECT s.slot FROM document_notice_slots s LEFT JOIN jobs j ON j.id=s.job_id
         WHERE s.job_id IS NULL OR j.id IS NULL OR j.state NOT IN ('queued','running')

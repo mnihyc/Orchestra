@@ -1,4 +1,5 @@
 /** Current Ports policies and refused acts, with the deciding places and holders the server supplied. */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { Link } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { ActionIcon } from '@/ui/actions';
@@ -37,8 +38,8 @@ export function PortsPolicy({ data }: { data: EnvironmentPorts }) {
   const { t } = useTranslation();
   const [open, setOpen] = useViewChoice<boolean>('ports', 'policy', false);
   const reasons = data.reasons.filter((reason, index, all) => all.findIndex((other) => other.message === reason.message && other.scope?.id === reason.scope?.id && JSON.stringify(other.holders) === JSON.stringify(reason.holders)) === index);
-  return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)} className="rounded-lg border border-border p-3">
-    <summary className="cursor-pointer text-sm font-medium text-text inline-flex items-center gap-2"><ActionIcon action={open ? 'hide' : 'show'} />{t('ports.policy.title')}</summary>
+  return <details open={open} onToggle={(event) => { if (event.currentTarget.open !== open) setOpen(event.currentTarget.open); }} className="rounded-lg border border-border p-3">
+    <summary className="cursor-pointer text-sm font-medium text-text inline-flex items-center gap-2"><ActionIcon action={open ? 'hide' : 'show'} />{t('ports.policy.title')}<DeviceChoiceWriterException writer={setOpen} /></summary><DeviceExpansionFacts writer={setOpen} open={open} />
     <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
       {Object.entries(data.policy).map(([name, setting]) => <div data-item key={name} className="min-w-0 rounded-lg bg-bg-subtle p-2">
         <dt className="text-text-muted">{t(`ports.policy.${name as keyof EnvironmentPorts['policy']}`)}</dt>

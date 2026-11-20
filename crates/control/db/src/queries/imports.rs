@@ -56,8 +56,10 @@ pub struct ImportRow {
     /// The place it went into; none once the place was purged.
     pub node_id: Option<Id>,
     /// The person's identity of the request.
+    #[sqlx(try_from = "crate::storage::Text")]
     pub client_id: String,
     /// What was asked, as the request was written.
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub request: Json,
     /// The job that brings it.
     pub job_id: Option<Id>,
@@ -126,8 +128,8 @@ pub async fn insert(conn: &mut Conn, new: &NewImport<'_>) -> Result<Option<Impor
     .bind(new.id)
     .bind(new.user)
     .bind(new.node)
-    .bind(new.client_id)
-    .bind(new.request)
+    .bind(orch_types::storable::encode_key(new.client_id))
+    .bind(orch_types::storable::encode_exact(new.request))
     .bind(new.files)
     .bind(new.source_blobs)
     .bind(new.package)
@@ -146,7 +148,7 @@ pub async fn by_client(
         "SELECT {COLUMNS} FROM imports WHERE user_id = $1 AND client_id = $2"
     )))
     .bind(user)
-    .bind(client_id)
+    .bind(orch_types::storable::encode_key(client_id))
     .fetch_optional(conn)
     .await?)
 }
