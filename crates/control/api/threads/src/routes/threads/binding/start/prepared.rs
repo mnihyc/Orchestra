@@ -56,6 +56,20 @@ pub(super) async fn context(
             "choose either an existing environment or a new one",
         ));
     }
+    if !query.environment_new
+        && (query.template_id.is_some() || query.host_id.is_some() || query.host_auto)
+    {
+        return Err(invalid(
+            "environment_new",
+            "a template or host describes a new environment",
+        ));
+    }
+    if query.host_auto && query.host_id.is_some() {
+        return Err(invalid(
+            "host_id",
+            "choose either a named host or the scheduler",
+        ));
+    }
     let id = ctx.id("id")?;
     let node = require(conn, principal, id, ctx.now).await?;
     let settings = resolved::load(conn, id).await.map_err(ApiError::internal)?;
@@ -70,12 +84,19 @@ pub(super) async fn context(
         };
     // This is the ordinary context decision, before its independently scoped choice
     // lists. A key never silently substitutes a different configured primary context.
+    let work = principal.ordinary(conn).await.map_err(ApiError::internal)?;
     let existing = match query.environment_id {
-        Some(environment) => Some(chosen_environment(conn, principal, environment, id).await?),
+        Some(environment) => Some(chosen_environment(conn, &work, environment, id).await?),
         None if !query.environment_new && environment_default == EnvironmentDefault::Shared => {
-            let candidates =
-                environment_candidates(conn, principal, id, Permission::EnvironmentUse, None)
-                    .await?;
+            let candidates = environment_candidates(
+                conn,
+                principal,
+                &work,
+                id,
+                Permission::EnvironmentUse,
+                None,
+            )
+            .await?;
             match setting::<Id>(conn, Place::Node(id), keys::ENV_DEFAULT_ID)
                 .await
                 .map_err(ApiError::internal)?
@@ -93,7 +114,7 @@ pub(super) async fn context(
                         )
                         .is_none()
                     }) {
-                        Some(chosen_environment(conn, principal, environment, id).await?)
+                        Some(chosen_environment(conn, &work, environment, id).await?)
                     } else {
                         None
                     }
@@ -114,7 +135,7 @@ pub(super) async fn context(
                 .map_err(ApiError::internal)?;
             (Some((environment, offers)), vec![source])
         }
-        None => match template_ground_source(conn, principal, &node).await? {
+        None => match template_ground_source(conn, principal, &node, query.template_id).await? {
             Some((environment, offers, template)) => (
                 Some((environment, offers)),
                 vec![ObjectRef {

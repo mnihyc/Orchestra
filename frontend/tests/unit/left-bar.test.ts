@@ -97,6 +97,7 @@ const nameOfRow = (item: NavItem): string => {
       return item.node.name;
     case 'doc':
       return `doc ${item.doc.title}`;
+    case 'children':
     case 'docs':
       return `(${item.state})`;
     case 'chat':

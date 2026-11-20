@@ -258,12 +258,13 @@ pub(super) async fn materialize(
     let env = orch_db::queries::environments::thread_engine::environment(conn, environment)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let pending = orch_engine::jobs::source::preparation_pending(
-        body.prepare_source,
-        worktree.is_some(),
-        source.repository_url.is_some(),
-        env.status == "running",
-    );
+    let pending = !body.workspace_edits.is_empty()
+        || orch_engine::jobs::source::preparation_pending(
+            body.prepare_source,
+            worktree.is_some(),
+            source.repository_url.is_some(),
+            env.status == "running",
+        );
     orch_engine::operation_scope::creator_files::bind(
         conn,
         plan.shared_mut(),
@@ -391,6 +392,7 @@ pub(super) async fn materialize(
         },
         first_input: body.first_input.clone(),
         prepare_source: body.prepare_source,
+        workspace_edits: body.workspace_edits.clone(),
         worktree,
         titled_by_automation: name.is_none(),
         settings,

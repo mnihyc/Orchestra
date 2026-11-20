@@ -617,6 +617,7 @@ pub(super) async fn collide(
             )
         });
         let old = StoredCommand {
+            content_transit: false,
             id: Some(command.id),
             machine: command.machine,
             kind: command.kind.as_str().into(),
@@ -629,6 +630,7 @@ pub(super) async fn collide(
             rows::insert_command(
                 &mut *collision.link.inner.db.acquire().await?,
                 &rows::NewCommand {
+                    content_transit: false,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),
