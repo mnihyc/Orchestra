@@ -143,6 +143,7 @@ pub(crate) async fn view_with_machine_sources(
     .map_err(ApiError::internal)?
     .unwrap_or_default();
     let activity = progress.activity.get_or_insert(api::JobActivity {
+        captured_deadline: None,
         waiting_for: None,
         updated_at: Time::new(row.updated_at),
         stall_after_seconds,
@@ -157,6 +158,17 @@ pub(crate) async fn view_with_machine_sources(
     {
         // An old cached label is not evidence for the currently selected source.
         activity.waiting_for = None;
+    }
+    if row.is_open()
+        && activity.captured_deadline.as_ref().is_some_and(|deadline| {
+            row.plan
+                .pointer("/active_command/id")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<orch_types::Id>(value).ok())
+                != Some(deadline.command)
+        })
+    {
+        activity.captured_deadline = None;
     }
     activity.stall_after_seconds = stall_after_seconds;
     activity.stopping = row.is_open() && row.cancel_requested();
@@ -219,6 +231,16 @@ pub(crate) async fn view_with_machine_sources(
         None
     };
     Ok(Job {
+        handoff_result: orch_engine::jobs::fork::handoff_result(row),
+        calculation: row
+            .plan
+            .get("calculation")
+            .cloned()
+            .and_then(|calculation| serde_json::from_value(calculation).ok()),
+        memory_outcome: orch_engine::memory::outcome(row),
+        measurement_timing: orch_engine::jobs::measurement::timing(row),
+        history_coverage: orch_engine::jobs::fork::history_coverage(row),
+        lifecycle_wait: orch_engine::jobs::runner::lifecycle_wait(row),
         call_recovery,
         id: row.id,
         kind: row.kind.clone(),
@@ -354,6 +376,7 @@ pub(crate) async fn prepare_read_for(
 }
 
 fn progress_only(shown: &mut Job) {
+    shown.handoff_result = None;
     shown.node_id = None;
     shown.provider_id = None;
     shown.batch_id = None;

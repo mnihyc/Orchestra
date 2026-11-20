@@ -608,6 +608,7 @@ impl Scene {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".into(),
                     descriptor: reported.clone(),
@@ -653,6 +654,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -705,6 +707,7 @@ impl Scene {
                 }
                 Ok(CommandResult::FsFetch(
                     orch_link_contract::commands::FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
                         hash: blob,
                         size,
                         mtime_ns: at.get().timestamp_nanos_opt().ok_or_else(|| {
@@ -734,6 +737,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -1605,19 +1610,30 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
     // The common controller supplier retains commands in its owned journal, not SQL.
     // Reconstruct only the production dispatcher's storage half from that actual issued
     // command, preserving every field; no synthetic answer or successful effect is invented.
+    let issued_at = scene
+        .world
+        .commands
+        .as_engine()
+        .status(command.id)
+        .await?
+        .ok_or("the actual issued answer receipt is absent")?
+        .issued_at;
+    let deadline =
+        orch_types::Time::new(issued_at).get() + chrono::Duration::from_std(command.work)?;
     let mut conn = scene.world.pool.acquire().await?;
     assert!(
         link::insert_command(
             &mut conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: machine,
                 kind: &command.kind,
                 body: &command.body,
                 serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
+                deadline_at: deadline
             },
-            scene.world.clock.now()
+            issued_at
         )
         .await?
     );
@@ -1650,7 +1666,7 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
         .ok_or("the canonical queue body was lost")?;
     assert_eq!(
         (saved.body, saved.serial_key, saved.deadline_at),
-        (command.body, command.key, command.deadline.get())
+        (command.body, command.key, deadline)
     );
     assert_eq!(
         scene
@@ -1845,6 +1861,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +1916,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -1940,6 +1958,69 @@ async fn admitted_download(cancel_live: bool) -> Proof {
     let scene = Scene::new().await?;
     let (native, destination, _export) = download_peer(&scene, cancel_live).await?;
     let environment = scene.world.environment;
+    let observed_source = scene.directory.path().join("out/result.bin");
+    let observed_destination = destination.clone();
+    let expected_source = scene.blob;
+    let thread = scene.thread;
+    let turn = scene.start.turn_id;
+    let sealed = Mutex::new(None::<orch_link_contract::source::WorkspaceObserveResult>);
+    // This peer exposes only the original source and the download destination. Observe their
+    // real unchanged baseline before admission is released, then publish that same sealed fact.
+    scene
+        .world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, move |command| {
+            let Command::WorkspaceObserve(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "wrong native observation",
+                ));
+            };
+            if body.environment_id != environment
+                || body.thread_id != thread
+                || body.turn_id != Some(turn)
+                || body.directory != "web"
+            {
+                return Err(CommandError::new(
+                    ErrorCode::NotFound,
+                    "the native observation names another source",
+                ));
+            }
+            let mut sealed = sealed.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(requested) = &body.sealed {
+                if sealed.as_ref() != Some(requested) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the original native observation changed",
+                    ));
+                }
+                return Ok(CommandResult::WorkspaceObserve(requested.clone()));
+            }
+            if let Some(observed) = sealed.as_ref() {
+                return Ok(CommandResult::WorkspaceObserve(observed.clone()));
+            }
+            let bytes = std::fs::read(&observed_source).map_err(|_| {
+                CommandError::new(ErrorCode::NotFound, "the original native source is absent")
+            })?;
+            if Hash::of(&bytes) != expected_source
+                || !std::fs::symlink_metadata(&observed_destination)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native download namespace changed before its original observation",
+                ));
+            }
+            let observed = orch_link_contract::source::WorkspaceObserveResult {
+                end_patch_blob: None,
+                end_manifest_blob: None,
+                changed_paths: Some(Vec::new()),
+                changed_paths_complete: true,
+            };
+            *sealed = Some(observed.clone());
+            Ok(CommandResult::WorkspaceObserve(observed))
+        });
     let call = "durably-admitted-download";
     let canonical = crate::ids::tool_result(scene.thread, call);
     let (admitted, release) = gate(scene.thread, &canonical.to_string(), Point::Native);
@@ -1959,6 +2040,22 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         "SELECT c.id,e.turn_id,e.segment_id,e.continuation_id,e.answer_id,c.deadline_at,c.created_at,c.body
          FROM thread_tool_commands e JOIN commands c ON c.id=e.command_id WHERE e.thread_id=$1 AND e.answer_id=$2")
         .bind(scene.thread).bind(canonical).fetch_one(scene.world.pool.pool()).await?;
+    // The source hold uses protected metadata even when native data names a queue.
+    // Roll back the malformed row before the actual paused native issuer resumes.
+    let mut identity = scene.world.pool.begin().await?;
+    assert!(native_hold(&mut identity, id).await?.is_some());
+    let mut native_body = body.clone();
+    native_body["$key"] = json!(environment.to_string());
+    sqlx::query("UPDATE commands SET serial_key=NULL,body=$2 WHERE id=$1")
+        .bind(id)
+        .bind(native_body)
+        .execute(&mut *identity)
+        .await?;
+    assert!(
+        native_hold(&mut identity, id).await?.is_none(),
+        "native payload fields cannot restore an absent protected queue identity"
+    );
+    identity.rollback().await?;
     let owner: Id = scene
         .world
         .scalar(
@@ -2092,10 +2189,6 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         None
     };
     scene.end_original().await?;
-    common::eventually("the genuine original end-file observation finishes before the native write is issued",||async {
-        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
-            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
-    }).await;
     let accepted = scene
         .request_selection("queued-native-effect-fence")
         .await?;
@@ -2283,6 +2376,10 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         result
     };
     assert_eq!(result.thread_id, scene.thread);
+    common::eventually("the original end-file observation finishes after the admitted native effect drains",||async {
+        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
+            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
+    }).await;
     scene.selected(&accepted).await?;
     assert_eq!(scene.world.machine.handler.runs_of(id), 1);
     assert_eq!(
@@ -3347,6 +3444,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

@@ -30,7 +30,7 @@ use orch_agent_contract::session::{
 };
 use orch_link_contract::commands::{
     AgentCredentialReturn, AgentCredentialSet, AgentDiscoverSessionsResult, AgentReadSessionResult,
-    AgentStartResult, BlobRef, Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode,
+    BlobRef, Command, CommandError, CommandKind, CommandResult, Empty, ErrorCode,
     ProviderDiscoverModels, ProviderRefresh, RecordRef, Sealed, SealedCredential,
     Secret as LinkSecret, SecretOrText, SessionExportResult, SessionOpen, SessionOpenProvider,
     SessionOpenResult, SessionResyncResult, TicketSlot, TurnImage,
@@ -116,6 +116,7 @@ struct Opened {
 impl Opened {
     fn ordinary(self) -> SessionOpenResult {
         SessionOpenResult {
+            mcp: self.session.mcp,
             native_session_ref: self.session.native_session_ref,
             resumed: self.session.resumed,
             import_report: self.session.import_report,
@@ -337,6 +338,7 @@ impl AgentRole {
                 .ok_or_else(|| internal("The retained model transport disappeared."))?;
             return Ok(Opened {
                 session: orch_agent_contract::session::SessionOpened {
+                    mcp: None,
                     native_session_ref: body
                         .native_session_ref
                         .clone()
@@ -508,6 +510,7 @@ impl AgentRole {
                 .loopback
                 .set_reach(&binding.session_key, crate::loopback::Reach::of(&body));
             let spec = SessionSpec {
+                opening_command: Some(call.context.id),
                 settings,
                 session_key: binding.session_key.clone(),
                 archive,
@@ -522,6 +525,9 @@ impl AgentRole {
                 mcp: body.mcp.iter().map(|server| server.name.clone()).collect(),
                 skills,
             };
+            let recorded_directory = spec.settings.directory.clone();
+            let recorded_cwd = spec.settings.cwd.clone();
+            let recorded_capture = spec.settings.output_capture_bytes;
             let opened = process
                 .call(move |adapter| {
                     Box::pin(async move {
@@ -556,13 +562,29 @@ impl AgentRole {
                 .await;
             match opened {
                 Ok(opened) => {
-                    process.session_opened(&binding, &opened.session.native_session_ref);
+                    process.session_opened(
+                        &binding,
+                        &opened.session.native_session_ref,
+                        &recorded_directory,
+                        &recorded_cwd,
+                        recorded_capture,
+                        body.exec
+                            .executor
+                            .is_none()
+                            .then_some(body.exec.environment_id),
+                    );
                     if fenced {
                         process.fence_continuation(body.thread_id);
                     }
                     self.hosting
-                        .report_clamps(body.thread_id, body.segment_id, &call.clamps)
-                        .await;
+                        .report_sandbox(
+                            (body.thread_id, body.segment_id),
+                            None,
+                            call.context.id,
+                            body.sandbox_mode,
+                            &call.clamps,
+                        )
+                        .await?;
                     Ok(opened)
                 }
                 Err(error) => {
@@ -587,6 +609,24 @@ impl AgentRole {
     ) -> Result<Empty, CommandError> {
         let process = self.process_of_thread(body.thread_id)?;
         process.check_segment(body.thread_id, expected)?;
+        if let Some(transport) = &body.transport {
+            process.check_segment(body.thread_id, Some(transport.segment_id))?;
+            if process.native_session_ref(body.thread_id).as_deref()
+                != Some(transport.native_session_ref.as_str())
+            {
+                return Err(internal(
+                    "The model transport names another native session.",
+                ));
+            }
+            let key = process
+                .session_key(body.thread_id)
+                .ok_or_else(|| internal("The retained native session is not open."))?;
+            self.hosting
+                .services()
+                .loopback
+                .replace_llm(&key, signed(&transport.ticket))
+                .ok_or_else(|| internal("The retained model transport disappeared."))?;
+        }
         let selection = native_selection(
             self.hosting.segment_of(body.thread_id),
             body.native_action.as_ref(),
@@ -630,8 +670,14 @@ impl AgentRole {
         }
         if let Some(segment) = self.hosting.segment_of(body.thread_id) {
             self.hosting
-                .report_clamps(body.thread_id, segment, &call.clamps)
-                .await;
+                .report_sandbox(
+                    (body.thread_id, segment),
+                    Some(body.turn_id),
+                    call.context.id,
+                    body.sandbox_mode,
+                    &call.clamps,
+                )
+                .await?;
         }
         Ok(Empty {})
     }
@@ -766,15 +812,11 @@ impl RoleHandler for AgentRole {
                         .await?,
                 )
             }
-            Command::AgentStart(body) => {
-                let (harness_version, descriptor, reused) =
-                    self.hosting.start(Some(call.context.id), &body).await?;
-                CommandResult::AgentStart(AgentStartResult {
-                    reused,
-                    harness_version,
-                    descriptor,
-                })
-            }
+            Command::AgentStart(body) => CommandResult::AgentStart(
+                self.hosting
+                    .start_cancellable(Some(call.context.id), &body, &call.context.cancel)
+                    .await?,
+            ),
             Command::AgentStop(body) => {
                 let logout = if body.logout == Some(true) {
                     match self.hosting.process(body.provider_id, body.agent_id) {
@@ -1135,6 +1177,7 @@ impl RoleHandler for AgentRole {
                     body.segment_id,
                     body.cursor.as_deref(),
                     initial,
+                    body.limits,
                 )?)
             }
             Command::SessionNativeActions(body) => {
@@ -1177,6 +1220,8 @@ impl RoleHandler for AgentRole {
                         .await?,
                 )
             }
+            // Export and resync keep reading native history if Stop arrives; they never restart a turn.
+            // Steer and approval keep their exact native target and report its ordinary accepted/ended result.
             Command::SessionResync(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
                 let items = process
@@ -1227,9 +1272,7 @@ impl RoleHandler for AgentRole {
             }
             Command::TurnInterrupt(body) => {
                 let process = self.process_of_thread(body.thread_id)?;
-                process
-                    .call(|adapter| adapter.interrupt(body.thread_id, body.turn_id))
-                    .await?;
+                process.interrupt(body.thread_id, body.turn_id).await?;
                 CommandResult::TurnInterrupt(Empty {})
             }
             Command::ApprovalResolve(body) => {
@@ -1255,6 +1298,7 @@ impl RoleHandler for AgentRole {
                     &body.call_ref,
                     match (&body.error, &body.result) {
                         (Some(error), _) => Err(orch_link_contract::commands::ToolError {
+                            rate_limit: error.rate_limit.clone(),
                             code: error.code.clone(),
                             message: error.message.clone(),
                         }),
@@ -1266,6 +1310,7 @@ impl RoleHandler for AgentRole {
                 let process = self.process_of_thread(body.thread_id)?;
                 let result: Result<Json, ToolError> = match body.error {
                     Some(error) => Err(ToolError {
+                        rate_limit: error.rate_limit,
                         code: error.code,
                         message: error.message,
                     }),
@@ -1355,7 +1400,11 @@ impl RoleHandler for AgentRole {
                     self.processes_with_login(body.provider_id)?,
                     false,
                 );
-                CommandResult::ProviderDiscoverModels(source.discover(body.models.as_ref()).await)
+                CommandResult::ProviderDiscoverModels(
+                    source
+                        .discover(body.models.as_ref(), body.max_report_bytes)
+                        .await,
+                )
             }
             Command::AgentCredentialReturn(AgentCredentialReturn {
                 provider_id,

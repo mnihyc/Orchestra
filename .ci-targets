@@ -1,0 +1,1 @@
+test -p orch-api-core --test ask --test copy_out_ask --test provider_harness --test threads_drive --test realtime_environment --test terminals_connector --test kfix_binding

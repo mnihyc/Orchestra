@@ -227,8 +227,8 @@ fn assert_same_frame(before: &Accepted, after: &(Id, Cmd)) {
     assert_eq!(after.1.key, before.frame.key);
     assert_eq!(after.1.body, before.frame.body);
     assert_eq!(
-        after.1.deadline, before.frame.deadline,
-        "the retained deadline is not renewed"
+        after.1.work, before.frame.work,
+        "the retained work allowance is not renewed"
     );
 }
 
