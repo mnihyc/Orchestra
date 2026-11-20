@@ -14,6 +14,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  messages:
+    uses: ./.github/workflows/public-history.yml
+
   targeted:
     name: Targeted Rust (${{ github.ref_name }})
     runs-on: ubuntu-24.04
@@ -58,8 +61,20 @@ jobs:
       - name: Plan the assigned native fixtures
         id: native-fixtures
         run: |
+          python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_fixtures.py'
           fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --targets .ci-targets --plan)
           printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
+      - name: Install the deployment database search extensions
+        if: fromJSON(steps.native-fixtures.outputs.plan).search_extensions
+        env:
+          ORCH_CI_POSTGRES: ${{ job.services.postgres.id }}
+        # Match the full CI's pinned deployment libraries before any fixture template is migrated.
+        run: |
+          set -euo pipefail
+          docker build --tag orch-ci-database ./deploy/postgres
+          docker run --rm --entrypoint tar orch-ci-database -C /usr/local -cf - lib/postgresql/vector.so lib/postgresql/pg_bigm.so share/postgresql/extension |
+            docker exec -i "$ORCH_CI_POSTGRES" tar -C /usr/local -xf -
+          docker exec "$ORCH_CI_POSTGRES" psql -U orch -d postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_bigm;'
       - name: Install the native fixtures' C compiler
         if: ${{ fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector }}
         run: |

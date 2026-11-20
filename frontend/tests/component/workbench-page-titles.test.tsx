@@ -103,7 +103,7 @@ it.each(['en', 'zh-CN'] as const)('keeps the previously active cached title thro
   for (let index = 0; index < tabs.length; index += 1) expect(state().named.get(tabs[index]!.id)?.title).toBe(resources[index]![language === 'en' ? 1 : 2]);
   expect(new Set(mounted)).toEqual(new Set([previous.id, next.id]));
   await act(() => window.dispatchEvent(new Event('pagehide')));
-  const saved = loadWorkspace(USER, 'page').kept;
+  const saved = loadWorkspace(USER).kept;
   expect(saved?.titles?.[previous.id]?.title).toBe(resources[0][language === 'en' ? 1 : 2]);
   freshDocument(); mounted.length = 0; drawFrame(); await screen.findByTestId(`pending-body-${next.id}`);
   expect(new Set(mounted)).toEqual(new Set([next.id]));
@@ -177,7 +177,7 @@ it.each([
   ['/settings/profile', 'Profile'], ['/settings/security', 'Security'], ['/settings/notifications', 'Notifications'],
   ['/settings/tokens', 'API tokens'], ['/settings/exports', 'Your exports'], ['/settings/interface', 'Interface'],
   ['/usage?tab=performance', 'Usage'], ['/settings/your-page', 'Your page'],
-  ['/settings', 'Profile'], ['/settings/usage', 'Usage'], ['/admin/users', 'Users'],
+  ['/settings', 'Profile'], ['/settings/usage', 'Usage'], ['/admin/users', 'People'],
 ] as const)('names the same non-object page class at %s from public metadata alone', async (href, title) => {
   await setLocale('en'); const target = parsePageAddress(href);
   expect(target).not.toBeNull(); expect(staticPageName(target!, i18n.t)?.title).toBe(title);

@@ -71,6 +71,7 @@ pub async fn managed_subscription(world: &World, name: &str) -> Id {
             name,
             owner_id: world.ada,
             home_id: world.root,
+            home_overridden: false,
             harness_kind: "fake",
             agent_id: world.agent,
             config: &json!({}),

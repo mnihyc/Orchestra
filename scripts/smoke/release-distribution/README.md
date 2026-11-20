@@ -2,7 +2,7 @@
 
 `bash scripts/smoke/release-distribution/run.sh` uses the two supplied or packaged
 releases, a fresh application stack, a loopback release site and an official
-registry pinned by index digest. It installs the first release offline, fetches
+registry pinned by index digest. It installs the earlier release offline, fetches
 the next one through the updater's actual site path, and proves the absent-image
 pull by the updater's log and the consumer's registry digest. A second update
 offers a nonexistent tag and checks the actual refusal while the application
