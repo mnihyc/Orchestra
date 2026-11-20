@@ -165,6 +165,9 @@ audit_actions! {
         AuthLogin = "auth.login", trail, "Somebody signed in.";
         AuthLoginFailed = "auth.login_failed", trail, "A sign-in was tried and failed.";
         AuthLocked = "auth.locked", trail, "Wrong tries at a name filled its count, and one proof was locked for that name.";
+        AuthHumanCheckAdmitted = "auth.human_check_admitted", trail, "People were let in without a human check, because the service that makes it could not be asked.";
+        AuthHumanCheckRefused = "auth.human_check_refused", trail, "People were turned away, because the service that makes the human check could not be asked.";
+        AuthHumanCheckSecretChanged = "auth.human_check_secret_changed", trail, "The secret of the human check was set or taken away.";
         AuthLogout = "auth.logout", trail, "Somebody signed out.";
         AuthAdminModeChanged = "auth.admin_mode_changed", trail, "A browser session changed its explicit As admin switch.";
         AdminOpened = "admin.opened", trail, "An object was opened through this session's native administrative reach.";
@@ -764,6 +767,9 @@ impl AuditAction {
             | Self::AuthEmailCodeEnabled
             | Self::AuthIdentityLinked
             | Self::AuthIdentityUnlinked
+            | Self::AuthHumanCheckAdmitted
+            | Self::AuthHumanCheckRefused
+            | Self::AuthHumanCheckSecretChanged
             | Self::AuthLocked
             | Self::AuthLogin
             | Self::AuthLoginFailed

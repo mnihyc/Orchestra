@@ -1,0 +1,4 @@
+fmt
+clippy
+contracts
+test -p orch-db --lib -- queries::notifications::subscribers::tests::
