@@ -211,7 +211,7 @@ describe('what a row of a table is about', () => {
 
   it('is a person or model by its display name, never a routing subtitle, and use of nobody as such', () => {
     expect(keyLabel('person', person, t)).toBe('Bo Lindqvist');
-    expect(keyLabel('person', { person: null }, t)).toBe('Not put down to a person');
+    expect(keyLabel('person', { person: null }, t)).toBe('Not attributed to a person');
     expect(keyLabel('model', { model: 'gpt-5.4', model_display: 'GPT-5.4' }, t)).toBe('GPT-5.4');
     expect(keyLabel('model', { model: 'our-local-model', model_display: '' }, t)).toBe(t('composer.model.displayUnknown'));
     expect(keyDetail('model', { model: 'private_model_route', model_display: 'Reasoner' }, t)).toBeNull();
@@ -223,7 +223,7 @@ describe('what a row of a table is about', () => {
 
   it('is a line without a name where the reader may not see the place, and cannot be pressed', () => {
     const hidden: UsageKey = { project: { id: ID, kind: 'project', name: null, redacted: true } };
-    expect(keyLabel('project', hidden, t)).toBe('A project you cannot see');
+    expect(keyLabel('project', hidden, t)).toBe('One project you cannot see');
     expect(filterValue('project', hidden)).toBeNull();
     expect(filterValue('project', { project: { id: ID, kind: 'project', name: 'Web', redacted: false } })).toBe(ID);
   });
