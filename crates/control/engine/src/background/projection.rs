@@ -72,7 +72,7 @@ impl Engine {
             for native in &observed.items {
                 let recorded: Option<(Id, Option<Id>)> = match native.native_item_ref.as_deref() {
                     Some(reference) => sqlx::query_as("SELECT id, turn_id FROM items WHERE thread_id=$1 AND segment_id=$2 AND native_ref=$3 AND kind='tool_call' ORDER BY seq_created LIMIT 1")
-                        .bind(thread).bind(source.segment_id).bind(reference).fetch_optional(&mut *conn).await?,
+                        .bind(thread).bind(source.segment_id).bind(orch_types::storable::encode_key(reference)).fetch_optional(&mut *conn).await?,
                     None => None,
                 };
                 let preview = crate::raw_events::mask_live(

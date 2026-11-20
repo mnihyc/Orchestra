@@ -1,0 +1,5 @@
+release-checks
+test -p orch-api-core --test installation_records
+web typecheck
+web lint
+web test -- tests/component/installation-records.test.tsx tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/help-content.test.ts
