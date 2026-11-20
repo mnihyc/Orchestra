@@ -277,6 +277,11 @@ impl Connection {
         lock(&self.subs).insert(sub.tag().id, Arc::clone(sub));
     }
 
+    /// Finds only a subscription owned by this connection, without replacing it.
+    pub(crate) fn subscription(&self, id: SubId) -> Option<Arc<Subscription>> {
+        lock(&self.subs).get(&id).cloned()
+    }
+
     /// Takes away the subscription with this number, if it has one.
     pub(crate) fn take(&self, id: SubId) -> Option<Arc<Subscription>> {
         lock(&self.subs).remove(&id)
@@ -402,7 +407,7 @@ pub async fn socket(
 
 enum Heard {
     /// A frame of the protocol.
-    Frame(ClientFrame),
+    Frame(ClientFrame, usize),
     /// Something that is not, and the code to close with.
     Fault(CloseCode, &'static str),
     /// The line says the client is there, and says nothing else.
@@ -426,7 +431,7 @@ async fn hear(stream: &mut SplitStream<WebSocket>) -> Heard {
         Some(Ok(Message::Ping(_) | Message::Pong(_))) => Heard::Alive,
         Some(Ok(Message::Binary(_))) => Heard::Fault(CloseCode::Malformed, REASON_MALFORMED),
         Some(Ok(Message::Text(text))) => match ClientFrame::decode(text.as_str()) {
-            Ok(frame) => Heard::Frame(frame),
+            Ok(frame) => Heard::Frame(frame, text.len()),
             Err(fault) => Heard::Fault(fault.close_code(), REASON_MALFORMED),
         },
     }
@@ -651,7 +656,7 @@ async fn first(
         Ok(Heard::Ended) => Err(ending(CloseCode::GoingAway, "")),
         Ok(Heard::Fault(code, reason)) => Err(ending(code, reason)),
         Ok(Heard::Alive) => Err(ending(CloseCode::Malformed, REASON_MALFORMED)),
-        Ok(Heard::Frame(frame)) => match frame.first() {
+        Ok(Heard::Frame(frame, _)) => match frame.first() {
             Ok(auth) => login(app, &auth.token, surface).await,
             Err(code) => Err(ending(code, "the first frame has to be auth")),
         },
@@ -708,6 +713,7 @@ async fn serve(
         server_time: inner.clock.time(),
         access_expires_at: login.expires.map(Time::new),
         heartbeat_secs: inner.tuning.heartbeat_secs,
+        max_client_frame_bytes: u32::try_from(MAX_CLIENT_FRAME_BYTES).unwrap_or(u32::MAX),
         build: app.build.to_string(),
     });
     if let Ok(text) = ready.encode() {
@@ -809,6 +815,70 @@ async fn discard_resource(connection: &Connection, pending: super::deltas::Pendi
     }
 }
 
+/// Keep a pending projection cancellable while answering liveness, and keep polling its
+/// database work even when the socket is flushing. Pausing that work for a socket wait could
+/// leave its transaction idle and retain one of the pool's connections.
+async fn with_heartbeats<T, F, S>(
+    work: F,
+    sink: &mut S,
+    connection: &Connection,
+    inner: &Inner,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+    S: Sink<Message> + Unpin,
+{
+    let mut work = std::pin::pin!(work);
+    loop {
+        tokio::select! {
+            result = &mut work => return Some(result),
+            () = connection.outbox.heartbeat_available() => {}
+        }
+        if connection.outbox.closing().is_some() {
+            return None;
+        }
+        let mut sending = std::pin::pin!(send_heartbeat(sink, connection, inner));
+        tokio::select! {
+            result = &mut work => return Some(result),
+            sent = &mut sending => if !sent { return None; }
+        }
+    }
+}
+
+async fn send_heartbeat<S: Sink<Message> + Unpin>(
+    sink: &mut S,
+    connection: &Connection,
+    inner: &Inner,
+) -> bool {
+    if futures::future::poll_fn(|cx| std::pin::Pin::new(&mut *sink).poll_ready(cx))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    // A pong contains only the client's number. Its actual credential deadline and the
+    // connection's close still apply at physical acceptance; it carries no authority facts.
+    if !connection.authenticated_at(inner.clock.time()) {
+        return false;
+    }
+    let sent: Result<bool, S::Error> = connection.outbox.accept_heartbeat(|text| {
+        let login = lock(&connection.authenticated);
+        if login
+            .expires
+            .is_some_and(|end| Time::new(end) <= inner.clock.time())
+            || !login.current.key_deadline_allows(inner.clock.as_ref())
+        {
+            return Ok(false);
+        }
+        std::pin::Pin::new(&mut *sink).start_send(Message::Text(text.into()))?;
+        Ok(true)
+    });
+    if !matches!(sent, Ok(true)) {
+        return false;
+    }
+    sink.flush().await.is_ok()
+}
+
 async fn write(
     sink: SplitSink<WebSocket, Message>,
     connection: Arc<Connection>,
@@ -824,7 +894,7 @@ async fn write(
     let every = std::time::Duration::from_secs(u64::from(inner.tuning.heartbeat_secs.max(1)));
     let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
     beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
+    'writer: loop {
         // Keep queued projections cancellable while the real sink waits for capacity.
         connection.waiting(Half::Writer, "a frame or a close to send");
         // Only between frames: the writer takes one frame at a time and sends it whole. Leaving the wait for the
@@ -861,104 +931,205 @@ async fn write(
                     continue;
                 };
                 connection.waiting(Half::Writer, "the identity of the delivery to be refreshed");
-                match super::watches::delivery_guard(&inner, &connection).await {
-                    Ok(Some(())) => {}
-                    Ok(None) => {
-                        discard_resource(&connection, pending).await;
-                        connection.outbox.done();
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "a socket publication identity could not be refreshed");
+                #[cfg(any(test, feature = "test-support"))]
+                let delivery_feed = {
+                    let recording = inner
+                        .frame_sql_trace
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_some();
+                    // Presence and other events on the same subscription are separate frames.
+                    // Only the owed durable sync belongs to this read/publication measurement.
+                    let sync = recording
+                        && serde_json::from_str::<serde_json::Value>(&text)
+                            .is_ok_and(|frame| frame["op"] == "sync");
+                    pending.tag.filter(|_| sync).and_then(|tag| {
                         connection
-                            .outbox
-                            .close(INTERNAL_ERROR, "the socket read could not be refreshed");
-                        connection.outbox.done();
-                        continue;
-                    }
-                }
+                            .subscriptions()
+                            .into_iter()
+                            .find(|sub| sub.tag() == tag)
+                            .map(|sub| sub.feed().clone())
+                    })
+                };
+                #[cfg(not(any(test, feature = "test-support")))]
+                let delivery_feed = None;
                 let mut refresh = None;
-                let sent = if let Some(tag) = pending.tag {
-                    let sub = connection
-                        .subscriptions()
-                        .into_iter()
-                        .find(|sub| sub.tag() == tag);
-                    let Some(sub) = sub else {
-                        connection.outbox.done();
-                        continue;
-                    };
-                    connection.waiting(Half::Writer, "the lock of the subscription it sends for");
-                    let mut state = sub.state.lock().await;
-                    connection.waiting(
-                        Half::Writer,
-                        "the authorization epoch to be read, the subscription locked",
+                let sent = loop {
+                    let identity = inner.traced_frame_sql(
+                        delivery_feed.as_ref(),
+                        connection.user,
+                        "publication.identity",
+                        async {
+                            if pending.heartbeat || pending.tag.is_some() {
+                                // recheck refreshes this credential under the subscription lock
+                                // before its access decision and physical acceptance below.
+                                Ok::<_, Fail>(Some(()))
+                            } else {
+                                super::watches::delivery_guard(&inner, &connection).await
+                            }
+                        },
                     );
-                    let epoch = match super::sync::read_epoch(&inner).await {
-                        Ok(epoch) => epoch,
+                    let Some(identity) =
+                        with_heartbeats(identity, &mut sink, &connection, &inner).await
+                    else {
+                        return;
+                    };
+                    match identity {
+                        Ok(Some(())) => {}
+                        Ok(None) => {
+                            discard_resource(&connection, pending).await;
+                            connection.outbox.done();
+                            continue 'writer;
+                        }
                         Err(error) => {
-                            tracing::warn!(%error, "a socket publication epoch could not be read");
+                            tracing::warn!(%error, "a socket publication identity could not be refreshed");
                             connection
                                 .outbox
                                 .close(INTERNAL_ERROR, "the socket read could not be refreshed");
                             connection.outbox.done();
-                            continue;
+                            continue 'writer;
                         }
-                    };
-                    connection.waiting(
-                        Half::Writer,
-                        "the subscription to be asked again, its lock held",
-                    );
-                    let allowed = if pending.event
-                        && matches!(sub.feed(), orch_realtime_contract::feeds::Feed::User)
-                    {
-                        Box::pin(inner.recheck_personal(&sub, &mut state, epoch)).await
-                    } else {
-                        Box::pin(inner.recheck(&sub, &mut state, epoch)).await
-                    };
-                    match allowed {
-                        Ok(true) => {}
-                        Ok(false) => {
+                    }
+                    let sent = if let Some(tag) = pending.tag {
+                        let sub = connection
+                            .subscriptions()
+                            .into_iter()
+                            .find(|sub| sub.tag() == tag);
+                        let Some(sub) = sub else {
+                            connection.outbox.done();
+                            continue 'writer;
+                        };
+                        connection
+                            .waiting(Half::Writer, "the lock of the subscription it sends for");
+                        let prepare = async {
+                            let mut state = sub.state.lock().await;
+                            connection.waiting(
+                                Half::Writer,
+                                "the authorization epoch to be read, the subscription locked",
+                            );
+                            let epoch = inner
+                                .traced_frame_sql(
+                                    delivery_feed.as_ref(),
+                                    connection.user,
+                                    "publication.epoch",
+                                    super::sync::read_epoch(&inner),
+                                )
+                                .await?;
+                            connection.waiting(
+                                Half::Writer,
+                                "the subscription to be asked again, its lock held",
+                            );
+                            let check = async {
+                                if pending.event
+                                    && matches!(
+                                        sub.feed(),
+                                        orch_realtime_contract::feeds::Feed::User
+                                    )
+                                {
+                                    Box::pin(inner.recheck_personal(&sub, &mut state, epoch)).await
+                                } else {
+                                    Box::pin(inner.recheck(&sub, &mut state, epoch)).await
+                                }
+                            };
+                            let allowed = inner
+                                .traced_frame_sql(
+                                    delivery_feed.as_ref(),
+                                    connection.user,
+                                    "publication.access",
+                                    check,
+                                )
+                                .await?;
+                            Ok::<_, Fail>((state, epoch, allowed))
+                        };
+                        let Some(prepared) =
+                            with_heartbeats(prepare, &mut sink, &connection, &inner).await
+                        else {
+                            return;
+                        };
+                        let (mut state, epoch, allowed) = match prepared {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                tracing::warn!(%error, "a socket subscription could not be refreshed");
+                                connection.outbox.close(
+                                    INTERNAL_ERROR,
+                                    "the socket read could not be refreshed",
+                                );
+                                connection.outbox.done();
+                                continue 'writer;
+                            }
+                        };
+                        if !allowed {
                             if pending.resource {
                                 state.resource_read = None;
                             }
                             connection.outbox.done();
-                            continue;
+                            continue 'writer;
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "a socket subscription could not be refreshed");
-                            connection
-                                .outbox
-                                .close(INTERNAL_ERROR, "the socket read could not be refreshed");
-                            connection.outbox.done();
-                            continue;
+                        // A heartbeat can consume the earlier ready slot. A new wait releases the
+                        // subscription and invalidates this preparation; refresh it after capacity.
+                        match futures::FutureExt::now_or_never(futures::future::poll_fn(|cx| {
+                            std::pin::Pin::new(&mut sink).poll_ready(cx)
+                        })) {
+                            Some(Ok(())) => {}
+                            Some(Err(_)) => return,
+                            None => {
+                                drop(state);
+                                if futures::future::poll_fn(|cx| {
+                                    std::pin::Pin::new(&mut sink).poll_ready(cx)
+                                })
+                                .await
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
                         }
-                    }
-                    #[cfg(any(test, feature = "test-support"))]
-                    super::origin_read_tests::before_start(&connection.name, &text).await;
-                    let origin = connection.credential();
-                    // The async subscription lock covers final acceptance, not accepted flush.
-                    let sent = start_frame(
-                        &mut sink,
-                        &inner,
-                        &connection,
-                        pending,
-                        text,
-                        &origin,
-                        Some((&sub, epoch, state.publication_identity())),
-                    );
-                    if matches!(&sent, Ok(false)) && pending.resource {
-                        state.resource_read = None;
-                    }
-                    drop(state);
-                    if matches!(&sent, Ok(false)) {
-                        // A natural deadline may cross at the synchronous cut. Reuse the
-                        // subscription's existing refresh/reset path after releasing its lock.
-                        refresh = Some(sub);
-                    }
-                    sent
-                } else {
-                    let origin = connection.credential();
-                    start_frame(&mut sink, &inner, &connection, pending, text, &origin, None)
+                        #[cfg(any(test, feature = "test-support"))]
+                        super::origin_read_tests::before_start(&connection.name, &text).await;
+                        let origin = connection.credential();
+                        // The async subscription lock covers final acceptance, not accepted flush.
+                        let sent = start_frame(
+                            &mut sink,
+                            &inner,
+                            &connection,
+                            pending,
+                            text,
+                            &origin,
+                            Some((&sub, epoch, state.publication_identity())),
+                        );
+                        if matches!(&sent, Ok(false)) && pending.resource {
+                            state.resource_read = None;
+                        }
+                        drop(state);
+                        if matches!(&sent, Ok(false)) {
+                            // A natural deadline may cross at the synchronous cut. Reuse the
+                            // subscription's existing refresh/reset path after releasing its lock.
+                            refresh = Some(Arc::clone(&sub));
+                        }
+                        sent
+                    } else {
+                        match futures::FutureExt::now_or_never(futures::future::poll_fn(|cx| {
+                            std::pin::Pin::new(&mut sink).poll_ready(cx)
+                        })) {
+                            Some(Ok(())) => {}
+                            Some(Err(_)) => return,
+                            None => {
+                                if futures::future::poll_fn(|cx| {
+                                    std::pin::Pin::new(&mut sink).poll_ready(cx)
+                                })
+                                .await
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                        let origin = connection.credential();
+                        start_frame(&mut sink, &inner, &connection, pending, text, &origin, None)
+                    };
+                    break sent;
                 };
                 match sent {
                     Ok(true) => {
@@ -1002,66 +1173,99 @@ async fn read(
     app: App,
     connection: Arc<Connection>,
     mut stream: SplitStream<WebSocket>,
-    mut login: Login,
+    login: Login,
 ) {
     let inner = Arc::clone(&app.realtime.inner);
+    let incoming = super::incoming::Incoming::new(inner.tuning.buffer_max_bytes);
+    let last_heard = Mutex::new(inner.clock.time());
+    // Both halves belong to this reader. Ending or cancelling it drops all pending control
+    // work and its database ownership; there is no detached per-connection worker.
+    let pump = async {
+        loop {
+            let heard = tokio::select! {
+                heard = hear(&mut stream) => heard,
+                () = inner.stop.cancelled() => return ending(CloseCode::GoingAway, "the server is stopping"),
+            };
+            *lock(&last_heard) = inner.clock.time();
+            match heard {
+                Heard::Ended => return ending(CloseCode::GoingAway, ""),
+                Heard::Fault(code, reason) => return ending(code, reason),
+                Heard::Alive => {}
+                Heard::Frame(ClientFrame::Ping(ping), _) => {
+                    connection.outbox.push_pong(PongFrame { n: ping.n });
+                }
+                Heard::Frame(frame, bytes) => incoming.push(frame, bytes).await,
+            }
+        }
+    };
+    let end = tokio::select! {
+        end = pump => Some(end),
+        end = controls(&app, &connection, login, &incoming, &last_heard) => end,
+        () = inner.stop.cancelled() => Some(ending(CloseCode::GoingAway, "the server is stopping")),
+    };
+    if let Some(end) = end {
+        connection.waiting(Half::Reader, "nothing: it closed the outbox");
+        connection.outbox.close(end.0, &end.1);
+    }
+}
+
+/// Control work and credential/epoch transitions stay in their original order. The network
+/// reader can acknowledge liveness while one of these operations waits for its actual facts.
+async fn controls(
+    app: &App,
+    connection: &Arc<Connection>,
+    mut login: Login,
+    incoming: &super::incoming::Incoming,
+    last_heard: &Mutex<Time>,
+) -> Option<Ending> {
+    let inner = &app.realtime.inner;
     let mut epoch = inner.epoch.subscribe();
     let mut tick = tokio::time::interval(inner.tuning.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let mut last_heard = inner.clock.time();
     let end = loop {
         if connection.outbox.closing().is_some() {
             connection.waiting(Half::Reader, "nothing: the connection was closing");
-            return;
+            return None;
         }
         connection.waiting(
             Half::Reader,
             "a frame of the client, the clock, the epoch or the stop",
         );
         tokio::select! {
-            heard = hear(&mut stream) => {
-                last_heard = inner.clock.time();
-                match heard {
-                    Heard::Ended => break ending(CloseCode::GoingAway, ""),
-                    Heard::Fault(code, reason) => break ending(code, reason),
-                    Heard::Alive => {}
-                    Heard::Frame(frame) => {
-                        connection.waiting(Half::Reader, "a frame of the client to be handled");
-                        if let Err(refusal) = Box::pin(handle(&app, &connection, &mut login, frame)).await {
-                            break refusal;
-                        }
-                    }
+            frame = incoming.next() => {
+                connection.waiting(Half::Reader, "a frame of the client to be handled");
+                if let Err(refusal) = Box::pin(handle(app, connection, &mut login, frame)).await {
+                    break refusal;
                 }
             }
             _ = tick.tick() => {
                 let now = inner.clock.time();
                 if connection.outbox.tick() == BacklogAction::Close {
                     // The outbox closed the connection itself, with 4408.
-                    return;
+                    return None;
                 }
-                if heard_nothing_for(last_heard, now, inner.tuning.silence) {
+                if heard_nothing_for(*lock(last_heard), now, inner.tuning.silence) {
                     break ending(CloseCode::GoingAway, "nothing was heard for a minute");
                 }
-                if !connection.authenticated_at(now) { return; }
+                if !connection.authenticated_at(now) { return None; }
             }
             moved = epoch.changed() => {
                 if moved.is_err() {
-                    return;
+                    return None;
                 }
                 let now_epoch = *epoch.borrow_and_update();
                 connection.waiting(
                     Half::Reader,
                     "the subscriptions to be asked again after the epoch moved",
                 );
-                if let Err(refusal) = Box::pin(epoch_moved(&app, &connection, now_epoch)).await {
+                if let Err(refusal) = Box::pin(epoch_moved(app, connection, now_epoch)).await {
                     break refusal;
                 }
             }
             () = inner.stop.cancelled() => break ending(CloseCode::GoingAway, "the server is stopping"),
         }
     };
-    connection.waiting(Half::Reader, "nothing: it closed the outbox");
-    connection.outbox.close(end.0, &end.1);
+    Some(end)
 }
 
 /// The authorization epoch moved: the person is looked at again, and so is
@@ -1181,9 +1385,7 @@ async fn handle(
             Ok(())
         }
         ClientFrame::Ping(ping) => {
-            if let Ok(text) = ServerFrame::Pong(PongFrame { n: ping.n }).encode() {
-                connection.outbox.push_urgent(text);
-            }
+            connection.outbox.push_pong(PongFrame { n: ping.n });
             Ok(())
         }
     }
@@ -1286,6 +1488,20 @@ pub mod tests {
     /// How long the half that did not end first is given to say why: short, since no case here depends on it.
     const GRACE: Duration = Duration::from_millis(30);
 
+    async fn controls_wait_for_space_and_leave_in_order_even_with_a_smaller_byte_budget() {
+        let queue = super::super::incoming::Incoming::new(1);
+        let first = ClientFrame::Unsub(orch_realtime_contract::frames::UnsubFrame { id: 1 });
+        let second = ClientFrame::Unsub(orch_realtime_contract::frames::UnsubFrame { id: 2 });
+        // One valid control still works when its representation exceeds the configured budget.
+        queue.push(first.clone(), 32).await;
+        let push = queue.push(second.clone(), 32);
+        tokio::pin!(push);
+        assert!(futures::poll!(&mut push).is_pending());
+        assert_eq!(queue.next().await, first);
+        push.await;
+        assert_eq!(queue.next().await, second);
+    }
+
     /// A half that takes `lock` across an await that never ends, as a writer or a reader does across a read of the
     /// database that is never polled again, and says that it holds it.
     async fn holds(lock: Arc<AsyncMutex<()>>, taken: oneshot::Sender<()>) {
@@ -1359,6 +1575,12 @@ pub mod tests {
         drop(reading);
         drop(writing);
         assert!(lock.try_lock().is_ok());
+    }
+
+    #[doc(hidden)]
+    pub fn __api_run_controls_wait_for_space_and_leave_in_order_even_with_a_smaller_byte_budget()
+    -> ::futures::future::LocalBoxFuture<'static, ()> {
+        Box::pin(self::controls_wait_for_space_and_leave_in_order_even_with_a_smaller_byte_budget())
     }
 
     #[doc(hidden)]
