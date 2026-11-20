@@ -171,7 +171,10 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    const requested = query.get('limit');
+    const limit = requested !== null ? Number(requested) : world.places.rowOf(opening[1]) === undefined
+      ? 40 : Number(world.settings.valueAt(opening[1], 'threads.opening_items').value);
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], limit) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
@@ -387,7 +390,7 @@ const server = createServer((request, response) => {
     if (request.method === 'GET' && result.status < 300 && typeof view === 'string' && request.headers.authorization !== undefined) {
       try {
         const { noteView } = await import('./view-read.ts');
-        await noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
+        noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
       } catch { /* Personal bookkeeping never changes a successful native page answer. */ }
     }
     return result;
@@ -431,6 +434,7 @@ const AUTH_WITHIN_MS = 10_000;
 const shells = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('orch.terminal.v1') ? 'orch.terminal.v1' : false) });
 /** The sockets of browsers and of displays. */
 const browserSockets = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('orch.browser.v1') ? 'orch.browser.v1' : false) });
+const portSockets = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('orch.port.v1') ? 'orch.port.v1' : false) });
 const displaySockets = new WebSocketServer({ noServer: true, handleProtocols: (protocols) => (protocols.has('orch.display.v1') ? 'orch.display.v1' : false) });
 
 server.on('upgrade', (request, socket, head) => {
@@ -446,6 +450,12 @@ server.on('upgrade', (request, socket, head) => {
   if (browser?.[1] !== undefined) {
     const id = browser[1];
     browserSockets.handleUpgrade(request, socket, head, (connection) => world.browsers.attach(connection, id, address.searchParams.get('ticket') ?? ''));
+    return;
+  }
+  const port = new RegExp(`^${BASE}/ws/ports/([^/]+)$`).exec(address.pathname);
+  if (port?.[1] !== undefined) {
+    const id = port[1];
+    portSockets.handleUpgrade(request, socket, head, (connection) => world.displays.probePort(connection, id, address.searchParams.get('ticket') ?? ''));
     return;
   }
   const display = new RegExp(`^${BASE}/ws/displays/([^/]+)$`).exec(address.pathname);
@@ -520,7 +530,7 @@ live.on('connection', (socket: WebSocket) => {
         joined.clear();
         for (const { part } of world.parts) part.gone?.(subscriber);
         for (const feed of subs.values()) world.subscribers.get(feed)?.delete(subscriber);
-        subs.clear();
+        subs.clear();world.closeHierarchy(subscriber);
         for (const [id, feed] of former) subscriber.send({ op: 'resync', id, feed });
       } });
       if (frame.op === 'auth') {
@@ -531,6 +541,7 @@ live.on('connection', (socket: WebSocket) => {
           server_time: new Date().toISOString(),
           access_expires_at: new Date(Date.now() + world.accessLifeMs).toISOString(),
           heartbeat_secs: 25,
+          max_client_frame_bytes:16*1024,
           build: world.meta.build,
         });
       }
@@ -564,6 +575,12 @@ live.on('connection', (socket: WebSocket) => {
           socket.close(4403); return;
         }
         finally { pendingOpening = null; }
+        if(world.isHierarchy(feed)){
+          if(frame.window!==undefined){world.hierarchyWindow(subscriber,person,id,feed,frame.window);return;}
+          subs.set(id,feed);world.openHierarchy(subscriber,id,feed);
+          subscriber.send({op:'subscribed',id,feed,seq:null,mode:'ephemeral'});
+          return;
+        }
         const orgId = /^org:(.+)$/.exec(feed)?.[1];
         const tree = orgId === undefined ? undefined : world.trees.get(orgId);
         if (orgId === undefined || tree === undefined) {
@@ -598,6 +615,7 @@ live.on('connection', (socket: WebSocket) => {
         const feed = subs.get(id);
         if (feed !== undefined) {
           subs.delete(id);
+          world.closeHierarchy(subscriber,id);
           world.subscribers.get(feed)?.delete(subscriber);
           subscriber.send({ op: 'closed', id, feed, reason: 'unsubscribed' });
         }
@@ -613,6 +631,7 @@ live.on('connection', (socket: WebSocket) => {
   });
 
   socket.on('close', () => {
+    world.closeHierarchy(subscriber);
     clearTimeout(late);
     sockets.delete(socket);
     sessionReaders.delete(socket);

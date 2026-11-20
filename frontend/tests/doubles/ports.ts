@@ -64,7 +64,7 @@ export class PortsWorld implements Part {
  private reason(act: string, code: string, message: string): PortReason { return { act, code, message, scope: ref(ACME.org, 'org', 'Acme'), holders: [{ kind: 'user', user: userRef(this.world.people.get('ada')!.me) }] }; }
  exposed(id: string): boolean { return [...this.openings.values()].some((opening) => opening.environment_id === id && opening.desired && opening.state !== 'closed' && opening.state !== 'expired' && opening.state !== 'waiting'); }
  private expire(): void { for (const opening of this.openings.values()) if (opening.until !== null && Date.parse(opening.until) <= Date.now() && opening.state !== 'closed') { opening.state = 'expired'; opening.desired = false; opening.revision += 1; } }
- private port(person: Person, id: string, number: number): EnvironmentPort {
+ port(person: Person, id: string, number: number): EnvironmentPort {
   this.require(person, id, 'ports.view');
   const scene = this.scene(id);
   const listeners = scene.listeners.filter((row) => row.port === number).map((row) => ({ ...row, process: row.process === null ? null : { ...row.process, thread: this.world.places.denied.get(person.me.username)?.has('thread.view') === true ? null : row.process.thread } }));

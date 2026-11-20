@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test -- tests/component/port-display.test.tsx tests/unit/vnc-viewer.test.ts
+web-e2e tests/e2e/vnc.spec.ts --project=chromium --grep "a person opens a verified RFB port"

@@ -9,7 +9,8 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
-import { liveIndexReason } from '@/features/files/indexWords';
+import { RecordingNotice, recordingReason } from '@/features/source/RecordingNotice';
+import { exclusionProblem, indexingProgress, liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -22,6 +23,7 @@ import { environmentKey, environmentQuery, updateEnvironment } from '@/api/envir
 import { ApiError } from '@/api/client';
 import { DetailPages, DetailSections, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { PortsPanel } from '@/features/ports/Ports';
+import { portDisplayOpener } from '@/features/ports/PortDisplayAction';
 import { BrowsersPanel } from '@/features/browser/Browsers';
 import { portsBrowser } from '@/features/browser/View';
 import { DisplaysTab } from '@/features/vnc/View';
@@ -35,6 +37,7 @@ import { UnitCommandFailure } from '@/features/resources/UnitConfiguration';
 import { EnvironmentDoor } from '@/features/resources/environments/Doors';
 import { HarnessTrustSection } from '@/features/resources/environments/HarnessTrust';
 import { AgentReach } from '@/features/resources/environments/AgentReach';
+import { EnvironmentProviderConnections } from './ProviderConnections';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { EnvironmentReadinessNotice } from '@/features/resources/SandboxReadiness';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
@@ -134,6 +137,10 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const context = { locale, timeZone };
+  const indexing = indexingProgress(environment.facts);
+  const idleStop = environment.idle_stop_deferred ? t('inspector.environment.idle.working')
+    : environment.idle_stop_at === null ? null : formatDateTime(environment.idle_stop_at, context, now);
+  const exclusions = exclusionProblem(t, environment.facts);
   return (
     <div className="flex flex-col gap-6">
       {environment.status_detail !== null && environmentRemovalPhase(environment) === undefined && <InlineAlert tone={environment.status === 'failed' ? 'danger' : 'info'}>{environmentStatusDetail(environment, t)}</InlineAlert>}
@@ -157,10 +164,11 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
-      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
-        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
-        <p>{t('largeTree.liveCost')}</p>
-      </InlineAlert>}
+      {indexing !== null && <InlineAlert tone="info">{t('largeTree.indexing', { files: new Intl.NumberFormat().format(indexing.total), percent: indexing.percent })}</InlineAlert>}
+      {exclusions !== null && <p role="alert" className="text-xs text-danger-text">{exclusions}</p>}
+      {exclusions === null && environment.index === 'live' && <p className="text-sm text-text-muted">{liveIndexReason(t, environment.index_reason, environment.facts)} · {t('largeTree.openFolders')}</p>}
+      <RecordingNotice environmentId={environment.id} reason={exclusions === null ? recordingReason(environment.facts) ?? (environment.index === 'live' ? 'live_tree' : null) : null} />
+      <p className="text-xs text-text-muted">{t('source.restore.gitignore')}</p>
       <EnvironmentPrograms id={environment.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
@@ -181,12 +189,13 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
             ...(environment.template === null ? [] : [{ name: t('environments.overview.template'), value: <ResourceName subject={{ kind: 'template', template: environment.template }} hint={false} /> }]),
             { name: t('environments.overview.reach'), value: t('environments.overview.reachValue', { count: environment.reach }) },
             ...(environment.last_activity_at === null ? [] : [{ name: t('environments.overview.lastActivity'), value: <RelativeTime at={environment.last_activity_at} /> }]),
-            ...(environment.idle_stop_at === null ? [] : [{ name: t('environments.overview.idleStop'), value: formatDateTime(environment.idle_stop_at, context, now) }]),
+            ...(idleStop === null ? [] : [{ name: t('environments.overview.idleStop'), value: idleStop }]),
             { name: t('environments.overview.may'), value: t(`environments.holding.${holding(environment.access.permissions)}`) },
           ]}
         />
       </Section>
       <ResourceDetails><AgentReach environment={environment} /></ResourceDetails>
+      <ResourceDetails label={t('providerCreation.environmentConnections')}>{()=> <EnvironmentProviderConnections environmentId={environment.id}/>}</ResourceDetails>
     </div>
   );
 }
@@ -309,7 +318,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const toolSections = [
     { value: 'tools' as const, label: t('resourceDetails.layout.tools'), panel: <EnvironmentTools key={environment.id} environment={environment} /> },
     { value: 'terminal' as const, label: t('views.terminal.title'), panel: <EnvironmentDoor environment={environment} kind="terminal" /> },
-    ...(viewPorts ? [{ value: 'ports' as const, label: t('ports.title'), panel: <PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> }] : []),
+    ...(viewPorts ? [{ value: 'ports' as const, label: t('ports.title'), panel: <PortsPanel environment={environment} onOpenDisplay={portDisplayOpener(null, () => onTab('vnc'))} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> }] : []),
     ...(environment.access.permissions.includes('browser.view') ? [{ value: 'browsers' as const, label: t('browser.tab'), panel: <BrowsersPanel environment={environment} threadId={null} /> }] : []),
     ...(environment.access.permissions.includes('vnc.view') ? [{ value: 'vnc' as const, label: t('vnc.tab'), panel: <DisplaysTab environment={environment} threadId={null} /> }] : []),
   ];
@@ -317,7 +326,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
     { value: 'settings' as const, label: t('resourceDetails.layout.configuration'), panel: <EnvironmentSettings key={wantedKey} environment={environment} wantedKey={wantedKey} /> },
     { value: 'controls' as const, label: t('environments.overview.switches'), panel: <><Switches environment={environment} manage={manage} /><DataSourcesSummary value={environment.data_sources} /></> },
     { value: 'trust' as const, label: t('resourceDetails.layout.trust'), panel: <HarnessTrustSection environment={environment} /> },
-    ...(environment.machine !== null && manage ? [{ value: 'limits' as const, label: t('environments.tabs.limits'), panel: <MachineLimits compact machineId={environment.machine.id} bounds="environment" id="environment-limits" title={t('environments.limits.title')} lead={t('environments.limits.lead', { machine: environment.machine.name })} /> }] : []),
+    ...(environment.machine !== null && manage ? [{ value: 'limits' as const, label: t('environments.tabs.limits'), panel: <MachineLimits machineId={environment.machine.id} bounds="environment" id="environment-limits" title={t('environments.limits.title')} lead={t('environments.limits.lead', { machine: environment.machine.name })} /> }] : []),
     ...(manage ? [{ value: 'danger' as const, label: t('resourceDetails.layout.lifecycle'), panel: <DangerZone environment={environment} onEnable={() => acts.enable(environment)} onDisable={() => acts.ask('disable', environment)} /> }] : []),
   ];
   const tool = toolSections.find((section) => section.value === tab)?.value ?? 'tools';
@@ -391,7 +400,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
         />
       )}
       {shown !== 'settings' && <UnitCommandFailure jobId={environment.job?.id} detail={environment.status_detail} href={`/resources/environments/${environment.id}?tab=settings&setting=env.after_up#unit-after-up`} />}
-      {tab === 'ports' && !viewPorts ? <PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> : <Tabs label={t('environments.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} className={directDoor ? 'flex min-h-0 flex-1 flex-col' : undefined} panelClassName={directDoor ? 'min-h-0 flex-1 overflow-hidden pt-3' : 'pt-6'} />}
+      {tab === 'ports' && !viewPorts ? <PortsPanel environment={environment} onOpenDisplay={portDisplayOpener(null, () => onTab('vnc'))} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> : <Tabs label={t('environments.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} className={directDoor ? 'flex min-h-0 flex-1 flex-col' : undefined} panelClassName={directDoor ? 'min-h-0 flex-1 overflow-hidden pt-3' : 'pt-6'} />}
       {acts.dialogs}
     </Frame>
   );
