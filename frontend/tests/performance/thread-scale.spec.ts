@@ -224,7 +224,7 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   // Warm: the first thread loads the page's code; the second is then opened by the router.
   await page.goto(`/thread/${MAIN}`);
   await expect(conversation(page).getByText(/Question 8\d\d:/).first()).toBeVisible({ timeout: WAIT_MS * slow });
-  await page.getByRole('tree', { name: 'Orgs, projects, topics and threads' }).getByRole('treeitem', { name: /Upgrade deps/ }).click();
+  await page.getByRole('tree', { name: 'Organizations, projects, topics and threads' }).getByRole('treeitem', { name: /Upgrade deps/ }).click();
   const threads = mainArea(page).getByRole('link', { name: 'Main thread' });
   await expect(threads.first()).toBeVisible();
   await page.evaluate(() => {
@@ -355,3 +355,90 @@ test('a link to an item near the beginning of a conversation of five thousand it
   // The newest items are not held, so the way back to them is offered.
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
 });
+
+for (const [count, turnCount] of [[639, 15], [5_000, 120]] as const) {
+  test(`a returning reader sees the latest answer in a ${count}-item thread and can read to both ends`, async ({ page }) => {
+    test.setTimeout(TEST_MS);
+    // Keep the mix of authored messages, completed commands and answers across both history sizes.
+    for (let n = 1; n <= turnCount; n++) {
+      const size = Math.floor(n * count / turnCount) - Math.floor((n - 1) * count / turnCount);
+      const id = `history-turn-${n}`;
+      const inputId = `history-input-${n}`;
+      await emit(MAIN, {
+        items: [
+          userMessage(inputId, `Read turn ${n}`, { author: ADA, turn: id, inputId }),
+          ...Array.from({ length: size - 2 }, (_, i) => command(`${id}-step-${i}`, {
+            turn: id, command: `check part ${i}`, output: `Part ${i} passed`, exit: 0,
+          })),
+          agentMessage(`${id}-answer`, `Answer for turn ${n}`, { turn: id, phase: 'final' }),
+        ],
+        turns: [turn(id, { ordinal: n, state: 'completed', inputId })],
+      });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await signIn(page);
+    const session = await page.context().newCDPSession(page);
+    await session.send('Network.enable');
+    await session.send('Network.emulateNetworkConditions', { offline: false, latency: 200, downloadThroughput: -1, uploadThroughput: -1 });
+    const last = conversation(page).getByText(`Answer for turn ${turnCount}`, { exact: true });
+    // Take the time inside the document, independent of how often Playwright checks readiness.
+    await page.addInitScript((answerId) => {
+      const measure = () => {
+        const row = document.querySelector<HTMLElement>(`[role="log"] [data-item="${answerId}"]`);
+        const clip = row?.closest('[data-scroll-area]')?.getBoundingClientRect();
+        const box = row?.getBoundingClientRect();
+        if (box && clip && box.height > 0 && Math.min(box.bottom, clip.bottom) > Math.max(box.top, clip.top)) {
+          performance.mark('latest-answer-visible');
+        } else requestAnimationFrame(measure);
+      };
+      requestAnimationFrame(measure);
+    }, `history-turn-${turnCount}-answer`);
+    await page.goto(`/thread/${MAIN}`, { waitUntil: 'commit' });
+    const firstScreen = async () => {
+      await page.waitForFunction(() => performance.getEntriesByName('latest-answer-visible').length > 0);
+      return page.evaluate((threadId) => {
+        const visible = performance.getEntriesByName('latest-answer-visible')[0]!.startTime;
+        const resources = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).filter((entry) => entry.responseEnd <= visible);
+        const opening = resources.find((entry) => {
+          const path = new URL(entry.name).pathname;
+          return path === `/api/v1/threads/${threadId}/opening` || path === `/api/v1/auth/session/thread/${threadId}`;
+        });
+        const words = resources.filter((entry) => new URL(entry.name).pathname.startsWith('/assets/words/'))
+          .map((entry) => ({ url: entry.name, bytes: entry.transferSize }));
+        return { visible, words, openingStart: opening?.startTime ?? null, openingEnd: opening?.responseEnd ?? null };
+      }, MAIN);
+    };
+    const cold = await firstScreen();
+    await page.reload({ waitUntil: 'commit' });
+    const warm = await firstScreen();
+    report('latest answer at 200 ms RTT', { count, cold: cold.visible, warm: warm.visible });
+    const previousWords = new Set(cold.words.map(({ url }) => url));
+    const reusedWords = warm.words.filter(({ url }) => previousWords.has(url));
+    const wordBytes = reusedWords.reduce((sum, { bytes }) => sum + bytes, 0);
+    report('returning visit before the latest answer', { count, openingStart: warm.openingStart, openingEnd: warm.openingEnd,
+      drawAfterOpening: warm.openingEnd === null ? null : warm.visible - warm.openingEnd, reusedWordFiles: reusedWords.length, wordBytes });
+
+    const log = conversation(page);
+    let peakHeapMiB = 0;
+    const sampleHeap = async () => {
+      const usage = await session.send('Runtime.getHeapUsage');
+      peakHeapMiB = Math.max(peakHeapMiB, usage.usedSize / 1_048_576);
+    };
+    await sampleHeap();
+    // A folded page can fit entirely in the viewport. Home still asks for older history there.
+    const first = log.getByText('Read turn 1', { exact: true });
+    await log.focus();
+    await expect(async () => {
+      await log.press('Home');
+      await sampleHeap();
+      await expect(first).toBeInViewport({ timeout: 250 });
+    }).toPass({ timeout: READ_ALL_MS, intervals: [250] });
+    await log.press('End');
+    await expect(last).toBeInViewport();
+    await sampleHeap();
+    report('heap sampled from the latest answer to the start and back', { count, peakHeapMiB });
+    expect(peakHeapMiB).toBeLessThan(BUDGET.heapMb);
+    expect(wordBytes, 'a returning reader reuses previously loaded translations without a transfer').toBe(0);
+    expect(warm.visible, 'navigation to the latest answer on a returning visit').toBeLessThanOrEqual(1_000);
+  });
+}
