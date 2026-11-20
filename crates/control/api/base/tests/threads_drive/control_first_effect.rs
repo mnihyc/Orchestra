@@ -173,7 +173,7 @@ async fn duplicate_inbox_rows_leave_the_first_effect_boundary_for_the_next_real_
         at: s.rig.world.now(),
     };
     assert!(announce(&mut tx, &row).await.unwrap().is_some());
-    let before: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id=$1")
+    let before: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
         .bind(s.ada.id())
         .fetch_one(&mut *tx)
         .await
@@ -201,7 +201,7 @@ async fn duplicate_inbox_rows_leave_the_first_effect_boundary_for_the_next_real_
     };
     assert!(announce_with(&mut tx, &fresh, Some(check)).await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let after: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id=$1")
+    let after: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
         .bind(s.ada.id())
         .fetch_one(&mut *tx)
         .await

@@ -155,11 +155,14 @@ pub(super) fn projection(
 
 /// Current model Use operands shared by wire-backed and native program helpers.
 pub(super) struct ModelUse<'a> {
+    pub purpose: orch_access_contract::permissions::UsagePurpose,
     pub place: Id,
     pub provider: Id,
     pub offering: &'a str,
     pub groups: &'a [String],
     pub effort: Option<&'a str>,
+    pub pool: Option<&'a crate::resource_choice::ProviderSelection>,
+    pub in_thread: bool,
 }
 
 pub(super) async fn offering_use(
@@ -169,34 +172,73 @@ pub(super) async fn offering_use(
     clock: &dyn Clock,
 ) -> Result<Option<Option<Id>>, EngineError> {
     let principal = Principal::load(conn, caller.clone(), clock.time()).await?;
-    let policies = crate::access::resource_policies(conn, request.provider).await?;
-    let usable = orch_authz::usable::usable(
-        conn,
-        &principal,
-        request.provider,
-        Some(request.place),
-        &policies,
-    )
-    .await?;
-    let Some(granted) = usable.granted() else {
-        return Ok(None);
+    let policies = if let Some(pool) = request.pool {
+        crate::access::resource_policies_for_choice(
+            conn,
+            &[request.provider],
+            pool.selection().path,
+        )
+        .await?
+    } else {
+        crate::access::resource_policies(conn, request.provider).await?
     };
-    // One entry has to allow the model and the effort together, and an entry that names efforts
-    // needs one to be asked for.
-    let place = crate::access::thread_place(conn, request.place).await?;
-    let allowing: Vec<_> = granted
-        .allowing(&orch_authz::options::Wanted {
-            model: Some((request.offering, request.groups)),
-            effort: request.effort,
-            at: place.as_ref(),
-            ..orch_authz::options::Wanted::default()
-        })
-        .into_iter()
-        .filter(|allowance| allowance.provider.efforts.is_none() || request.effort.is_some())
-        .collect();
-    if allowing.is_empty() {
-        return Ok(None);
-    }
+    let place = if request.in_thread {
+        crate::access::thread_place(conn, request.place).await?
+    } else {
+        None
+    };
+    let wanted = orch_authz::options::Wanted {
+        purpose: request.purpose,
+        model: Some((request.offering, request.groups)),
+        effort: request.effort,
+        at: place.as_ref(),
+        ..Default::default()
+    };
+    let entry = if let Some(pool) = request.pool {
+        if pool.purpose() != request.purpose
+            || !pool.matches_request(request.provider, Some(request.offering))
+        {
+            return Ok(None);
+        }
+        let Some(contribution) = orch_authz::pools::provider_choice(
+            conn,
+            &principal,
+            pool.selection().path,
+            pool.selection().leaf,
+            Some(request.place),
+            &wanted,
+            pool.purpose().grant(),
+            &policies,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        contribution.member_entry()
+    } else {
+        let usable = orch_authz::usable::usable(
+            conn,
+            &principal,
+            request.provider,
+            Some(request.place),
+            &policies,
+        )
+        .await?;
+        let Some(granted) = usable.granted() else {
+            return Ok(None);
+        };
+        // One entry has to allow the model and the effort together, and an entry that names efforts
+        // needs one to be asked for.
+        let allowing: Vec<_> = granted
+            .allowing(&wanted)
+            .into_iter()
+            .filter(|allowance| allowance.provider.efforts.is_none() || request.effort.is_some())
+            .collect();
+        if allowing.is_empty() {
+            return Ok(None);
+        }
+        granted.entry_among(&allowing)
+    };
     let def = super::super::definition_of(keys::MODELS_ALLOWED)?;
     let snapshot = orch_settings::Snapshot::load(
         conn,
@@ -214,7 +256,7 @@ pub(super) async fn offering_use(
             return Ok(None);
         }
     }
-    Ok(Some(granted.entry_among(&allowing)))
+    Ok(Some(entry))
 }
 
 pub(super) async fn model_use(
@@ -232,15 +274,21 @@ pub(super) async fn model_use(
     let effort = orch_provider_contract::calls::requested_effort(&params)
         .map_err(EngineError::unreadable)?
         .or(request.model_parameters.default_effort.as_deref());
+    let pool = evidence.pool_selection(conn, caller).await?;
     offering_use(
         conn,
         caller,
         &ModelUse {
+            purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                &evidence.capability,
+            ),
             place: evidence.origin.place()?,
             provider: evidence.provider,
             offering: &evidence.offering,
             groups: &evidence.groups,
             effort,
+            pool: pool.as_ref(),
+            in_thread: evidence.origin.tool().is_some(),
         },
         clock,
     )

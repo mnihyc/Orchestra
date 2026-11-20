@@ -42,6 +42,23 @@ pub struct Delay {
     /// What the option is when the profile does not set it, in milliseconds.
     #[serde(default)]
     pub default_ms: u64,
+    /// System registry setting supplying this default in milliseconds, where the program declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_setting: Option<String>,
+    /// Bounded pending native input while optional evidence is read. Pressure ends the read, not the input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_buffer: Option<PendingBuffer>,
+}
+
+/// A program's profile default for native notifications retained during its evidence wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBuffer {
+    /// JSON pointer within the profile configuration.
+    pub pointer: String,
+    /// Default retained payload bytes; a single larger input ends the optional wait immediately.
+    pub default_bytes: u64,
+    /// System registry setting supplying this default.
+    pub default_setting: String,
 }
 
 /// An option the profile did not set that took less than its default, because the time left no more.
@@ -78,6 +95,14 @@ impl TurnEndDelays {
         let bound_ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let mut lowered = Vec::new();
         for delay in &self.delays {
+            if let Some(buffer) = &delay.pending_buffer
+                && config
+                    .pointer(&buffer.pointer)
+                    .and_then(Json::as_u64)
+                    .is_none()
+            {
+                put(config, &buffer.pointer, buffer.default_bytes);
+            }
             // Where what the program waits besides is all the bound gives, no value of the option is at fault.
             if bound_ms <= delay.also_ms {
                 continue;
@@ -100,6 +125,9 @@ impl TurnEndDelays {
                         to_ms: room,
                         bound_ms,
                     });
+                }
+                None if delay.default_setting.is_some() => {
+                    put(config, &delay.pointer, delay.default_ms);
                 }
                 None => {}
             }
@@ -144,8 +172,45 @@ mod tests {
                 pointer: "/child_usage_wait_ms".into(),
                 also_ms: 8_000,
                 default_ms: 1_000,
+                default_setting: None,
+                pending_buffer: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_registry_default_is_carried_to_the_program_and_still_fits_the_interrupt_window() {
+        let mut declared = declared();
+        declared.delays[0].default_setting = Some("agents.native_result_wait_ms".into());
+        declared.delays[0].default_ms = 3_000;
+        let mut config = json!({});
+        declared.fit(&mut config, Duration::from_secs(30)).unwrap();
+        assert_eq!(config["child_usage_wait_ms"], 3_000);
+        let mut config = json!({});
+        declared
+            .fit(&mut config, Duration::from_millis(8_500))
+            .unwrap();
+        assert_eq!(config["child_usage_wait_ms"], 500);
+    }
+
+    #[test]
+    fn a_waits_pending_notification_buffer_uses_its_resolved_default_even_with_an_explicit_wait() {
+        let declaration = TurnEndDelays::read(&json!({"version":1,"delays":[{
+            "pointer":"/native_result_wait_ms","default_ms":2000,
+            "pending_buffer":{"pointer":"/native_result_buffer_bytes","default_bytes":16384,
+                "default_setting":"agents.native_result_buffer_bytes"}
+        }]}))
+        .unwrap();
+        for wait in [Json::Null, json!(500)] {
+            let mut config = json!({"native_result_wait_ms":wait});
+            declaration
+                .fit(&mut config, Duration::from_secs(30))
+                .unwrap();
+            assert_eq!(config["native_result_buffer_bytes"], 16384);
+        }
+        let mut explicit = json!({"native_result_buffer_bytes":0});
+        declaration.fit(&mut explicit, Duration::ZERO).unwrap();
+        assert_eq!(explicit["native_result_buffer_bytes"], 0);
     }
 
     #[test]
