@@ -659,7 +659,10 @@ async fn a_real_guarded_selection_and_gc_can_finish_before_the_old_cancelled_dis
     assert!(
         storage::forget_blob(&mut *world.pool.acquire().await?, &blob, world.clock.now()).await?
     );
-    assert!(store.delete(&blob).await?);
+    assert!(
+        within(store.delete(&blob)).await??,
+        "the released command's bytes can retire while its old issuer is still paused"
+    );
     let before = selected_snapshot(&world, thread, document).await?;
     release
         .send(())

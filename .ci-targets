@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test history --test turn
+web typecheck
+web lint
+web test -- tests/component/subagent-lane.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts tests/unit/thread-timeline.test.ts

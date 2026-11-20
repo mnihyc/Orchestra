@@ -2,7 +2,7 @@
 import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
+import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, Layers3, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
 import { createContext, Fragment, type CSSProperties, type KeyboardEvent, memo, type ReactNode, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -56,6 +56,7 @@ const RESOURCE_ICONS = new Map<string, ReactNode>(Object.entries({
   machine: <Server className={ICON_CLASS} aria-hidden />,
   mount: <HardDrive className={ICON_CLASS} aria-hidden />,
   template: <LayoutTemplate className={ICON_CLASS} aria-hidden />,
+  pool: <Layers3 className={ICON_CLASS} aria-hidden />,
   skill: <GraduationCap className={ICON_CLASS} aria-hidden />,
   chat: <MessageSquare className={ICON_CLASS} aria-hidden />,
   group: <FolderTree className={ICON_CLASS} aria-hidden />,

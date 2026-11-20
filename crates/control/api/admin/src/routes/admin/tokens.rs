@@ -304,6 +304,7 @@ impl<const PERSON: bool> native::Selected for Tokens<PERSON> {
     type Query = AdminTokenListQuery;
     type Value = Selected;
     type Reply = Page<AdminToken>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = if PERSON {
         &sources::USER_TOKENS
     } else {

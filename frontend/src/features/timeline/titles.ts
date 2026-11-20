@@ -8,7 +8,7 @@
 import type { TFunction } from 'i18next';
 
 import type { Item } from '@/generated/api-types';
-import { approvalReview, reviewOutcome } from './tools/reviewFacts';
+import { approvalReview, reviewFailed, reviewOutcome } from './tools/reviewFacts';
 import { webAction } from './tools/webAction';
 
 export type ToolItem = Extract<Item, { kind: 'tool_call' }>;
@@ -146,6 +146,10 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
       };
     }
     case 'subagent':
+      if (tool.state === 'failed' && tool.child_stream === '') {
+        const text = tool.model ? t('timeline.step.subagentNotStartedModel', { model: tool.model }) : t('timeline.step.subagentNotStarted');
+        return { ...none, text, tone: 'danger' };
+      }
       return { ...none, text: tool.name === null ? t('timeline.step.subagentUnnamed') : t('timeline.step.subagent', { name: tool.name }), result: t(`timeline.step.subagentState.${tool.state}`), tone: tool.state === 'failed' ? 'danger' : 'muted' };
     case 'orch':
       return { ...none, text: tool.tool === 'send_message' || tool.tool === 'send_chat_message' || tool.tool === 'send_thread_message'
@@ -153,7 +157,7 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
         : item.payload.title === '' ? t('timeline.step.orch', { tool: tool.tool }) : item.payload.title };
     case 'other': {
       const review=tool.name==='harness/approvalReview' ? approvalReview(tool.result) : null;
-      if(review!==null) return {...none,text:t('timeline.permissionReview.title'),result:reviewOutcome(review.outcome,t),tone:item.payload.raw.is_error?'danger':'muted'};
+      if(review!==null) return {...none,text:t('timeline.permissionReview.title'),result:reviewOutcome(review.outcome,t),tone:reviewFailed(review.outcome)?'danger':'muted'};
       return { ...none, text: item.payload.title === '' ? tool.name : item.payload.title };
     }
   }

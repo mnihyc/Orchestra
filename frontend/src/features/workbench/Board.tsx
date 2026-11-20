@@ -1,5 +1,7 @@
+import { mark as perfMark } from '@/lib/marks';
+import { shapeOfTab, TabSkeleton } from '@/features/workbench/TabSkeleton';
 import { selectContentTab } from '@/features/workbench/contentNavigation';
-import { LiveThreadStateIcon } from '@/ui/ThreadState';
+import { LiveThreadStateIcon } from './ThreadIcon';
 /** The workbench drawn from its layout tree: every group of tabs in its area, each view kept alive while its tab moves, and a tab carried from one place to another by pointer or by keyboard.
  *
  * Three things meet here. The frame of areas and borders is the shared `Workbench`. The layout
@@ -10,16 +12,20 @@ import { LiveThreadStateIcon } from '@/ui/ThreadState';
 import { useNodeLabel } from '@/features/navigation/placeLabels';
 import { CachedTabNames, useTabCaptions } from './TabNames';
 import { DocumentMarksProvider, forgetDocumentMarks } from '@/features/documents/marks';
-import { moveScoped, panelTarget, panelRead, panelContinuation } from '@/features/workbench/panelScope';
+import { explicitPanelTarget, moveScoped, panelReadForTarget, panelContinuation } from '@/features/workbench/panelScope';
 import { openFinder } from '@/features/finder/store';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
 import { Button } from '@/ui/Button';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import { ViewWindowLease } from '@/features/workbench/ViewWindow';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
-import { contentLocation, contentTarget } from './contentAddress';
+import { contentAddress, contentLocation, contentTarget } from './contentAddress';
+import { usePageContent } from './pageContent';
+import { pageCanReadBeforeShell } from './pageReads';
 import { WorkspaceContext } from './WorkspaceContext';
 import { ThreadReadProvider } from '@/realtime/threadReadContext';
+import { contentThreadRead } from '@/realtime/threadScope';
+import { useRetainedThread } from '@/realtime/live';
 import { InspectorContext } from '@/shell/RouteContext';
 import { forgetScreenHeading, useCurrentHeading } from '@/shell/screen';
 import { useTabName, isContentTab } from '@/features/workbench/store';
@@ -36,7 +42,7 @@ import {
   useSensors,
 } from '@dnd-kit/core';
 import { PanelBottomClose, PanelLeftClose, PanelRightClose, Pin, SquareDashedMousePointer } from 'lucide-react';
-import { type ReactNode, Fragment, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, Fragment, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -83,10 +89,16 @@ import { forgetViewActions, ViewActionSlot } from '@/features/workbench/actions'
 import { viewKey } from '@/features/workbench/viewIdentity';
 import { useWorkbench } from '@/features/workbench/store';
 import { useFrameReadiness } from '@/shell/FrameReadiness';
-import { isClosable, tabEntries } from '@/features/workbench/Tabs';
+import { tabEntries } from '@/features/workbench/Tabs';
+import { useShallow } from 'zustand/react/shallow';
 import { SlideOutBar } from './SlideOutBar';
-import { useViews, type ViewDefinition, viewOf } from '@/features/workbench/views';
-import { useVisibleLayout } from '@/features/workbench/availability';
+import { usePeek } from './peek';
+import { useInterfaceReading } from '@/lib/interfaceReading';
+import { retainedClosedTabs } from '@/features/workbench/persistence';
+import { prunePresentations } from '@/features/workbench/presentation';
+import { useSidebarPreferences } from '@/features/navigation/preferences';
+import { useViews, type ViewDefinition, type ViewProps, viewOf } from '@/features/workbench/views';
+import { useWorkbenchBars } from '@/features/workbench/availability';
 import { AddViewButton } from '@/features/workbench/OpenViews';
 import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
@@ -116,12 +128,34 @@ function homeOf(key: string): HTMLElement {
   return home;
 }
 
+function availableGroup(group: Group, hasPorts: boolean): Group {
+  return hasPorts || !group.tabs.some((tab) => tab.view === 'ports') ? group : { ...group, tabs: group.tabs.filter((tab) => tab.view !== 'ports') };
+}
+
+function frontTab(group: Group): Tab | null {
+  return group.tabs.find((tab) => tab.id === group.active) ?? group.tabs[0] ?? null;
+}
+
 /** Keeps each saved view's home; its body first mounts when a visible slot leases it. */
 export function ViewHost({ layout }: { layout: Layout }) {
   useThreadWindowLifetime();
   const unsaved = useWorkbench((state) => state.unsaved);
-  const placed = allGroups(layout).flatMap(({ area, group }) => group.tabs.map((tab) => ({ tab, area })));
-  const keys = placed.map(({ tab }) => viewKey(tab)).join('\n');
+  const closed = useWorkbench((state) => state.closedTabs);
+  const { kept_closed_tabs: recent, ready: readingReady } = useInterfaceReading();
+  const setClosedLimit = useWorkbench((state) => state.setClosedLimit);
+  const cachedLimit = useWorkbench((state) => state.closedLimit);
+  const retainedCount = readingReady ? recent : cachedLimit;
+  useEffect(() => { if (readingReady) setClosedLimit(recent); }, [readingReady, recent, setClosedLimit]);
+  const hasPorts = useViews().some((view) => view.name === 'ports');
+  const placed = allGroups(layout).flatMap(({ area, group }) => {
+    const tabbed = area === 'main' || area === 'bottom';
+    const front = tabbed ? frontTab(availableGroup(group, hasPorts)) : null;
+    return group.tabs.map((tab) => ({ tab, area, covered: tabbed && tab !== front && viewOf(tab.view)?.window !== true }));
+  });
+  const retained = [...placed, ...retainedClosedTabs(layout, closed, retainedCount).map(({ tab }) => ({ tab, area: 'main' as const, covered: false }))];
+  const keys = retained.map(({ tab }) => viewKey(tab)).join('\n');
+  // Removed children finish their presentation cleanup before this parent effect prunes old owners.
+  useEffect(() => { prunePresentations(new Set(retained.map(({ tab }) => tab.id))); }, [keys]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A view whose tab is gone has no home any more.
   useEffect(() => {
@@ -137,12 +171,22 @@ export function ViewHost({ layout }: { layout: Layout }) {
     }
   }, [keys]);
 
-  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
+  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{retained.map(({ tab, area, covered }) =>
+    <HostedView key={viewKey(tab)} tab={tab} area={area} covered={covered} hold={unsaved.has(tab.id)} />)}</>;
 }
+
+const HostedView = memo(function HostedView({ tab, area, covered, hold }: ViewProps & { covered: boolean; hold: boolean }) {
+  const key = viewKey(tab);
+  return createPortal(<ContentBoundary resetKey={key} className="h-full">
+    <ViewOpening view={key} route={openingForView(tab.id)} hold={hold} covered={covered}><ViewBody tab={tab} area={area} /></ViewOpening>
+  </ContentBoundary>, homeOf(key), key);
+});
 
 /** Shows a view in the group that holds its tab, by taking in the element the view is drawn into. */
 export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean }) {
-  const { ready, pending } = useFrameReadiness();
+  const frame = useFrameReadiness();
+  const ready = frame.ready || frame.pageReady === true && pageCanReadBeforeShell(tab);
+  const pending = frame.pending;
   const slot = useRef<HTMLDivElement>(null);
   const key = viewKey(tab);
   useLayoutEffect(() => {
@@ -156,7 +200,10 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     parent.addEventListener('focusin', focus, true);
     parent.addEventListener('pointerdown', focus, true);
     const closeOpening = ready ? showViewOpening(key, openingForView(tab.id)) : () => undefined;
+    perfMark('switch/shown', { tab: tab.id });
+    const painted = requestAnimationFrame(() => perfMark('switch/painted', { tab: tab.id }));
     return () => {
+      cancelAnimationFrame(painted);
       closeOpening();
       parent.removeEventListener('focusin', focus, true);
       parent.removeEventListener('pointerdown', focus, true);
@@ -165,53 +212,75 @@ export function ViewSlot({ tab, primary = false }: { tab: Tab; primary?: boolean
     };
   }, [key, ready, tab.id]);
   return <div className="h-full min-h-0">
-    {!ready && (primary && pending !== null ? pending : <SkeletonRows rows={4} className="p-3" />)}
+    {!ready && (primary && pending !== null ? pending : <TabSkeleton shape={shapeOfTab(tab)} />)}
     <div ref={slot} hidden={!ready} className="h-full min-h-0" />
   </div>;
 }
 
+const RegisteredViewBody = memo(function RegisteredViewBody({ body: Body, tab, area }: ViewProps & Pick<ViewDefinition, 'body'>) {
+  return <Body tab={tab} area={area} />;
+});
+
 function ViewBody({ tab, area }: { tab: Tab; area: AreaId }) {
   const { t } = useTranslation();
   const definition = useViews().find((candidate) => candidate.name === tab.view);
-  const activeContent = useWorkbench((state) => state.activeContent);
-  const layout = useWorkbench((state) => state.layout);
   const content = isContentTab(tab);
+  const focusedContent = useWorkbench((state) => content && state.activeContent === tab.id);
+  const explicit = useMemo(() => content ? contentTarget(tab) : explicitPanelTarget(tab), [content, tab]);
+  const activeContent = useWorkbench((state) => content || explicit !== null ? null : state.activeContent);
+  const page = useWorkbench((state) => activeContent === null ? null : findTab(state.layout, activeContent)?.tab ?? null);
+  const source = useMemo(() => page === null ? null : contentTarget(page), [page]);
   const root = useRef<HTMLDivElement>(null);
+  usePageContent(focusedContent ? contentAddress(tab) : null, tab.id, root);
   const [shape, setShape] = useState<Shape>('wide');
   const [compact, setCompact] = useState(false);
-  const activeHeading = useCurrentHeading();
+  const measured = useRef<HTMLElement | null>(null);
+  const activeHeading = useCurrentHeading(!content && explicit === null && source === null);
+  const orgId = activeHeading?.target?.kind === 'org' ? activeHeading.target.id : null;
   const location = useMemo(() => contentLocation(tab), [tab]);
-  const target = useMemo(() => content ? contentTarget(tab) : panelTarget(tab, layout, activeContent, activeHeading), [content, tab, layout, activeContent, activeHeading]);
+  const target = useMemo<InspectorTarget | null>(() => explicit ?? source ?? (orgId === null ? null : { kind: 'org', id: orgId }), [explicit, source, orgId]);
   const fixed = !content && (tab.scope?.mode === 'fixed' || tab.of?.thread !== undefined || tab.of?.environment !== undefined);
   const headingOwner = content || fixed ? tab.id : activeContent;
   const instance = useMemo(() => ({ id: tab.id, root, target, headingOwner,
-    content, focusedContent: content && activeContent === tab.id }), [tab.id, target, content, headingOwner, activeContent]);
-  const read = useMemo(() => content ? null : panelRead(tab, layout, activeContent, target), [content, tab, layout, activeContent, target]);
+    content, focusedContent }), [tab.id, target, content, headingOwner, focusedContent]);
+  const read = useMemo(() => content ? null : panelReadForTarget(tab, target, activeContent, source), [content, tab, target, activeContent, source]);
+  const modelRead = useMemo(() => content && target?.kind === 'thread' ? contentThreadRead(target.id, tab.id) : read, [content, target, tab.id, read]);
+  useRetainedThread(modelRead);
   useLayoutEffect(() => {
     const element = root.current;
     if (element === null || typeof ResizeObserver === 'undefined') return;
-    const tokens = getComputedStyle(document.documentElement);
-    const width = (name: string, fallback: number) => {
-      const value = tokens.getPropertyValue(name).trim(), size = Number.parseFloat(value);
-      return !Number.isFinite(size) ? fallback : value.endsWith('rem') ? size * (Number.parseFloat(tokens.fontSize) || 16) : size;
+    function breakpoints() {
+      const tokens = getComputedStyle(document.documentElement);
+      const width = (name: string, fallback: number) => {
+        const value = tokens.getPropertyValue(name).trim(), size = Number.parseFloat(value);
+        return !Number.isFinite(size) ? fallback : value.endsWith('rem') ? size * (Number.parseFloat(tokens.fontSize) || 16) : size;
+      };
+      return { medium: width('--screen-md', 900), large: width('--screen-lg', 1200), compactAt: width('--breakpoint-sm', 640) };
+    }
+    let limits: ReturnType<typeof breakpoints> | undefined;
+    const measure = (size: number) => {
+      if (size <= 0) return;
+      const { medium, large, compactAt } = limits ??= breakpoints();
+      measured.current = element;
+      setShape(size >= large ? 'wide' : size >= medium ? 'medium' : 'small');
+      setCompact(size < compactAt);
     };
-    const medium = width('--screen-md', 900), large = width('--screen-lg', 1200), compactAt = width('--breakpoint-sm', 640);
-    const measure = () => {
-      const size = element.clientWidth;
-      if (size > 0) { setShape(size >= large ? 'wide' : size >= medium ? 'medium' : 'small'); setCompact(size < compactAt); }
-    };
-    const observer = new ResizeObserver(measure); observer.observe(element); measure();
+    // The first mount needs its shape immediately. A kept node already has it, and observing
+    // again delivers the actual size before paint even if its new slot is a different width.
+    const observer = new ResizeObserver(([entry]) => { if (entry !== undefined) measure(entry.contentRect.width); });
+    observer.observe(element);
+    if (measured.current !== element) measure(element.clientWidth);
     return () => observer.disconnect();
   }, []);
   const Body = definition?.body;
-  const contentBody = <ViewInstanceContext.Provider value={instance}><ViewShapeContext.Provider value={shape}><ViewCompactContext.Provider value={compact}>
+  const contentBody = <ViewInstanceProvider value={instance}><ViewShapeContext.Provider value={shape}><ViewCompactContext.Provider value={compact}>
     {target?.workspace !== undefined ? <WorkspaceContext source={target.workspace} location={content ? location : null} />
       : fixed && target !== null ? <InspectorContext target={target} continuation={panelContinuation(tab)} /> : null}
-    <InstanceName id={tab.id} content={content} fixed={fixed} target={target} location={content ? location : null} title={definition === undefined ? tab.view : t(definition.title)} />
+    {definition !== undefined && <InstanceName id={tab.id} content={content} fixed={fixed} target={target} location={content ? location : null} title={t(definition.title)} />}
     <Suspense fallback={<SkeletonRows rows={5} />}>
-      {Body === undefined ? <EmptyState compact icon={<SquareDashedMousePointer aria-hidden />} title={t('workbench.view.unknown')} /> : <Body tab={tab} area={area} />}
+      {Body === undefined ? <EmptyState compact icon={<SquareDashedMousePointer aria-hidden />} title={t('workbench.view.unknown')} /> : <RegisteredViewBody body={Body} tab={tab} area={area} />}
     </Suspense>
-  </ViewCompactContext.Provider></ViewShapeContext.Provider></ViewInstanceContext.Provider>;
+  </ViewCompactContext.Provider></ViewShapeContext.Provider></ViewInstanceProvider>;
   const body = target?.kind === 'document' ? <DocumentMarksProvider owner={headingOwner ?? tab.id} documentId={target.id}>{contentBody}</DocumentMarksProvider> : contentBody;
   return <div ref={root} className="h-full min-h-0 min-w-0" data-view-instance={tab.id}>
     <ThreadReadProvider read={read}>{body}</ThreadReadProvider>
@@ -219,7 +288,7 @@ function ViewBody({ tab, area }: { tab: Tab; area: AreaId }) {
 }
 
 function InstanceName({ id, content, fixed, title, target, location }: { id: string; content: boolean; fixed: boolean; title: string; target: InspectorTarget | null; location: ReturnType<typeof contentLocation> }) {
-  const heading = useCurrentHeading();
+  const heading = useCurrentHeading(content || fixed);
   const qualified = useNodeLabel(heading?.target?.kind === 'thread' ? heading.target.id : undefined, heading?.tabTitle ?? heading?.title);
   const hierarchy = heading?.path?.map((part) => part.redacted ? '…' : part.name).join(' / ');
   const path = location !== null && location.view !== 'page' ? [hierarchy, location.path].filter(Boolean).join(' / ') : hierarchy;
@@ -233,7 +302,8 @@ function InstanceName({ id, content, fixed, title, target, location }: { id: str
 
 interface TabHandleProps {
   tab: Tab;
-  group: Group;
+  groupId: string;
+  groupLabel: string;
   index: number;
   area: AreaId;
   active: boolean;
@@ -242,7 +312,7 @@ interface TabHandleProps {
   presentedTitle?: string;
 }
 
-function TabHandle({ tab, group, index, area, active, tabbable, definition, presentedTitle }: TabHandleProps) {
+const TabHandle = memo(function TabHandle({ tab, groupId, groupLabel, index, area, active, tabbable, definition, presentedTitle }: TabHandleProps) {
   const { t } = useTranslation();
   const helpFor = useWorkbenchChoiceHelp();
   const layout = useWorkbench((state) => state.layout);
@@ -251,12 +321,12 @@ function TabHandle({ tab, group, index, area, active, tabbable, definition, pres
   const named = useWorkbench((state) => state.named.get(tab.id));
   const baseTitle = named?.title ?? (definition === undefined ? tab.view : t(definition.title));
   const title = presentedTitle ?? baseTitle;
-  const target: Target = { to: 'group', group: group.id, index };
+  const target: Target = { to: 'group', group: groupId, index };
 
   const drag = useDraggable({ id: tab.id, data: { title } });
   const drop = useDroppable({
     id: spotId(target),
-    data: { target, label: t('workbench.spots.before', { tab: title, group: groupName(layout, group.id, t) }) } satisfies DropSpot,
+    data: { target, label: t('workbench.spots.before', { tab: title, group: groupLabel }) } satisfies DropSpot,
   });
   const { active: carriedTab } = useDndContext();
 
@@ -268,26 +338,26 @@ function TabHandle({ tab, group, index, area, active, tabbable, definition, pres
   return (
     <ViewTab
       id={tabElementId(tab.id)}
-      panelId={panelIdOf(group.id)}
+      panelId={panelIdOf(groupId)}
       title={title}
-      icon={named?.thread === undefined ? Icon === undefined ? null : <Icon aria-hidden /> : <LiveThreadStateIcon display={named.thread.display} threadId={named.thread.id} />}
+      icon={named?.thread === undefined ? Icon === undefined ? null : <Icon aria-hidden /> : <LiveThreadStateIcon display={named.thread.display} threadId={named.thread.id} rootId={named.thread.rootId} />}
       about={named?.path ?? (definition === undefined ? undefined : t(definition.about))}
       active={active}
       tabbable={tabbable}
       unsaved={unsaved}
       kept={false}
       pinned={tab.pinned === true}
-      closable={isClosable(layout, tab.id) && tab.pinned !== true}
+      closable={tab.pinned !== true}
       dropBefore={drop.isOver && carriedTab !== null && carriedTab.id !== tab.id}
       carried={drag.isDragging}
-      menu={tabEntries(layout, tab.id, t, change, helpFor)}
+      menu={() => tabEntries(layout, tab.id, t, change, helpFor)}
       onSelect={() => selectContentTab(tab.id)}
       onClose={() => useWorkbench.getState().close({ kind: 'tab', tab: tab.id })}
       focusFallback={() => {
         const selected = useWorkbench.getState().focusedMainTab;
         return selected === null ? null : document.getElementById(tabElementId(selected));
       }}
-      onDoubleClick={area === 'main' ? () => change((current) => toggleMaximized(current, group.id)) : undefined}
+      onDoubleClick={area === 'main' ? () => change((current) => toggleMaximized(current, groupId)) : undefined}
       handleRef={(node) => {
         drag.setNodeRef(node);
         drop.setNodeRef(node);
@@ -295,7 +365,7 @@ function TabHandle({ tab, group, index, area, active, tabbable, definition, pres
       handleProps={{ ...described, ...drag.listeners }}
     />
   );
-}
+});
 
 /** The rest of a strip after its tabs: dropping here puts a tab last in the group. */
 function StripEnd({ group }: { group: Group }) {
@@ -389,39 +459,46 @@ function GroupView({ group: originalGroup, area, actions }: { group: Group; area
   const helpFor = useWorkbenchChoiceHelp();
   const registered = useViews();
   const hasPorts = registered.some((view) => view.name === 'ports');
-  const group = { ...originalGroup, tabs: originalGroup.tabs.filter((tab) => tab.view !== 'ports' || hasPorts) };
+  const group = availableGroup(originalGroup, hasPorts);
   const layout = useWorkbench((state) => state.layout);
   const focused = useWorkbench((state) => state.focusedGroup === group.id);
   const setFocusedGroup = useWorkbench((state) => state.setFocusedGroup);
   const named = useWorkbench((state) => state.named);
   const unsaved = useWorkbench((state) => state.unsaved);
   const change = useWorkbench((state) => state.change);
-  const frame = useWorkbench();
-  const front = group.tabs.find((tab) => tab.id === group.active) ?? group.tabs[0] ?? null;
+  const focusMode = useWorkbench((state) => state.focusMode);
+  const screen = useWorkbench((state) => state.screen), arrangement = useWorkbench((state) => state.arrangement);
+  const { choose, reset, setFocusMode } = useWorkbench.getState();
+  const front = frontTab(group);
   const byId = new Map(group.tabs.map((tab, index) => [tab.id, { tab, index }]));
-  const captions = useTabCaptions(area === 'main' ? mainGroups(layout.main).flatMap((item) => item.tabs).filter((tab) => tab.view !== 'ports' || hasPorts) : group.tabs);
+  const captionTabs = useWorkbench(useShallow((state) => area === 'main' ? mainGroups(state.layout.main).flatMap((item) => item.tabs)
+    .filter((tab) => tab.view !== 'ports' || hasPorts) : group.tabs));
+  const captions = useTabCaptions(captionTabs);
+  const groupLabel = groupName(layout, group.id, t);
+
+  const tabInfo = useMemo(() => group.tabs.map((tab) => {
+    const definition = registered.find((view) => view.name === tab.view);
+    const Icon = named.get(tab.id)?.icon ?? definition?.icon;
+    const thread = named.get(tab.id)?.thread;
+    const choice = definition === undefined ? { name: tab.view, description: '' } : viewChoice(definition, t);
+    const title = captions.get(tab.id) ?? named.get(tab.id)?.title ?? choice.name;
+    return { id: tab.id, title: t('workbench.choices.tab.name', { name: title }), path: named.get(tab.id)?.path, description: t('workbench.choices.tab.description', { description: choice.description }), help: helpFor(title),
+      icon: thread === undefined ? Icon === undefined ? undefined : <Icon aria-hidden /> : <LiveThreadStateIcon display={thread.display} threadId={thread.id} rootId={thread.rootId} />, unsaved: unsaved.has(tab.id), closable: tab.pinned !== true,
+      onSelect: () => selectContentTab(tab.id), onClose: () => useWorkbench.getState().close({ kind: 'tab', tab: tab.id }) };
+  }), [group.tabs, captions, named, unsaved, helpFor, t, registered]);
 
   return (
     <ViewGroup
-      label={groupName(layout, group.id, t)}
+      label={groupLabel}
       tabIds={group.tabs.map((tab) => tab.id)}
       activeId={front?.id ?? null}
-      tabInfo={group.tabs.map((tab) => {
-        const definition = viewOf(tab.view);
-        const Icon = named.get(tab.id)?.icon ?? definition?.icon;
-        const thread = named.get(tab.id)?.thread;
-        const choice = definition === undefined ? { name: tab.view, description: '' } : viewChoice(definition, t);
-        const title = captions.get(tab.id) ?? named.get(tab.id)?.title ?? choice.name;
-        return { id: tab.id, title: t('workbench.choices.tab.name', { name: title }), path: named.get(tab.id)?.path, description: t('workbench.choices.tab.description', { description: choice.description }), help: helpFor(title),
-          icon: thread === undefined ? Icon === undefined ? undefined : <Icon aria-hidden /> : <LiveThreadStateIcon display={thread.display} threadId={thread.id} />, unsaved: unsaved.has(tab.id), closable: isClosable(layout, tab.id) && tab.pinned !== true,
-          onSelect: () => selectContentTab(tab.id), onClose: () => useWorkbench.getState().close({ kind: 'tab', tab: tab.id }) };
-      })}
+      tabInfo={tabInfo}
       tabElementId={tabElementId}
       panelId={panelIdOf(group.id)}
       compactTabs={area === 'main' && mainGroups(layout.main).length > 1}
       focused={focused && area === 'main' && mainGroups(layout.main).length > 1}
       onFocusWithin={() => setFocusedGroup(group.id)}
-      actions={<>{ready && front !== null && <ViewActionSlot tab={front} />}{frame.focusMode && area === 'main' && focused && <AddViewButton />}{actions}</>}
+      actions={<>{ready && front !== null && <ViewActionSlot tab={front} />}{focusMode && area === 'main' && focused && <AddViewButton />}{actions}</>}
       stripEnd={<StripEnd group={group} />}
       overlay={<DropZones group={group} area={area} />}
       empty={
@@ -432,8 +509,8 @@ function GroupView({ group: originalGroup, area, actions }: { group: Group; area
           action={area === 'main' ? <>
             <Button size="sm" onClick={() => { setFocusedGroup(group.id); openFinder(''); }}>{t('workbench.workspace.open')}</Button>
             {group.retainEmpty === true && <Button size="sm" onClick={() => change((layout) => removeEmptyMainGroup(layout, group.id))}>{t('workbench.workspace.removeGroup')}</Button>}
-            <ArrangementMenu screen={frame.screen} current={frame.arrangement} onChoose={frame.choose} onReset={frame.reset} />
-            {frame.focusMode && <Button size="sm" onClick={() => frame.setFocusMode(false)}>{t('workbench.workspace.exitFocus')}</Button>}
+            <ArrangementMenu screen={screen} current={arrangement} onChoose={choose} onReset={reset} />
+            {focusMode && <Button size="sm" onClick={() => setFocusMode(false)}>{t('workbench.workspace.exitFocus')}</Button>}
           </> : undefined}
         />
       }
@@ -445,7 +522,8 @@ function GroupView({ group: originalGroup, area, actions }: { group: Group; area
             key={tabId}
             tab={entry.tab}
             index={entry.index}
-            group={group}
+            groupId={group.id}
+            groupLabel={groupLabel}
             area={area}
             active={state.active}
             tabbable={state.tabbable}
@@ -485,6 +563,13 @@ function MainTree({ node }: { node: MainNode }) {
 
 // ---------------------------------------------------------------- the board
 
+function MainPanes() {
+  const main = useWorkbench((state) => state.layout.main);
+  const maximized = useWorkbench((state) => state.layout.maximized);
+  const group = maximized === null ? undefined : mainGroups(main).find((candidate) => candidate.id === maximized);
+  return group === undefined ? <MainTree node={main} /> : <GroupView group={group} area="main" />;
+}
+
 export interface BoardProps {
   rail: ReactNode;
   /** What spans the main area and the right bar, above their tabs. */
@@ -498,7 +583,7 @@ const CLOSE_ICONS = { left: PanelLeftClose, right: PanelRightClose, bottom: Pane
 
 export function Board({ rail, top, status, pending }: BoardProps) {
   const { t } = useTranslation();
-  const layout = useVisibleLayout();
+  const layout = useWorkbenchBars();
   const change = useWorkbench((state) => state.change);
   const overlay = useWorkbench((state) => state.overlay);
   const setOverlay = useWorkbench((state) => state.setOverlay);
@@ -506,7 +591,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
   const [limits] = useState(frameLimits);
   const [carried, setCarried] = useState<{ id: string; title: string } | null>(null);
   const carriedMoved = useRef(false);
-  const dragAnnouncements = viewDragAnnouncements(layout, t);
+  const dragAnnouncements = viewDragAnnouncements(() => useWorkbench.getState().layout, t);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: DRAG_STARTS_AFTER_PX } }),
@@ -551,10 +636,17 @@ export function Board({ rail, top, status, pending }: BoardProps) {
     };
   };
 
-  const maximized = layout.maximized === null ? null : (mainGroups(layout.main).find((group) => group.id === layout.maximized) ?? null);
   const spotOf = (data: unknown): DropSpot | null => (data as DropSpot | undefined) ?? null;
   const focusMode = useWorkbench((state) => state.focusMode);
   const beside = shape === 'wide' || focusMode;
+  // A hidden bar peeks only for a person who chose that, and only after the pointer has rested at its edge.
+  // The choice is read once the frame's one bootstrap has answered; until then the cache or this device's last copy stands, and no request of its own is made.
+  const { peek } = useSidebarPreferences();
+  usePeek({
+    enabled: peek === true && !focusMode && pending === undefined,
+    bars: SLIDING_BARS.filter((id) => (id !== 'right' || beside) && barHasViews(layout, id) && !layout[id].open),
+    onPeek: setOverlay,
+  });
 
   return (
     <DndContext
@@ -598,11 +690,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
         bottom={bar('bottom')}
         main={
           <main id="main-content" data-main-area data-area-stop tabIndex={-1} aria-label={t('workbench.areas.main')} className="relative h-full outline-none">
-            {pending !== undefined ? pending : maximized === null ? (
-              <MainTree node={layout.main} />
-            ) : (
-              <GroupView group={maximized} area="main" />
-            )}
+            {pending !== undefined ? pending : <MainPanes />}
             {carried !== null && !layout.left.open && <Dock bar="left" />}
             {carried !== null && (!layout.right.open || !beside) && <Dock bar="right" />}
             {carried !== null && !layout.bottom.open && <Dock bar="bottom" />}
@@ -613,7 +701,6 @@ export function Board({ rail, top, status, pending }: BoardProps) {
         if (id === 'right' && !beside) return null;
         const usable = barHasViews(layout, id);
         return <Fragment key={id}>
-          {!layout[id].open && usable && <div data-bar-edge={id} aria-hidden className="fixed top-0 bottom-(--status-bar-height) z-(--layer-sticky) w-(--bar-reveal-width)" style={id === 'left' ? { left: 'var(--rail-width)' } : { right: 0 }} onPointerEnter={(event) => { if (event.pointerType !== 'touch') setOverlay(id); }} />}
           <SlideOutBar bar={id} size={layout[id].size} open={usable && overlay === id && !layout[id].open} docked={layout[id].open} onClose={() => setOverlay(null)}>{bar(id).content}</SlideOutBar>
         </Fragment>;
       })}
