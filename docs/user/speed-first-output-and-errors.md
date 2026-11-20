@@ -8,21 +8,19 @@ summary: Compare request performance, find timing in a turn and understand unava
 
 # Speed, first output and errors
 
-Open **Usage**, then **Performance** to compare models, or **Requests** to follow individual requests.
-Your scope, dates and filters stay in place between the three views. A provider's page also shows its
-last seven days. Each request links to the turn that made it.
+Open **Usage**, then **Performance** to compare models, or **Requests** to follow single requests. Your scope, dates and filters stay in place between the three views. The page of a provider also shows its last seven days. Each request links to the turn that made it.
 
-Usage is in your account menu. Choose **Me**, an organisation, department or project in the header,
-then a range. **Last week** means the previous Monday through Sunday. These report days use UTC,
-shown in the date range; request timestamps use your time zone. **By thread** is a visible tab
-where you may read thread reports. Turns count distinct turns in the matching records, including
-turns with no token report. Multiple requests of one turn do not add turns.
+Usage is in your account menu. Choose **Me**, an organization, a department or a project in the header, then a range.
+
+- **Last week** means the previous Monday through Sunday. These report days use UTC, shown in the date range. The times of requests use your time zone.
+- **By thread** is a tab you see where you may read reports of threads.
+- **Turns** counts distinct turns in the matching records, including turns with no report of tokens. Several requests of one turn do not add turns.
 
 ## What the figures mean
 
 **First output** is the time from asking the model until its first output arrives, including thinking
 before any visible words. **Speed** is streamed output tokens per second while that output is being
-generated. Streamed thinking counts where the harness reports it. Hidden reasoning is subtracted
+generated. Streamed thinking counts where the agent program reports it. Hidden reasoning is subtracted
 where its count is known. Time spent running tools or waiting for a person does not count towards speed.
 A stream that omits a separate hidden-thinking count keeps speed unmeasured.
 **Request time** runs from asking the model to its final output, before a tool runs.
@@ -38,8 +36,7 @@ choices and named period. Choices in the address take precedence; filter chips a
 stay in the address alone.
 
 **Error rate** is provider-side failures divided by requests with a known outcome, with the failure count
-beside it. Harness, session and tool-environment failures remain in Requests without blaming the provider. A person's cancellation is visible as **Cancelled** and never counts as an error.
-Each error's row shows its code and the provider's explanation. Filters can show all failures or one code.
+beside it. Failures of the agent program, of the session and of the environment of a tool stay in **Requests** without blaming the provider. A cancellation by a person shows as **Cancelled** and never counts as an error. The row of each error shows its code and the explanation of the provider. Filters can show all failures or one code.
 
 ## Why a figure is not measured
 
@@ -47,18 +44,16 @@ A dash means that no value was measured. The question mark beside a figure expla
 
 - Speed needs at least half a second of generation and 32 streamed output tokens. Short replies
   still have request time and first output where their boundaries were reported.
-- Some harnesses hide thinking without reporting its separate token count. Those requests have
-  first-output and request times, but cannot have a measured streaming speed.
+- Some agent programs hide thinking without reporting its separate count of tokens. Those requests have times for the first output and for the request, but no measured speed of streaming.
 - Some sub-agents report tokens without request times.
-- A harness or version without proven request boundaries can report counts while its times remain
-  unmeasured. Earlier usage records may also have no request measurements.
+- An agent program or a version that reports no request boundaries can report counts while its times stay unmeasured. Earlier usage records may also have no measurements of requests.
 
 These are missing observations. They never become zero in a figure or a percentile. Picker hints appear
 only after a choice has at least 20 measured requests here over the last seven days.
 
 ## Find the time in a turn
 
-Open a turn's footer details. **Model time** adds its timed main-stream requests. **Tool time** is the turn's elapsed
+Open the details in the footer of a turn. **Model time** adds its timed main-stream requests. **Tool time** is the turn's elapsed
 time less that measured model time. It includes sub-agent work and unmeasured intervals, with a note
 when either is present. If no main-stream request has a time, both figures remain unmeasured. **First output** comes from the first
 request; **Speed** is the median of eligible requests. **Requests of this turn** opens the filtered log.

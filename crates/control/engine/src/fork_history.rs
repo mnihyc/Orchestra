@@ -68,71 +68,19 @@ pub struct Selected {
     pub left_out_before: Option<i32>,
 }
 
-/// Makes the selected, already recorded conversation readable in a fork before its first input.
-/// All work uses the caller's transaction; no harness, file or second connection is awaited here.
-/// With no Orch turn, only the session's adopted earlier items can be copied. A Nothing fork skips this call.
-pub async fn copy_conversation(
+/// Publish an already-owned immutable capture without locking its live source.
+pub async fn copy_captured_conversation(
     unit: &mut crate::unit::Unit<'_>,
-    source: Id,
+    captured: &orch_db::queries::thread_history_cuts::Cut,
     target: Id,
     segment: Id,
-    range: Option<(i32, i32)>,
-    source_segment: Option<Id>,
 ) -> Result<(), EngineError> {
-    if source == target {
+    if captured.thread_id == target {
         return Err(EngineError::unreadable(
             "A full fork cannot copy into its source execution.",
         ));
     }
-    // This synchronous legacy entry point has no external wait. The confirmed job
-    // path uses its already-owned durable cut instead. Keep the source lock through
-    // both capture and copy, then release this temporary target-owned cut atomically.
-    let source_row = orch_db::queries::threads::lock(unit.conn, source)
-        .await?
-        .ok_or_else(|| EngineError::unreadable("The source conversation is unavailable."))?;
-    if source_segment.is_some_and(|segment| Some(segment) != source_row.current_segment_id) {
-        return Err(EngineError::unreadable(
-            "The requested source segment is no longer selected.",
-        ));
-    }
-    // This legacy API means all finished selected turns when no range was supplied.
-    // The durable cut API requires an explicit bound; None there means no turns.
-    let range = match range {
-        Some(range) => Some(range),
-        None => Some((
-            1,
-            orch_db::queries::thread_history_cuts::last_finished(
-                unit.conn,
-                source,
-                source_row.active_continuation_id,
-            )
-            .await?
-            .unwrap_or(0),
-        )),
-    };
-    let at = unit.now();
-    let captured = orch_db::queries::thread_history_cuts::capture(
-        unit.conn,
-        &orch_db::queries::thread_history_cuts::Capture {
-            id: target,
-            thread: source,
-            view: source_row.active_continuation_id,
-            job: None,
-            owner_thread: Some(target),
-            segment: source_row.current_segment_id,
-            execution_revision: source_row.execution_revision,
-            range,
-            at,
-        },
-    )
-    .await?;
-    cut::copy(unit, &captured, target, segment, source_segment).await?;
-    sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND owner_thread_id=$1")
-        .bind(target)
-        .execute(&mut *unit.conn)
-        .await
-        .map_err(orch_db::DbError::from)?;
-    Ok(())
+    cut::copy(unit, captured, target, segment, captured.source_segment_id).await
 }
 
 /// What a history holds, counted: how many turns, and its items by kind. The plan counts a history in SQL and never loads
@@ -276,6 +224,7 @@ pub fn report_counts(
         _ => {}
     }
     HistoryReport {
+        handoff: None,
         fidelity: match method {
             HistoryMethod::NeutralImport | HistoryMethod::FileHandoff => Fidelity::Structured,
             HistoryMethod::SummaryHandoff => Fidelity::Summary,
@@ -349,18 +298,102 @@ pub(crate) async fn carry_budget(
     place: Id,
     window: Option<i64>,
 ) -> Result<Option<usize>, EngineError> {
+    Ok(carry_allowance(conn, place, window).await?.bytes)
+}
+
+/// One resolved carry policy supplies the byte decision and its captured public allowance.
+pub(crate) struct CarryAllowance {
+    pub bytes: Option<usize>,
+    pub fact: orch_api_contract::forks::HistoryContextAllowance,
+}
+
+pub(crate) async fn carry_allowance(
+    conn: &mut orch_db::Conn,
+    place: Id,
+    window: Option<i64>,
+) -> Result<CarryAllowance, EngineError> {
+    use orch_api_contract::forks::{HistoryAllowanceSource, HistoryContextAllowance};
     let Some(window) = window else {
-        return Ok(None);
+        return Ok(CarryAllowance {
+            bytes: None,
+            fact: HistoryContextAllowance {
+                share: None,
+                tokens: None,
+                source: HistoryAllowanceSource::UnknownModelWindow,
+                setting_scope: None,
+            },
+        });
     };
-    let share = Box::pin(orch_settings::get::<i64>(
+    let policy = Box::pin(orch_settings::resolve(
         conn,
         orch_settings::Place::Node(place),
         orch_settings_contract::registry::keys::THREAD_SWITCH_CARRY_SHARE,
     ))
-    .await?
-    .unwrap_or(80)
-    .clamp(10, 95);
-    Ok(usize::try_from(window.saturating_mul(share) / 100 * CARRY_BYTES_PER_TOKEN).ok())
+    .await?;
+    let share = policy
+        .value()
+        .and_then(Json::as_i64)
+        .unwrap_or(80)
+        .clamp(10, 95);
+    let tokens = window.saturating_mul(share) / 100;
+    let bytes = usize::try_from(tokens.saturating_mul(CARRY_BYTES_PER_TOKEN)).ok();
+    let setting_scope =
+        serde_json::from_value(serde_json::to_value(policy.resolved.source.scope)?)?;
+    Ok(CarryAllowance {
+        bytes,
+        fact: HistoryContextAllowance {
+            share: Some(share),
+            tokens: Some(tokens),
+            source: HistoryAllowanceSource::DeclaredModelWindow,
+            setting_scope: Some(setting_scope),
+        },
+    })
+}
+
+/// Native sessions and summaries do not claim to use the literal-turn share of a model window.
+pub(crate) fn allowance_for_method(
+    mut allowance: orch_api_contract::forks::HistoryContextAllowance,
+    method: HistoryMethod,
+) -> orch_api_contract::forks::HistoryContextAllowance {
+    use orch_api_contract::forks::HistoryAllowanceSource as Source;
+    let source = match method {
+        HistoryMethod::SameSession
+        | HistoryMethod::NativeFork
+        | HistoryMethod::NativeTransplant => Some(Source::NativeSession),
+        HistoryMethod::SummaryHandoff => Some(Source::Summary),
+        HistoryMethod::Nothing => Some(Source::Nothing),
+        HistoryMethod::NeutralImport | HistoryMethod::FileHandoff => None,
+    };
+    if let Some(source) = source {
+        allowance.share = None;
+        allowance.tokens = None;
+        allowance.setting_scope = None;
+        allowance.source = source;
+    }
+    allowance
+}
+
+/// Compact the actual represented ordinals, preserving holes rather than using a loaded-window index.
+#[must_use]
+pub(crate) fn turn_ranges(
+    mut ordinals: Vec<i64>,
+) -> Vec<orch_api_contract::forks::HistoryTurnRange> {
+    ordinals.sort_unstable();
+    ordinals.dedup();
+    let mut ranges: Vec<orch_api_contract::forks::HistoryTurnRange> = Vec::new();
+    for ordinal in ordinals {
+        if let Some(last) = ranges.last_mut()
+            && last.through.checked_add(1) == Some(ordinal)
+        {
+            last.through = ordinal;
+        } else {
+            ranges.push(orch_api_contract::forks::HistoryTurnRange {
+                from: ordinal,
+                through: ordinal,
+            });
+        }
+    }
+    ranges
 }
 
 /// The line that opens a neutral archive of a range that begins at the turn `first`, later than the first turn.
@@ -631,6 +664,8 @@ mod tests {
 
     fn item(kind: &str, turn: Id) -> ItemRow {
         ItemRow {
+            text_replacements: 0,
+            storage_gap: None,
             continuation_id: Id::nil(),
             id: orch_types::new_id(),
             thread_id: Id::nil(),
