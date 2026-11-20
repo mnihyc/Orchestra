@@ -9,6 +9,8 @@ summary: Open work, inspect cards and menus, and read long values without changi
 
 # Reading views and details
 
+This page shows how screens, cards, menus, long names and compact settings behave, so that you know where to look and what each control does.
+
 ## Opening a screen
 
 Open a thread or a resource by its name. Its first screen shows the information you may read.
@@ -56,6 +58,12 @@ Open the question mark for more help and the linked article.
 A bell shows the served notification level. Chat's Off is separate from a place's Off.
 A change is pending until its answer arrives. A refused discussion change keeps the served level
 and opens its error beside the bell. Escape closes that error and returns focus to the bell.
+
+Things are named by their name, their kind and their time: a container by the host it is on, a program by its release,
+a set of files by the time it was kept. A hash, an identifier or a revision number is never a word of a sentence.
+Where support or an operator asks for one, the thing's menu or details offer **Copy ID**; it goes to the clipboard
+and stays out of sight. Source-control views keep the short commit hash, and a page that asks you to check a
+download or a backup keeps its checksum.
 
 ## Reading documents and files
 
