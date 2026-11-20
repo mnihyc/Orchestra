@@ -1,0 +1,3 @@
+test -p orch-api-base --lib -- archives::
+test -p orch-api-core --lib -- archives::
+test -p orch-envhost --lib -- archive::
