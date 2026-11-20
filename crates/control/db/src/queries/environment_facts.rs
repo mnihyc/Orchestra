@@ -72,6 +72,19 @@ pub async fn access_profiles(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        environments,
+        |rows| &mut rows.placements,
+        |conn, ids| Box::pin(load_access_profiles(conn, ids)),
+    )
+    .await
+}
+
+async fn load_access_profiles(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
     use orch_access_contract::permissions::Placement;
     if environments.is_empty() {
         return Ok(Vec::new());
@@ -127,6 +140,19 @@ pub async fn of(conn: &mut Conn, environment: Id) -> Result<Option<EnvironmentMa
 /// (inside the lateral, a one-time filter, instead of a join filter applied after reading every
 /// host's driver declarations), and a planned host is found through `jobs_environment_host_idx`.
 pub async fn of_many(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        environments,
+        |rows| &mut rows.machines,
+        |conn, ids| Box::pin(load_of_many(conn, ids)),
+    )
+    .await
+}
+
+async fn load_of_many(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {

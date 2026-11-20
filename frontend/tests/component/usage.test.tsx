@@ -129,13 +129,13 @@ describe('the limit prompt', () => {
 
   it('says that nobody can let a turn through where nobody holds the row', () => {
     const { dialog } = prompt({ bypass_all: false, reached: [limit()] });
-    expect(within(dialog).getByText('Nobody can let it through from here.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Nobody can let it through from here. Wait for the limit to reset, or ask whoever manages the limits to raise it.')).toBeInTheDocument();
   });
 
   it('says how many turns run against a cap on turns at once, and starts the turn now for whoever may pass it', async () => {
     const user = userEvent.setup();
     const { onSend, dialog } = prompt({ bypass_all: true, reached: [limit({ cap: running(), can_bypass: true })] });
-    expect(within(dialog).getByText('4 of 4 turns are running on Team Pro. Yours would wait its turn.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Turns running on Team Pro: 4 of 4. Yours would wait its turn.')).toBeInTheDocument();
     expect(within(dialog).queryByRole('meter')).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Start it now anyway' }));
     expect(onSend).toHaveBeenCalledWith({ caps: [ID] });

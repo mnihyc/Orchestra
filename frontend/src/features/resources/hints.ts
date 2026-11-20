@@ -62,7 +62,7 @@ export function resourceHintGuide(id: string): { id: string; heading: string | n
   if (id === 'machine-delegate') return { id: 'connect-a-machine', heading: null };
   if (id.startsWith('template-')) return { id: TEMPLATE_GUIDE.id, heading: null };
   const heading = id.startsWith('arrangement-') ? 'how-agents-run'
-    : id.startsWith('env-') ? 'environments-and-their-doors'
+    : id.startsWith('env-') ? 'environments-and-their-ways-in'
       : id === 'host-volumes' ? 'templates-and-updates'
         : id.startsWith('agent-') || id.startsWith('host-') || id.startsWith('machine-') ? 'profiles-hosts-and-computers'
           : 'providers-and-models';

@@ -1,4 +1,5 @@
 {
+  "storage.data": "timeline.storage.failed",
   "read_unavailable": "ui.error.rawHistoryUnavailable",
   "context_overflow": "ui.error.contextLimit",
   "model_rerouted": "ui.error.modelRerouted",
@@ -7,6 +8,7 @@
   "image_result_unavailable": "ui.error.imageResultUnavailable",
   "native_web_action_failed": "ui.error.nativeWebActionFailed",
   "native_web_action_unproven": "ui.error.nativeWebActionUnproven",
+  "native_web_no_end": "ui.error.nativeWebNoEnd",
   "context_length_exceeded": "ui.error.contextLimit",
   "timeout": "network.silent",
   "timed_out": "network.silent",
@@ -23,6 +25,7 @@
   "insufficient_quota": "ui.error.quota",
   "insufficient_balance": "ui.error.quota",
   "cancelled": "ui.error.cancelled",
+  "overruled": "ui.error.overruled",
   "aborted": "network.aborted",
   "unsupported": "errors.capability.unsupported",
   "after_up_failed": "ui.error.afterStart",
@@ -56,5 +59,6 @@
   "permission_denied": "harnessFailures.permission_denied",
   "mcp_server_failed": "harnessFailures.mcp_server_failed",
   "fast_mode_paused": "harnessFailures.fast_mode_paused",
-  "harness_diverged": "ui.error.harnessDiverged"
+  "harness_diverged": "ui.error.harnessDiverged",
+  "history_not_carried": "ui.error.historyNotCarried"
 }

@@ -19,7 +19,7 @@ use orch_api_contract::{
     resource_groups::{ObjectHomeSet, ObjectTagsSet, ResourceHomeSetBody, ResourceTagsSetBody},
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -133,11 +133,12 @@ fn accepted(reply: RawReply) -> Json {
 async fn key(world: &World, owner: &Who, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: owner.id(),
             name: "Resource grouping control",
             token_hash: &token_hash(&secret),
