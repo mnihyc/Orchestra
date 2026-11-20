@@ -130,6 +130,7 @@ async fn require_source(conn: &mut Conn, principal: &Principal, root: &Root) -> 
         ResourceKind::McpServer => Permission::McpManage,
         ResourceKind::Mount => Permission::MountManage,
         ResourceKind::Skill => Permission::SkillManage,
+        ResourceKind::Pool => Permission::PoolManage,
     };
     let result = if root.kind == ResourceKind::Machine {
         resources::machines::require_machine(conn, principal, root.object.id, permission).await

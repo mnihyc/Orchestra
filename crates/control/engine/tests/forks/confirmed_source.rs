@@ -363,6 +363,7 @@ impl Rig {
             });
         self.on_open(|open| {
             Ok(SessionOpenResult {
+                mcp: None,
                 native_session_ref: if matches!(open.mode, SessionMode::Resume | SessionMode::Adopt)
                 {
                     open.native_session_ref.clone().ok_or_else(|| {
@@ -981,10 +982,10 @@ async fn historical_unconfirmed_words_are_refused_instead_of_copied_out_of_their
         .fetch_one(rig.world.pool.pool())
         .await
         .unwrap();
-    let native = CommandKind::ALL
+    let native: Vec<_> = CommandKind::ALL
         .iter()
-        .map(|kind| rig.world.commands.issued_of(kind.as_str()))
-        .sum::<usize>();
+        .map(|kind| (kind.as_str(), rig.world.commands.issued_of(kind.as_str())))
+        .collect();
     let jobs = rig
         .world
         .count("SELECT count(*) FROM jobs WHERE node_id=$1", source)
@@ -1044,13 +1045,9 @@ async fn historical_unconfirmed_words_are_refused_instead_of_copied_out_of_their
             .await,
         0
     );
-    assert_eq!(
-        CommandKind::ALL
-            .iter()
-            .map(|kind| rig.world.commands.issued_of(kind.as_str()))
-            .sum::<usize>(),
-        native
-    );
+    for (kind, count) in native {
+        assert_eq!(rig.world.commands.issued_of(kind), count, "{kind}");
+    }
     rig.world.shutdown().await;
 }
 

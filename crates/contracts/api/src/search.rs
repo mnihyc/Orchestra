@@ -174,6 +174,8 @@ pub enum NameKind {
     Machine,
     /// A skill.
     Skill,
+    /// A configured resource pool.
+    Pool,
 }
 
 impl NameKind {
@@ -200,6 +202,7 @@ impl NameKind {
             Self::Mount => "mount",
             Self::Machine => "machine",
             Self::Skill => "skill",
+            Self::Pool => "pool",
         }
     }
 }
@@ -356,6 +359,9 @@ pub struct SearchListQuery {
     /// A node: only what lies in it and below it. Everything the caller can read when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Id>,
+    /// Only items of this conversation stream, applied before matching and paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
     /// A comma list of item kinds, `chat_message` and `document`; empty selects none, absence all.
     #[serde(
         default,
@@ -408,6 +414,15 @@ pub struct SearchListQuery {
     /// On a stream, milliseconds already elapsed since the last keystroke.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typing_age_ms: Option<u32>,
+    /// Stream-only read of already captured serving sources; requires this search's own cursor and starts no retrieval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_details: Option<bool>,
+    /// Offset within that captured source list, never within corpus results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_offset: Option<u32>,
+    /// Finds current safe place labels or captured serving-model labels inside that source list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_filter: Option<String>,
 }
 
 /// Which names to find, among whatever the caller may see: nodes they may view, documents they may
@@ -417,6 +432,9 @@ pub struct SearchListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NameSearchListQuery {
+    /// One exact identity, independent of recent visits; the same current visibility checks still apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Id>,
     /// Only this caller's starred kind/id identities; empty words list them in saved order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starred: Option<bool>,
@@ -467,10 +485,71 @@ pub struct SearchOrderEntry {
     pub match_field: Option<SearchMatchField>,
 }
 
+/// A model admitted by the actual query, without requiring access to its provider configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningModel {
+    /// Opaque model reference component, never an identifier to display as a name.
+    pub provider_id: Id,
+    /// Actual routing name used for the vector space.
+    pub model_name: String,
+    /// Captured display name, with the routing name only when no distinct label was supplied.
+    pub display_name: String,
+}
+
+/// Safe current names around one actual serving receipt; a generation's raw identifier is not exposed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningSource {
+    /// Root whose index answered, named only under this reader's current authority.
+    pub root: NodeRef,
+    /// Model actually used, not a subsequently configured replacement.
+    pub model: SearchMeaningModel,
+    /// Actual embedding-request usage owner, absent when a cached vector issued no new request.
+    pub usage_owner: Option<UserRef>,
+    /// A recorded owner exists but its name is not shared with this reader.
+    pub usage_owner_withheld: bool,
+    /// No new query embedding was requested.
+    pub cached: bool,
+    /// When the serving lookup completed.
+    pub observed_at: Time,
+}
+
+/// A bounded page of this query's captured sources, not another search or model request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SearchMeaningSourcePage {
+    /// Currently authorized, safely named sources on this page.
+    pub sources: Vec<SearchMeaningSource>,
+    /// Explicit continuation within the same receipt.
+    pub next_offset: Option<u32>,
+    /// Sources matching the current safe-label filter.
+    pub total: u32,
+    /// Older source positions had no captured provenance; zero is not substituted for them.
+    pub unreported: bool,
+}
+
 /// A newline-delimited event of one search; each payload appears once in that search segment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchStreamEvent {
+    /// Actual serving provenance; the independent receipt cursor remains available when corpus results are exhausted.
+    MeaningSources {
+        /// Reader-bound receipt, with the same lifetime and allowance as ordinary search cursors.
+        cursor: Option<String>,
+        /// Actual serving indexes, not merely configured roots.
+        total: u32,
+        /// Some earlier serving positions have no receipt.
+        unreported: bool,
+        /// A model caption is valid only for exactly one proven serving source.
+        single: Option<SearchMeaningModel>,
+        /// Present only for an explicit read of the already captured source list.
+        page: Option<Box<SearchMeaningSourcePage>>,
+    },
+    /// The indexed field scope, including the current allowance for newly projected conversation text.
+    /// Word matches never imply full transcript coverage: raw calls, output, hidden reasoning,
+    /// side threads and text whose masking inputs cannot be opened are excluded.
+    Coverage {
+        /// Characters retained per masked conversation item. Existing projections change on rebuild.
+        conversation_chars: u64,
+    },
     /// The settings that govern this opening, resolved at the selected scope.
     Options {
         /// The initial number of visible rows.
@@ -673,6 +752,7 @@ crate::endpoints! {
                 Object(K::McpServer),
                 Object(K::Mount),
                 Object(K::Skill),
+                Object(K::Pool),
                 Identity(I::Chat),
                 Identity(I::Account),
                 Identity(I::Group),
