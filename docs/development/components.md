@@ -1,9 +1,8 @@
 # Component inventory
 
 This map links the implemented application, contract, control and runtime
-packages and the extension seams that remain reserved. Package READMEs describe
-their behavior and test coverage. Release support also depends on the
-validation of the packaged programs on their supported platforms.
+packages and the extension points. Package READMEs describe their behavior and how to
+build and test them.
 
 ## Executables
 
@@ -19,15 +18,15 @@ validation of the packaged programs on their supported platforms.
 The service entry points compose the libraries below. `orchctl` provides local
 administration, bootstrap, diagnostics, provider import and plugin checks.
 `orch-mock-llm` in testkit is a controlled model server used by native harness
-and end-to-end tests; its scripted replies are separate from real model proof.
+and end-to-end tests; its scripted replies are not answers of a real model.
 
 ## Libraries and implementations
 
 The workspace manifest lists the applications, libraries and tooling below.
-Contracts carry the wire types and trait seams; control packages own durable
+Contracts carry the wire types and the traits; control packages own durable
 product decisions and runtime packages enforce the machine side. Built-in OIDC
 sign-in and the model summarizer have implementations; each package's README
-states its behavior, tests and any remaining limitations.
+states its behavior, its tests and its limits.
 
 | Package | Responsibility |
 |---------|----------------|
@@ -46,8 +45,9 @@ states its behavior, tests and any remaining limitations.
 | [orch-access-contract](../../crates/contracts/access/README.md) | Permission catalogue, roles and permission-page contracts, without access decisions. |
 | [orch-summarizer-contract](../../crates/contracts/summarizer/README.md) | Summarizer contract for titles, tags, summary text and handoffs. |
 | [orch-notifier-contract](../../crates/contracts/notifier/README.md) | Notification channel contract hosted by the worker. |
-| [orch-blob-contract](../../crates/contracts/blob/README.md) | BlobStore trait seam; local storage is the v0.1 implementation. |
-| [orch-identity-contract](../../crates/contracts/identity/README.md) | IdentityProviderKind trait seam; OIDC is the v0.1 implementation. |
+| [orch-blob-contract](../../crates/contracts/blob/README.md) | The BlobStore trait; local storage is the implementation in 0.1. |
+| [orch-human-check-contract](../../crates/contracts/human-check/README.md) | HumanCheckProvider trait seam; hCaptcha and reCAPTCHA of Google Cloud Fraud Defense are the first backends. |
+| [orch-identity-contract](../../crates/contracts/identity/README.md) | The IdentityProviderKind trait; OIDC is the implementation in 0.1. |
 | [orch-config](../../crates/platform/config/README.md) | Configuration loading shared by service and machine entry points. |
 | [orch-telemetry](../../crates/platform/telemetry/README.md) | Structured logging and metrics shared by components; what a system records stays inside it. |
 | [orch-pki](../../crates/platform/pki/README.md) | Certificate authority and machine identity mechanisms. |
@@ -81,15 +81,16 @@ states its behavior, tests and any remaining limitations.
 | [orch-notifier-telegram](../../extensions/notifiers/telegram/README.md) | Telegram bot notification delivery to the people who linked a chat with the bot. |
 | [orch-notifier-webhook](../../extensions/notifiers/webhook/README.md) | Signed webhook notification delivery. |
 | [orch-blob-local](../../extensions/blobs/local/README.md) | Local directory implementation of content-addressed storage. |
+| [orch-human-check](../../extensions/human-check/vendors/README.md) | The human-check backends: hCaptcha, and reCAPTCHA of Google Cloud Fraud Defense through siteverify and through the Assessments API. |
 | [orch-identity-oidc](../../extensions/identity/oidc/README.md) | OpenID Connect identity-provider implementation. |
 | [orch-testkit](../../crates/tooling/testkit/README.md) | Behavioral doubles, a clock that moves when told and a database of its own for each test, for the tests of the other packages. |
 | [orch-build-info](../../crates/foundation/build-info/README.md) | Compiled version and component identity shared by executables. |
 | [orch-build-support](../../crates/tooling/build-support/README.md) | Build-script release validation and component counter allocation. |
 | [orch-xtask](../../crates/tooling/xtask/README.md) | Rust verification, generated contracts and release packaging with manifest validation. |
 
-[The extension host map](../../extensions/README.md) includes the translator
-seam for external implementations and one reserved protocol. [External examples](../../examples/plugins/README.md)
-cover driver and summarizer plugin homes; neither is executable.
+[The extension host map](../../extensions/README.md) lists the implementations of each kind of extension, and the
+translator interface for external ones. The [Python plugin examples](../../examples/plugins/README.md) show a driver,
+a notifier, a provider source and a summarizer.
 
 ## Frontend
 
@@ -97,12 +98,12 @@ The shared foundation covers the workbench that is the shell, typed API and real
 live stores, routing, generated contracts, UI primitives, context menus,
 the help index, themes, localization and tooling.
 The feature areas below contain the screens and their controls. Their READMEs
-describe the implemented behavior and any remaining work.
+describe the behavior of each.
 
 | Feature home | Responsibility |
 |--------------|----------------|
 | [workbench](../../frontend/src/features/workbench/README.md) | The workbench: areas, views and arrangements |
-| [auth](../../frontend/src/features/auth/README.md) | Setup, registration, signing in by each proof, and invitations |
+| [auth](../../frontend/src/features/auth/README.md) | Setup, registration, signing in with each kind of proof, and invitations |
 | [onboarding](../../frontend/src/features/onboarding/README.md) | First-run guidance |
 | [navigation](../../frontend/src/features/navigation/README.md) | Organization and work navigation, and the finder |
 | [help](../../frontend/src/features/help/README.md) | Hints and help |
@@ -122,7 +123,6 @@ describe the implemented behavior and any remaining work.
 | [settings](../../frontend/src/features/settings/README.md) | Personal and hierarchical configuration |
 | [admin](../../frontend/src/features/admin/README.md) | System management |
 | [start](../../frontend/src/features/start/README.md) | Type-and-go and explicit binding |
-| [fork](../../frontend/src/features/fork/README.md) | Fork, switch, move and update |
 | [inbox](../../frontend/src/features/inbox/README.md) | Notification inbox |
 | [approvals](../../frontend/src/features/approvals/README.md) | All approval kinds |
 | [usage](../../frontend/src/features/usage/README.md) | Usage at three depths, caps, rates and passing a limit |
@@ -149,6 +149,5 @@ from the contract crates and checked against their committed forms.
 | [Automation helpers](../../.github/scripts/README.md) and [release notes](../../.github/release-notes/README.md) | Release validation and user-facing release information |
 | [Public docs](../README.md) | User, operator, security and extension guides; the user guide also supplies application help; generated OpenAPI |
 
-This inventory describes where code lives. Release support depends on the
-behavioral tests, deployment scenarios and native platform checks for the
-exact packaged candidate; a source listing alone does not establish it.
+This inventory describes where code lives. What a release supports is in its
+[release notes](../../CHANGELOG.md).

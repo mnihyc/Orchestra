@@ -20,8 +20,6 @@ use crate::routes::access::page::NameBounds;
 
 use crate::routes::settings::readers;
 
-use crate::routes::settings::readers::PreparedSettings;
-
 use crate::routes::usage::caps;
 
 use crate::routes::usage::caps::PreparedReached;
@@ -58,8 +56,6 @@ use orch_api_contract::threads::ThreadOpeningGet;
 
 use orch_api_contract::threads::ThreadOpeningGetQuery;
 
-use orch_api_contract::threads::ThreadOutlineGetQuery;
-
 use orch_api_contract::threads::ThreadSyncGetQuery;
 
 use orch_authz::Act;
@@ -82,12 +78,25 @@ use orch_types::Id;
 
 use std::collections::BTreeMap;
 
+use native::thread_openings::Openings;
 use std::collections::BTreeSet;
+
+#[path = "opening/session.rs"]
+mod session;
+
 pub(super) fn mount(registry: &mut Registry) {
+    let openings = std::sync::Arc::new(Openings::default());
+    bind(registry, openings.clone());
+    let mut addressed = Registry::new();
+    bind(&mut addressed, openings);
+    session::mount(registry, addressed.into_router());
+}
+
+fn bind(registry: &mut Registry, openings: std::sync::Arc<Openings>) {
     registry.on_snapshot_read_with_optional_operation(
         ThreadOpeningGet,
         native::selected::<Opening>,
-        opening,
+        move |ctx, query, ()| opening(openings.clone(), ctx, query),
     );
 }
 
@@ -164,8 +173,6 @@ struct Witness {
     projection_revision: i64,
     viewed_segment: Option<Id>,
     current_segment: Option<Id>,
-    draft: bool,
-    parameters: bool,
     provider: bool,
     controls: Vec<(KeyTargetKind, Option<Id>)>,
     names: BTreeSet<Id>,
@@ -175,13 +182,45 @@ struct Witness {
 
 struct Prepared {
     query: ThreadOpeningGetQuery,
-    settings: PreparedSettings,
     reached: Option<PreparedReached>,
     provider: Option<crate::routes::resources::providers::PreparedProjection>,
     bounds: NameBounds,
-    offer_modes: bool,
     pending: Option<crate::input_schedules::PreparedThreadPending>,
-    witness: Witness,
+    draft: bool,
+    parameters: bool,
+    witness: Option<Witness>,
+}
+
+async fn can_read_draft(conn: &mut Conn, principal: &Principal, thread: Id) -> ApiResult<bool> {
+    Ok(available(
+        authorization::require_projected(
+            conn,
+            principal,
+            thread,
+            authorization::exact(Permission::ThreadInteract),
+            Act::Use,
+            Policy::default(),
+            native::modern(principal.caller()),
+        )
+        .await,
+    )?
+    .is_some())
+}
+
+async fn thread_pending(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    thread: Id,
+    follows_active: bool,
+) -> ApiResult<Option<crate::input_schedules::PreparedThreadPending>> {
+    if follows_active {
+        available(
+            crate::input_schedules::prepare_thread_pending(conn, principal, topic, thread).await,
+        )
+    } else {
+        Ok(None)
+    }
 }
 
 struct Opening;
@@ -192,6 +231,52 @@ impl native::Selected for Opening {
     type Value = Prepared;
     type Reply = ThreadOpening;
     const DECLARATION: &'static Declaration<Source> = &sources::OPENING;
+
+    fn select_ordinary<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut Conn,
+        principal: &'a Principal,
+        query: &'a Self::Query,
+    ) -> BoxFuture<'a, ApiResult<(Prepared, Vec<native::Facts<Source>>)>> {
+        if !ctx.ordinary_browser_opening() {
+            return Self::select(ctx, conn, principal.caller(), query);
+        }
+        Box::pin(async move {
+            let thread = ctx.id("id")?;
+            // The ordinary snapshot has checked Thread View. Each private pane keeps its own gate.
+            readers::require_readable(conn, principal, thread).await?;
+            let row = threads::thread(conn, thread)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            let projection = thread_continuations::projection(conn, thread, query.continuation_id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            let draft = can_read_draft(conn, principal, thread).await?;
+            let reached =
+                caps::prepare_reached_for_thread(ctx, conn, principal, thread, None).await?;
+            let pending = thread_pending(
+                conn,
+                principal,
+                row.topic_id,
+                thread,
+                projection.follows_active,
+            )
+            .await?;
+            Ok((
+                Prepared {
+                    query: query.clone(),
+                    reached: Some(reached),
+                    provider: None,
+                    bounds: NameBounds::default(),
+                    pending,
+                    draft,
+                    parameters: true,
+                    witness: None,
+                },
+                Vec::new(),
+            ))
+        })
+    }
 
     fn select<'a>(
         ctx: &'a Ctx,
@@ -219,20 +304,14 @@ impl native::Selected for Opening {
             let projection = thread_continuations::projection(conn, id, query.continuation_id)
                 .await?
                 .ok_or_else(ApiError::not_found)?;
-            let settings = readers::prepare_settings(conn, &principal, id).await?;
-            let draft = available(
-                authorization::require_projected(
-                    conn,
-                    &principal,
-                    id,
-                    authorization::exact(Permission::ThreadInteract),
-                    Act::Use,
-                    Policy::default(),
-                    native::modern(caller),
-                )
-                .await,
-            )?
-            .is_some();
+            let settings = readers::prepare_settings_views(
+                conn,
+                &principal,
+                id,
+                Some(super::parameters::FIRST_SCREEN_SETTINGS),
+            )
+            .await?;
+            let draft = can_read_draft(conn, &principal, id).await?;
 
             // These are actual current native binding rows, before descriptor/model projection.
             let mut binding = Vec::new();
@@ -390,19 +469,14 @@ impl native::Selected for Opening {
             if let Some(ids) = &mut cap_ids {
                 ids.sort_unstable();
             }
-            let mut pending = if projection.follows_active {
-                available(
-                    crate::input_schedules::prepare_thread_pending(
-                        conn,
-                        &principal,
-                        row.topic_id,
-                        id,
-                    )
-                    .await,
-                )?
-            } else {
-                None
-            };
+            let mut pending = thread_pending(
+                conn,
+                &principal,
+                row.topic_id,
+                id,
+                projection.follows_active,
+            )
+            .await?;
             if let Some(selected) = &pending
                 && !permitted(
                     ctx,
@@ -421,8 +495,6 @@ impl native::Selected for Opening {
                 projection_revision: projection.projection_revision,
                 viewed_segment: projection.viewed_segment_id,
                 current_segment: row.current_segment_id,
-                draft,
-                parameters,
                 provider: provider.is_some(),
                 controls: control_ids,
                 names: bounds.nodes.clone(),
@@ -443,13 +515,13 @@ impl native::Selected for Opening {
             Ok((
                 Prepared {
                     query: query.clone(),
-                    settings,
                     reached,
                     provider,
                     bounds,
-                    offer_modes,
                     pending,
-                    witness,
+                    draft,
+                    parameters,
+                    witness: Some(witness),
                 },
                 facts,
             ))
@@ -472,34 +544,53 @@ impl native::Selected for Opening {
     ) -> BoxFuture<'a, ApiResult<ThreadOpening>> {
         Box::pin(async move {
             let query = &value.query;
-            let sync = super::read::sync_in(
+            let configured = orch_settings::get::<u32>(
+                conn,
+                orch_settings::Place::Node(ctx.id("id")?),
+                orch_settings_contract::registry::keys::THREADS_OPENING_ITEMS,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(40);
+            let limit = super::read::limit_of(query.limit, configured, u32::MAX)?;
+            let sync = super::read::sync_window_in(
                 ctx,
                 conn,
+                principal,
                 ThreadSyncGetQuery {
                     limit: query.limit,
                     continuation_id: query.continuation_id,
                     projection_revision: query.projection_revision,
                     ..Default::default()
                 },
+                limit,
             )
             .await?;
-            let outline = super::read::outline_in(
-                ctx,
-                conn,
-                ThreadOutlineGetQuery {
-                    limit: query.limit,
-                    continuation_id: query.continuation_id,
-                    projection_revision: query.projection_revision,
-                    ..Default::default()
-                },
-            )
-            .await?;
-            let draft = if value.witness.draft {
+            let draft = if value.draft {
                 super::drive::draft_in(ctx, conn).await?
             } else {
                 None
             };
-            let parameters = if value.witness.parameters {
+            let visible_turns: BTreeSet<_> = sync
+                .items
+                .iter()
+                .filter_map(|item| item.turn_id)
+                .chain(sync.thread.current_turn_id)
+                .collect();
+            let shown_models = sync
+                .turns
+                .iter()
+                .filter(|turn| visible_turns.contains(&turn.id))
+                .flat_map(|turn| {
+                    std::iter::once(turn.model.clone()).chain(
+                        turn.usage_detail
+                            .as_ref()
+                            .and_then(|detail| detail.effective_model.clone())
+                            .filter(|model| !model.is_empty()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut parameters = if value.parameters {
                 available(
                     super::parameters::parameters_in(
                         ctx,
@@ -511,6 +602,7 @@ impl native::Selected for Opening {
                         } else {
                             super::parameters::ProviderView::Native
                         },
+                        super::parameters::ParameterProjection::FirstScreen(&shown_models),
                     )
                     .await,
                 )?
@@ -539,22 +631,23 @@ impl native::Selected for Opening {
                 }
                 None => None,
             };
-            let settings = readers::show_settings_with_controls(
-                ctx,
-                conn,
-                principal,
-                &value.settings,
-                &value.bounds,
-                value.offer_modes,
-            )
-            .await?;
+            if let Some(parameters) = &mut parameters {
+                for option in &mut parameters.model.options {
+                    option.option_constraints.clear();
+                    option.parameters.request_options = None;
+                    option.parameters.offered = None;
+                }
+                parameters.model.options_partial = true;
+            }
             let follows_active = sync
                 .projection
                 .as_ref()
                 .is_none_or(|projection| projection.follows_active);
             let gateway = if follows_active {
                 Some(
-                    match crate::routes::gateways::thread_in(ctx, conn, ctx.id("id")?).await {
+                    match crate::routes::gateways::thread_in(ctx, conn, principal, ctx.id("id")?)
+                        .await
+                    {
                         Ok(data) => orch_api_contract::nodes::OverviewPart::Ready { data },
                         Err(error) => {
                             let error = if native::modern(principal.caller()) {
@@ -564,7 +657,7 @@ impl native::Selected for Opening {
                             };
                             let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
                             orch_api_contract::nodes::OverviewPart::Failed {
-                                problem,
+                                problem: Box::new(problem),
                                 retry_after,
                             }
                         }
@@ -585,7 +678,7 @@ impl native::Selected for Opening {
                         )
                         .into_parts_for(&ctx.request_id);
                         orch_api_contract::nodes::OverviewPart::Failed {
-                            problem,
+                            problem: Box::new(problem),
                             retry_after,
                         }
                     }
@@ -594,12 +687,25 @@ impl native::Selected for Opening {
                 None
             };
             Ok(ThreadOpening {
+                screen: match super::parameters::screen_facts_in(conn, sync.thread.base.id).await {
+                    Ok(data) => orch_api_contract::nodes::OverviewPart::Ready { data },
+                    Err(error) => {
+                        let error = if native::modern(principal.caller()) {
+                            crate::middleware::authorization::problem_without_content(error)
+                        } else {
+                            error
+                        };
+                        let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
+                        orch_api_contract::nodes::OverviewPart::Failed {
+                            problem: Box::new(problem),
+                            retry_after,
+                        }
+                    }
+                },
                 sync,
                 draft,
                 parameters,
                 limits,
-                settings,
-                outline,
                 gateway,
                 pending_agent_schedules,
             })
@@ -614,17 +720,20 @@ impl native::Selected for Opening {
         opened: &'a Prepared,
         fresh: &'a Prepared,
     ) -> BoxFuture<'a, ApiResult<bool>> {
-        Box::pin(async move { Ok(opened.witness == fresh.witness) })
+        Box::pin(async move {
+            Ok(opened.witness.is_some()
+                && opened.witness == fresh.witness
+                && opened.draft == fresh.draft
+                && opened.parameters == fresh.parameters)
+        })
     }
 }
 
 async fn opening(
+    openings: std::sync::Arc<Openings>,
     ctx: Ctx,
     query: ThreadOpeningGetQuery,
-    (): (),
 ) -> ApiResult<Answer<ThreadOpening>> {
-    Ok(
-        Answer::from(native::selected_read::<Opening>(ctx, query, ()).await?)
-            .header(CACHE_CONTROL, crate::sign_in::NOT_KEPT),
-    )
+    let value = openings.read::<Opening>(ctx, query).await?;
+    Ok(Answer::from(value).header(CACHE_CONTROL, crate::sign_in::NOT_KEPT))
 }

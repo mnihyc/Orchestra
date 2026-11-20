@@ -22,6 +22,9 @@ pub mod routes {
 
 #[doc(hidden)]
 pub fn install_interfaces() {
+    routes::resources::providers::__api_install_provider_thread();
+    routes::resources::providers::__api_install_provider_list_rows();
+    routes::resources::providers::__api_install_provider_inventory_rows();
     routes::capabilities::__api_install_51c3f443d6();
 
     routes::duplicates::moving::__api_install_5ca59db85d();
@@ -219,6 +222,8 @@ pub fn install_interfaces() {
     routes::resources::templates::__api_install_d83d9b6fff();
 
     routes::resources::validation::__api_install_d2a05682ae();
+
+    routes::resources::validation::__api_install_ef3cd14b55();
 
     routes::resources::view::__api_install_9b9d72ac9f();
 
