@@ -58,8 +58,6 @@ use orch_engine::browsers::BrowserFailure;
 
 use orch_engine::browsers::Browsers;
 
-use orch_engine::browsers::CLOSED_LIST_KEPT;
-
 use orch_engine::browsers::OpenBrowser;
 
 use orch_engine::browsers::Requester;
@@ -166,7 +164,7 @@ pub(crate) async fn current(
     principal: Option<&Principal>,
     environment: Id,
 ) -> ApiResult<EnvironmentBrowsers> {
-    current_with_names(app, conn, principal, environment, None).await
+    current_with_names(app, conn, principal, environment, None, None, None).await
 }
 orch_api_base::__api_bind_3f4b14d8fe!();
 
@@ -176,6 +174,8 @@ async fn current_with_names(
     principal: Option<&Principal>,
     environment: Id,
     names: Option<&NameBounds>,
+    query: Option<&EnvironmentBrowserListQuery>,
+    selected: Option<Id>,
 ) -> ApiResult<EnvironmentBrowsers> {
     let site = rows::site(conn, environment)
         .await?
@@ -213,7 +213,39 @@ async fn current_with_names(
             browser: p.browser,
         })
         .collect();
-    let found = rows::list(conn, environment, app.clock.now() - CLOSED_LIST_KEPT).await?;
+    let query = query.cloned().unwrap_or_default();
+    let limit = i64::from(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+    );
+    if limit == 0 {
+        return Err(ApiError::invalid("limit", "choose a positive page size"));
+    }
+    let mut found = if let Some(id) = selected {
+        rows::get(conn, id)
+            .await?
+            .filter(|row| row.environment_id == environment)
+            .into_iter()
+            .collect()
+    } else {
+        rows::page(
+            conn,
+            environment,
+            query.closed.unwrap_or(false),
+            query.query.as_deref().unwrap_or_default(),
+            query.cursor,
+            limit + 1,
+        )
+        .await?
+    };
+    let next_cursor =
+        if selected.is_none() && i64::try_from(found.len()).unwrap_or(i64::MAX) > limit {
+            found.pop();
+            found.last().map(|row| row.id)
+        } else {
+            None
+        };
     let people: Vec<_> = found
         .iter()
         .filter_map(|r| r.opened_by)
@@ -241,6 +273,18 @@ async fn current_with_names(
         placement: parse(&site.placement)?,
         status: parse(&site.status)?,
     };
+    let idle_policy = orch_settings::resolve(
+        conn,
+        orch_settings::Place::Environment(environment),
+        "browser.idle_minutes",
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let idle_minutes = idle_policy.value().and_then(Json::as_i64).unwrap_or(0);
+    let idle_source = serde_json::from_value(
+        serde_json::to_value(idle_policy.resolved.source.scope).map_err(ApiError::internal)?,
+    )
+    .map_err(ApiError::internal)?;
     let mut browsers = Vec::new();
     for row in found {
         let thread = match (row.thread_id, principal) {
@@ -269,7 +313,24 @@ async fn current_with_names(
         let watching = app.engine.browsers().memory().watching(row.id);
         let driving = app.realtime.browsers().driving(row.id, app.clock.now());
         let drivers = refusals::user_refs(conn, &driving).await?;
+        let lifecycle = InteractiveLifecycle {
+            driving_idle_expires_at: orch_api_contract::workspace::JobWaitTime::NotApplicable,
+            gate: off,
+            idle_close_eligible_at: if off.is_none() && row.env_generation == site.generation {
+                Browsers::idle_close_eligible_at(&row, watching, idle_minutes)
+            } else {
+                orch_api_contract::workspace::JobWaitTime::NotApplicable
+            },
+            closed_entry_expires_at: orch_api_contract::workspace::JobWaitTime::Unreported,
+            retirement_reason: row.close_reason.clone(),
+            idle_minutes: (row.origin == "started" && row.state != "closed")
+                .then_some(idle_minutes),
+            policy_source: (row.origin == "started" && row.state != "closed")
+                .then_some(idle_source),
+            evaluated_at: Time::new(app.clock.now()),
+        };
         browsers.push(Browser {
+            lifecycle: Some(lifecycle),
             id: row.id,
             environment: env.clone(),
             profile: row.profile,
@@ -319,12 +380,20 @@ async fn current_with_names(
         })
         .flatten();
     Ok(EnvironmentBrowsers {
+        next_cursor,
         off,
         support,
         presets,
         profiles: if off.is_none() { profiles } else { Vec::new() },
         profiles_dir,
-        browsers: if off.is_none() { browsers } else { Vec::new() },
+        browsers: if off.is_none() {
+            browsers
+        } else {
+            browsers
+                .into_iter()
+                .filter(|row| row.state == orch_api_contract::browsers::BrowserState::Closed)
+                .collect()
+        },
         limit: EnvironmentBrowsersLimit { open: count, max },
     })
 }
@@ -376,7 +445,9 @@ async fn list(
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
     require(&mut conn, &principal, id, Permission::BrowserView).await?;
-    if query.look == Some(true) || ctx.app.engine.browsers().memory().profiles(id).is_none() {
+    if query.closed != Some(true)
+        && (query.look == Some(true) || ctx.app.engine.browsers().memory().profiles(id).is_none())
+    {
         let site = rows::site(&mut conn, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
@@ -391,7 +462,16 @@ async fn list(
             conn = ctx.app.db.acquire().await?;
         }
     }
-    let current = current(&ctx.app, &mut conn, Some(&principal), id).await?;
+    let current = current_with_names(
+        &ctx.app,
+        &mut conn,
+        Some(&principal),
+        id,
+        None,
+        Some(&query),
+        None,
+    )
+    .await?;
     drop(conn);
     ctx.app.engine.browsers().changed(id).await;
     Ok(current)
@@ -405,12 +485,20 @@ pub(super) async fn browser_in(
     id: Id,
     names: Option<&NameBounds>,
 ) -> ApiResult<Browser> {
-    current_with_names(app, conn, Some(principal), environment, names)
-        .await?
-        .browsers
-        .into_iter()
-        .find(|b| b.id == id)
-        .ok_or_else(ApiError::not_found)
+    current_with_names(
+        app,
+        conn,
+        Some(principal),
+        environment,
+        names,
+        None,
+        Some(id),
+    )
+    .await?
+    .browsers
+    .into_iter()
+    .find(|b| b.id == id)
+    .ok_or_else(ApiError::not_found)
 }
 
 // Browser operations use the refreshed identity while a shared guard protects the engine's transactions.

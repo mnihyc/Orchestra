@@ -4,6 +4,7 @@
  * address (`tab`). An org inside another is reached by its address, and also by its id, which is what
  * the tree of the left bar knows of it; the id is replaced by the address before anything is shown.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { usePageParams, usePageSearch, usePageNavigate } from '@/features/workbench/pageContext';
 import { useRememberedView } from '@/lib/viewChoices';
 import { createFileRoute, redirect } from '@tanstack/react-router';
@@ -38,7 +39,7 @@ function OrgRoute() {
     <OrgHome
       slug={slug}
       tab={picked}
-      onTab={(next) => { choose(next); void navigate({ search: { tab: next }, replace: true }); }}
+      onTab={carryDeviceChoice((next: typeof picked) => { choose(next); void navigate({ search: { tab: next }, replace: true }); }, choose)}
     />
   );
 }
