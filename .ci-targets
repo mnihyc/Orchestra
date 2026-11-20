@@ -1,0 +1,2 @@
+web typecheck
+web test -- tests/unit/acts.test.ts tests/unit/workbench-grid.test.ts tests/component/tabs-keyboard.test.tsx

@@ -12,10 +12,34 @@ import { Popover } from '@/ui/Popover';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn(), access: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => calls.open }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: calls.access }));
 
 describe('one guide entry on the screen', () => {
+
+  it('measures returning guides together and leaves them alone when a live answer grows beside them', async () => {
+    function Entry() {
+      const entry = useGuideEntry('returning-thread', null);
+      return <span ref={entry.ref}>{!entry.hidden && <button>Thread guide</button>}</span>;
+    }
+    const styles = vi.spyOn(globalThis, 'getComputedStyle');
+    try {
+      const view = render(<><section data-guides>{Array.from({ length: 20 }, (_, i) => <Entry key={i} />)}</section><div data-answer /></>);
+      const guides = view.container.querySelector('[data-guides]')!;
+      const answer = view.container.querySelector('[data-answer]')!;
+      await act(async () => { await Promise.resolve(); });
+      expect(guides.querySelectorAll('button')).toHaveLength(1);
+      expect(styles.mock.calls.filter(([element]) => element === guides)).toHaveLength(1);
+      styles.mockClear();
+      await act(async () => { answer.append(document.createElement('p')); await Promise.resolve(); });
+      expect(styles).not.toHaveBeenCalled();
+      // Moving the first holder within the same surface changes who offers the guide.
+      const first = guides.firstElementChild!;
+      await act(async () => { guides.append(first); await Promise.resolve(); });
+      expect(first.querySelector('button')).toBeNull();
+      expect(guides.firstElementChild?.querySelector('button')).not.toBeNull();
+    } finally { styles.mockRestore(); }
+  });
 
   it('keeps inactive background guides suppressed while a modal covers the screen, then restores one entry', async () => {
     const view = show(<section data-testid="covered-help"><GuideLink guide="how-approvals-work" /><GuideLink guide="how-approvals-work" /></section>);
@@ -52,8 +76,11 @@ describe('one guide entry on the screen', () => {
     await act(async () => { await Promise.resolve(); });
     const styles = vi.spyOn(globalThis, 'getComputedStyle');
     try {
-      await act(async () => { screen.getByTestId('floating-motion').style.transform = 'translateX(4px)'; await Promise.resolve(); });
+      const moving = screen.getByTestId('floating-motion');
+      const contains = vi.spyOn(moving, 'contains');
+      await act(async () => { moving.style.transform = 'translateX(4px)'; await Promise.resolve(); });
       expect(styles).not.toHaveBeenCalled();
+      expect(contains).not.toHaveBeenCalled();
       await act(async () => { screen.getByTestId('guide-first').hidden = true; await Promise.resolve(); });
       await waitFor(() => expect(screen.getByTestId('guide-second').querySelector('button')).not.toBeNull());
       expect(styles).toHaveBeenCalled();
@@ -101,7 +128,7 @@ describe('the empty place’s creation question', () => {
   it.each(['org', 'project'] as const)('opens %s’s own creation row without an access write', async (kind) => {
     calls.access.mockClear();
     show(<CreationPermissionLink place={{ kind, id: 'actual-place', name: 'My place' }} />);
-    await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }));
+    await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may make topics here?' }));
     expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: kind === 'project' ? 'project.create_topics' : 'org.interact' });
   });
 });

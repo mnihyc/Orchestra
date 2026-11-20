@@ -2,7 +2,7 @@
  *
  * The lines of a thread's history between its items, each one sentence that names who did what, in
  * the reader's language: "Chen created this thread", "Bo changed the model to gpt-6 at high", "Dana
- * moved Main to host-3". A line is centred with a small icon and has its time under the pointer. A
+ * moved Main to host-3". A line is centred with a small icon and opens its exact time on demand. A
  * line is one sentence: what it stands for (a plan, a difference, an output) is never in it.
  */
 import type { TFunction } from 'i18next';
@@ -25,6 +25,7 @@ import {
   Pause,
   PencilLine,
   Play,
+  RefreshCw,
   Settings2,
   ScrollText,
   Share2,
@@ -43,16 +44,18 @@ import { UserChip } from '@/ui/UserChip';
 import { ResourceSentence } from '@/features/resource-facts/ResourceSentence';
 import { resourceSubjectOf } from '@/features/resource-facts/facts';
 
-import type { EnvironmentRef, Item, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, Item, SessionReopenReason, UserRef } from '@/generated/api-types';
 import type { MarkerPayload } from '../markerTypes';
 import { useFormatContext } from '@/lib/appearance';
-import { formatSpan } from '@/lib/time';
+import { formatExact, formatSpan } from '@/lib/time';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { TimeOfDay } from '@/ui/TimeOfDay';
+import { MarkerTime } from './MarkerTime';
 import { Button } from '@/ui/Button';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { openGiven } from '@/features/inspector/givenFocus';
 import { useTimelineContext } from '../context';
+import { SessionNativeHistory } from '../NativeHistoryFacts';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { CallModel } from '@/features/calls/Model';
@@ -65,6 +68,21 @@ type MarkerItem = Extract<Item, { kind: 'marker' }>;
 
 const who = (user: UserRef | null, t: TFunction): string => user?.display_name ?? t('timeline.marker.someone');
 const environment = (ref: EnvironmentRef | null, t: TFunction): string => ref?.name ?? t('timeline.marker.anEnvironment');
+
+/** Why the thread's next turn opened its session again, in words. */
+function reopenReason(reason: SessionReopenReason, t: TFunction): string {
+  switch (reason) {
+    case 'unknown': return t('timeline.marker.sessionReopened.unknown');
+    case 'instructions': return t('timeline.marker.sessionReopened.instructions');
+    case 'limits': return t('timeline.marker.sessionReopened.limits');
+    case 'configuration': return t('timeline.marker.sessionReopened.configuration');
+    case 'mcp': return t('timeline.marker.sessionReopened.mcp');
+    case 'tools': return t('timeline.marker.sessionReopened.tools');
+    case 'skills': return t('timeline.marker.sessionReopened.skills');
+    case 'program_reloads': return t('timeline.marker.sessionReopened.programReloads');
+    case 'side_history': return t('timeline.marker.sessionReopened.sideHistory');
+  }
+}
 
 const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
   harness_changed: Settings2,
@@ -95,6 +113,7 @@ const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
   capability_revoked: ShieldCheck,
   compacted: Minimize2,
   instructions_deferred: Info,
+  session_reopened: RefreshCw,
   limit_bypassed: Flag,
   archived: Archive,
   unarchived: ArchiveRestore,
@@ -122,8 +141,8 @@ const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
 
 const nativeRecord=(value:unknown):value is Record<string,unknown>=>typeof value==='object' && value!==null && !Array.isArray(value);
 
-/** Native enum words are interpreted here; instruction text never reaches this projection. */
-export function nativeChangeValue(change:string,value:unknown,t:TFunction):string {
+/** Native enum words are interpreted here; instruction text never reaches this projection. With `brief`, an approval mode is only its name, where the long form adds the program's own value. */
+export function nativeChangeValue(change:string,value:unknown,t:TFunction,brief=false):string {
   const named=(name:string)=>t(`harnessChanges.values.${name}` as 'harnessChanges.values.default');
   if(change==='environment_connection' && (value==='connected' || value==='disconnected'))return t(value==='connected'?'harnessChanges.environmentConnected':'harnessChanges.environmentDisconnected');
   if(change==='reply_buffering' && nativeRecord(value) && typeof value.show_ui==='boolean')return t(value.show_ui?'harnessChanges.bufferingVisible':'harnessChanges.bufferingHidden');
@@ -159,17 +178,21 @@ export function nativeChangeValue(change:string,value:unknown,t:TFunction):strin
   if(change==='model' && typeof value==='string')return modelDisplayName(value,t);
   if(change==='effort' && typeof value==='string')return effortDisplayName(value,t);
   if(change==='approval_mode' && nativeRecord(value)) {
+    // The name of the glossary comes first, and what the program itself said stays beside it.
+    const glossary=(mode:'ask'|'on_request'|'auto'|'bypass')=>t(`choiceCatalog.approvalMode.${mode}.name` as 'choiceCatalog.approvalMode.ask.name');
+    const withOwn=(name:string,own:string)=>brief ? name : t('harnessChanges.ownValue',{name,own});
     if(typeof value.native_mode==='string') {
-      const modes:Record<string,string>={default:'ask',acceptEdits:'onRequest',auto:'automatic',bypassPermissions:'bypass',plan:'plan'};
-      const mode=modes[value.native_mode];
-      return mode===undefined ? value.native_mode : named(mode);
+      const modes:Record<string,'ask'|'on_request'|'auto'|'bypass'>={default:'ask',acceptEdits:'on_request',auto:'auto',bypassPermissions:'bypass'};
+      if(value.native_mode==='plan')return withOwn(named('plan'),value.native_mode);
+      const mode=Object.hasOwn(modes,value.native_mode) ? modes[value.native_mode] : undefined;
+      return mode===undefined ? value.native_mode : withOwn(glossary(mode),value.native_mode);
     }
     const policy=value.policy;
-    if(policy==='never')return named('bypass');
-    if(value.reviewer==='auto_review')return named('automatic');
-    if(policy==='untrusted')return named('ask');
-    if(policy==='on-request')return named('onRequest');
-    if(policy==='on-failure')return named('onFailure');
+    if(policy==='never')return withOwn(glossary('bypass'),policy);
+    if(value.reviewer==='auto_review')return withOwn(glossary('auto'),value.reviewer);
+    if(policy==='untrusted')return withOwn(glossary('ask'),policy);
+    if(policy==='on-request')return withOwn(glossary('on_request'),policy);
+    if(policy==='on-failure')return withOwn(named('onFailure'),policy);
     return named('custom');
   }
   if(change==='sandbox_mode' && nativeRecord(value)) {
@@ -203,6 +226,9 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
   switch (payload.marker) {
     case 'harness_changed': {
       const data=payload.data;
+      if(data.change==='warning' && nativeRecord(data.value) && typeof data.value.message==='string')return t('harnessChanges.warning',{program:data.program,message:data.value.message});
+      if(data.change==='turn_diff')return t('harnessChanges.diffUpdated',{program:data.program});
+      if(data.change==='turn_diff_unavailable')return t('harnessChanges.diffUnreadable',{program:data.program});
       if(data.change==='rate_limit') {
         const value=nativeRecord(data.value)?data.value:{};
         const words=[value.message,value.reason].filter((part):part is string=>typeof part==='string' && part.length>0);
@@ -216,6 +242,7 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
           ? t('harnessChanges.unrecognizedCount',{program:data.program,name:data.subject,number:formatNumber(count,context.locale)})
           : t('harnessChanges.unrecognized',{program:data.program,name:data.subject});
       }
+      if(data.change==='mcp_configuration')return t('harnessChanges.mcpConfiguration',{program:data.program});
       if(data.change==='context_compaction')return t('timeline.marker.compacted');
       if(data.change==='managed_settings_readback')return t(nativeRecord(data.value) && data.value.status==='mismatch' ? 'harnessChanges.pinsDiffer' : nativeRecord(data.value) && data.value.status==='reported' ? 'harnessChanges.pinsReported' : 'harnessChanges.pinsIncomplete',{program:data.program});
       if(data.change==='system_event')return t('harnessChanges.event',{program:data.program,value:nativeChangeValue(data.change,data.value,t)});
@@ -327,6 +354,8 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
         : t('timeline.marker.compactedIn', { duration: formatSpan(payload.data.duration_ms, context) });
     case 'instructions_deferred':
       return t('timeline.marker.instructionsDeferred', { program: payload.data.program });
+    case 'session_reopened':
+      return reopenReason(payload.data.reason, t);
     case 'limit_bypassed':
       return t('timeline.marker.limitBypassed', { by: who(payload.data.by, t), limits: payload.data.limits.map((limit) => limit.label).join(', ') });
     case 'archived':
@@ -372,12 +401,13 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
         case 'interrupted': return t('goals.marker.pausedInterrupted', { by: includeActor ? who(payload.data.by, t) : '' });
         case 'blocked': return t('goals.marker.pausedBlocked');
         case 'failed': return t('goals.marker.pausedFailed');
+        case 'unchecked': return t('goals.marker.pausedUnchecked');
         default: return t('goals.marker.pausedBy', { by: includeActor ? who(payload.data.by, t) : '' });
       }
     case 'goal_resumed':
       return t('goals.marker.resumed', { by: includeActor ? who(payload.data.by, t) : '' });
     case 'goal_met':
-      return t(payload.data.checked_by === 'agent' ? 'goals.marker.metAgent' : 'goals.marker.met', { count: payload.data.turns });
+      return t(payload.data.checked_by === 'person' ? 'goals.marker.metPerson' : 'goals.marker.met', { count: payload.data.turns });
     case 'goal_stopped':
       return t('goals.marker.stopped', { reason: t(`goals.reason.${payload.data.reason}`, { limit: payload.data.limit ?? '' }) });
     case 'goal_cleared':
@@ -418,9 +448,9 @@ function RateLimitMarker({item,threadId}:{item:MarkerItem;threadId:string}) {
   const context=useFormatContext();
   // The historical segment's already bounded provider name; a later switch cannot rename this notice.
   const providerName=useThreadPart(threadId,view=>view.segments.find(segment=>segment.id===item.segment_id)?.provider?.name);
-  return <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+  return <div title={formatExact(item.created_at,context)} className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
     <Settings2 aria-hidden/><span className="wrap-anywhere">{markerSentence(item.payload,t,{...context,providerName})}</span>
-    <TimeOfDay at={item.created_at} className="text-xs"/>
+    <MarkerTime at={item.created_at}/>
   </div>;
 }
 
@@ -464,6 +494,7 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
       <span className="wrap-anywhere">{markerSentence(item.payload, t, context, false)}</span>
       {data.recovered !== null && data.removed_at !== null && <span>{t('agentHistory.removedAt')} <RelativeTime at={data.removed_at} /></span>}
       <RelativeTime at={item.created_at} />
+      <SessionNativeHistory threadId={timeline.threadId} segmentId={data.segment_id} fragment={false} />
     </div>;
   }
   // A session context can precede the first turn. Keep that orphan link in one compact line;
@@ -486,8 +517,9 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
       <TimeOfDay at={item.created_at} className="text-xs" />
     </div>;
   }
+  // Keep the line compact while making its exact moment available by keyboard and touch too.
   return (
-      <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+      <div title={formatExact(item.created_at, context)} className="flex flex-wrap items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
         <Icon aria-hidden />
         <span className="wrap-anywhere">
           {item.payload.marker === 'call_recovery' && typeof item.payload.data.provider_id === 'string' && typeof item.payload.data.model === 'string' && ['skip', 'return', 'failover'].includes(item.payload.data.action)
@@ -497,7 +529,8 @@ export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: numb
             : markerSentence(item.payload, t, context)}
           {count > 1 && <span className="ml-1">· {t('timeline.marker.more', { count: count - 1 })}</span>}
         </span>
-        <TimeOfDay at={item.created_at} className="text-xs" />
+        <MarkerTime at={item.created_at} />
+        {item.payload.marker === 'segment_started' && <SessionNativeHistory threadId={timeline.threadId} segmentId={item.payload.data.segment_id} />}
       </div>
   );
 }

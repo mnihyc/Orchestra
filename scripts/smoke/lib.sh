@@ -36,6 +36,9 @@ case "$SMOKE_RUN" in
 esac
 SMOKE_RELEASES="$SMOKE_BASE/releases"
 SMOKE_DIR="$SMOKE_BASE/runs/$SMOKE_RUN"
+# Releases a scenario makes of its own (deploy_variant), beside the run's directory: the scenario's own directory is made, and
+# refused if it is there, when its stack is.
+SMOKE_VARIANTS="$SMOKE_BASE/variants/$SMOKE_RUN"
 python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" validate --repo "$SMOKE_REPO" \
   --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name preflight
 mkdir -p "$SMOKE_DIR"
@@ -124,6 +127,23 @@ broken_release() {
   rm -rf "$work"
   (cd "$SMOKE_REPO" && cargo xtask package --out "$target" --manifest-only) >&2 || abort "the manifest of the broken release was not written"
 }
+
+# deploy_variant SOURCE NAME ARGS...: a copy of a release, in $SMOKE_VARIANTS/NAME, whose orch-deploy bundle differs, with a manifest that says so
+# (scripts/smoke/deploy_variant.py has the arguments: the generation and the minimum, files to replace, the releases it
+# publishes the files of). Both releases of a scenario are packaged from the same tree, so their deployment files are the
+# same; a variant is how a scenario makes files that change, and a generation that asks for them.
+deploy_variant() {
+  local source="$1" target="$SMOKE_VARIANTS/$2"
+  shift 2
+  mkdir -p "$SMOKE_VARIANTS"
+  rm -rf "${target:?}"
+  cp -al "$source" "$target"
+  python3 -I "$SMOKE_REPO/scripts/smoke/deploy_variant.py" "$target" "$@" || abort "the deployment files of $target were not changed"
+  (cd "$SMOKE_REPO" && cargo xtask package --out "$target" --manifest-only) >&2 || abort "the manifest of $target was not written"
+}
+
+# nginx_serves_keys: the web edge hands the key routes to the API (a JSON answer) and not to the application's page.
+nginx_serves_keys() { curl -sS -o /dev/null -w '%{content_type}' "$EDGE/openapi/v1/nothing-here" | grep -q json; }
 
 # --- Stacks -------------------------------------------------------------------
 
@@ -220,6 +240,7 @@ finish() {
       --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$SMOKE_SCENARIO" || return 1
     SMOKE_CLEANUP_COMPLETE=1
   fi
+  if [ -d "$SMOKE_VARIANTS" ]; then rm -rf -- "${SMOKE_VARIANTS:?}"; rmdir -- "$SMOKE_BASE/variants" 2> /dev/null || true; fi
   printf '\n%s: %d checks, %d failed\n' "$(basename "$0")" "$CHECKED" "$FAILED"
   [ "$FAILED" -eq 0 ]
 }
