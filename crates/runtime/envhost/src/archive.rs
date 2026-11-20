@@ -7,11 +7,11 @@
 //! directory is only a name in a list, a link is only a link, and an archive that asks for a
 //! password is listed where its format lets names be read and none of its entries is opened.
 //!
-//! The format is found from the first bytes and not from the extension. A compressed tar has no
-//! index, so it is read through once, and the reading stops at the limit of entries or at the
-//! time limit, whichever comes first, and says so.
+//! The format is found from the first bytes and not from the extension. Live listings keep their
+//! reader across result windows. ZIP directory records and tar headers are read one at a time;
+//! continuation neither retains a whole archive index nor repeats an earlier compressed prefix.
 
-use std::collections::BTreeMap;
+use orch_api_contract::workspace::archive::{Children, clean};
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::sync::Arc;
@@ -27,6 +27,168 @@ use crate::error::{HostError, Result};
 use crate::files::Files;
 use crate::paths::RelPath;
 use crate::platform::read_at;
+
+/// Three u16-sized ZIP fields, decoded names and parsed extra-field records fit this reservation.
+/// It is independent of the entry count and held while the live parser is actually running.
+pub(crate) const ZIP_READER_BYTES: usize = 32 * u16::MAX as usize;
+
+/// Format information available before an archive's live entry stream begins.
+#[derive(Clone, Copy)]
+pub(crate) struct ArchiveInfo {
+    pub(crate) format: ArchiveFormat,
+    pub(crate) compression: Option<ArchiveCompression>,
+    pub(crate) encrypted: bool,
+}
+
+fn live_child(
+    inside: &str,
+    raw: &str,
+    kind: ArchiveEntryKind,
+    size: Option<i64>,
+    modified_at: Option<Time>,
+) -> Option<ArchiveEntry> {
+    let raw = clean(raw);
+    let below = if inside.is_empty() {
+        raw
+    } else {
+        raw.strip_prefix(inside)?.strip_prefix('/')?
+    };
+    if below.is_empty() {
+        return None;
+    }
+    let (name, deeper) = below
+        .split_once('/')
+        .map_or((below, false), |(name, _)| (name, true));
+    if name.is_empty() {
+        return None;
+    }
+    let path = if inside.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{inside}/{name}")
+    };
+    let kind = if deeper { ArchiveEntryKind::Dir } else { kind };
+    Some(ArchiveEntry {
+        path,
+        kind,
+        size: if kind == ArchiveEntryKind::Dir {
+            None
+        } else {
+            size
+        },
+        modified_at: if deeper { None } else { modified_at },
+    })
+}
+
+impl Files {
+    /// Keeps the decompressor/file open across bounded result handoffs; no prefix is reread.
+    pub(crate) fn stream_archive(
+        &self,
+        path: &RelPath,
+        inside: Option<&str>,
+        cancel: &tokio_util::sync::CancellationToken,
+        metadata: &mut dyn FnMut(ArchiveInfo) -> Result<()>,
+        emit: &mut dyn FnMut(ArchiveEntry) -> Result<()>,
+    ) -> Result<()> {
+        let opened = self.open_regular(path)?;
+        let before = opened.meta.identity();
+        let inside = inside.map(clean).unwrap_or("");
+        match shape_of(&opened.file)? {
+            Shape::Zip => {
+                let mut archive = zip::unstable::read::ZipIterable::try_new(
+                    Positional {
+                        file: Arc::clone(&opened.file),
+                        offset: 0,
+                    },
+                    zip::read::Config::default(),
+                )
+                .map_err(unreadable)?;
+                let mut encrypted = false;
+                for entry in archive.files().map_err(unreadable)? {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    encrypted |= entry.map_err(unreadable)?.encrypted();
+                }
+                metadata(ArchiveInfo {
+                    format: ArchiveFormat::Zip,
+                    compression: None,
+                    encrypted,
+                })?;
+                for entry in archive.files().map_err(unreadable)? {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    let entry = entry.map_err(unreadable)?;
+                    let Ok(name) = entry.name() else {
+                        continue;
+                    };
+                    let kind = if entry.is_dir() {
+                        ArchiveEntryKind::Dir
+                    } else if entry.is_symlink() {
+                        ArchiveEntryKind::Link
+                    } else {
+                        ArchiveEntryKind::File
+                    };
+                    if let Some(entry) = live_child(
+                        inside,
+                        &name,
+                        kind,
+                        i64::try_from(entry.size()).ok(),
+                        entry.last_modified().and_then(time_of_dos),
+                    ) {
+                        emit(entry)?;
+                    }
+                }
+            }
+            Shape::Tar(compression) => {
+                metadata(ArchiveInfo {
+                    format: ArchiveFormat::Tar,
+                    compression,
+                    encrypted: false,
+                })?;
+                let mut archive = tar::Archive::new(decompress(&opened.file, compression)?);
+                for entry in archive.entries().map_err(unreadable)? {
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled);
+                    }
+                    let entry = entry.map_err(unreadable)?;
+                    let header = entry.header();
+                    let kind = match header.entry_type() {
+                        tar::EntryType::Directory => ArchiveEntryKind::Dir,
+                        tar::EntryType::Symlink | tar::EntryType::Link => ArchiveEntryKind::Link,
+                        tar::EntryType::Regular
+                        | tar::EntryType::Continuous
+                        | tar::EntryType::GNUSparse => ArchiveEntryKind::File,
+                        _ => continue,
+                    };
+                    let raw = entry
+                        .path()
+                        .map_err(unreadable)?
+                        .to_string_lossy()
+                        .into_owned();
+                    if let Some(entry) = live_child(
+                        inside,
+                        &raw,
+                        kind,
+                        header.size().ok().and_then(|size| i64::try_from(size).ok()),
+                        header.mtime().ok().and_then(time_of_unix),
+                    ) {
+                        emit(entry)?;
+                    }
+                }
+            }
+        }
+        let after = crate::platform::file_meta(&opened.file)
+            .map_err(|error| HostError::io("checking the observed archive", error))?;
+        if after.identity() != before {
+            return Err(HostError::Changed(
+                "the archive changed during its observation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// The size of a tar header block, which also settles whether a stream is a tar.
 const TAR_BLOCK_BYTES: usize = 512;
@@ -59,6 +221,25 @@ impl Read for Positional {
         let count = read_at(&self.file, buffer, self.offset)?;
         self.offset += count as u64;
         Ok(count)
+    }
+}
+
+impl Seek for Positional {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let offset = match position {
+            std::io::SeekFrom::Start(offset) => i128::from(offset),
+            std::io::SeekFrom::Current(offset) => i128::from(self.offset) + i128::from(offset),
+            std::io::SeekFrom::End(offset) => {
+                i128::from(self.file.metadata()?.len()) + i128::from(offset)
+            }
+        };
+        self.offset = u64::try_from(offset).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "archive position is outside its file",
+            )
+        })?;
+        Ok(self.offset)
     }
 }
 
@@ -149,22 +330,6 @@ fn shape_of(file: &Arc<File>) -> Result<Shape> {
     }
 }
 
-/// An entry's path as the listing writes it: no leading `./` or `/`, no trailing `/`.
-fn clean(path: &str) -> &str {
-    let mut path = path;
-    loop {
-        let next = path
-            .strip_prefix("./")
-            .or_else(|| path.strip_prefix('/'))
-            .unwrap_or(path);
-        if next.len() == path.len() {
-            break;
-        }
-        path = next;
-    }
-    path.trim_end_matches('/')
-}
-
 fn time_of_unix(seconds: u64) -> Option<Time> {
     Utc.timestamp_opt(i64::try_from(seconds).ok()?, 0)
         .single()
@@ -186,106 +351,17 @@ fn time_of_dos(stamp: zip::DateTime) -> Option<Time> {
     Some(Time::new(Utc.from_utc_datetime(&naive)))
 }
 
-/// The children of one directory of an archive, gathered from entries that come in any order.
-struct Children {
-    inside: String,
-    limit: usize,
-    found: BTreeMap<String, ArchiveEntry>,
-}
-
-impl Children {
-    fn new(inside: Option<&str>, limit: usize) -> Self {
-        Self {
-            inside: inside.map(clean).unwrap_or("").to_owned(),
-            limit,
-            found: BTreeMap::new(),
-        }
-    }
-
-    /// Notes an entry; says whether more than the limit are known now.
-    fn add(
-        &mut self,
-        raw: &str,
-        kind: ArchiveEntryKind,
-        size: Option<i64>,
-        modified_at: Option<Time>,
-    ) -> bool {
-        let path = clean(raw);
-        let below = if self.inside.is_empty() {
-            path
-        } else {
-            match path
-                .strip_prefix(self.inside.as_str())
-                .and_then(|rest| rest.strip_prefix('/'))
-            {
-                Some(rest) => rest,
-                None => return false,
-            }
-        };
-        if below.is_empty() {
-            return false;
-        }
-        let (name, deeper) = match below.split_once('/') {
-            Some((name, _)) => (name, true),
-            None => (below, false),
-        };
-        if name.is_empty() {
-            return false;
-        }
-        let full = if self.inside.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{}/{name}", self.inside)
-        };
-        if deeper {
-            // Something below it exists, so it is a directory, whether or not it has an entry of its own.
-            self.found.entry(name.to_owned()).or_insert(ArchiveEntry {
-                path: full,
-                kind: ArchiveEntryKind::Dir,
-                size: None,
-                modified_at: None,
-            });
-        } else {
-            let entry = ArchiveEntry {
-                path: full,
-                kind,
-                size: if kind == ArchiveEntryKind::Dir {
-                    None
-                } else {
-                    size
-                },
-                modified_at,
-            };
-            self.found.insert(name.to_owned(), entry);
-        }
-        self.found.len() > self.limit
-    }
-
-    fn finish(self) -> (Vec<ArchiveEntry>, bool) {
-        let truncated = self.found.len() > self.limit;
-        let mut entries: Vec<ArchiveEntry> = self.found.into_values().collect();
-        entries.sort_by(|a, b| {
-            let dirs_first =
-                (a.kind != ArchiveEntryKind::Dir).cmp(&(b.kind != ArchiveEntryKind::Dir));
-            dirs_first
-                .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
-                .then_with(|| a.path.cmp(&b.path))
-        });
-        entries.truncate(self.limit);
-        (entries, truncated)
-    }
-}
-
 fn unreadable(error: impl std::fmt::Display) -> HostError {
     HostError::Unsupported(format!("this archive cannot be read: {error}"))
 }
 
 fn list_zip(file: &File, children: &mut Children) -> Result<bool> {
-    let mut archive = zip::ZipArchive::new(file).map_err(unreadable)?;
+    let mut archive = zip::unstable::read::ZipIterable::try_new(file, zip::read::Config::default())
+        .map_err(unreadable)?;
     let mut encrypted = false;
     let mut enough = false;
-    for index in 0..archive.len() {
-        let entry = archive.by_index_raw(index).map_err(unreadable)?;
+    for entry in archive.files().map_err(unreadable)? {
+        let entry = entry.map_err(unreadable)?;
         encrypted |= entry.encrypted();
         if enough {
             continue;
@@ -367,6 +443,7 @@ impl Files {
         };
         let (entries, over_limit) = children.finish();
         Ok(ArchiveListing {
+            next_cursor: None,
             format,
             compression,
             entries,
@@ -378,9 +455,14 @@ impl Files {
     /// Reads the entry `entry` of the archive at `path`, at most the preview size of it. An entry
     /// that is larger, that asks for a password or is not a file is refused.
     pub fn archive_read(&self, path: &RelPath, entry: &str) -> Result<Vec<u8>> {
+        self.archive_read_bounded(path, entry, self.limits().preview_bytes)
+    }
+
+    /// Keeps the caller's selected preview bound during decoding, before allocating the entry.
+    pub fn archive_read_bounded(&self, path: &RelPath, entry: &str, bound: u64) -> Result<Vec<u8>> {
         let opened = self.open_regular(path)?;
         let file = &opened.file;
-        let limit = self.limits().preview_bytes;
+        let limit = self.limits().preview_bytes.min(bound);
         let wanted = clean(entry);
         match shape_of(file)? {
             Shape::Zip => read_zip(file.as_ref(), wanted, limit),
@@ -419,29 +501,33 @@ fn read_bounded(reader: &mut dyn Read, what: &str, limit: u64) -> Result<Vec<u8>
 }
 
 fn read_zip<R: Read + Seek>(source: R, wanted: &str, limit: u64) -> Result<Vec<u8>> {
-    let mut archive = zip::ZipArchive::new(source).map_err(unreadable)?;
+    let mut archive =
+        zip::unstable::read::ZipIterable::try_new(source, zip::read::Config::default())
+            .map_err(unreadable)?;
+    let files = archive.files().map_err(unreadable)?;
     let mut found = None;
-    for index in 0..archive.len() {
-        let entry = archive.by_index_raw(index).map_err(unreadable)?;
+    for entry in files.by_ref() {
+        let entry = entry.map_err(unreadable)?;
         if entry.name().is_ok_and(|name| clean(&name) == wanted) {
-            if entry.encrypted() {
-                return Err(HostError::Unsupported(format!(
-                    "{wanted} is encrypted, and no entry of an encrypted archive is opened"
-                )));
-            }
-            if entry.is_dir() || entry.is_symlink() {
-                return Err(HostError::Unsupported(format!("{wanted} is not a file")));
-            }
-            if entry.size() > limit {
-                return Err(too_large(wanted, entry.size(), limit));
-            }
-            found = Some(index);
-            break;
+            found = Some(entry);
         }
     }
-    let index =
+    let entry =
         found.ok_or_else(|| HostError::NotFound(format!("{wanted} is not in the archive")))?;
-    let mut entry = archive.by_index(index).map_err(unreadable)?;
+    if entry.encrypted() {
+        return Err(HostError::Unsupported(format!(
+            "{wanted} is encrypted, and no entry of an encrypted archive is opened"
+        )));
+    }
+    if entry.is_dir() || entry.is_symlink() {
+        return Err(HostError::Unsupported(format!("{wanted} is not a file")));
+    }
+    if entry.size() > limit {
+        return Err(too_large(wanted, entry.size(), limit));
+    }
+    let mut entry = entry
+        .with_reader(files.reader_mut(), zip::ZipReadOptions::new())
+        .map_err(unreadable)?;
     read_bounded(&mut entry, wanted, limit)
 }
 
@@ -758,6 +844,56 @@ mod tests {
             small.archive_read(&path("a.tar"), "top.txt"),
             Err(HostError::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn a_repeated_zip_name_opens_the_same_last_member_its_listing_describes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("a.txt", b"old".as_slice()),
+            ("b.txt", b"newer"),
+            ("z/child", b""),
+            ("Z.txt", b"z"),
+            ("A.txt", b"A"),
+        ] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        let mut bytes = writer.finish().unwrap().into_inner();
+        let mut offset = 0;
+        while let Some(at) = bytes[offset..].windows(5).position(|name| name == b"b.txt") {
+            let at = offset + at;
+            bytes[at..at + 5].copy_from_slice(b"a.txt");
+            offset = at + 5;
+        }
+        std::fs::write(root.path().join("repeat.zip"), bytes).unwrap();
+        let files = files_with(root.path(), Limits::default());
+        use ArchiveEntryKind::{Dir, File};
+        let expected = [
+            ("z", Dir, None),
+            ("A.txt", File, Some(1)),
+            ("a.txt", File, Some(5)),
+            ("Z.txt", File, Some(1)),
+        ];
+        for limit in [3, 4] {
+            let listing = files
+                .archive_list(&path("repeat.zip"), None, limit)
+                .unwrap();
+            let entries: Vec<_> = listing
+                .entries
+                .iter()
+                .map(|e| (e.path.as_str(), e.kind, e.size))
+                .collect();
+            assert_eq!(entries, expected[..limit]);
+            assert_eq!(listing.truncated, limit < expected.len());
+        }
+        assert_eq!(
+            files.archive_read(&path("repeat.zip"), "a.txt").unwrap(),
+            b"newer"
+        );
     }
 
     #[test]

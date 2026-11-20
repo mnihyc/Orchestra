@@ -1,167 +1,104 @@
-# Incident diagnosis
+# Diagnose a problem
 
-Start with the visible failure and the component responsible for it. Keep the
-thread/job id, time, release/build and component status with the incident;
-credentials and reset URLs do not belong in the incident record. This release
-runs one API process, which owns live terminal/browser/display tickets.
+Find which part of an Orch installation failed, repair it without making it worse, and close the incident with proof that it is fixed. Start with the visible failure and the component behind it.
 
-## Establish the deployment's state
+Orch runs one API process, which owns the live terminal, browser and display tickets. Keep the thread or job id, the time, the build and the component status with the incident. Credentials and reset URLs do not belong in the incident record.
+
+## Before you start
+
+You need shell access to the host that runs the stack, in its `deploy/` directory (Compose reads the project from there), and, for most repairs, an administrator account.
+
+## Find your symptom
+
+| You see | Go to |
+|---|---|
+| The web application does not load, or answers 502 or 503 | [Establish the state of the stack](#1-establish-the-state-of-the-stack), then [Monitor an installation](monitoring.md#what-readiness-means) |
+| A machine or a thread is offline, or a turn is held | [A machine or thread went offline](#a-machine-or-thread-went-offline) |
+| A provider shows missing setup, offline, exhausted or refused | [A provider needs attention](#a-provider-needs-attention) |
+| Nobody can sign in | [Nobody can sign in](#nobody-can-sign-in) |
+| The disk is filling | [Storage pressure](#storage-pressure) |
+| An update stopped halfway | [An update was interrupted](#an-update-was-interrupted) |
+| Notifications do not arrive | [A notification failed](#a-notification-failed) |
+| The HTTPS front misbehaves | [Run the HTTPS front](edge.md#if-it-does-not-work) |
+
+## 1. Establish the state of the stack
 
 From the deployment's directory, use its own Compose project:
 
 ```sh
 docker compose ps
 docker compose exec -T api /opt/orchctl/orchctl doctor
+./update.sh doctor                    # the same, and the edge from this host, once
 docker compose logs --since 15m api gateway worker node
 ```
 
-The log window is a starting view of the incident, not a retention policy;
-expand it to the observed start time when needed. `doctor` reports each check
-and exits nonzero for a failed one. Its optional `--url` checks the actual HTTPS
-edge, large bodies and idle sockets. Follow [the edge guide](edge.md) for that
-invocation and its current limits. Readiness does not prove a model answered
-or an external notification was delivered.
-
-`scripts/smoke/incidents/check.sh --stack DIR --project NAME` performs the
-read-only local Compose/doctor inventory. It requires the existing deployment
-and starts no services. Its output is one piece of evidence, not a repair.
+- `doctor` reports each check and exits nonzero if one failed. Add `--url` to check the real HTTPS front, large bodies and idle sockets ([Check the front](edge.md#6-check-the-front)).
+- The services log to Compose. Logs rotate at 10 MiB, five files each. The 15-minute window is a starting view: widen it to the time the problem began.
+- Readiness proves neither that a model answered nor that an outside notification was delivered.
+- `scripts/smoke/incidents/check.sh --stack DIR --project NAME` makes the same read-only inventory of Compose and `doctor` for an existing deployment. It starts no service. Its output is one piece of evidence, not a repair.
 
 ## A machine or thread went offline
 
-Read the machine page for its current connection, facts, certificate and local
-policy, then the thread's binding and blocked reason. A connector reconnects
-with its recorded stream/cursor and command journal. Do not enroll it as a new
-machine to repair a short link outage: Enroll again, when offered, preserves
-its registered identity. An expired/revoked certificate needs the enrollment
-or renewal procedure appropriate to that machine.
+1. Read the machine's page: its connection, facts, certificate and local policy. Then read the thread's binding and its reason for being blocked.
+2. Wait for the connector to reconnect: it continues with its recorded stream position and command journal. Do not enroll it again as a new machine to repair a short outage. **Enroll again**, when the page offers it, keeps the registered identity. An expired or revoked certificate needs the enrollment or renewal for that machine ([Connect a machine](../user/connect-a-machine.md)).
+3. If a turn is held, look at the pending inputs and the job that holds it. **Stop** holds the queue and **Continue** releases it.
+4. If a stop failed, the thread says so, and a process may have survived. Check it in the running-work, process and terminal views before you retry anything that has an effect. A remote command you retry must keep its original identity so the connector can recognize the repeat.
 
-Only the machine owning a stream can update it. A refused foreign report is
-acknowledged and discarded and leaves a bounded administrative record. Check
-the segment's immutable harness-machine identity when diagnosing late events;
-do not repair this by weakening source checks.
+Only the machine that owns a stream can update it. A foreign report is acknowledged and discarded, and leaves a short administrative record. If events arrive late, check the stream's recorded machine identity. Do not weaken the source check to repair it.
 
-If a turn is held, inspect pending inputs and the job that holds it. Stop holds
-the queue; Continue releases it. A native command may survive a failed stop,
-which the thread reports. Use its running-work/process/terminal views to check
-that process before retrying an effect. A retried remote command must retain
-its original identity to use the connector's deduplication.
-
-On Windows, process-tree shutdown checks the observed descendants before ending
-their parent. It omits ambiguous children from the process list and refuses the
-stop if the recorded times cannot distinguish a child from a reused process
-number. A child created during the final check can escape observation;
-inspect the machine's processes if shutdown was concurrent with new work.
+On Windows, ending a process tree checks the observed child processes before it ends their parent. It leaves out a child it cannot identify and refuses the stop if the recorded times cannot tell a child from a reused process number. A child created during the final check can escape; look at the machine's processes if the stop overlapped new work.
 
 ## A provider needs attention
 
-The provider page distinguishes missing setup, offline, exhausted and a vendor
-refusal. Read its actual credential lapse, plan windows and last safe error.
-An unavailable or unknown fact does not mean zero credit. A subscription's
-renewal happens where that sign-in is kept; an external fresh token is imported
-through the provider's normal method. Keep a single renewing login copy where
-the method requires one.
+The provider's page tells missing setup, offline, exhausted and a refusal by the vendor apart. Read its credential expiry, its plan windows and its last safe error. An unknown or unavailable figure never means zero credit.
 
-An exclusive handover must be returned before its environment can stop. A
-failed return keeps that refusal visible; the manager can repair it or use the
-explicit declaration of loss, with its named effect. A provider reset is only
-for its manager after the browser confirmation names the reset. A retry of
-its request identity does not consume another reset.
+- A subscription renews where its sign-in is kept. A fresh token from outside is imported through the provider's normal method. Keep one renewing copy of a login where its method needs that.
+- A handover of a whole sign-in must be returned before its environment can stop. If the return fails, the refusal stays visible; the manager can repair it or declare the sign-in lost, which says what that does.
+- Only the provider's manager can use a reset, after the browser's confirmation names it. Retrying the same request does not use another one.
 
 ## Nobody can sign in
 
-If the person's normal recovery cannot work, a host operator can create a
-one-use reset URL through the same server library:
+If the person's normal recovery cannot work, create a one-use reset link on the host:
 
 ```sh
 docker compose exec -T api /opt/orchctl/orchctl admin reset-link operator
 ```
 
-Replace `operator` with the account's actual username. Give the printed URL
-privately to that person; do not redirect it to the ordinary incident log.
-Add `--clear-second-step` only when that person's second step must also be
-removed. Creating the link leaves a safe audited receipt, and using it consumes
-the one-use token. A suspended person remains suspended until the suspension
-is lifted.
+1. Replace `operator` with the account's username.
+2. Give the printed URL to that person privately. Do not copy it to the incident log.
+3. Add `--clear-second-step` only if the second step must also be removed.
 
-The host CLI also supports `admin grant`, `revoke`, `suspend` and `resume`.
-It refuses removing or suspending the last system administrator who can sign
-in. Run it with the deployment's configuration and secrets, and record the
-actual administrative act. Host recovery retains its local deployment authority.
-An automation key still needs its explicitly selected operations and current account
-rights; it cannot obtain the browser's private-access override through recovery.
+Creating the link leaves an audited receipt, and using it consumes the token. A suspended person stays suspended until the suspension is lifted. The host command also has `admin grant`, `revoke`, `suspend` and `resume`; it refuses to remove or suspend the last system administrator who can sign in. Run it with the deployment's configuration and secrets, and record the act. An automation key still needs its selected operations and the account's current permissions, and cannot gain the browser's private-access override through this recovery.
 
-## Storage pressure and cleanup
+`admin human-check off` switches the [human check](human-check.md) off, as the system, when its service cannot be
+reached and nobody can get past it.
 
-Inspect the affected environment/provider, job and host before reclaiming data.
-Workspaces, homes, provider state, browser profiles and mounts have distinct
-custody. A database backup does not include every host's directories. A removed
-environment may intentionally retain volumes until its purge date; those bytes
-can still support authorized inspection and restore.
+## Storage pressure
 
-Use the product's Remove/Purge or update-recovery action with the displayed
-scope. For host inventory, units carry `orch.system`, `orch.runtime_id` and
-`orch.kind`. Select only the system being diagnosed:
+1. Look at the affected environment or provider, the job and the host before you reclaim anything. Workspaces, homes, provider state, browser profiles and mounts have different owners. A database backup does not include every host's directories. A removed environment may keep its volumes until its purge date on purpose, so that they can still be inspected and restored.
+2. Use the product's **Remove** or **Purge** or the update recovery, with the scope it shows ([Clean up storage and uninstall](storage-cleanup.md)).
+3. To list the containers of one system on a host, filter by label:
 
-```sh
-docker ps -a --filter label=orch.system=example --format '{{.ID}} {{.Names}}'
-```
+   ```sh
+   docker ps -a --filter label=orch.system=example --format '{{.ID}} {{.Names}}'
+   ```
 
-Replace `example` with that deployment's system name and compare its runtime
-ids to the server's resources. Orphan reconciliation and explicit volume cleanup
-protect live successor references. Do not reclaim storage with a whole-host
-prune: the Docker daemon can contain unrelated deployments and retained work.
-Use [backup and restore](backup-and-restore.md) and [upgrades](upgrades.md) for
-their ownership and recovery rules.
+   Replace `example` with the deployment's system name, and compare the `orch.runtime_id` of each with the server's resources. Containers carry `orch.system`, `orch.runtime_id` and `orch.kind`.
 
-## Updates, dependencies and delivery failures
+Never reclaim storage with a whole-host prune: the Docker daemon can hold other deployments and retained work. Reconciliation of orphans and explicit volume cleanup protect the references of a live successor. Ownership and recovery are described in [Back up and restore](backup-and-restore.md) and [Update and roll back](upgrades.md).
 
-If an update was interrupted, retain its journal and run the updater's Recover
-operation. Do not manually retarget payload links while a transaction is open.
-The release manifest verifies payload hashes; stock image digests and the
-native/platform/dependency gates have their own checks. A locally packaged
-release is separate from an artifact fetched from a release site.
+## An update was interrupted
 
-For a failed notification, inspect its route/channel and safe delivery receipt.
-Retryable, gone, rejected and uncertain outcomes have different effects. The
-worker honors the configured private-host policy at each connection and
-redirect. Fixing the channel does not fabricate proof of an earlier delivery.
+Keep the update's journal and run the updater's recover operation (`./update.sh recover`). Do not move payload links by hand while a transaction is open. The release manifest checks the payload hashes; the stock image digests and the platform and dependency checks have their own. A release you packaged yourself is separate from one fetched from a release site. See [Update and roll back](upgrades.md#after-an-interruption).
 
-Close an incident with the candidate build, the observed cause, the exact
-repair and a repeated visible outcome. On a disposable deployment, verify the
-reset-link's single use, a reconnect, updater recovery and that label-scoped
-cleanup leaves another deployment untouched. Those are the operator procedure's
-acceptance checks; a written checklist alone is not a passing run.
+## A notification failed
 
-## A screen opens slowly or a card does not fit
+Look at the notification's route and channel and its safe delivery receipt. Retryable, gone, rejected and uncertain outcomes have different effects. The worker applies the private-host policy at each connection and each redirect. Fixing the channel does not invent evidence of an earlier delivery.
 
-Record the build, screen, language, theme and viewport width. Compare a fresh opening with returning
-from another screen. In browser network diagnostics, separate data reads from static assets and sign-in.
-Keep request methods, route names, status and timing; remove tokens, cookies and private content.
+## Close the incident
 
-The first thread or resource screen shares its opening reads. Closed navigation and Documents views
-wait until shown. An expanded navigation can read more than one bounded page. A retained label or an
-already open card never replaces the current reader's access check. Follow a refusal in the interface;
-do not repair slow opening by disabling authority checks.
+Write down the build you checked, the cause you saw, the exact repair, and a repeated visible result showing it works. On a disposable deployment you can rehearse the four repairs: the one-use reset link, a reconnect, the updater's recovery, and a label-scoped cleanup that leaves another deployment untouched. A written checklist alone does not count as having tried them.
 
-For slow role counts, capture the query plan and buffer reads at the reported audience size.
-Compare the first read on a new database connection with repeated reads on that connection.
-Record machine load with each measurement. Repeated indexed reads can still cost time; a plan
-with no disk reads does not prove that the query is cheap. Apply the forward database migrations
-so existing installations and fresh databases use the same holder expansion.
+## Report a screen problem
 
-Cards, menus and help use the available viewport and scroll internally when long. Reproduce both
-pointer and keyboard behavior. Check the whole value on hover or focus, Escape and return focus.
-Include the affected control and its first name line in a layout report. Record whether advanced
-options were folded or open. Controls inside folded options become reachable when the section opens.
-Literal source lines and an author's repeated document heading are authored data.
-
-Escape closes a full-value tooltip before the inspection beneath it. A further Escape closes the
-inspection. The underlying dialog stays open until its own dismissal.
-
-A tab keeps its last read name while its page reloads. Include the page heading and the tab in an
-identity report, and say whether the page was still loading or had failed. A failed read keeps its
-current unavailable state; a retained name does not enable its actions.
-The active tab also shows its name. A narrow strip may truncate it; an ample strip does not hide it
-because the page has a matching heading.
-
-See [Reading views and details](../user/reading-views-and-details.md) for the current screen behavior.
+If a screen opens slowly or a card does not fit, report the build, the screen, the language, the theme and the viewport width, and compare a fresh opening with a return from another screen. Include the affected control, whether advanced options were folded, and what you did with the pointer and the keyboard. For slow opening, keep request methods, route names, status and timing from the browser's network view, and remove tokens, cookies and private content. Do not turn authority checks off to speed a screen up. [Reading views and details](../user/reading-views-and-details.md) describes how screens behave.
