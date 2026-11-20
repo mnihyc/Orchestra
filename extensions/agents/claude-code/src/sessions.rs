@@ -6,10 +6,9 @@
 //! environment carries the credential and the switches. [`launch`] works all of it out from the session and
 //! the turn without touching anything, so that every rule is tested on its result.
 //!
-//! Two things are held on purpose. The set of MCP servers is exactly the one Orch built (`--strict-mcp-config`):
-//! the harness loads no server from its user's configuration or from a file in the directory. And the harness
-//! is always told where its memory is, or that it has none: left alone it keeps notes under its home, which
-//! one provider's every thread shares.
+//! Managed homes and remote executors use the delivered MCP set. A local person's program retains its own
+//! native definitions, and a shared name retains that definition. The harness is always told where its memory
+//! is, or that it has none: left alone it keeps notes under a home shared by the provider's threads.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -408,6 +407,42 @@ pub fn setting_sources(configured: &str, spec: &SessionSpec) -> String {
     }
 }
 
+fn keeps_workspace_configuration(spec: &SessionSpec) -> bool {
+    !spec
+        .settings
+        .workspace_configuration
+        .as_ref()
+        .is_some_and(|answer| answer.answer == orch_agent_contract::session::ConfigTrust::KeepOut)
+}
+
+fn mcp_search(spec: &SessionSpec) -> orch_agent_contract::discovery::McpSearch {
+    let mut directories = vec![spec.settings.directory.clone()];
+    if spec.settings.cwd != spec.settings.directory {
+        directories.push(spec.settings.cwd.clone());
+    }
+    orch_agent_contract::discovery::McpSearch { directories }
+}
+
+/// Native names retained for the actual local program; no definition leaves discovery.
+pub(crate) fn native_mcp_names(
+    setup: &HarnessSetup,
+    spec: &SessionSpec,
+) -> std::collections::BTreeSet<String> {
+    if !setup.managed_home && !through_executor(spec) {
+        let file = crate::discovery::user_configuration(setup.home.as_deref(), &setup.inherited);
+        crate::discovery::native_servers(
+            file.as_deref(),
+            &mcp_search(spec),
+            keeps_workspace_configuration(spec),
+        )
+        .into_iter()
+        .map(|(found, _)| found.name)
+        .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        std::collections::BTreeSet::new()
+    }
+}
+
 /// The MCP servers of a session: Orch's tools when it has any, the executor's tools when the harness works
 /// through a tool set that has a server, and the environment's servers by name.
 #[must_use]
@@ -441,8 +476,11 @@ pub fn mcp_config(setup: &HarnessSetup, spec: &SessionSpec) -> Json {
         exec["timeout"] = json!(EXEC_TOOL_TIMEOUT_MILLIS);
         servers.insert(EXEC_SERVER.to_owned(), exec);
     }
+    let native = native_mcp_names(setup, spec);
     for name in &spec.mcp {
-        servers.insert(name.clone(), entry(setup.loopback.mcp(key, name)));
+        if !native.contains(name) {
+            servers.insert(name.clone(), entry(setup.loopback.mcp(key, name)));
+        }
     }
     json!({ "mcpServers": servers })
 }
@@ -608,6 +646,13 @@ pub fn settings_json(setup: &HarnessSetup, spec: &SessionSpec, turn: &TurnSettin
                 json!(ttl.as_str()),
             );
         }
+    }
+    if !setup.managed_home && !through_executor(spec) && !keeps_workspace_configuration(spec) {
+        let names = crate::discovery::found_servers(None, &mcp_search(spec))
+            .into_iter()
+            .map(|(found, _)| found.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        settings.insert("disabledMcpjsonServers".to_owned(), json!(names));
     }
     let own_tools = !through_executor(spec);
     if own_tools {
@@ -1027,6 +1072,10 @@ pub fn approval_reviewer(
 /// The arguments of a session's process.
 #[must_use]
 pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
+    arguments_for(launch, &mcp_config(launch.setup, launch.spec))
+}
+
+fn arguments_for(launch: &Launch<'_>, mcp: &Json) -> Vec<String> {
     let Launch {
         setup,
         spec,
@@ -1092,9 +1141,11 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
     args.push(setting_sources(&setup.config.setting_sources, spec));
     args.push("--settings".to_owned());
     args.push(settings_json(setup, spec, turn).to_string());
-    args.push("--strict-mcp-config".to_owned());
+    if setup.managed_home || through_executor(spec) {
+        args.push("--strict-mcp-config".to_owned());
+    }
     args.push("--mcp-config".to_owned());
-    args.push(mcp_config(setup, spec).to_string());
+    args.push(mcp.to_string());
     // The thread's skills, as a plugin of this session only, from the thread's own directory (which `skills_plugin`
     // has made one); not where its commands run elsewhere, since the skills' files would not be there.
     if let Some(skills) = spec.skills.as_ref().filter(|_| !through_executor(spec)) {
@@ -1135,17 +1186,39 @@ pub fn arguments(launch: &Launch<'_>) -> Vec<String> {
 
 /// Everything a session's process is started with.
 pub fn launch(launch: &Launch<'_>) -> Result<LaunchSpec, AdapterError> {
+    launch_with_mcp(launch).map(|(spec, _)| spec)
+}
+
+/// The launch and its source labels are built from the same supplied MCP configuration.
+pub(crate) fn launch_with_mcp(
+    launch: &Launch<'_>,
+) -> Result<(LaunchSpec, BTreeMap<String, &'static str>), AdapterError> {
     let env = environment(launch)?;
-    Ok(LaunchSpec {
-        program: launch.setup.program.clone(),
-        args: arguments(launch),
-        env,
-        cwd: working_directory(launch.setup, launch.spec),
-        label: format!(
-            "session-{}",
-            &launch.spec.session_key[..8.min(launch.spec.session_key.len())]
-        ),
-    })
+    let mcp = mcp_config(launch.setup, launch.spec);
+    let mut definitions: BTreeMap<_, _> = native_mcp_names(launch.setup, launch.spec)
+        .into_iter()
+        .map(|name| (name, "native"))
+        .collect();
+    definitions.extend(
+        mcp.get("mcpServers")
+            .and_then(Json::as_object)
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| (name.clone(), "orch")),
+    );
+    Ok((
+        LaunchSpec {
+            program: launch.setup.program.clone(),
+            args: arguments_for(launch, &mcp),
+            env,
+            cwd: working_directory(launch.setup, launch.spec),
+            label: format!(
+                "session-{}",
+                &launch.spec.session_key[..8.min(launch.spec.session_key.len())]
+            ),
+        },
+        definitions,
+    ))
 }
 
 /// Where the harness keeps the transcript of a session in a home of Orch's, which is the same place for
@@ -1161,7 +1234,8 @@ pub fn managed_transcript(home: &Path, session_id: &str) -> PathBuf {
 mod tests {
     use super::*;
     use orch_agent_contract::session::{
-        ExecAccess, MountGrant, SessionMemory, SessionMode, SessionSettings,
+        ConfigTrust, ExecAccess, MountGrant, SessionMemory, SessionMode, SessionSettings,
+        WorkspaceConfiguration,
     };
     use orch_plugin_contract::Secret;
     use orch_types::new_id;
@@ -1183,7 +1257,10 @@ mod tests {
 
     fn spec() -> SessionSpec {
         SessionSpec {
+            opening_id: orch_types::new_id(),
+            opening_command: None,
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: new_id(),
                 thread_id: new_id(),
@@ -1210,6 +1287,7 @@ mod tests {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: Some(SessionMemory {
                     directory: "/workspace/web/.orch/memory".into(),
@@ -1983,6 +2061,78 @@ mod tests {
         assert_eq!(
             managed_environment(false)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"],
             "1"
+        );
+    }
+
+    #[test]
+    fn a_local_persons_home_keeps_native_servers_beside_the_delivered_orch_servers() {
+        for managed in [false, true] {
+            for remote in [false, true] {
+                let mut setup = setup();
+                setup.managed_home = managed;
+                let mut session = spec();
+                session.exec.executor = remote.then(|| "claude-tools".to_owned());
+                let launch = built(&setup, &session, &turn(), &Origin::New);
+                assert_eq!(
+                    launch.args.iter().any(|arg| arg == "--strict-mcp-config"),
+                    managed || remote
+                );
+                let config: Json =
+                    serde_json::from_str(&after(&launch.args, "--mcp-config").unwrap()).unwrap();
+                assert!(
+                    config["mcpServers"]["tmux"]["url"]
+                        .as_str()
+                        .unwrap()
+                        .contains("/mcp/")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_shared_names_keep_their_definition_and_a_kept_out_project_stays_disabled() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let own = json!({"mcpServers":{"tmux":{"command":"native-tmux","env":{"PRIVATE_VALUE":"synthetic-private"}}}}).to_string();
+        let project =
+            json!({"mcpServers":{"project-docs":{"command":"native-project"}}}).to_string();
+        std::fs::write(home.path().join(".claude.json"), &own).unwrap();
+        std::fs::write(workspace.path().join(".mcp.json"), &project).unwrap();
+        let mut setup = setup();
+        setup.home = Some(home.path().to_path_buf());
+        setup.managed_home = false;
+        let mut session = spec();
+        session.settings.workspace_root = workspace.path().to_string_lossy().into_owned();
+        session.settings.directory = session.settings.workspace_root.clone();
+        session.settings.cwd = session.settings.directory.clone();
+        session.mcp = vec!["tmux".into(), "project-docs".into(), "extra".into()];
+        let delivered = mcp_config(&setup, &session);
+        assert!(delivered["mcpServers"].get("tmux").is_none());
+        assert!(delivered["mcpServers"].get("project-docs").is_none());
+        assert!(delivered["mcpServers"].get("extra").is_some());
+        assert!(!delivered.to_string().contains("synthetic-private"));
+        session.settings.workspace_configuration = Some(WorkspaceConfiguration {
+            answer: ConfigTrust::KeepOut,
+            files: String::new(),
+        });
+        let settings = settings_json(&setup, &session, &turn());
+        assert_eq!(settings["disabledMcpjsonServers"], json!(["project-docs"]));
+        let delivered = mcp_config(&setup, &session);
+        assert!(
+            delivered["mcpServers"].get("tmux").is_none(),
+            "a kept out workspace never suppresses the person's global native server"
+        );
+        assert!(
+            delivered["mcpServers"].get("project-docs").is_some(),
+            "the explicitly delivered Orch definition remains usable when the workspace's own definition is kept out"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".claude.json")).unwrap(),
+            own
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(".mcp.json")).unwrap(),
+            project
         );
     }
 

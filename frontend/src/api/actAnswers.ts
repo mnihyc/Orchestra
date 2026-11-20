@@ -47,13 +47,16 @@ export function answerChanges(act: Act, p: PathParam, dependencies: readonly Cha
   const related = dependencies.filter((change) => 'relatedViews' in change);
   const outside = dependencies.filter((change) => 'outsideViews' in change);
   const missing = dependencies.filter((change) => 'missing' in change);
-  const native = dependencies.filter((change) => !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
+  // These derived choices have no feed or row receipt; every mounted reader needs its own current answer.
+  const bindings = dependencies.filter((change): change is Stale => 'key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'));
+  const native = dependencies.filter((change) => !('key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'))
+    && !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
   const answered = nativeAnswerChanges(act, p, native);
   // An entry that says its membership repair is always needed (an org moved answers with the org, not with who is in the tree it
   // went to) keeps it with whatever the answer made of the row, as the related views and the exact views are kept.
   const membership = native.filter((change) => 'people' in change && change.always === true);
   const kept = answered.some((change) => 'people' in change) ? [] : membership;
-  return [...answered, ...kept, ...related, ...outside, ...missing];
+  return [...answered, ...kept, ...related, ...outside, ...missing, ...(bindings.length === 0 ? [] : [{ missing: bindings, allObserved: true as const, cancelPending: true as const }])];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
@@ -180,7 +183,7 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     // The nested writer returns a server, never its parent Environment. Restricted receipts
     // contain no stored server view; only an already loaded parent MCP page may be retaken.
     if (record(answer) && record(answer.access) && record(answer.spec)) put('mcp_server', answer, true);
-    changes.push({ missing: [{ key: ['environment-mcp', parts[1]], exact: true }], cancelPending: true });
+    changes.push({ environmentMcp: parts[1] });
     return changes;
   }
   if (act.method==='POST' && parts[0]==='threads' && parts[2]==='calls' && parts[3]==='recovery' && record(answer) && 'recovery' in answer) {
@@ -227,6 +230,10 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     const key = ['host-runtimes', parts[1]];
     if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.id === parts[3]) {
       return [{ collection: { key, identity: 'id', id: parts[3], data: answer }, cancelPending: true }];
+    }
+    if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.projection === 'receipt'
+      && answer.host_id === parts[1] && answer.runtime_id === parts[3]) {
+      return [{ missing: [{ key, exact: true }], cancelPending: true }];
     }
     // Removal may be scheduled. Its acknowledgement cannot say which rows remain on the host.
     if (act.method === 'DELETE' && parts.length === 4) return [{ missing: [{ key, exact: true }], cancelPending: true }];

@@ -60,8 +60,7 @@ export function GatewayCatalogueView({ catalogue, writable = false, onSave, onRe
     finally { setPending(false); }
   };
   return <section aria-label={t('regionalGateways.title')} className="flex min-w-0 flex-col gap-3">
-    <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-2">
-      <span className="min-w-0 wrap-anywhere text-xs text-text-muted">{t('regionalGateways.revision', { revision: catalogue.revision })}</span>
+    <div className="flex min-w-0 flex-wrap items-baseline justify-end gap-2">
       <span className="inline-flex items-center gap-1"><HelpHint term={t('regionalGateways.title')} what={t('regionalGateways.catalogueHelp')}
         guide={{ article: 'connect-a-machine', heading: 'gateway-catalogue' }} />
         {onRefresh !== undefined && <IconButton action="refresh" size="sm" label={t('regionalGateways.refresh')} pending={refreshing} onClick={onRefresh} />}

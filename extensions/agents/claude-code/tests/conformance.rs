@@ -11,6 +11,8 @@ mod common;
 mod model_only;
 #[path = "common/native_recording.rs"]
 mod native_recording;
+#[path = "../../../../scripts/harness-canary/translated_model.rs"]
+mod translated_model;
 
 use orch_adapter_claude_code::{
     ClaudeCodeAdapter,
@@ -53,7 +55,39 @@ impl Launcher for Isolated {
             .0
     }
 }
-async fn shared(case: &str) {
+fn native_environment() -> std::collections::BTreeMap<String, String> {
+    let mut env =
+        std::collections::BTreeMap::from([("CLAUDE_CODE_MAX_RETRIES".to_owned(), "1".to_owned())]);
+    if std::env::var("ORCH_CLAUDE_FEATURE_FLAGS_OFF").as_deref() == Ok("1") {
+        env.insert("CLAUDE_CODE_DISABLE_FEATURE_FLAGS".into(), "1".into());
+    }
+    env
+}
+
+fn isolated(
+    rig: &common::Rig,
+    network: Arc<model_only::ModelOnly>,
+) -> (Arc<Isolated>, Option<String>) {
+    let binary = std::env::var("ORCH_CONFORMANCE_CLAUDE_BINARY").ok();
+    let mut mounts: Vec<std::path::PathBuf> = vec![rig.home.path().into(), rig.work.path().into()];
+    if let Some(path) = &binary {
+        mounts.push(std::path::Path::new(path).parent().unwrap().into());
+    }
+    let launcher = Arc::new(Isolated {
+        network,
+        mounts,
+        launches: Mutex::new(Vec::new()),
+    });
+    (launcher, binary)
+}
+
+async fn shared(case: &str) -> orch_api_contract::admin::HarnessConformanceCase {
+    shared_with_translation(case, false).await
+}
+async fn shared_with_translation(
+    case: &str,
+    translated: bool,
+) -> orch_api_contract::admin::HarnessConformanceCase {
     let mut rig = common::Rig::new()
         .await
         .expect("native conformance requires its pinned image");
@@ -69,20 +103,20 @@ async fn shared(case: &str) {
     let address = server
         .as_ref()
         .map_or(rig.model.addr(), |server| server.address);
+    let translation = if translated {
+        Some(translated_model::Translation::start(address, false, common::TOKEN).await)
+    } else {
+        None
+    };
+    let address = translation
+        .as_ref()
+        .map_or(address, |translation| translation.address);
     let network = model_only::ModelOnly::new(address).await;
-    let binary = std::env::var("ORCH_CONFORMANCE_CLAUDE_BINARY").ok();
-    let mut mounts: Vec<std::path::PathBuf> = vec![rig.home.path().into(), rig.work.path().into()];
-    if let Some(path) = &binary {
-        mounts.push(std::path::Path::new(path).parent().unwrap().into());
-    }
-    let launcher = Arc::new(Isolated {
-        network,
-        mounts,
-        launches: Mutex::new(Vec::new()),
-    });
+    let (launcher, binary) = isolated(&rig, network);
     rig.adapter = ClaudeCodeAdapter::with_launcher(Arc::new(SystemClock), launcher.clone());
     let requests = || {
-        rig.model
+        let actual = rig
+            .model
             .requests()
             .into_iter()
             .map(|request| ModelRequest {
@@ -91,7 +125,12 @@ async fn shared(case: &str) {
                 status: request.status,
                 queued: request.script == Some(orch_testkit::doubles::model::ScriptSource::Queue),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(translation) = &translation {
+            translation.requests(&actual)
+        } else {
+            actual
+        }
     };
     let launches = || {
         launcher
@@ -114,6 +153,9 @@ async fn shared(case: &str) {
     let control_model = |control: ModelControl| -> Result<(), String> {
         match control {
             ModelControl::Reset => {
+                if let Some(translation) = &translation {
+                    translation.clear();
+                }
                 rig.model.reset();
                 Ok(())
             }
@@ -154,14 +196,6 @@ async fn shared(case: &str) {
                 .map_err(|error| error.to_string()),
         }
     };
-    // Until the real subscription trial passes, only this ignored test sees the local probe.
-    let local_checks = (case == "auto_review").then(|| {
-        let mut checks = orch_adapter_claude_code::descriptor::manifest()
-            .checks
-            .clone();
-        checks.probes.push(case.to_owned());
-        checks
-    });
     let version =
         std::env::var("ORCH_EXPECTED_CLAUDE_VERSION").unwrap_or_else(|_| "2.1.322".into());
     let recording = native_recording::NativeRecording::from_env(case, &version, &common::image());
@@ -178,16 +212,7 @@ async fn shared(case: &str) {
             harness_kind: "claude-code".into(),
             profile: AgentProfile {
                 config: json!({}),
-                env: {
-                    let mut env = std::collections::BTreeMap::from([(
-                        "CLAUDE_CODE_MAX_RETRIES".to_owned(),
-                        "1".to_owned(),
-                    )]);
-                    if std::env::var("ORCH_CLAUDE_FEATURE_FLAGS_OFF").as_deref() == Ok("1") {
-                        env.insert("CLAUDE_CODE_DISABLE_FEATURE_FLAGS".into(), "1".into());
-                    }
-                    env
-                },
+                env: native_environment(),
                 ..AgentProfile::default()
             },
             home: Some(rig.home.path().display().to_string()),
@@ -196,9 +221,7 @@ async fn shared(case: &str) {
             binary,
         },
         version,
-        checks: local_checks
-            .as_ref()
-            .unwrap_or(&orch_adapter_claude_code::descriptor::manifest().checks),
+        checks: &orch_adapter_claude_code::descriptor::manifest().checks,
         workspace: rig.work.path().into(),
         within: NATIVE_CASE_WITHIN,
         requests: &requests,
@@ -211,29 +234,34 @@ async fn shared(case: &str) {
             None
         },
     };
-    let informational = local_checks.is_some();
-    let result = if informational {
-        native::run_probe(&mut rig.adapter, &fixture, case).await
-    } else {
-        native::run_case(&mut rig.adapter, &fixture, case).await
-    };
+    let result = native::run_case(&mut rig.adapter, &fixture, case).await;
     model_only::record(
         "claude-code",
         case,
-        if informational {
-            "informational"
-        } else if result.passed {
-            "passed"
-        } else {
-            "failed"
-        },
+        if result.passed { "passed" } else { "failed" },
         &fixture.version,
         json!(result),
     );
     if let Some(recording) = &recording {
-        recording.finish(result.passed, informational);
+        recording.finish(result.passed, false);
+    }
+    if translated && result.passed {
+        let actual = rig.model.requests();
+        assert!(
+            actual
+                .iter()
+                .any(|request| request.path.ends_with("/responses")),
+            "the native case reached the opposite interface"
+        );
+        assert!(
+            !actual
+                .iter()
+                .any(|request| request.path.ends_with("/messages")),
+            "the target never served the native Messages interface"
+        );
     }
     assert!(result.passed, "{result:?}");
+    result
 }
 
 #[tokio::test]
@@ -259,6 +287,11 @@ async fn an_unproved_readonly_boundary_is_not_offered_and_a_session_requiring_it
 #[tokio::test]
 async fn native_tool_answers_have_only_one_model_facing_form() {
     shared("tools.result_form").await;
+}
+
+#[tokio::test]
+async fn a_checkpoint_before_an_earlier_message_forks_exactly_there_and_leaves_the_source_whole() {
+    shared("input_prefix").await;
 }
 
 #[tokio::test]
@@ -407,10 +440,13 @@ async fn changing_bypass_keeps_ask_mode_and_uses_the_matching_launch_environment
 }
 
 #[tokio::test]
-#[ignore = "explicit candidate-only staged classifier proof; real subscription and manifest activation remain pending"]
 async fn native_auto_classifier_stages_hooks_and_model_policy_are_observed() {
-    assert!(!orch_adapter_claude_code::descriptor::auto_proven());
-    shared("auto_review").await;
+    let result = shared("auto_review").await;
+    assert_eq!(result.feature.as_deref(), Some("approval_modes.auto"));
+    assert!(
+        result.error.is_none() && result.unsupported.is_none(),
+        "{result:?}"
+    );
 }
 
 /// A real candidate, a disposable home and the actual read-only control reply; no model credential or turn.
@@ -551,4 +587,73 @@ async fn managed_pins_are_read_back_from_the_actual_candidate() {
     }
     rig.adapter.stop().await.unwrap();
     println!("CONFORMANCE passed claude-code managed_pins {expected}");
+}
+
+#[tokio::test]
+async fn native_translation_keeps_parallel_tools_images_and_the_exact_history_prefix() {
+    for case in [
+        "parallel_calls",
+        "image_result",
+        "input_prefix",
+        "tools.result_form",
+    ] {
+        shared_with_translation(case, true).await;
+    }
+}
+
+#[tokio::test]
+async fn native_translation_completes_automatic_compaction_and_returns_to_working() {
+    use orch_agent_contract::{events::TurnPhaseKind, loopback::Loopback};
+    use orch_plugin_contract::Secret;
+    let mut rig = common::Rig::new()
+        .await
+        .expect("native translation requires its pinned image");
+    let translation =
+        translated_model::Translation::start(rig.model.addr(), false, common::TOKEN).await;
+    let network = model_only::ModelOnly::new(translation.address).await;
+    let (launcher, binary) = isolated(&rig, network);
+    rig.adapter = ClaudeCodeAdapter::with_launcher(Arc::new(SystemClock), launcher);
+    rig.adapter
+        .start(
+            AgentStart {
+                provider_id: new_id(),
+                provider_kind: None,
+                agent_id: new_id(),
+                harness_kind: "claude-code".into(),
+                profile: AgentProfile {
+                    config: json!({}),
+                    env: native_environment(),
+                    ..AgentProfile::default()
+                },
+                home: Some(rig.home.path().display().to_string()),
+                provider_config: json!({}),
+                loopback: Loopback::new(translation.address.port(), Secret::new(common::TOKEN)),
+                binary,
+            },
+            rig.sink.clone(),
+        )
+        .await
+        .unwrap();
+    rig.open().await;
+    let script = "#!mock\nusage 198000 50\nsay Reading a lot.\ntool Bash {\"command\":\"mkdir -p c && echo x > c/x\",\"description\":\"x\"}\nthen\nusage 3000 20\nsay Finished after compaction.\n";
+    let (_, events) = rig.run_deciding(script, common::allow).await;
+    let phases = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::TurnPhase(phase) => Some(phase.kind),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        vec![TurnPhaseKind::Compacting, TurnPhaseKind::Working]
+    );
+    assert!(events.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(end) if end.status==TurnOutcome::Completed)));
+    assert!(
+        rig.model
+            .requests()
+            .iter()
+            .all(|request| !request.path.ends_with("/messages"))
+    );
+    rig.adapter.stop().await.unwrap();
 }

@@ -175,9 +175,15 @@ async fn a_same_version_confirmed_path_change_closes_its_live_channel_and_keeps_
         );
         // A real local confirmation changes the policy. No host mutation or stop helper is called here.
         let changed: MachineFacts = serde_json::from_value(
-            rig.succeed(&MachineProgramsCommand::ConfirmHarness {
-                kind: "fake".into(),
-                path: replacement.display().to_string(),
+            rig.succeed(&orch_link_contract::commands::MachineProgramsRequest {
+                request: MachineProgramsCommand::ConfirmHarness {
+                    kind: "fake".into(),
+                    path: replacement.display().to_string(),
+                },
+                confirmation: Some(orch_agent_programs::confirmation::Confirmation {
+                    by: orch_types::new_id(),
+                    at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+                }),
             })
             .await,
         )
