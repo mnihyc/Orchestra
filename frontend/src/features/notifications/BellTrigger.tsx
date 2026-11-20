@@ -14,6 +14,11 @@ interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'
   scopeLabel?: string;
   level: SubscriptionLevel | ChatLevel | DocumentDiscussionLevel;
   inherited?: boolean;
+  /** The admitted subscription says it was added for this person's contribution. */
+  automatic?: boolean;
+  /** An open menu can display the same node that describes its trigger when closed. */
+  descriptionId?: string;
+  descriptionInPopup?: boolean;
   /** A place bell names its short effective level in the header. */
   showLevel?: boolean;
   pending?: boolean;
@@ -25,11 +30,12 @@ function BellButton({ stateId, ...props }: ButtonHTMLAttributes<HTMLButtonElemen
   return <button {...props} type="button" aria-describedby={stateId} />;
 }
 
-export function BellTrigger({ label, scopeLabel, level, inherited = false, showLevel = false, pending = false, disabled = false, ref, className, onClick, onPointerDown, onKeyDown, ...rest }: Props) {
+export function BellTrigger({ label, scopeLabel, level, inherited = false, automatic = false, descriptionId, descriptionInPopup = false, showLevel = false, pending = false, disabled = false, ref, className, onClick, onPointerDown, onKeyDown, ...rest }: Props) {
   const { t } = useTranslation();
-  const stateId = useId();
+  const localStateId = useId();
+  const stateId = descriptionId ?? localStateId;
   const name = t(`notificationBell.level.${level}`);
-  const description = inherited ? t('notificationBell.inherited', { level: name }) : name;
+  const description = automatic ? t('notificationBell.contributed', {level:name}) : inherited ? t('notificationBell.inherited', { level: name }) : name;
   const Icon = level === 'off' ? BellOff : level === 'all' ? BellRing : Bell;
   const named = showLevel || level === 'off';
   return <Tooltip content={named ? label : description}>
@@ -47,8 +53,8 @@ export function BellTrigger({ label, scopeLabel, level, inherited = false, showL
         onKeyDown?.(event);
       }}>
       {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : <Icon aria-hidden />}
-      {named && <span>{scopeLabel === undefined ? name : scopeLabel + ' · ' + name}</span>}
-      <span id={stateId} className="sr-only">{description}</span>
+      {named && <span>{scopeLabel === undefined ? name : scopeLabel + ' · ' + name}{automatic && ` · ${t('notificationBell.auto')}`}</span>}
+      {!descriptionInPopup && <span id={stateId} className="sr-only">{description}</span>}
     </BellButton>
   </Tooltip>;
 }

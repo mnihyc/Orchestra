@@ -8,7 +8,7 @@ test.beforeEach(async () => {
 });
 
 const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation', exact: true });
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 
 test('the menu of a place that is longer than the room it has scrolls, takes the keyboard, and is no barrier to anybody', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 480 });

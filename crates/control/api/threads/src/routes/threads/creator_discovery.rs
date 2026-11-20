@@ -310,6 +310,7 @@ async fn checked(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: caller.user(),
                     node: topic,
                     provider,
@@ -347,7 +348,7 @@ async fn checked(
             .await
             .map_err(ApiError::engine)?;
         orch_engine::models::check_allowed(row.as_ref(), settings.models_allowed.as_deref(), model)
-            .map_err(|_| ApiError::new(ErrorCode::ModelNotAllowed, "the model is not allowed"))?;
+            .map_err(|why| super::model_refusal(model, why))?;
         if let Some(effort) = body.effort.as_deref() {
             let row = row.ok_or_else(|| {
                 ApiError::new(ErrorCode::ModelNotAllowed, "the model is not allowed")

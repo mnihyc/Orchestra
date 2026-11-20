@@ -18,7 +18,7 @@
 //! closed for being slow, only for being dead.
 
 use crate::framing::{
-    Connection, Inbound, LinkMeter, MessageSink, MessageSource, Outgoing, SessionOver,
+    Connection, Inbound, LinkMeter, MessageSink, MessageSource, Outgoing, Refused, SessionOver,
     TransportError, queues, read_loop, send_frame, write_loop,
 };
 use async_trait::async_trait;
@@ -124,25 +124,32 @@ impl SessionSender {
     pub fn send_datagram(&self, packet: crate::ports::Datagram) -> Result<(), SessionOver> {
         self.out.datagram(packet)
     }
-    /// Sends a frame that must not wait behind events or data.
-    pub fn send(&self, frame: impl Into<Frame>) -> Result<(), SessionOver> {
-        self.out.control(&frame.into(), self.limits.frame_bytes())
+    /// Sends a frame that must not wait behind events or data. A frame larger
+    /// than a frame goes in parts. One larger than the session's message limit
+    /// is not sent, and the refusal says so.
+    pub fn send(&self, frame: impl Into<Frame>) -> Result<(), Refused> {
+        self.out.control(&frame.into())
+    }
+
+    /// Sends a logical command result whose kind is carried across message allowances.
+    pub fn send_paged(&self, frame: impl Into<Frame>) -> Result<(), Refused> {
+        self.out.control_paged(&frame.into())
     }
 
     /// Sends a frame of events.
-    pub fn send_events(&self, frame: impl Into<Frame>) -> Result<(), SessionOver> {
-        self.out.events(&frame.into(), self.limits.frame_bytes())
+    pub fn send_events(&self, frame: impl Into<Frame>) -> Result<(), Refused> {
+        self.out.events(&frame.into())
     }
 
     /// Sends a text frame that must not overtake the tunnel data sent
     /// before it: the end of a stream, a clean close.
-    pub fn send_ordered(&self, frame: impl Into<Frame>) -> Result<(), SessionOver> {
-        self.out.ordered(&frame.into(), self.limits.frame_bytes())
+    pub fn send_ordered(&self, frame: impl Into<Frame>) -> Result<(), Refused> {
+        self.out.ordered(&frame.into())
     }
 
     /// Sends a frame of tunnel data.
-    pub fn send_data(&self, frame: &DataFrame) -> Result<(), SessionOver> {
-        self.out.data(frame, self.limits.frame_bytes())
+    pub fn send_data(&self, frame: &DataFrame) -> Result<(), Refused> {
+        self.out.data(frame)
     }
 
     /// Sends a binary frame that is already written.
@@ -160,6 +167,13 @@ impl SessionSender {
     #[must_use]
     pub fn max_frame_bytes(&self) -> usize {
         self.limits.frame_bytes()
+    }
+
+    /// The byte allowance of an ordinary message. Paged command kinds can span
+    /// it through the same parts writer.
+    #[must_use]
+    pub fn max_message_bytes(&self) -> usize {
+        self.limits.message_bytes()
     }
 
     /// How many bytes of payload the next data frame should carry: a
@@ -270,7 +284,7 @@ fn start(
     meter: Arc<LinkMeter>,
 ) -> (SessionSender, SessionInbox) {
     let Connection { sink, source, .. } = connection;
-    let (out, queued) = queues();
+    let (out, queued) = queues(limits);
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     #[cfg(feature = "test-observers")]
@@ -296,7 +310,15 @@ fn start(
             inner: sink,
             activity: write_activity,
         };
-        if let Err(error) = write_loop(Box::new(counting), queued, write_meter, write_ended).await {
+        if let Err(error) = write_loop(
+            Box::new(counting),
+            queued,
+            write_meter,
+            limits.frame_bytes(),
+            write_ended,
+        )
+        .await
+        {
             #[cfg(feature = "test-observers")]
             failed_observed.enqueue(Some(0));
             if writer_failed.send(Inbound::Lost(Some(error))).is_err() {
@@ -314,15 +336,14 @@ fn start(
             observed: Arc::clone(&observed[0]),
         }),
         inbound_tx,
-        limits.frame_bytes(),
-        limits.ports,
+        limits,
         Arc::clone(&meter),
+        timing.dead_after,
     ));
     tokio::spawn(pump(
         inbound_rx,
         events_tx,
         out,
-        limits,
         timing,
         meter,
         activity,
@@ -391,15 +412,17 @@ impl MessageSource for ActivitySource {
 /// Answers pings, measures the round trip, pings when this side has been
 /// silent, gives the session up when the other has, and hands everything
 /// else on.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the tasks of a session meet here, and each of these is a different thing they share"
+#[cfg_attr(
+    feature = "test-observers",
+    expect(
+        clippy::too_many_arguments,
+        reason = "the tasks of a session meet here, and each of these is a different thing they share"
+    )
 )]
 async fn pump(
     mut inbound: mpsc::UnboundedReceiver<Inbound>,
     events: mpsc::UnboundedSender<SessionEvent>,
     out: Outgoing,
-    limits: Limits,
     timing: Timing,
     meter: Arc<LinkMeter>,
     activity: Arc<Activity>,
@@ -420,7 +443,6 @@ async fn pump(
         }
         result
     };
-    let max = limits.frame_bytes();
     let mut next_ping: i64 = 1;
     let mut waiting_for: Option<(i64, Instant)> = None;
     let mut last_ping = Instant::now();
@@ -441,7 +463,7 @@ async fn pump(
             next_ping += 1;
             last_ping = Instant::now();
             waiting_for = Some((n, last_ping));
-            let _ = out.control(&Ping { n }.into(), max);
+            let _ = out.control(&Ping { n }.into());
         }
         let until_ping = timing
             .heartbeat
@@ -460,7 +482,7 @@ async fn pump(
                 None => break EndReason::PeerClosed,
                 Some(Inbound::Frame(frame)) => match frame.as_ref() {
                     Frame::Ping(Ping { n }) => {
-                        let _ = out.control(&Pong { n: *n }.into(), max);
+                        let _ = out.control(&Pong { n: *n }.into());
                     }
                     Frame::Pong(Pong { n }) => {
                         if let Some((expected, at)) = waiting_for.take() {
@@ -488,7 +510,7 @@ async fn pump(
                     if send(SessionEvent::Datagram(packet)).is_err() {break EndReason::Local;}
                 }
                 Some(Inbound::Broken(error)) => {
-                    let _ = out.control(&Bye { code: error.bye() }.into(), max);
+                    let _ = out.control(&Bye { code: error.bye() }.into());
                     break EndReason::Protocol(error.to_string());
                 }
                 Some(Inbound::Lost(None)) => break EndReason::PeerClosed,
@@ -932,8 +954,8 @@ pub async fn accept(
             &mut connection,
             RejectCode::UpgradeRequired,
             format!(
-                "connectors older than {} are not accepted",
-                gateway.versions.min
+                "this connector is {} and the system accepts {} and newer: update it",
+                auth.connector_version, gateway.versions.min
             ),
             None,
         )
@@ -1108,8 +1130,8 @@ pub async fn accept(
             &mut connection,
             RejectCode::UpgradeRequired,
             format!(
-                "node builds older than {} are not accepted; waiting for its hosted turns to drain",
-                gateway.versions.min
+                "this node is {} and the system accepts {} and newer: it updates once its hosted turns have drained",
+                auth.connector_version, gateway.versions.min
             ),
             None,
             reply.update_permit,

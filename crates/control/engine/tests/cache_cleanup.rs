@@ -14,7 +14,7 @@ async fn operation_notification_defaults_follow_the_place_override_and_a_system_
     let mut conn = world.pool.acquire().await.unwrap();
     let place = orch_settings::Place::Node(world.topic);
     assert!(
-        orch_engine::notifications::operation_default(&mut conn, place, true)
+        !orch_engine::notifications::operation_default(&mut conn, place, true)
             .await
             .unwrap()
     );
@@ -1096,6 +1096,7 @@ async fn session_delivery_follows_native_acknowledgement_order_and_missing_legac
         insert_command(
             &mut conn,
             &NewCommand {
+                content_transit: false,
                 id,
                 machine_id: world.machine_id,
                 kind: "session.open",
@@ -1132,6 +1133,7 @@ async fn session_delivery_follows_native_acknowledgement_order_and_missing_legac
     insert_command(
         &mut conn,
         &NewCommand {
+            content_transit: false,
             id: close,
             machine_id: world.machine_id,
             kind: "session.close.fenced",
@@ -1182,6 +1184,7 @@ async fn session_delivery_follows_native_acknowledgement_order_and_missing_legac
     insert_command(
         &mut conn,
         &NewCommand {
+            content_transit: false,
             id: legacy,
             machine_id: world.machine_id,
             kind: "session.open",
@@ -1352,6 +1355,7 @@ async fn an_acknowledged_harness_stop_closes_unknown_delivery_and_fences_a_late_
     insert_command(
         &mut conn,
         &NewCommand {
+            content_transit: false,
             id: command,
             machine_id: world.machine_id,
             kind: "session.open",
