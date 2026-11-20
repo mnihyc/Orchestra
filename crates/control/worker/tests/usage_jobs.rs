@@ -218,6 +218,7 @@ async fn exact_credit_observations_follow_the_existing_metrics_retention_duratio
                 name: "Reported credits",
                 owner_id: world.admin,
                 home_id: home,
+                home_overridden: false,
                 upstreams: &json!([{
                     "protocol": "openai-responses",
                     "base_url": "https://example.invalid/v1",

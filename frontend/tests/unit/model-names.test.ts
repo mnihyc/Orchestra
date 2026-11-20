@@ -34,8 +34,8 @@ it.each(['en', 'zh-CN'] as const)('uses reported names and an honest missing-nam
   expect(effortDisplayName('My custom effort')).toBe('My custom effort');
   expect(programName({ kind: 'codex', name: 'Codex', names: {} }, locale)).toBe('Codex');
   expect(programName({ kind: 'claude_code', name: 'Claude Code', names: {} }, locale)).toBe('Claude Code');
-  const example = { kind: 'fake', name: 'Example agent', names: { 'zh-CN': '示例代理' } };
-  expect(programName(example, locale)).toBe(locale === 'zh-CN' ? '示例代理' : 'Example agent');
+  const example = { kind: 'fake', name: 'Example agent', names: { 'zh-CN': '示例智能体' } };
+  expect(programName(example, locale)).toBe(locale === 'zh-CN' ? '示例智能体' : 'Example agent');
   expect(programName({ kind: 'private_harness_key', name: '', names: {} }, locale)).toBeNull();
   expect(keyLabel('model', { model: 'private_vendor_route', model_display: 'Reasoner' }, i18n.t)).toBe('Reasoner');
   expect(keyDetail('model', { model: 'private_vendor_route', model_display: 'Reasoner' }, i18n.t)).toBeNull();
