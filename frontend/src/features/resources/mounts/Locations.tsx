@@ -8,6 +8,7 @@ import { Hint } from '@/features/help/Hint';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { choiceOption } from '@/i18n/choices';
@@ -28,7 +29,11 @@ import { StatusDot } from '@/ui/StatusDot';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { UserChip } from '@/ui/UserChip';
 import { Tooltip } from '@/ui/Tooltip';
+import { ContextMenu } from '@/ui/ContextMenu';
+import { IconButton } from '@/ui/IconButton';
+import { Menu, type MenuEntry } from '@/ui/Menu';
 import { MountLocationsEmpty } from './Where';
+import { CopyMountData } from './Copy';
 
 /** The hints in the order the screens offer them; `none` stands for a location nobody described. */
 const DATA_KINDS: readonly (MountDataKind | 'none')[] = ['own', 'shared', 'synced', 'none'];
@@ -110,14 +115,19 @@ export function Locations({ mount }: { mount: Mount }) {
   const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<MountLocation | null>(null);
+  const [copying, setCopying] = useState<MountLocation | null>(null);
   const [confirm, setConfirm] = useState('');
   const remove = useMutation({ mutationFn: async () => {
     if (removing === null) return;
     await removeMountLocation(mount.id, removing.machine.id, removing.kind === 'volume' ? confirm : undefined);
   }, onSuccess: () => { setRemoving(null); } });
+  const entries = (location: MountLocation): MenuEntry[] => [
+    { id: 'copy-data', label: t('mountCopy.copy'), disabled: location.can_remove && location.source !== null ? false : t('mountCopy.noSource'), onSelect: () => setCopying(location) },
+    { id: 'remove', label: t('resourceDetails.remove'), danger: true, disabled: location.can_remove ? false : t('resources.act.manageRequired'), onSelect: () => { remove.reset(); setConfirm(''); setRemoving(location); } },
+  ];
   return <Section id="mount-locations" title={t('resourceDetails.mount.locations')} action={<><Hint popover id="loss-mounts" />{holds(mount.access, 'mount.use') && <Button onClick={() => setAdding(true)}>{t('resourceDetails.mount.addLocation')}</Button>}</>}>
     {mount.locations.length === 0 ? <EmptyState compact title={<MountLocationsEmpty hidden={mount.locations_hidden} />} /> : <>
-      <DetailPages items={mount.locations}>{(page) => <ul className="flex flex-col divide-y divide-border">{page.map((location) => <li key={location.machine.id} className="flex flex-col items-start gap-2 py-2">
+      <DetailPages items={mount.locations}>{(page) => <ul className="flex flex-col divide-y divide-border">{page.map((location) => <ContextMenu key={location.machine.id} label={location.machine.name} entries={entries(location)}><li className="flex flex-col items-start gap-2 py-2">
         <div className="flex flex-wrap items-center gap-2">
           {location.host === null
             ? <Link to="/resources/machines/$id" params={{ id: location.machine.id }} className="text-link hover:underline">{location.machine.name}</Link>
@@ -125,15 +135,16 @@ export function Locations({ mount }: { mount: Mount }) {
           <span>{t(location.kind === 'volume' ? 'resourceDetails.mount.volume' : 'resourceDetails.mount.path')}</span>
           <code>{location.source ?? t('resourceDetails.mount.sourceHidden')}</code>
           {location.storage !== null && <span>{location.storage}</span>}<LocationDataKind mount={mount} location={location} /><UserChip user={location.created_by} />
-          {location.can_remove && <Button size="sm" variant="danger-ghost" onClick={() => { remove.reset(); setConfirm(''); setRemoving(location); }}>{t('resourceDetails.remove')}</Button>}
+          <Menu label={location.machine.name} entries={entries(location)} trigger={<IconButton label={t('operation.actions')} icon={<MoreHorizontal aria-hidden />} />} />
         </div>
         {!location.machine.online && <p className="text-sm text-text-muted">{t('resourceDetails.mount.locationOfflineHelp')}</p>}
-      </li>)}</ul>}</DetailPages>
+      </li></ContextMenu>)}</ul>}</DetailPages>
       {(mount.locations_hidden ?? 0) > 0 && <p><MountLocationsEmpty hidden={mount.locations_hidden} /></p>}
     </>}
     <LostLocations mount={mount} />
     <Kept mount={mount} />
     {adding && <AddLocation mount={mount} onClose={() => setAdding(false)} />}
+    {copying !== null && <CopyMountData mount={mount} sourceMachine={copying.machine.id} onClose={() => setCopying(null)} />}
     <Dialog open={removing !== null} onOpenChange={(open) => { if (!open && !remove.isPending) setRemoving(null); }} title={t('resourceDetails.mount.removeLocation')} dismissible={!remove.isPending} footer={<><Button data-autofocus disabled={remove.isPending} onClick={() => setRemoving(null)}>{t('common.cancel')}</Button><Button variant="danger" pending={remove.isPending} disabled={removing?.kind === 'volume' && confirm !== mount.name} onClick={() => remove.mutate()}>{t('resourceDetails.remove')}</Button></>}>
       <p>{t(removing?.kind === 'volume' ? 'resourceDetails.mount.volumeRemoval' : 'resourceDetails.mount.pathRemoval', { name: mount.name, machine: removing?.machine.name ?? '' })}</p>
       {removing?.kind === 'volume' && <Input label={t('resourceDetails.mount.confirmName')} value={confirm} onChange={(event) => setConfirm(event.target.value)} />}

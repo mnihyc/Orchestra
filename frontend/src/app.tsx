@@ -7,7 +7,7 @@
  * nothing of theirs stays in the page's query cache.
  */
 import { QueryClientProvider } from '@tanstack/react-query';
-import { createRouter, RouterProvider } from '@tanstack/react-router';
+import { createRouter, RouterContextProvider, RouterProvider } from '@tanstack/react-router';
 import { LucideProvider } from 'lucide-react';
 
 import { meKey, metaKey } from '@/api/auth';
@@ -80,10 +80,12 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <LucideProvider size={ICON_SIZE} strokeWidth={ICON_STROKE}>
         <TooltipProvider>
-          <Toaster>
-            <RouterProvider router={router} />
-            <OwnerReadConfirmation />
-          </Toaster>
+          <RouterContextProvider router={router}>
+            <Toaster>
+              <RouterProvider router={router} />
+              <OwnerReadConfirmation />
+            </Toaster>
+          </RouterContextProvider>
         </TooltipProvider>
       </LucideProvider>
     </QueryClientProvider>

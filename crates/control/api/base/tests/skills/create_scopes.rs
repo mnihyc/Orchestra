@@ -1,7 +1,7 @@
 //! Own native source roles and independent completed Skill Read.
 use super::*;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use serde_json::json;
 fn home(operation: &str, home: Id, actions: &[&str]) -> serde_json::Value {
@@ -13,11 +13,12 @@ fn custody(operation: &str, user: Id) -> serde_json::Value {
 async fn key(world: &World, user: Id, rules: Vec<serde_json::Value>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native Skill creation",
             token_hash: &token_hash(&token),

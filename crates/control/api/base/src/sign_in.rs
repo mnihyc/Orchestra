@@ -16,6 +16,7 @@
 //!   per address.
 //! - [`proofs`] checks a password, a mailed code and an authenticator's code,
 //!   and says what a person's set of proofs lacks.
+//! - [`human_check`] asks a person who has no session to prove they are not a program, where the system asks it.
 //! - [`login`] is the sign-in itself and the request for a code by mail.
 //! - [`accounts`] makes a person with the org that is theirs.
 //! - [`reset_links`] makes a link that sets a new password by hand, for a person
@@ -479,6 +480,10 @@ pub mod codes;
 
 #[path = "sign_in/fresh.rs"]
 pub mod fresh;
+
+/// The human check asked of a person before they sign in, register or have mail sent.
+#[path = "sign_in/human_check.rs"]
+pub mod human_check;
 
 #[path = "sign_in/login.rs"]
 pub mod login;
