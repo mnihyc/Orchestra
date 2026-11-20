@@ -2,8 +2,6 @@
 
 use orch_access_contract::permissions::Permission;
 
-use orch_access_contract::permissions::PermissionName;
-
 use orch_authz::Act;
 
 use orch_authz::Policy;
@@ -21,17 +19,16 @@ pub(crate) async fn readable(
     principal: &Principal,
     nodes: &[Id],
 ) -> Result<HashSet<Id>, orch_authz::Error> {
-    Ok(orch_authz::nodes::holding(
+    Ok(orch_authz::nodes::holding_ids(
         conn,
         principal,
         nodes,
-        PermissionName::Exact(Permission::DocView),
+        Permission::DocView,
         Act::Use,
         Policy::default(),
     )
     .await?
     .into_iter()
-    .map(|node| node.id)
     .collect())
 }
 orch_api_base::__api_bind_f52fcb6b67!();

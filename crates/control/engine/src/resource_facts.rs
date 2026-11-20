@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use crate::EngineError;
 
 pub mod activity;
+pub mod applications;
 pub mod custody;
 pub mod library;
 
@@ -351,8 +352,16 @@ pub async fn authorities(
         .iter()
         .flat_map(|site| view(site.kind).into_iter().chain(manage(site.kind)))
         .collect();
-    let frame =
-        orch_authz::Frame::load(conn, principal, Policy::default(), graph, &sites, &wanted).await?;
+    let frame = orch_authz::Frame::for_permissions(
+        conn,
+        principal,
+        Policy::default(),
+        graph,
+        &sites,
+        &[],
+        &wanted,
+    )
+    .await?;
     Ok(resources
         .into_iter()
         .filter_map(|resource| {

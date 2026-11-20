@@ -5,6 +5,7 @@
  * needed it shows the failure with "Try again", which draws it anew and so fetches it anew.
  */
 import { type ComponentType, lazy } from 'react';
+import { partFailure } from '@/lib/partFailures';
 
 /** Fetches a part up to three times, a short pause between the tries. */
 async function loadThrice<T>(load: () => Promise<T>, left = 3): Promise<T> {
@@ -22,8 +23,8 @@ export function lazyPart<Props extends object>(load: () => Promise<{ default: Co
   const make = () =>
     lazy(() =>
       loadThrice(load).catch((error: unknown) => {
-        current = make();
-        throw error;
+        // React must see this rejected component before an explicit Retry creates its next attempt.
+        throw partFailure(error, () => { current = make(); });
       }),
     );
   let current = make();

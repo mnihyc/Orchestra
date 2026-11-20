@@ -243,7 +243,9 @@ pub(crate) async fn assemble(
         }
     }
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &sites, &everything, &[])
+            .await?;
     let sees_anchor = frame.holds_any(anchor);
     let mut missing: Vec<orch_access_contract::decisions::MissingAccess> = Vec::new();
     for item in lacking {
@@ -267,7 +269,11 @@ pub(crate) async fn assemble(
             missing::missing_access(conn, &frame, &item.site, &item.permissions, known).await?;
         if let Some(options) = &item.options {
             for entry in &mut entries {
-                if entry.permissions.contains(&Permission::ProviderUse) {
+                if entry
+                    .permissions
+                    .iter()
+                    .any(|permission| permission.has_provider_options())
+                {
                     entry.options = Some(options.clone());
                 }
             }
@@ -335,8 +341,7 @@ pub async fn check(
     check_all(conn, principal, object, &[permission], policy).await
 }
 
-/// Uses the physical machine's resource page, or its host facade when that role is offered.
-/// View, Use and Manage have the same supplier for registration, moves and policy editing.
+/// Uses the physical machine's resource page, or the host that governs its node or unit.
 pub async fn check_machine(
     conn: &mut Conn,
     principal: &Principal,
@@ -349,13 +354,18 @@ pub async fn check_machine(
 }
 
 /// Resolves the page and permission that govern a physical machine, including a host facade.
-/// Audience expansion uses this same supplier as the permission check.
+/// Audience expansion uses this same supplier as the permission check. A unit that a host runs
+/// has no page of its own: the host that runs it governs it, as it governs its own node.
 pub async fn machine_permission(
     conn: &mut Conn,
     machine: Id,
     permission: Permission,
 ) -> Result<(ObjectRef, Permission), Error> {
-    Ok(match rows::hosting::host_of_machine(conn, machine).await? {
+    // HostUse makes new work on a shared host. It does not let a person register credentials or
+    // change programs inside another person's existing unit; the host manager administers those.
+    let unit = permission == Permission::MachineUse
+        && rows::hosting::host_running(conn, machine).await?.is_some();
+    Ok(match rows::hosting::host_naming(conn, machine).await? {
         Some(host) => (
             ObjectRef {
                 kind: ObjectKind::Host,
@@ -363,6 +373,7 @@ pub async fn machine_permission(
             },
             match permission {
                 Permission::MachineView => Permission::HostView,
+                Permission::MachineUse if unit => Permission::HostManage,
                 Permission::MachineUse => Permission::HostUse,
                 Permission::MachineManage => Permission::HostManage,
                 other => other,
@@ -519,7 +530,9 @@ async fn decide(
             Vec::new(),
         )));
     }
-    let frame = Frame::load(conn, principal, policy, graph, &all_sites, &wanted).await?;
+    let frame =
+        Frame::load_with_participation(conn, principal, policy, graph, &all_sites, &wanted, &[])
+            .await?;
     let mut through: Vec<Through> = Vec::new();
     let mut lacking: Vec<Lacking> = Vec::new();
     let mut unscoped = false;
@@ -599,18 +612,7 @@ pub async fn effective(
     object: ObjectRef,
     policy: Policy,
 ) -> Result<Effective, Error> {
-    let (graph, _, site) = site(conn, object).await?;
-    let everything = every_permission([site.kind]);
-    let frame = Frame::load_with_participation(
-        conn,
-        principal,
-        policy,
-        graph,
-        std::slice::from_ref(&site),
-        &everything,
-        std::slice::from_ref(&site),
-    )
-    .await?;
+    let (frame, site) = effective_frame(conn, principal, object, policy, true).await?;
     Ok(Effective {
         admin_place: frame.admin_place(&site),
         admin_only: frame.admin_only(&site),
@@ -622,6 +624,78 @@ pub async fn effective(
         owner: frame.owns(&site),
         held: frame.effective(&site),
     })
+}
+
+/// Permissions for projections that show what a person can do with a resource.
+pub async fn held_permissions(
+    conn: &mut Conn,
+    principal: &Principal,
+    object: ObjectRef,
+    policy: Policy,
+) -> Result<Vec<Held>, Error> {
+    let (frame, site) = effective_frame(conn, principal, object, policy, false).await?;
+    Ok(frame.effective(&site))
+}
+
+async fn effective_frame<'p>(
+    conn: &mut Conn,
+    principal: &'p Principal,
+    object: ObjectRef,
+    policy: Policy,
+    participation: bool,
+) -> Result<(Frame<'p>, Site), Error> {
+    let (graph, _, site) = site(conn, object).await?;
+    let everything = every_permission([site.kind]);
+    let frame = Frame::load_with_participation(
+        conn,
+        principal,
+        policy,
+        graph,
+        std::slice::from_ref(&site),
+        &everything,
+        if participation {
+            std::slice::from_ref(&site)
+        } else {
+            &[]
+        },
+    )
+    .await?;
+    Ok((frame, site))
+}
+
+/// Independent model permissions share the same resource frame and single-entry option evaluator.
+pub async fn model_permission(
+    conn: &mut Conn,
+    principal: &Principal,
+    provider: Id,
+    permission: Permission,
+    policy: Policy,
+) -> Result<Result<crate::usable::Use, crate::usable::Access>, Error> {
+    if !permission.has_provider_options() {
+        return Ok(Err(crate::usable::Access::None));
+    }
+    let (graph, resource, site) = site(
+        conn,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+    )
+    .await?;
+    if resource.deleted {
+        return Err(Error::NotFound(provider));
+    }
+    let everything = every_permission([site.kind]);
+    let frame = Frame::load(
+        conn,
+        principal,
+        policy,
+        graph,
+        std::slice::from_ref(&site),
+        &everything,
+    )
+    .await?;
+    crate::usable::access_for(&frame, &resource, &site, None, false, permission)
 }
 
 /// Exact resource holdings in one frame, without truncating them to a page of the global resource list.
@@ -867,7 +941,8 @@ pub async fn holding(
         }
     }
     let all: Vec<Site> = sites.iter().map(|(_, site)| site.clone()).collect();
-    let frame = Frame::load(conn, principal, policy, graph, &all, &[permission]).await?;
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, &all, &[], &[permission]).await?;
     Ok(sites
         .into_iter()
         .filter(|(_, site)| {
@@ -1147,7 +1222,7 @@ pub async fn may_change_policy_key(
     let Some(_) = orch_db::queries::environments::location_machine(conn, machine).await? else {
         return Ok(Keying::NoSuchMachine);
     };
-    if let Some(host) = rows::hosting::host_of_machine(conn, machine).await? {
+    if let Some(host) = rows::hosting::host_naming(conn, machine).await? {
         let decision = check(
             conn,
             principal,

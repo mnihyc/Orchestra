@@ -115,12 +115,13 @@ pub async fn of_thread(
         Permission::ThreadInteract,
         Permission::ThreadManage,
     ]);
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         &[thread_site.clone(), site.clone()],
+        &[],
         &wanted,
     )
     .await?;
@@ -244,12 +245,13 @@ pub async fn offer(
     let (graph, resource, site) = resources::site(conn, dependency.object).await?;
     let everything = every_permission([dependency.object.kind]);
     let policy = policies.at(resource.home).node_policy();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         &everything,
     )
     .await?;
@@ -281,12 +283,13 @@ pub(crate) async fn reader_change(
         .find(|row| row.id == environment)
         .ok_or(Error::NotFound(environment))?;
     let site = site_of(&graph, resource).ok_or(Error::NotFound(environment))?;
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policies.sharing_at(resource.home),
         graph,
         &[thread.clone(), site],
+        &[],
         &every_permission([ObjectKind::Thread, ObjectKind::Environment]),
     )
     .await?;

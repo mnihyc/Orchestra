@@ -475,7 +475,7 @@ impl Continuing {
         let seq = unit.stamp(recipe.thread_id).await?;
         let changed=sqlx::query("UPDATE segments SET native_session_ref=$4,seq_updated=$5
             WHERE id=$1 AND thread_id=$2 AND continuation_id=$3 AND (native_session_ref IS NULL OR native_session_ref=$4)")
-            .bind(recipe.segment_id).bind(recipe.thread_id).bind(recipe.target_continuation_id).bind(prepared.native()).bind(seq)
+            .bind(recipe.segment_id).bind(recipe.thread_id).bind(recipe.target_continuation_id).bind(orch_types::storable::encode_key(prepared.native())).bind(seq)
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?.rows_affected();
         if changed != 1 {
             return Err(failed(
@@ -495,7 +495,7 @@ impl Continuing {
             let changed=sqlx::query("UPDATE thread_continuations SET native_creation_result=COALESCE(native_creation_result,$4)
                 WHERE thread_id=$1 AND id=$2 AND native_creation=$3
                 AND (native_creation_result IS NULL OR native_creation_result=$4)")
-                .bind(recipe.thread_id).bind(recipe.target_continuation_id).bind(creation).bind(opened)
+                .bind(recipe.thread_id).bind(recipe.target_continuation_id).bind(creation).bind(orch_types::storable::encode_exact(&opened))
                 .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?.rows_affected();
             if changed != 1 {
                 return Err(failed(
@@ -507,9 +507,9 @@ impl Continuing {
         sqlx::query("UPDATE thread_continuations SET native_source=COALESCE(native_source,$3),
             native_prefix=COALESCE(native_prefix,$4),open_result=$5,current_segment_id=$6 WHERE thread_id=$1 AND id=$2")
             .bind(recipe.thread_id).bind(recipe.target_continuation_id)
-            .bind(serde_json::to_value(&recipe.source_lane.source).map_err(internal)?)
-            .bind(recipe.prefix.as_ref().map(serde_json::to_value).transpose().map_err(internal)?)
-            .bind(serde_json::to_value(prepared).map_err(internal)?).bind(recipe.segment_id)
+            .bind(orch_types::storable::encode_exact(&serde_json::to_value(&recipe.source_lane.source).map_err(internal)?))
+            .bind(recipe.prefix.as_ref().map(serde_json::to_value).transpose().map_err(internal)?.as_ref().map(orch_types::storable::encode_exact))
+            .bind(orch_types::storable::encode_exact(&serde_json::to_value(prepared).map_err(internal)?)).bind(recipe.segment_id)
             .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
         jobs::merge_plan(
             unit.conn,
@@ -910,8 +910,10 @@ impl Continuing {
                 AND (native_prefix IS NULL OR native_prefix=$2)",
             )
             .bind(recipe.target_continuation_id)
-            .bind(&prefix)
-            .bind(serde_json::to_value(&recipe.source_lane.source).map_err(internal)?)
+            .bind(orch_types::storable::encode_exact(&prefix))
+            .bind(orch_types::storable::encode_exact(
+                &serde_json::to_value(&recipe.source_lane.source).map_err(internal)?,
+            ))
             .execute(&mut *tx)
             .await
             .map_err(orch_db::DbError::from)?

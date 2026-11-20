@@ -18,12 +18,13 @@ pub async fn review(
         .map_err(EngineError::from)?;
     let mut asked = vec![permission, Permission::AccessManage];
     asked.extend(permission.held_through());
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         std::slice::from_ref(&site),
+        &[],
         &asked,
     )
     .await
@@ -199,12 +200,13 @@ pub async fn can_bypass(
     let (graph, _, site) = orch_authz::resources::site(conn, object).await?;
     let mut asked = vec![permission, Permission::AccessManage];
     asked.extend(permission.held_through());
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         std::slice::from_ref(&site),
+        &[],
         &asked,
     )
     .await?;

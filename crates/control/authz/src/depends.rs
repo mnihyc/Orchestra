@@ -15,7 +15,9 @@
 use orch_access_contract::decisions::{MissingAccess, MissingOptions, ObjectRef};
 use orch_access_contract::pages::PageKind;
 use orch_access_contract::pages::{Entry, Holder, PageChange, RowChange};
-use orch_access_contract::permissions::{NodePermission, Permission, Profile, ProviderUse};
+use orch_access_contract::permissions::{
+    NodePermission, Options, Permission, Profile, ProviderUse,
+};
 use orch_access_contract::roles::{NodeKind, Role};
 use orch_db::Conn;
 use orch_types::Id;
@@ -70,13 +72,15 @@ fn lets_run(
     groups: &[String],
     effort: Option<&str>,
 ) -> bool {
-    if permission != Permission::ProviderUse {
+    if !permission.has_provider_options() {
         return true;
     }
-    let granted: ProviderUse = options::read(permission, entry)
-        .map(|read| options::of_provider(&read))
-        .unwrap_or_default();
-    model.is_none_or(|model| options::allows_model(&granted, model, groups))
+    let Ok(read) = options::read(permission, entry) else {
+        return false;
+    };
+    let granted = options::of_provider(&read);
+    granted.allows_purpose(orch_access_contract::permissions::ProviderUsePurpose::Work)
+        && model.is_none_or(|model| options::allows_model(&granted, model, groups))
         && effort.is_none_or(|effort| granted.allows_effort(effort))
 }
 
@@ -274,12 +278,13 @@ pub async fn of_thread(
         .await?
         .remove(&(provider, model.to_owned()))
         .unwrap_or_default();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         &[thread_site.clone(), site.clone()],
+        &[],
         &wanted,
     )
     .await?;
@@ -303,6 +308,9 @@ pub async fn of_thread(
         owner: resource.first_owner,
         permission: Permission::ProviderUse,
         options: Some(MissingOptions {
+            purposes: Some(vec![
+                orch_access_contract::permissions::ProviderUsePurpose::Work,
+            ]),
             services: None,
             models: Some(vec![model.to_owned()]),
             efforts: effort.map(|effort| vec![effort.to_owned()]),
@@ -359,7 +367,7 @@ fn can_give(
     {
         return false;
     }
-    if permission != Permission::ProviderUse {
+    if !permission.has_provider_options() {
         return true;
     }
     let Ok(Ok(grant)) = usable::access(frame, resource, site, None, false) else {
@@ -368,11 +376,13 @@ fn can_give(
     // The people have it when one single entry of theirs has the model and the effort together.
     grant.each.iter().any(|allowance| {
         let options = &allowance.provider;
-        model.map_or(options.models.is_none(), |model| {
-            options::allows_model(options, model, groups)
-        }) && effort.map_or(options.efforts.is_none(), |effort| {
-            options.allows_effort(effort)
-        })
+        options.allows_purpose(orch_access_contract::permissions::ProviderUsePurpose::Work)
+            && model.map_or(options.models.is_none(), |model| {
+                options::allows_model(options, model, groups)
+            })
+            && effort.map_or(options.efforts.is_none(), |effort| {
+                options.allows_effort(effort)
+            })
     })
 }
 
@@ -457,7 +467,10 @@ async fn of_place_resolved(
     for (resource, site, permission) in &sites {
         let policy = policies.sharing_at(resource.home);
         if let std::collections::hash_map::Entry::Vacant(e) = frames.entry(policy) {
-            e.insert(Frame::load(conn, principal, policy, graph.clone(), &all, &wanted).await?);
+            e.insert(
+                Frame::for_permissions(conn, principal, policy, graph.clone(), &all, &[], &wanted)
+                    .await?,
+            );
         }
         if let Some(frame) = frames.get(&policy) {
             let (open, through) = open_for(
@@ -483,13 +496,14 @@ async fn of_place_resolved(
                 name: resource.name.clone(),
                 owner: resource.first_owner,
                 permission: *permission,
-                options: (*permission == Permission::ProviderUse && model.is_some()).then(|| {
-                    MissingOptions {
-                        services: None,
-                        models: model.map(|model| vec![model.to_owned()]),
-                        efforts: effort.map(|effort| vec![effort.to_owned()]),
-                        r#where: None,
-                    }
+                options: (*permission == Permission::ProviderUse).then(|| MissingOptions {
+                    purposes: Some(vec![
+                        orch_access_contract::permissions::ProviderUsePurpose::Work,
+                    ]),
+                    services: None,
+                    models: model.map(|model| vec![model.to_owned()]),
+                    efforts: effort.map(|effort| vec![effort.to_owned()]),
+                    r#where: None,
                 }),
                 open,
                 through,
@@ -523,12 +537,13 @@ pub async fn of_provider(
     let profile = pick(&found, profile)?;
     let holder_site = site_of(&graph, &provider).ok_or(Error::NotFound(provider.id))?;
     let site = site_of(&graph, &profile).ok_or(Error::NotFound(profile.id))?;
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policies.sharing_at(profile.home),
         graph,
         &[holder_site.clone(), site.clone()],
+        &[],
         &[
             Permission::ProviderUse,
             Permission::AgentUse,
@@ -611,7 +626,15 @@ pub async fn offer(
             add: Some(vec![orch_access_contract::pages::EntryAdd {
                 holder,
                 options: dependency.options.as_ref().map(|wanted| {
-                    serde_json::json!({ "models": wanted.models, "efforts": wanted.efforts })
+                    Options::ProviderUse(ProviderUse {
+                        purposes: wanted.purposes.clone(),
+                        models: wanted.models.clone(),
+                        services: wanted.services.clone(),
+                        efforts: wanted.efforts.clone(),
+                        r#where: wanted.r#where.clone(),
+                        ..ProviderUse::default()
+                    })
+                    .to_json()
                 }),
                 expires_at: None,
                 note: None,
@@ -630,12 +653,13 @@ pub async fn offer(
     let (graph, resource, site) = resources::site(conn, dependency.object).await?;
     let everything = every_permission([dependency.object.kind]);
     let policy = policies.at(resource.home).node_policy();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         &everything,
     )
     .await?;
