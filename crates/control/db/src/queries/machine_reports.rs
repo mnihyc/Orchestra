@@ -16,7 +16,7 @@ async fn active(conn: &mut Conn, machine: Id) -> Result<bool, DbError> {
     // The batch holds the machine's row until it commits, without a shared barrier: a revocation
     // waits for the batch, or the batch waits for the revocation and then sees it, and is refused.
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR SHARE",
+        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR KEY SHARE",
     )
     .bind(machine)
     .fetch_optional(&mut *conn)
@@ -91,6 +91,37 @@ pub async fn accepts(
     // are mostly one turn's, and each of them asked again in its transaction (C-turns).
     let mut turns_found: Vec<Id> = Vec::new();
     for (kind, body) in reports.iter().copied() {
+        if let Stream::Provider { provider_id } = *stream
+            && matches!(kind, "lease.usage" | "lease.denied")
+        {
+            let Some(lease) = id(body, "lease_id") else {
+                return Ok(false);
+            };
+            // A public call has its own native command in place of a turn lease. Its original
+            // machine may deliver the usage after the response ends or the provider moves.
+            let relay_model = match kind {
+                "lease.usage" => body.get("model").and_then(Json::as_str),
+                _ => None,
+            };
+            if !sqlx::query_scalar::<_, bool>(
+                "SELECT ($3 AND EXISTS(SELECT 1 FROM leases WHERE id=$1 AND provider_id=$2))
+                 OR EXISTS(SELECT 1 FROM provider_relay_calls r JOIN commands c ON c.id=r.id
+                     WHERE r.id=$1 AND r.provider_id=$2 AND r.machine_id=$4 AND r.model_name=$5
+                     AND c.machine_id=r.machine_id AND c.kind='provider.relay' AND c.body=r.command_body)",
+            )
+            .bind(lease)
+            .bind(provider_id)
+            .bind(owns)
+            .bind(machine)
+            .bind(relay_model)
+            .fetch_one(&mut *conn)
+            .await?
+            {
+                return Ok(false);
+            }
+            accepted = true;
+            continue;
+        }
         if !owns {
             if let Stream::Env { environment_id } = *stream
                 && requested_move_report(conn, machine, environment_id, kind, body).await?
@@ -117,21 +148,6 @@ pub async fn accepts(
                     return Ok(false);
                 }
                 turns_found.push(turn);
-            }
-            Stream::Provider { provider_id } if matches!(kind, "lease.usage" | "lease.denied") => {
-                let Some(lease) = id(body, "lease_id") else {
-                    return Ok(false);
-                };
-                if !sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM leases WHERE id = $1 AND provider_id = $2)",
-                )
-                .bind(lease)
-                .bind(provider_id)
-                .fetch_one(&mut *conn)
-                .await?
-                {
-                    return Ok(false);
-                }
             }
             Stream::Env { environment_id } if kind == "browser.state" => {
                 let Some(browser) = id(body, "browser_id") else {
@@ -197,6 +213,25 @@ pub async fn accepts(
 
 fn id(body: &Json, key: &str) -> Option<Id> {
     body.get(key)?.as_str()?.parse().ok()
+}
+
+/// Whether `machine` is the unit that enrolled for the environment's current runtime while the
+/// environment's own row does not name it yet. What such a unit reports is held until the row names
+/// it: it is not another machine's report, and nothing is refused or counted for it.
+pub async fn awaits_attachment(
+    conn: &mut Conn,
+    machine: Id,
+    environment: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runtimes r JOIN environments e ON e.id = r.environment_id
+         WHERE r.environment_id = $1 AND r.machine_id = $2 AND r.successor_of IS NULL
+         AND r.state IN ('creating','running') AND e.machine_id IS DISTINCT FROM $2)",
+    )
+    .bind(environment)
+    .bind(machine)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// Whether the machine is the registered node of this runtime's host.
