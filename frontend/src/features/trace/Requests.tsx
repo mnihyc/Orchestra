@@ -1,4 +1,5 @@
 /** Expandable request lines reveal exact matching rows, recorded holders and individually authorized object acts. */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { ShieldAlert } from 'lucide-react';
 import { AdminModeStamp } from '@/features/access/AdminMode';
 import { useViewChoice } from '@/lib/viewChoices';
@@ -43,15 +44,15 @@ export function RequestRow({ line, select, selected, onSelect, onRestore }: { li
   const acts = (row: TraceEntry) => <ObjectActs object={row.object} trace {...(bulkRestorable(row) ? { onRestore: () => onRestore(row) } : {})} />;
   return <li id={auditEntryAnchor(entry.id)} className="min-w-0 px-3 py-3" data-trace-row={entry.id} data-trace-request={entry.request_id ?? undefined} data-trace-object={entry.object.id ?? undefined} onKeyDown={(event) => { if (event.key === 'Escape') { setOpen(false); event.currentTarget.querySelector<HTMLButtonElement>('[data-expand]')?.focus(); event.stopPropagation(); } }}>
     <div className="flex min-w-0 items-start gap-2">{!multiple && tick(entry)}<IconButton size="sm" data-expand action={open ? 'hide' : 'show'} aria-expanded={open} label={t(open ? 'trace.hideDetails' : 'trace.showDetails', { action: auditActionName(entry.action, t) })} onClick={() => setOpen(!open)} className="shrink-0" /><div className="flex min-w-0 flex-1 flex-col gap-1">
-      <div className="flex min-h-(--control-sm) flex-wrap items-center gap-x-3 gap-y-1 [&>*]:min-h-(--control-sm) [&>*]:items-center"><time dateTime={entry.at} className="inline-flex text-sm leading-(--control-sm) text-text-muted">{formatDateTime(entry.at, format)}</time><TraceActor entry={entry} />{line.rows.some((row) => row.override) && <Badge tone="warning"><ShieldAlert className="size-4" aria-hidden />{t('trace.override')}</Badge>}</div>
+      <div className="flex min-h-(--control-sm) flex-wrap items-center gap-x-3 gap-y-1 [&>*]:min-h-(--control-sm) [&>*]:items-center"><time dateTime={entry.at} className="inline-flex text-sm leading-(--control-sm) text-text-muted">{formatDateTime(entry.at, format)}</time><TraceActor entry={entry} /><DeviceChoiceWriterException writer={setOpen} />{line.rows.some((row) => row.override) && <Badge tone="warning"><ShieldAlert className="size-4" aria-hidden />{t('trace.override')}</Badge>}</div>
       <p className="wrap-anywhere">{auditSentence(entry, t)}</p>
       {!multiple && acts(entry)}
     </div></div>
-    {open && <ul className="mt-3 min-w-0 divide-y divide-border rounded-lg bg-bg-subtle px-3">{line.rows.map((row) => <li key={row.id} data-trace-detail={row.id} className="flex min-w-0 flex-col gap-2 py-3 text-sm">
+    {open && <><DeviceExpansionFacts writer={setOpen} open={open} /><ul className="mt-3 min-w-0 divide-y divide-border rounded-lg bg-bg-subtle px-3">{line.rows.map((row) => <li key={row.id} data-trace-detail={row.id} className="flex min-w-0 flex-col gap-2 py-3 text-sm">
       {multiple && <div className="flex items-start gap-2">{tick(row)}<div className="flex min-w-0 flex-col gap-1"><time dateTime={row.at} className="text-xs text-text-muted">{formatDateTime(row.at, format)}</time><TraceActor entry={row} /><p className="wrap-anywhere">{auditSentence(row, t)}</p></div></div>}
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1"><dt className="text-text-muted">{auditObjectName(row.object.kind, t)}</dt><dd className="wrap-anywhere">{row.object.name ?? t('trace.unknown')}</dd>{recordedHolder(row.details) && <><dt>{t('trace.holderThen')}</dt><dd className="wrap-anywhere">{recordedHolder(row.details)}</dd></>}{row.ip && <><dt>{t('trace.ip')}</dt><dd className="font-mono wrap-anywhere">{row.ip}</dd></>}</dl>
       {typeof row.details === 'object' && row.details !== null && 'profile' in row.details && typeof row.details.profile === 'string' && PROFILES.includes(row.details.profile) && <p>{t(row.details.profile === 'managed' ? 'trace.profiles.managed' : 'trace.profiles.connected')}</p>}
       <div className="min-w-0 overflow-auto"><RecordedDetails entry={row} /></div>{multiple && acts(row)}
-    </li>)}</ul>}
+    </li>)}</ul></>}
   </li>;
 }

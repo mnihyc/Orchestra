@@ -107,13 +107,13 @@ for (const theme of ['light', 'dark'] as const) test(`agent replies use compact 
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const message = page.locator('[data-item="compact-answer"]').getByText('The release investigation is complete.', { exact: true });
   await expect(message).toBeVisible();
-  const footer = page.locator('[data-footer="compact-turn"]');
-  // Selection now shares the compact footer menu with the identical context-menu action.
-  await footer.hover();
-  const more = footer.getByRole('button', { name: 'More turn actions', exact: true });
+  const answer = page.locator('[data-item="compact-answer"]');
+  // Selection shares the menu of the answer's toolbar with the identical context-menu action.
+  await answer.hover();
+  const more = answer.getByRole('button', { name: 'More acts on this item', exact: true });
   await expect(more).toBeVisible();
   await expect(more).toHaveText('');
-  await expect(footer.getByRole('button', { name: 'Copy turn as Markdown', exact: true })).toHaveText('');
+  await expect(answer.getByRole('button', { name: 'Copy', exact: true })).toHaveText('');
   await more.click();
   await expect(page.getByRole('menuitem', { name: 'Select this turn', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
