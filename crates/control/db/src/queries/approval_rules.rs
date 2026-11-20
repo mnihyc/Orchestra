@@ -88,19 +88,17 @@ pub async fn insert(
     Ok(())
 }
 
-/// The active rule of a thread, bound to this very binding, whose matcher is this one, if there is one.
-pub async fn active_matching(
+/// Active rules bound to this exact runtime. Their private source requests decide matching.
+pub async fn active_bound(
     conn: &mut Conn,
     thread: Id,
     binding: &Binding,
-    matcher: &Json,
-) -> Result<Option<Id>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM thread_approval_rules
+) -> Result<Vec<(Id, Id)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT id, approval_id FROM thread_approval_rules
           WHERE thread_id = $1 AND revoked_at IS NULL AND inactive_reason IS NULL
             AND harness_kind = $2 AND provider_id = $3 AND agent_id = $4 AND environment_id = $5 AND directory = $6
-            AND matcher = $7
-          ORDER BY created_at LIMIT 1",
+          ORDER BY created_at,id",
     )
     .bind(thread)
     .bind(&binding.harness_kind)
@@ -108,8 +106,7 @@ pub async fn active_matching(
     .bind(binding.agent_id)
     .bind(binding.environment_id)
     .bind(&binding.directory)
-    .bind(matcher)
-    .fetch_optional(conn)
+    .fetch_all(conn)
     .await?)
 }
 

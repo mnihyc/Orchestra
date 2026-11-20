@@ -53,8 +53,8 @@ impl HandoverFixture {
             "target":{"kind":"provider","id":login.provider,"reach":"self"},
             "allow":[{"operation":RETURN,"actions":["manage"]}]
         }]}))?;
-        let token = new_token(API_TOKEN_PREFIX);
         let token_id = new_id();
+        let token = crate::middleware::authentication::new_api_token(token_id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
@@ -224,7 +224,14 @@ impl HandoverFixture {
         })
     }
 
-    fn received_once(&self, command: &Outgoing, deadline: Time) -> Proof {
+    async fn received_once(&self, command: &Outgoing, deadline: Time) -> Proof {
+        let row = self
+            .login
+            .transport
+            .dispatcher
+            .status(command.id)
+            .await?
+            .ok_or("the actual handover command row is absent")?;
         let native = self
             .login
             .transport
@@ -249,7 +256,7 @@ impl HandoverFixture {
         assert_eq!(
             serde_json::to_value(&wire[0])?,
             json!({"id":command.id,"k":command.kind.as_str(),"key":command.key.wire(),
-                "deadline":deadline,"b":command.body}),
+                "work":Cmd::work_budget(Time::new(row.created_at),deadline),"b":command.body}),
             "private caller/source evidence never enters the native frame"
         );
         Ok(())
@@ -357,7 +364,7 @@ impl HandoverFixture {
         } else {
             assert!(matches!(outcome, CommandOutcome::Succeeded(ref body)
                 if body == &Self::expected(command)?));
-            self.received_once(command, deadline)?;
+            self.received_once(command, deadline).await?;
         }
         Ok(())
     }
@@ -395,7 +402,7 @@ impl HandoverFixture {
                 .result,
             row.result
         );
-        self.received_once(command, deadline)
+        self.received_once(command, deadline).await
     }
 }
 
