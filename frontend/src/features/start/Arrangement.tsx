@@ -7,6 +7,7 @@
  * shown off with the server's own reason and is never put in place of the one that was asked for. What the thread
  * then runs on is told in its head.
  */
+import { ModelTranslation } from '@/features/models/ModelTranslation';
 import { TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
@@ -81,7 +82,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
       <p className="text-sm text-text-muted">{t('start.arrangement.pickAgent')}</p>
     );
   }
-  if (resolved.arrangements.length === 0) {
+  if (resolved.arrangements.length === 0 && resolved.arrangement === null) {
     return <p className="text-sm text-text-muted">{t('start.arrangement.unknown', { agent: agent.entry.agent.name })}</p>;
   }
   const first = resolved.arrangements[0];
@@ -98,6 +99,9 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
       ...(row.open ? {} : { disabled: arrangementWhy(row.entry, t) }),
     };
   });
+  if (resolved.arrangement !== null && !options.some((option) => option.value === resolved.arrangement)) {
+    options.push({ value: resolved.arrangement, ...choiceOption(t, `arrangement.${resolved.arrangement}`), disabled: t('start.arrangement.notAvailable') });
+  }
   return (
     <div className={cx('flex flex-col gap-2', refreshing && 'opacity-60')} aria-busy={refreshing || undefined}>
       {resolved.arrangement === null && first !== undefined && (
@@ -113,6 +117,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
         onValueChange={onChange}
         options={options}
       /></ChoiceField>
+      <ModelTranslation value={resolved.arrangements.find((row) => row.type === resolved.arrangement)?.entry.isolation.translation ?? first?.entry.isolation.translation} />
     </div>
   );
 }

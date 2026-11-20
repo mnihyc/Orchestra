@@ -19,7 +19,7 @@ use orch_api_contract::access::PermissionPageUpdate;
 use orch_api_contract::common::{ErrorCode, PageQuery, Problem};
 use orch_api_contract::resources::{ProviderThreadList, ProviderThreadListReply};
 use orch_api_contract::settings::{ProviderSettingList, ResolvedSetting};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -169,7 +169,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>, scopes: &[&str
         serde_json::to_value(scope).unwrap()
     });
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
