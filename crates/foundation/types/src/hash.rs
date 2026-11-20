@@ -105,7 +105,7 @@ impl JsonSchema for Hash {
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string", "pattern": "^[0-9a-f]{64}$" })
+        schemars::json_schema!({ "type": "string", "pattern": "^[0-9a-f]{64}$", "x-native-content-address": true })
     }
 }
 

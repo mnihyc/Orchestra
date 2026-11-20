@@ -642,7 +642,14 @@ pub struct Publisher {
 struct PublisherState {
     last: Option<DateTime<Utc>>,
     turn_completed: bool,
+    /// How long the last publication took to make and upload.
+    last_cost: Duration,
 }
+
+/// After a publication that took some time, a turn that completes waits this many times as long
+/// before the next one is made: listing a large tree again is a tenth of the time at most, and not
+/// once for each turn of each thread.
+const TURN_COST_FACTOR: u32 = 10;
 
 impl Publisher {
     /// A publisher that publishes at most once in `interval` while changes go on, and at once for
@@ -676,18 +683,29 @@ impl Publisher {
         if !tree_changed {
             return None;
         }
-        if state.turn_completed {
+        let waited = self.clock.now().signed_duration_since(last).to_std().ok();
+        if state.turn_completed
+            && (state.last_cost.is_zero()
+                || waited.is_some_and(|waited| waited >= state.last_cost * TURN_COST_FACTOR))
+        {
             return Some(Reason::TurnCompleted);
         }
-        let waited = self.clock.now().signed_duration_since(last);
-        (waited.to_std().is_ok_and(|waited| waited >= self.interval)).then_some(Reason::Interval)
+        waited
+            .is_some_and(|waited| waited >= self.interval)
+            .then_some(Reason::Interval)
     }
 
     /// Says that a manifest was published just now.
     pub fn published(&self) {
+        self.published_taking(Duration::ZERO);
+    }
+
+    /// Says that a manifest was published just now, and how long it took to make and upload.
+    pub fn published_taking(&self, cost: Duration) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.last = Some(self.clock.now());
         state.turn_completed = false;
+        state.last_cost = cost;
     }
 }
 
@@ -1024,6 +1042,26 @@ mod tests {
         assert_eq!(publisher.due(false), None, "but only if the tree changed");
         publisher.published();
         assert_eq!(publisher.due(true), None);
+    }
+
+    #[test]
+    fn a_turn_that_completes_waits_ten_times_as_long_as_a_dear_publication_took() {
+        let clock = ManualClock::new(chrono::DateTime::from_timestamp(1_000_000, 0).unwrap());
+        let publisher = Publisher::new(Arc::new(clock.clone()), Duration::from_secs(300));
+        publisher.published_taking(Duration::from_secs(20));
+        publisher.turn_completed();
+        clock.advance(chrono::Duration::seconds(199));
+        assert_eq!(
+            publisher.due(true),
+            None,
+            "a tree that takes twenty seconds to list is not listed again at every turn"
+        );
+        clock.advance(chrono::Duration::seconds(1));
+        assert_eq!(
+            publisher.due(true),
+            Some(Reason::TurnCompleted),
+            "the turn that completed in the meantime is listed once the time has come"
+        );
     }
 
     #[test]

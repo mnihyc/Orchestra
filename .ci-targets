@@ -1,0 +1,4 @@
+test -p orch-engine --test background_wake
+test -p orch-engine --test exports -- the_job_writes_the_archive_into_the_store_pins_it_and_removing_it_lets_the_bytes_go --exact --nocapture
+test -p orch-engine --test notifications -- an_approval_that_the_harness_withdrew_is_read_for_everybody_too --exact --nocapture
+test -p orch-api-core --test standalone_creation -- standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_start_more_work --exact --nocapture

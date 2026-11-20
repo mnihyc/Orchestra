@@ -17,6 +17,7 @@ import type { Template } from '@/generated/api-types';
 import { Input } from '@/ui/Input';
 import { Switch } from '@/ui/Switch';
 import { toast } from '@/ui/Toast';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 export interface EditTemplateProps {
   template: Template;
@@ -37,6 +38,7 @@ export function EditTemplate({ template, only, onClose }: EditTemplateProps) {
   const nameChanged = name.trim() !== template.name;
   const descriptionChanged = only === undefined && description.trim() !== template.description;
   const onChanged = only === undefined && on !== template.enabled;
+  const application=useApplicationImpact({object:{kind:'template',id:template.id},model_id:null},onChanged);
   const save = useMutation({
     mutationFn: () =>
       updateTemplate(template.id, {
@@ -58,7 +60,7 @@ export function EditTemplate({ template, only, onClose }: EditTemplateProps) {
       admin={adminSpec(template, 'template.manage')}
       title={only === 'name' ? t('resources.edit.renameTitle', { name: template.name }) : t('resources.edit.title', { name: template.name })}
       changed={nameChanged || descriptionChanged || onChanged}
-      valid={name.trim() !== ''}
+      valid={name.trim() !== ''&&application.ready}
       pending={save.isPending}
       error={save.error}
       onSave={() => save.mutate()}
@@ -79,6 +81,7 @@ export function EditTemplate({ template, only, onClose }: EditTemplateProps) {
         <>
           <Input label={t('resources.edit.description')} optional value={description} disabled={save.isPending} onChange={(event) => setDescription(event.target.value)} autoComplete="off" />
           <Switch name={t('templates.modeChoices.enabled.name')} description={t('templates.modeChoices.enabled.description')} checked={on} disabled={save.isPending} onCheckedChange={setOn} />
+          {onChanged&&<ApplicationPreview read={application.read} kind={on?'enable':'disable'}/>}
         </>
       )}
     </EditDialog>

@@ -176,9 +176,22 @@ impl Use {
     /// The allowances that allow all of what is wanted together.
     #[must_use]
     pub fn allowing(&self, wanted: &options::Wanted<'_>) -> Vec<&Allowance> {
+        self.allowing_for(
+            wanted,
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        )
+    }
+
+    /// The complete allowances that permit this use and its requested limits together.
+    #[must_use]
+    pub fn allowing_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> Vec<&Allowance> {
         self.each
             .iter()
-            .filter(|allowance| options::entry_allows(&allowance.provider, wanted))
+            .filter(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
             .collect()
     }
 
@@ -188,6 +201,18 @@ impl Use {
         self.each
             .iter()
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
+    }
+
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
     }
 
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
@@ -232,6 +257,23 @@ pub fn access(
     let Some(permission) = use_permission(resource.kind) else {
         return Ok(Err(Access::None));
     };
+    access_for(frame, resource, site, work, kept_to_its_owner, permission)
+}
+
+/// The same resource-entry evaluator for an independently granted provider model act.
+pub fn access_for(
+    frame: &Frame<'_>,
+    resource: &Resource,
+    site: &Site,
+    work: Option<&[Id]>,
+    kept_to_its_owner: bool,
+    permission: Permission,
+) -> Result<Result<Use, Access>, Error> {
+    if use_permission(resource.kind) != Some(permission)
+        && !(resource.kind == ResourceKind::Provider && permission == Permission::ProviderRelay)
+    {
+        return Ok(Err(Access::None));
+    }
     let principal = frame.principal();
     let caller = principal.caller();
     let mut site = site.clone();
@@ -303,7 +345,7 @@ pub fn access(
         .iter()
         .any(|way| matches!(way, Through::Owner | Through::SystemAdmin));
     let mut each = Vec::new();
-    if permission == Permission::ProviderUse && !unlimited {
+    if permission.has_provider_options() && !unlimited {
         for found in &in_use {
             each.push(Allowance {
                 entry: Some(found.entry.id),
@@ -336,7 +378,7 @@ pub fn access(
 /// The allowances of a use that no entry narrows: one, of no entry, for a provider; none for a
 /// resource whose options are not decided one entry at a time.
 fn unlimited_each(permission: Permission) -> Vec<Allowance> {
-    if permission == Permission::ProviderUse {
+    if permission.has_provider_options() {
         vec![Allowance {
             entry: None,
             provider: ProviderUse::unlimited(),
@@ -875,6 +917,9 @@ async fn judge_provider(
         at,
     } = *judging;
     let wanted_options = MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        ]),
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
@@ -1107,6 +1152,11 @@ pub async fn judge_alone(
         site: site.clone(),
         permissions: vec![Permission::ProviderUse],
         options: Some(MissingOptions {
+            purposes: granted
+                .each
+                .iter()
+                .any(|allowance| allowance.provider.purposes.is_some())
+                .then(|| vec![orch_access_contract::permissions::ProviderUsePurpose::Work]),
             r#where: at.and_then(Whereabouts::name).map(|name| vec![name]),
             ..MissingOptions::default()
         }),

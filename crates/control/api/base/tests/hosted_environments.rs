@@ -1187,7 +1187,7 @@ async fn creation_commits_its_owned_environment_and_job_before_a_slow_response_r
     let making = make(&world, &t, &t.c.admin, "Committed before response");
     let inspect = async {
         rig::eventually("the response's blocked component update read", || async {
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id FROM component_updates%')")
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE 'SELECT machine_id,recommended_version,state,detail,command_id%FROM component_updates%')")
                 .fetch_one(&world.db.pool).await.unwrap()
         }).await;
         let committed: (Id, Id) = sqlx::query_as(
@@ -1233,6 +1233,8 @@ async fn confirmed_immediate_delete_returns_its_durable_job_and_no_predicted_exp
             .query(&EnvironmentDeleteQuery {
                 confirm: "Delete now".into(),
                 at: None,
+                expected_keep_days: None,
+                expected_revision: None,
             });
         async move { request.send().await }
     };
@@ -1612,6 +1614,24 @@ async fn the_places_of_a_topic_are_the_hosts_the_caller_may_use_with_why_one_can
     assert_eq!(hosts[0].owner.as_ref().unwrap().username, "admin");
     assert_eq!(hosts[0].host.address, "acme.admin.Build box");
     assert_eq!(hosts[0].capacity.memory_mb, 16_384);
+    let captured = hosts[0]
+        .calculation
+        .as_ref()
+        .expect("the scheduler supplies its calculation");
+    assert_eq!(captured.capacities.memory_mb, 16_384);
+    assert!(
+        captured.capacities_as_of.is_none(),
+        "fixture declarations carry no report date"
+    );
+    let mut old = serde_json::to_value(hosts[0]).unwrap();
+    old.as_object_mut().unwrap().remove("calculation");
+    assert!(
+        serde_json::from_value::<orch_api_contract::environment::PlaceHost>(old)
+            .unwrap()
+            .calculation
+            .is_none()
+    );
+
     assert!(!hosts[1].usable && !hosts[1].automatic);
     assert_eq!(hosts[1].reasons, [HostReason::Unschedulable]);
     let environments: Vec<_> = listed
@@ -1909,6 +1929,8 @@ async fn keeping_awake_counts_as_activity_and_keeping_withdraws_a_removal_that_h
         .query(&EnvironmentDeleteQuery {
             confirm: "Main".to_owned(),
             at: Some(Time::new(world.now() + chrono::Duration::days(1))),
+            expected_keep_days: None,
+            expected_revision: None,
         })
         .send()
         .await
@@ -1931,6 +1953,200 @@ async fn keeping_awake_counts_as_activity_and_keeping_withdraws_a_removal_that_h
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
+}
+
+#[tokio::test]
+async fn running_native_work_defers_the_reported_idle_deadline_until_the_work_ends() {
+    use orch_db::queries::threads::{self, NewSegment};
+    use orch_link_contract::background::{BackgroundTask, BackgroundTaskKind, BackgroundTaskState};
+
+    let world = World::new().await;
+    let t = team(&world).await;
+    let made = make(&world, &t, &t.c.admin, "Native work").await;
+    let binding = start_binding(&world, &t).await;
+    sqlx::query("UPDATE jobs SET state='cancelled',finished_at=now() WHERE environment_id=$1")
+        .bind(made.base.id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,environment_id,driver,template_id,spec_hash,generation,state,volumes) VALUES($1,'environment',$2,'idle-work-unit',$3,'docker',$4,$5,1,'running','{}')")
+        .bind(orch_types::new_id()).bind(t.host).bind(made.base.id).bind(t.template).bind([0_u8;32].as_slice())
+        .execute(&world.db.pool).await.unwrap();
+    sqlx::query("UPDATE environments SET status='running',generation=1,config=$2,last_activity_at=$3 WHERE id=$1")
+        .bind(made.base.id).bind(json!({"env.idle_stop_minutes":60})).bind(world.now()-chrono::Duration::hours(2))
+        .execute(&world.db.pool).await.unwrap();
+    let idle: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        idle.idle_stop_at.is_some(),
+        "the fixture has an enabled unit idle policy"
+    );
+
+    let thread = orch_types::new_id();
+    let segment = orch_types::new_id();
+    let item = orch_types::new_id();
+    let mut conn = world.conn().await;
+    assert!(
+        threads::insert_thread(
+            &mut conn,
+            thread,
+            t.topic,
+            "Background work",
+            t.c.admin.id(),
+            world.now()
+        )
+        .await
+        .unwrap()
+    );
+    threads::insert_segment(
+        &mut conn,
+        &NewSegment {
+            id: segment,
+            thread_id: thread,
+            agent_id: binding.agent_id,
+            provider_id: binding.provider_id,
+            environment_id: made.base.id,
+            env_generation: 1,
+            arrangement: "separated",
+            executor: Some("orch-exec"),
+            tool_set: None,
+            credential_path: "forwarded",
+            native_session_ref: Some("idle-work-session"),
+            started_by: Some(t.c.admin.id()),
+            started_at: world.now(),
+        },
+        1,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE threads SET environment_id=$2,current_segment_id=$3,agent_id=$4,provider_id=$5,state='idle' WHERE node_id=$1")
+        .bind(thread).bind(made.base.id).bind(segment).bind(binding.agent_id).bind(binding.provider_id).execute(&mut *conn).await.unwrap();
+    let task = BackgroundTask {
+        id: "native-work".into(),
+        run_id: None,
+        native_item_ref: "background-item".into(),
+        origin_turn: orch_types::new_id(),
+        kind: BackgroundTaskKind::Command,
+        label: "Indexing".into(),
+        name: None,
+        nickname: None,
+        role: None,
+        state: BackgroundTaskState::Running,
+        exit_code: None,
+        can_end: false,
+    };
+    sqlx::query("INSERT INTO items(id,thread_id,segment_id,stream,kind,status,payload,seq_created,seq_updated) VALUES($1,$2,$3,'main','tool_call','completed',$4,1,1)")
+        .bind(item).bind(thread).bind(segment).bind(json!({"name":"run","arguments":{},"background_tasks":{"work":{"task":task}}}))
+        .execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let held: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        held.idle_stop_at.is_none(),
+        "running native work holds the idle stop"
+    );
+    assert_eq!(
+        serde_json::to_value(&held).unwrap()["idle_stop_deferred"],
+        true
+    );
+
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(made.base.id)
+        .bind(json!({"env.idle_stop_minutes":0}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let off: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&off).unwrap()["idle_stop_deferred"],
+        false,
+        "an off policy is not a deferred stop"
+    );
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(made.base.id)
+        .bind(json!({"env.idle_stop_minutes":60}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{background_tasks,work,task,state}', '\"completed\"') WHERE id=$1").bind(item).execute(&world.db.pool).await.unwrap();
+    let ready: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(ready.idle_stop_at.is_some());
+    assert_eq!(
+        serde_json::to_value(&ready).unwrap()["idle_stop_deferred"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn a_removal_uses_the_previewed_recovery_window_and_refuses_a_changed_policy_before_effects()
+{
+    let mut config = orch_config::ServerConfig::default();
+    config.retention.soft_delete_days = 1;
+    let world = World::with(config).await;
+    let t = team(&world).await;
+    sqlx::query("DELETE FROM settings WHERE key='env.removed_keep_days'")
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let made = make(&world, &t, &t.c.admin, "Recovery window").await;
+    sqlx::query("UPDATE jobs SET state='cancelled',finished_at=$2 WHERE environment_id=$1")
+        .bind(made.base.id)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&made).unwrap()["removal_keep_days"],
+        1,
+        "the displayed default is bounded by deployment retention"
+    );
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES($1,'env.removed_keep_days','0') ON CONFLICT(node_id,key) DO UPDATE SET value='0'")
+        .bind(t.c.acme).execute(&world.db.pool).await.unwrap();
+    let refused = world.app.call(EnvironmentDelete, &[&made.base.id]).token(&t.c.admin.token)
+        .query(&json!({"confirm":"Recovery window","expected_keep_days":1,"expected_revision":made.revision}))
+        .send().await.problem();
+    assert_eq!(refused.code, ErrorCode::ConflictStaleRevision);
+    let current: Environment = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&t.c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        current.remove_at.is_none(),
+        "no removal was accepted under a different promise"
+    );
+    assert_eq!(
+        serde_json::to_value(&current).unwrap()["removal_keep_days"],
+        0
+    );
+    let accepted: Environment = world.app.call(EnvironmentDelete, &[&made.base.id]).token(&t.c.admin.token)
+        .query(&json!({"confirm":"Recovery window","expected_keep_days":0,"expected_revision":current.revision}))
+        .send().await.ok();
+    assert_eq!(accepted.removal.unwrap().keep_days, 0);
 }
 
 #[tokio::test]
@@ -2043,11 +2259,37 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "another".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
         .problem();
     assert_eq!(wrong.code, ErrorCode::RequestInvalid);
+    // By force is for a provider's unit: for an environment's it is refused with its reason, and changes nothing.
+    let forced = world
+        .app
+        .call(HostRuntimeDelete, &[&t.host, &runtime])
+        .token(&t.c.admin.token)
+        .query(&HostRuntimeDeleteQuery {
+            confirm: "orch-environment-0123456789ab".to_owned(),
+            volumes: None,
+            force: Some(true),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(forced.code, ErrorCode::PlanBlocked);
+    assert_eq!(
+        forced
+            .extra
+            .get("reason")
+            .and_then(|reason| reason.as_str()),
+        Some("force_environment")
+    );
+    assert_eq!(
+        forced.extra.get("can_force"),
+        Some(&serde_json::Value::Bool(false))
+    );
     world
         .app
         .call(HostRuntimeDelete, &[&t.host, &runtime])
@@ -2055,6 +2297,7 @@ async fn a_hosts_manager_sees_everything_that_runs_on_it_and_takes_a_unit_away_a
         .query(&HostRuntimeDeleteQuery {
             confirm: "orch-environment-0123456789ab".to_owned(),
             volumes: None,
+            force: None,
         })
         .send()
         .await
@@ -2145,4 +2388,59 @@ async fn explicit_new_keeps_its_placement_refusal_while_implicit_creation_needs_
         ErrorCode::EnvironmentNoneUsable,
         "{implicit:?}"
     );
+}
+
+#[tokio::test]
+async fn choosing_another_template_checks_the_agent_and_host_that_will_actually_start() {
+    use orch_api_contract::binding::NodeBindingOptionsGet;
+    let world = World::new().await;
+    let t = team(&world).await;
+    let binding = start_binding(&world, &t).await;
+    let alternate = a_template(&world, &t.c.admin, t.c.acme, "Agent ready").await;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{exec,offers}','[]') WHERE id=$1")
+        .bind(t.template)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    world
+        .set_at(
+            orch_settings::Target::Node(t.topic),
+            "env.host_id",
+            json!(orch_types::new_id()),
+        )
+        .await;
+    for (template, host, automatic, ready) in [
+        (t.template, Some(t.host), false, false),
+        (alternate, Some(t.host), false, true),
+        (alternate, Some(orch_types::new_id()), false, false),
+        (alternate, None, false, false),
+        (alternate, None, true, true),
+    ] {
+        let mut query =
+            json!({ "environment_new": true, "template_id": template, "host_auto": automatic });
+        if let Some(host) = host {
+            query["host_id"] = json!(host);
+        }
+        let offered = world
+            .app
+            .call(NodeBindingOptionsGet, &[&t.topic])
+            .token(&t.c.admin.token)
+            .query(&query)
+            .send()
+            .await
+            .ok();
+        let agent = offered
+            .providers
+            .iter()
+            .find(|row| row.provider.id == binding.provider_id)
+            .unwrap()
+            .agents
+            .iter()
+            .find(|row| row.agent.id == binding.agent_id)
+            .unwrap();
+        assert_eq!(
+            agent.usable, ready,
+            "the exact chosen template and host decide readiness"
+        );
+    }
 }
