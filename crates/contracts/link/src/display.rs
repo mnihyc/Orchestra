@@ -6,6 +6,16 @@ use orch_types::Id;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// The machine serves the selected local source for this display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayTarget {
+    /// An endpoint checked by the local RFB handshake.
+    Endpoint(String),
+    /// The connector's currently accessible desktop session.
+    Desktop,
+}
+
 /// Verifies and registers an agent's local VNC server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -15,7 +25,7 @@ pub struct DisplayAdopt {
     /// Its reserved identifier.
     pub display_id: Id,
     /// A loopback port or a local socket path.
-    pub endpoint: String,
+    pub target: DisplayTarget,
     /// A stored reference, replaced by a machine-sealed value on the wire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<Secret>,
@@ -24,6 +34,8 @@ pub struct DisplayAdopt {
 /// Safe facts learned from a VNC handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DisplayAdoptResult {
+    /// The local endpoint or desktop selected by this machine.
+    pub endpoint: String,
     /// Its tunnel service.
     pub service: String,
     /// Its server's name, where known.

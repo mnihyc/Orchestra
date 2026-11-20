@@ -172,6 +172,7 @@ impl ClaudeCodeAdapter {
             let _ = started
                 .sink
                 .emit(AdapterEvent::Status(HarnessStatus {
+                    home: None,
                     status: state,
                     detail,
                     harness_version: Some(started.version.clone()),
@@ -482,6 +483,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                         session.spec = spec;
                     }
                     return Ok(SessionOpened {
+                        mcp: None,
                         native_session_ref: id,
                         resumed: true,
                         import_report: None,
@@ -801,6 +803,27 @@ impl AgentAdapter for ClaudeCodeAdapter {
             .await?
     }
 
+    fn interrupt_handle(&self) -> Option<orch_agent_contract::adapter::Interrupt> {
+        self.started.as_ref()?;
+        let handles: HashMap<_, _> = self
+            .sessions
+            .iter()
+            .map(|(thread, session)| (*thread, session.handle.clone()))
+            .collect();
+        Some(Arc::new(move |thread, turn| {
+            let handle = handles.get(&thread).cloned();
+            Box::pin(async move {
+                handle
+                    .ok_or_else(|| AdapterError::SessionNotFound(thread.to_string()))?
+                    .ask(|reply| Command::Interrupt {
+                        turn_id: turn,
+                        reply,
+                    })
+                    .await?
+            })
+        }))
+    }
+
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
         let handle = self.session(thread)?.handle.clone();
         handle
@@ -927,10 +950,66 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 raw_events: false,
             },
             Arc::clone(&self.clock),
-            started.sink.clone(),
-            thread,
-            spec.settings.segment_id,
+            started.sink.for_opening(spec.opening_id),
+            orch_agent_contract::history::NativePrefixSource {
+                thread_id: thread,
+                segment_id: spec.settings.segment_id,
+                native_session_ref: native,
+            },
             Some(home.join("outputs")),
+            spec.settings.output_capture_bytes,
+        )
+        .await
+        .map_err(|error| AdapterError::Internal(error.to_string()))
+    }
+
+    async fn recover_turn(
+        &mut self,
+        source: orch_agent_contract::history::RecoverySource,
+        turn_id: orch_types::Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        cwd: String,
+        output_capture_bytes: u64,
+    ) -> Result<bool, AdapterError> {
+        let opening_id = source.opening_id;
+        let source = source.session;
+        let started = self.started()?.clone();
+        let home = Self::files_home(&started.setup).ok_or_else(|| {
+            AdapterError::HarnessUnavailable("the native home is unavailable for recovery".into())
+        })?;
+        let lookup_home = home.clone();
+        let lookup_native = source.native_session_ref.clone();
+        let transcript = tokio::task::spawn_blocking(move || {
+            history::find_transcript_checked(&lookup_home, &lookup_native)
+        })
+        .await
+        .map_err(|error| AdapterError::HarnessUnavailable(error.to_string()))?
+        .map_err(|error| {
+            AdapterError::HarnessUnavailable(format!(
+                "the exact native history could not be inspected: {error}"
+            ))
+        })?
+        .ok_or_else(|| AdapterError::SessionNotFound(source.native_session_ref.clone()))?;
+        let Some(native) = native_turn_ref else {
+            return Ok(false);
+        };
+        history::recover_turn(
+            &transcript,
+            MapperSettings {
+                directory,
+                cwd,
+                raw_events: false,
+            },
+            Arc::clone(&self.clock),
+            started.sink.for_opening(opening_id),
+            history::Recovery {
+                source,
+                admitted: turn_id,
+                output_capture_bytes,
+                native,
+                image_outputs: Some(home.join("outputs")),
+            },
         )
         .await
         .map_err(|error| AdapterError::Internal(error.to_string()))

@@ -20,7 +20,7 @@ use orch_db::{
     queries::{jobs, threads},
 };
 use orch_link_contract::commands::{AgentStop, NodeRuntimeStop, ProviderStop, SerialKey};
-use orch_types::{Id, new_id};
+use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -291,7 +291,7 @@ impl Engine {
             unit.wake(thread.node_id);
             turns.push((row.thread, turn.id));
         }
-        let requests = activity::requests(unit.conn, &target).await?;
+        let requests = activity::requests_at(unit.conn, &target, Some(Time::new(now))).await?;
         let label = if target.model_id.is_some() {
             "Model"
         } else {
@@ -309,6 +309,7 @@ impl Engine {
                 "{label} {}",
                 if deleted { "removed" } else { "switched off" }
             ),
+            now,
         )
         .await?;
         let harnesses = if target.model_id.is_none()
@@ -360,7 +361,11 @@ impl Engine {
             || !harnesses.is_empty()
             || !keepers.is_empty()
             || !units.is_empty();
-        let plan = json!({"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
+        let notification_threads = work
+            .iter()
+            .map(|row| row.thread)
+            .collect::<std::collections::BTreeSet<_>>();
+        let plan = json!({"notification_operation":crate::notifications::current_operation(),"notification_threads":notification_threads,"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
         let row = jobs::insert(
             unit.conn,
             &jobs::NewJob {
@@ -498,6 +503,7 @@ impl Phased for Quiescing {
                             *agent,
                             *machine,
                             &orch_db::queries::resources::thread_engine::HarnessReport {
+                                home: None,
                                 status: crate::harnesses::OFFLINE,
                                 detail: None,
                                 version: None,
@@ -565,22 +571,43 @@ impl Phased for Quiescing {
                     return Ok(Done::Finished);
                 }
                 for (runtime, machine) in &self.recipe.units {
-                    job.command_to_undo(
-                        Outgoing::new(
-                            ids::derived(
-                                "resource.pause.unit",
-                                &[job.id().as_bytes(), runtime.as_bytes()],
-                            ),
-                            *machine,
-                            SerialKey::Runtime(*runtime),
-                            &NodeRuntimeStop {
-                                runtime_id: *runtime,
-                                reason: None,
-                            },
+                    let stopped = job
+                        .command_to_undo(
+                            Outgoing::new(
+                                ids::derived(
+                                    "resource.pause.unit",
+                                    &[job.id().as_bytes(), runtime.as_bytes()],
+                                ),
+                                *machine,
+                                SerialKey::Runtime(*runtime),
+                                &NodeRuntimeStop {
+                                    runtime_id: *runtime,
+                                    reason: None,
+                                },
+                            )
+                            .map_err(EngineError::from)?,
                         )
-                        .map_err(EngineError::from)?,
-                    )
-                    .await?;
+                        .await;
+                    match stopped {
+                        Ok(_) => {}
+                        // A host that has no such unit has nothing left to stop; its word that it has none is written
+                        // down, so that the next start makes a unit.
+                        Err(Stop::Failed(failure)) if failure.code == "not_found" => {
+                            sqlx::query("UPDATE runtimes SET loss_missing=true WHERE id=$1")
+                                .bind(runtime)
+                                .execute(
+                                    &mut *self
+                                        .engine
+                                        .db()
+                                        .acquire()
+                                        .await
+                                        .map_err(EngineError::from)?,
+                                )
+                                .await
+                                .map_err(DbError::from)?;
+                        }
+                        Err(other) => return Err(other),
+                    }
                     sqlx::query("UPDATE runtimes SET state='stopped',updated_at=$2 WHERE id=$1 AND state IN ('running','starting')").bind(runtime).bind(job.now()).execute(&mut *self.engine.db().acquire().await.map_err(EngineError::from)?).await.map_err(DbError::from)?;
                 }
             }

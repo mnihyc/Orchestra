@@ -165,6 +165,9 @@ audit_actions! {
         AuthLogin = "auth.login", trail, "Somebody signed in.";
         AuthLoginFailed = "auth.login_failed", trail, "A sign-in was tried and failed.";
         AuthLocked = "auth.locked", trail, "Wrong tries at a name filled its count, and one proof was locked for that name.";
+        AuthHumanCheckAdmitted = "auth.human_check_admitted", trail, "People were let in without a human check, because the service that makes it could not be asked.";
+        AuthHumanCheckRefused = "auth.human_check_refused", trail, "People were turned away, because the service that makes the human check could not be asked.";
+        AuthHumanCheckSecretChanged = "auth.human_check_secret_changed", trail, "The secret of the human check was set or taken away.";
         AuthLogout = "auth.logout", trail, "Somebody signed out.";
         AuthAdminModeChanged = "auth.admin_mode_changed", trail, "A browser session changed its explicit As admin switch.";
         AdminOpened = "admin.opened", trail, "An object was opened through this session's native administrative reach.";
@@ -403,6 +406,7 @@ audit_actions! {
         MachinePolicyChanged = "machine.policy_changed", trail, "A key of a machine's local policy was changed, on the machine or from Orch.";
         MachineProgramsChanged = "machine.programs_changed", trail, "A machine manager registered, tested, removed or reloaded an external program.";
         MachineRolesChanged = "machine.roles_changed", trail, "A machine manager changed the connector roles handed to Orch.";
+        MachineGatewayChanged = "machine.gateway_changed", trail, "A machine manager changed its primary gateway choice.";
         MachineUpdateRequested = "machine.update_requested", trail, "A verified physical connector or node update was requested.";
         MachineReportRefused = "machine.report_refused", trail, "Reports from a machine about something it does not hold were refused.";
     }
@@ -466,6 +470,7 @@ audit_actions! {
         RateCatalogueLoaded = "rate_catalogue.loaded", trail, "A rate catalogue was loaded.";
     }
     System {
+        ServerUpdateRequested = "server.update_requested", trail, "The server release updater was requested on its bundled node.";
         SystemSettingsUpdated = "system.settings_updated", trail, "A setting of the system was written.";
         CapabilityDefUpdated = "capability_def.updated", trail, "The definition of a capability was changed.";
         HostUpdated = "host.updated", line, "A host was changed: its name, its labels, or what it does when it is full.";
@@ -582,6 +587,7 @@ impl AuditAction {
             | Self::ResourceTagsChanged
             | Self::SettingsReset
             | Self::SettingsUpdated
+            | Self::ServerUpdateRequested
             | Self::SystemSettingsUpdated
             | Self::TemplateDisabled
             | Self::TemplateEnabled
@@ -652,6 +658,7 @@ impl AuditAction {
             | Self::MachinePolicyChanged
             | Self::MachineProgramsChanged
             | Self::MachineRolesChanged
+            | Self::MachineGatewayChanged
             | Self::MachineRenewed
             | Self::MachineRevoked
             | Self::MachineReportRefused
@@ -764,6 +771,9 @@ impl AuditAction {
             | Self::AuthEmailCodeEnabled
             | Self::AuthIdentityLinked
             | Self::AuthIdentityUnlinked
+            | Self::AuthHumanCheckAdmitted
+            | Self::AuthHumanCheckRefused
+            | Self::AuthHumanCheckSecretChanged
             | Self::AuthLocked
             | Self::AuthLogin
             | Self::AuthLoginFailed
@@ -1033,6 +1043,7 @@ mod tests {
             A::MachinePolicyChanged,
             A::MachineProgramsChanged,
             A::MachineRolesChanged,
+            A::MachineGatewayChanged,
             A::MachineReportRefused,
         ] {
             assert!(!action.is_history_line(), "{action}");

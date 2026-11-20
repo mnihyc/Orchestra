@@ -616,7 +616,7 @@ impl Origin {
             ),
             (
                 "machines",
-                "SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE",
+                "SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE",
             ),
             (
                 "env_templates",
