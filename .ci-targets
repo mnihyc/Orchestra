@@ -1,0 +1,7 @@
+fmt
+test -p orch-provider-contract --lib -- models::tests::
+test -p orch-engine --lib -- models::tests::
+test -p orch-engine --test preflight -- every_check_blocks_the_thread_with_its_reason_and_lets_it_through_when_its_cause_clears
+test -p orch-api-core --test threads_make --test binding_options --test binding_set
+test -p orch-api-core --test ask
+test -p orch-api-core --lib

@@ -190,11 +190,13 @@ impl Read {
         };
         let expected = match kind {
             "fs.stat" => serde_json::to_value(FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),
             })?,
             "fs.fetch" => serde_json::to_value(FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.proof.site.environment,
                 mount: None,
                 path: path.into(),
@@ -212,7 +214,7 @@ impl Read {
             .execute(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.proof.site.machine)
             .execute(conn)
             .await
@@ -321,6 +323,7 @@ impl Read {
         self.current_issue_callers(
             conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -430,7 +433,10 @@ impl Engine {
             .map_err(|refusal| EngineError::unreadable(refusal.message))?;
         let mut images = Vec::with_capacity(files.len());
         let mut raw_blobs = Vec::new();
-        let raw_input = self.image_raw_text(&call.arguments, &mut raw_blobs).await?;
+        let mut publications = Vec::new();
+        let raw_input = self
+            .image_raw_text(&call.arguments, &mut raw_blobs, &mut publications)
+            .await?;
         for (index, file) in files.iter().enumerate() {
             let name = if index < args.images.len() {
                 format!("source-{}", index + 1)
@@ -539,6 +545,7 @@ impl Engine {
         sqlx::query("UPDATE thread_tool_calls SET plan=jsonb_set(plan,ARRAY[$2::text],$3) WHERE answer_id=$1 AND NOT(plan ? $2)").bind(crate::ids::tool_result(call.thread,&call.call_ref)).bind(SLOT).bind(serde_json::to_value(frozen)?).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
         let finished = unit.finish().await?;
         self.commit(tx, finished).await?;
+        drop(publications);
         Ok(images)
     }
 }

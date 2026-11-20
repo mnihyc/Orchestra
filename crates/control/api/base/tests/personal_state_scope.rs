@@ -15,7 +15,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::{ErrorCode, MAX_JSON_BYTES};
 use orch_api_contract::nodes::NodeGet;
 use orch_api_contract::personal::{MeProjectViewDelete, MeStateGet, MeStateSet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_db::queries::{identity, transaction_guard};
 use orch_types::{Id, Json, new_id};
@@ -50,7 +50,7 @@ async fn key(world: &World, user: Id, target: Id, operations: &[(&str, &str)]) -
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let mut conn = world.conn().await;
     identity::create_api_token_scoped(

@@ -44,11 +44,11 @@ pub fn has_inline_inputs(binding: &Binding) -> bool {
 
 /// Materialize every supplied image into the selected declaration's JSON parameter.
 /// The common renderer still owns the wire shape, and the shared keeper sends normal JSON.
+/// Source reads enforce the configured blob allowance; transport admission owns the whole request.
 pub fn materialize_inline_inputs(
     binding: &Binding,
     mut input: Json,
     images: &[InputImage],
-    maximum_bytes: usize,
 ) -> Result<Json, SourceError> {
     if !has_inline_inputs(binding) || images.is_empty() {
         return Err(refused(
@@ -77,9 +77,6 @@ pub fn materialize_inline_inputs(
         ..Binding::default()
     };
     let mut seen = BTreeSet::new();
-    let mut used = serde_json::to_vec(object)
-        .map_err(|_| refused("image parameters could not be encoded"))?
-        .len();
     let mut rows = Vec::with_capacity(images.len());
     for image in images {
         if image.bytes.is_empty()
@@ -90,20 +87,6 @@ pub fn materialize_inline_inputs(
             return Err(refused(
                 "every inline input needs distinct source-bound image bytes",
             ));
-        }
-        let encoded = image
-            .bytes
-            .len()
-            .checked_add(2)
-            .and_then(|size| size.checked_div(3))
-            .and_then(|size| size.checked_mul(4))
-            .and_then(|size| size.checked_add(image.media_type.len() + "data:;base64,".len()))
-            .ok_or_else(|| refused("inline image input exceeds the request budget"))?;
-        if used
-            .checked_add(encoded)
-            .is_none_or(|size| size > maximum_bytes)
-        {
-            return Err(refused("inline image input exceeds the request budget"));
         }
         let url = format!(
             "data:{};base64,{}",
@@ -118,26 +101,9 @@ pub fn materialize_inline_inputs(
             .get("body")
             .cloned()
             .ok_or_else(|| refused("the inline image item did not render"))?;
-        used = used
-            .checked_add(
-                serde_json::to_vec(&row)
-                    .map_err(|_| refused("the inline image item could not be encoded"))?
-                    .len(),
-            )
-            .ok_or_else(|| refused("inline image input exceeds the request budget"))?;
-        if used > maximum_bytes {
-            return Err(refused("inline image input exceeds the request budget"));
-        }
         rows.push(row);
     }
     object.insert(field.into(), Json::Array(rows));
-    if serde_json::to_vec(&input)
-        .map_err(|_| refused("image parameters could not be encoded"))?
-        .len()
-        > maximum_bytes
-    {
-        return Err(refused("inline image input exceeds the request budget"));
-    }
     let _ = render_request(binding, &input)?;
     Ok(input)
 }

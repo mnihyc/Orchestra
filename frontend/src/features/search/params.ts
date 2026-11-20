@@ -203,6 +203,17 @@ export function restoredView(params: SearchParams, saved: string): SearchParams 
   } catch { return undefined; }
 }
 
+/** Validation may use a default, but that does not make the unavailable saved choice a new choice. */
+export function unavailableSavedView(saved: string): boolean {
+  if (saved === '') return false;
+  try {
+    const parsed: unknown = JSON.parse(saved);
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') return true;
+    const current = JSON.parse(savedView(readParams(parsed as Record<string, unknown>))) as Record<string, unknown>;
+    return Object.entries(parsed).some(([key, value]) => JSON.stringify(current[key]) !== JSON.stringify(value));
+  } catch { return true; }
+}
+
 export type { ItemKind };
 
 /** A broader root choice starts with all places in that root, keeping non-place criteria. */

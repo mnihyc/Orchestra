@@ -17,7 +17,7 @@ use orch_api_contract::resources::{
     ProviderModelSuggestionAccept, ProviderModelSuggestionList, ProviderModelUpdate,
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::{access, identity, link};
@@ -126,9 +126,9 @@ impl Scene {
     }
 
     async fn key_for(&self, user: Id, provider: Id, allow: Json) -> Key {
-        let secret = new_token(API_TOKEN_PREFIX);
-        let hash = token_hash(&secret);
         let id = new_id();
+        let secret = new_api_token(id);
+        let hash = token_hash(&secret);
         identity::create_api_token_scoped(
             &mut *self.world.conn().await,
             &identity::NewApiToken {

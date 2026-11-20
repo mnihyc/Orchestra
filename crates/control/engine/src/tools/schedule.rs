@@ -11,7 +11,7 @@ use std::sync::{Arc, PoisonError};
 
 /// Whether this exact thread may be offered the managed tool now.
 pub async fn offered(conn: &mut Conn, thread: &ThreadRow) -> Result<bool, EngineError> {
-    if thread.side_of.is_some() {
+    if super::side_reading(thread).is_some() {
         return Ok(false);
     }
     let wanted = [definition_of(keys::THREADS_AGENT_SCHEDULES)?];
