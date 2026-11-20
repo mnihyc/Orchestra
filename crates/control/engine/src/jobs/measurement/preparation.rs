@@ -721,6 +721,13 @@ pub(crate) fn build_command(
     let source_machine: Id = serde_json::from_value(row.plan["machine"].clone())?;
     let timeout = row.plan["timeout_secs"].as_u64().ok_or_else(closed)?;
     let work = WorkReport {
+        timeout_policy: row
+            .plan
+            .get("timeout_policy")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .map(serde_json::from_value)
+            .transpose()?,
         files_total: None,
         bytes_total: None,
         job_id: row.id,
@@ -758,7 +765,11 @@ pub(crate) fn build_command(
         )
     };
     Ok(Outgoing {
+        content_transit: false,
+        after: None,
         authority: None,
+        input_facts: None,
+        session_offer: None,
         id,
         machine,
         kind,
@@ -845,6 +856,7 @@ impl CommandEvidence {
         } else {
             let serial = command.key.wire();
             let proposed = NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -908,6 +920,8 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            content_transit: false,
+            after: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,
@@ -915,6 +929,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key.is_some() {
             return Ok(None);
@@ -942,6 +958,8 @@ impl CommandEvidence {
         access: &dyn ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         let actual = Outgoing {
+            content_transit: false,
+            after: None,
             id: command.id,
             machine: command.machine_id,
             kind: command.kind.parse().map_err(|_| closed())?,
@@ -949,6 +967,8 @@ impl CommandEvidence {
             body: command.body.clone(),
             deadline: Some(Time::new(command.deadline_at)),
             authority: None,
+            input_facts: None,
+            session_offer: None,
         };
         if command.serial_key().is_some() {
             return Ok(None);

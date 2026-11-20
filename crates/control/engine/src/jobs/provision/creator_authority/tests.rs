@@ -189,6 +189,7 @@ impl Fixture {
             self.world.machine_id,
             SerialKey::Environment(self.world.environment),
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.world.environment,
                 mount: None,
                 path: "web".into(),
@@ -242,6 +243,7 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         s.world.machine_id,
         SerialKey::Environment(s.world.environment),
         &FsSnapshot {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: s.world.environment,
             job_id: s.job.id(),
@@ -266,14 +268,27 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
             .as_u64()
             .is_some_and(|value| value > 0)
     );
+    let at = s
+        .world
+        .commands
+        .as_engine()
+        .status(id)
+        .await?
+        .ok_or("the original issue receipt is absent")?
+        .issued_at;
+    let deadline = Time::new(at + chrono::Duration::from_std(actual.work)?);
     let canonical = Outgoing {
+        content_transit: false,
+        after: None,
         id,
         machine: s.world.machine_id,
         kind: CommandKind::FsSnapshot,
         key: SerialKey::Environment(s.world.environment),
         body: actual.body.clone(),
-        deadline: Some(actual.deadline),
+        deadline: Some(deadline),
         authority: None,
+        input_facts: None,
+        session_offer: None,
     };
     assert!(s.allows(&canonical).await?);
     let mut conn = s.world.pool.acquire().await?;

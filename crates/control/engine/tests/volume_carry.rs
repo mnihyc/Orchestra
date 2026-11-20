@@ -15,6 +15,8 @@ use orch_authz::{
     Caller,
     ownership::{NewAccess, start_resource},
 };
+use orch_blob_contract::store::{BlobStore, stream_of};
+use orch_blob_local::LocalBlobStore;
 use orch_db::queries::{
     resources::mounts::{self as mounts, LocationRow, MountRow},
     storage,
@@ -25,11 +27,19 @@ use orch_link_contract::commands::{
 };
 use orch_types::{Hash, Time, new_id};
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn a_home_and_private_view_fork_measures_then_carries_whole_volumes_before_the_target_unit_is_created()
  {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        LocalBlobStore::open(directory.path().join("blobs"))
+            .await
+            .unwrap(),
+    );
     let world = World::new().await;
+    world.engine().attach_blobs(store.clone());
     serve(&world);
     let source = ScriptedHost::on(&world, "Source volumes", 16_384).await;
     let target = ScriptedHost::on(&world, "Target volumes", 16_384).await;
@@ -93,10 +103,16 @@ async fn a_home_and_private_view_fork_measures_then_carries_whole_volumes_before
         .unwrap();
     }
     sqlx::query("UPDATE runtimes SET volumes=volumes || $2 WHERE id=$1").bind(source_runtime).bind(json!({format!("over:{mount}"):{"name":format!("orch-over-{environment}-{mount}"),"storage":null}})).execute(&mut *conn).await.unwrap();
-    let hash = Hash::of(b"whole volume fixture");
-    storage::register_blob(&mut conn, &hash, 20, world.clock.now())
+    let bytes = bytes::Bytes::from_static(b"whole volume fixture");
+    let hash = Hash::of(&bytes);
+    let part = store
+        .put(&hash, Some(20), stream_of(vec![bytes]))
         .await
         .unwrap();
+    storage::register_blob(&mut conn, &hash, part.size, world.clock.now())
+        .await
+        .unwrap();
+    drop(part);
     drop(conn);
     world
         .set(
@@ -267,22 +283,19 @@ async fn a_home_and_private_view_fork_measures_then_carries_whole_volumes_before
             .all(|volume| volume.volume.name.starts_with("orch-home-")
                 || volume.volume.name.starts_with("orch-over-"))
     );
-    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let remaining: i64 =
-            sqlx::query_scalar("SELECT pin_count::bigint FROM blobs WHERE hash=$1")
-                .bind(hash.as_bytes().as_slice())
-                .fetch_one(world.pool.pool())
+    common::eventually(
+        "the last volume transfer to release the unowned archive",
+        || async {
+            storage::blob(&mut world.pool.acquire().await.unwrap(), &hash)
                 .await
-                .unwrap();
-        if remaining == 0 {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < until,
-            "transient archives were not unpinned after provisioning finished"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+                .unwrap()
+                .is_none()
+        },
+    )
+    .await;
+    assert!(
+        !store.exists(&hash).await.unwrap(),
+        "the archive bytes must be released too"
+    );
     world.engine().stop();
 }

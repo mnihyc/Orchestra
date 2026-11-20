@@ -30,6 +30,7 @@ import { ApiError } from '@/api/client';
 import type { Density, EnvironmentStatus, Field, HistoryLine, Locale, MissingAccess, PresenceUser, Problem, Theme, UserRef } from '@/generated/api-types';
 import { LOCALES } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { formatNumber } from '@/lib/format';
 import { languageOf } from '@/features/files/languages';
 import { denial } from '@/lib/permissions';
@@ -56,6 +57,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { FieldForm, type FormValues, initialValues } from '@/ui/FieldForm';
+import { FactDisclosure, FactDisclosureBody } from '@/ui/FactDisclosure';
 import { HelpHint } from '@/ui/HelpHint';
 import { HistoryLines } from '@/ui/HistoryLines';
 import { HolderChip, type PeopleSource } from '@/ui/HolderChip';
@@ -903,6 +905,19 @@ export default function Gallery() {
             }}
             empty={t('admin.overview.nothingStored')}
           />
+        </Specimen>
+
+        <Specimen name="FactDisclosure, FactDisclosureBody">
+          <Row>
+            <FactDisclosure fragment={t('dev.facts.shortened')} groups={[
+              { key: 'last', kind: 'last_result', facts: [{ key: 'owner', label: t('dev.facts.usageOwner'), value: <UserChip user={ADA} /> }, { key: 'input', label: t('summaryBox.rateInput'), value: null }] },
+              { key: 'next', kind: 'next_refresh', facts: [{ key: 'input', label: t('summaryBox.rateInput'), value: formatNumber(32_000, locale) }] },
+            ]} />
+          </Row>
+          <FactDisclosureBody groups={[
+            { key: 'setting', kind: 'current_setting', facts: [{ key: 'context', label: t('summaryOptions.fields.context_tokens'), value: formatNumber(32_000, locale), source: <SourceSettingLink source={{ scope: 'system', node: null }} def={{ key: 'summary.targets', class: 'parameter' }} fallback={t('settings.editor.from.system')} /> }] },
+            { key: 'outcome', kind: 'recorded_outcome', facts: [{ key: 'usage', label: t('dev.facts.recordedUsage'), value: null }] },
+          ]} />
         </Specimen>
 
         <section aria-label={OVERLAYS} className="flex flex-col gap-2">
