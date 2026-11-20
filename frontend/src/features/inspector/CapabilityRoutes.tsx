@@ -1,4 +1,5 @@
 /** The inspector renders the server's single capability resolution; it computes no support matrix. */
+import { ModelTranslation } from '@/features/models/ModelTranslation';
 import { Trans, useTranslation } from 'react-i18next';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
@@ -10,6 +11,7 @@ interface Quote { amount: string; currency: string; unit: string }
 interface CapabilityView {
   capability: string; title: string; reason: string | null; program_default: boolean;
   detail?: string | null;
+  translation?: unknown;
   route_view: { kind: string } | null; provider: { id: string; title: string } | null;
   prices: Record<string, Quote>; fallbacks?: unknown; facts?: unknown;
 }
@@ -67,6 +69,8 @@ export function CapabilityRoutes({ value }: { value: unknown }) {
     "delegation": t('capabilityRoutes.routes.delegation'),
   };
   const reasons: Record<string, string> = {
+    "program_unit_unavailable": t('capabilityRoutes.reasons.program_unit_unavailable'),
+    "program_unit_network_unavailable": t('capabilityRoutes.reasons.program_unit_network_unavailable'),
     "native_image_sign_in_required": t('capabilityRoutes.reasons.native_image_sign_in_required'),
     "route_not_declared": t('capabilityRoutes.reasons.route_not_declared'),
     "route_does_not_carry_capability": t('capabilityRoutes.reasons.route_does_not_carry_capability'),
@@ -128,6 +132,7 @@ export function CapabilityRoutes({ value }: { value: unknown }) {
             <span className="font-medium text-text">{word(names, row.capability) ?? row.title}</span>
             <StatusDot tone={kind === undefined ? 'off' : 'idle'} label={label} showLabel />
           </div>
+          {row.capability === 'generation' && <ModelTranslation value={row.translation} />}
           {kind !== undefined && row.program_default && <span className="text-text-muted">{t('capabilityRoutes.programDefault')}</span>}
           {row.provider !== null && <ResourceChip subject={{ kind: 'provider', provider: { id: row.provider.id, name: row.provider.title } }} hint={false} />}
           {prices.map((price, index) => <span key={index} className="text-text-muted tabular-nums">{t('capabilityRoutes.quote', {

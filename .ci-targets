@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-summarizer-model --lib --test capabilities --test prompts
+test -p orch-provider-contract --lib -- capabilities::
+test -p orch-adapter-claude-code --test sessions -- a_program_model_turn_
+test -p orch-adapter-claude-code --test conformance -- a_native_conversation_with_no_tools_refuses_a_forced_action_on_the_controlled_model
+test -p orch-db --test usage_ledger
+test -p orch-authz --test use_where
+test -p orch-settings-contract --lib
