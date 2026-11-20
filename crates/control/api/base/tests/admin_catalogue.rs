@@ -73,6 +73,7 @@ async fn capabilities(world: &World, by: &Who) -> Vec<CapabilityDef> {
         .send()
         .await
         .ok()
+        .items
 }
 
 async fn remove_capability(world: &World, by: &Who, key: &str) -> Reply<CapabilityDef> {
@@ -773,6 +774,65 @@ fn corp() -> IdentityProviderInput {
     }
 }
 
+#[tokio::test]
+async fn management_finds_a_late_sign_in_provider_and_can_continue_every_page() {
+    use orch_api_contract::common::CollectionQuery;
+    let world = World::new().await;
+    let c = cast(&world).await;
+    for index in 0..13 {
+        add_provider(
+            &world,
+            &c.root,
+            &IdentityProviderInput {
+                key: format!("source{index:02}"),
+                name: format!("Sign-in source {index:02}"),
+                issuer: format!("https://id{index}.example.com"),
+                ..corp()
+            },
+        )
+        .await
+        .ok();
+    }
+    let found = world
+        .app
+        .call(AdminIdentityProviderList, &[])
+        .token(&c.root.token)
+        .query(&CollectionQuery {
+            q: Some("source 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Sign-in source 12");
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = world
+            .app
+            .call(AdminIdentityProviderList, &[])
+            .token(&c.root.token)
+            .query(&CollectionQuery {
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn add_provider(
     world: &World,
     by: &Who,
@@ -820,6 +880,7 @@ async fn providers(world: &World, by: &Who) -> Vec<IdentityProvider> {
         .send()
         .await
         .ok()
+        .items
 }
 
 /// What is kept sealed for the provider, opened with the key of these tests.
@@ -902,7 +963,7 @@ async fn an_identity_provider_is_added_with_the_usual_claims_and_its_secret_is_k
         "the secret is write-only"
     );
     assert_eq!(kept_secret(&world, made.id).await.unwrap(), b"s3cret-value");
-    assert_eq!(listed.ok(), std::slice::from_ref(&made));
+    assert_eq!(listed.ok().items, std::slice::from_ref(&made));
     let lines = lines_of(&world, "identity_provider.created").await;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].actor_id, Some(c.root.id()));
@@ -1411,4 +1472,114 @@ async fn somebody_who_is_no_system_admin_is_refused_the_catalogue_the_builds_the
     assert!(capabilities(&world, &c.root).await.is_empty());
     assert!(builds(&world, &c.root).await.is_empty());
     assert!(providers(&world, &c.root).await.is_empty());
+}
+
+#[tokio::test]
+async fn capability_names_are_found_before_their_page_and_localized_aliases_keep_native_admin_authority()
+ {
+    use orch_api_contract::admin::CapabilityListQuery;
+    let world = World::new().await;
+    let c = cast(&world).await;
+    for index in 0..13 {
+        define(
+            &world,
+            &c.root,
+            &CapabilityDef {
+                key: format!("cap_{index:02}"),
+                label: format!("Capability {index:02}"),
+                ..gpu()
+            },
+        )
+        .await
+        .ok();
+    }
+    define(
+        &world,
+        &c.root,
+        &CapabilityDef {
+            key: "net_admin".to_owned(),
+            label: "Network administration".to_owned(),
+            ..gpu()
+        },
+    )
+    .await
+    .ok();
+    let ask = CapabilityListQuery {
+        q: Some("Capability 12".to_owned()),
+        limit: Some(1),
+        cursor: None,
+        aliases: None,
+    };
+    let page = world
+        .app
+        .call(AdminCapabilityList, &[])
+        .token(&c.root.token)
+        .query(&ask)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|def| def.key.as_str())
+            .collect::<Vec<_>>(),
+        ["cap_12"]
+    );
+    assert!(page.next_cursor.is_none());
+    let mut ask = CapabilityListQuery {
+        q: Some("Capability".to_owned()),
+        limit: Some(1),
+        cursor: None,
+        aliases: None,
+    };
+    let mut keys = Vec::new();
+    loop {
+        let page = world
+            .app
+            .call(AdminCapabilityList, &[])
+            .token(&c.root.token)
+            .query(&ask)
+            .send()
+            .await
+            .ok();
+        keys.extend(page.items.into_iter().map(|def| def.key));
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        ask.cursor = Some(cursor);
+    }
+    assert_eq!(keys.len(), 13);
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 13);
+    let alias = CapabilityListQuery {
+        q: Some("网络".to_owned()),
+        limit: Some(1),
+        cursor: None,
+        aliases: Some("net_admin".to_owned()),
+    };
+    assert_eq!(
+        world
+            .app
+            .call(AdminCapabilityList, &[])
+            .token(&c.root.token)
+            .query(&alias)
+            .send()
+            .await
+            .ok()
+            .items[0]
+            .key,
+        "net_admin"
+    );
+    for who in [&c.boss, &c.ada] {
+        let problem = world
+            .app
+            .call(AdminCapabilityList, &[])
+            .token(&who.token)
+            .query(&alias)
+            .send()
+            .await
+            .problem();
+        assert_no_system_admin(&problem, "localized capability search");
+    }
 }

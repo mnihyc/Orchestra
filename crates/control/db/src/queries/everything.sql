@@ -91,6 +91,7 @@ WITH reader_projection AS MATERIALIZED (SELECT $4::jsonb AS grants), __NODE_VISI
     AND ($32::text IS NULL OR CASE i.kind
       WHEN 'template' THEN EXISTS (SELECT 1 FROM env_templates t WHERE t.id=i.id::uuid AND t.kind=$32)
       WHEN 'environment' THEN EXISTS (SELECT 1 FROM environments e WHERE e.id=i.id::uuid AND CASE WHEN e.template_id IS NULL THEN 'machine' ELSE 'template' END=$32)
+      WHEN 'agent' THEN $32='system' AND EXISTS (SELECT 1 FROM agents a WHERE a.id=i.id::uuid AND a.home_id IS NULL)
       ELSE false END)
     AND (NOT $33::boolean OR COALESCE((i."grant"->>'library_scope')::boolean,false))
     AND ($34::uuid IS NULL OR i.path @> ARRAY[$34])) fits

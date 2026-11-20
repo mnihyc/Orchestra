@@ -110,7 +110,8 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         .query(&OrgGroupListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     let renamed = world
         .app
@@ -143,18 +144,26 @@ async fn a_group_is_made_listed_described_anew_and_deleted_by_whoever_manages_th
         .app
         .call(OrgGroupList, &[&s.acme])
         .token(&s.boss.token)
-        .query(&OrgGroupListQuery { under: None })
+        .query(&OrgGroupListQuery {
+            under: None,
+            ..OrgGroupListQuery::default()
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let under = world
         .app
         .call(OrgGroupList, &[&s.acme])
         .token(&s.boss.token)
-        .query(&OrgGroupListQuery { under: Some(true) })
+        .query(&OrgGroupListQuery {
+            under: Some(true),
+            ..OrgGroupListQuery::default()
+        })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!((direct.len(), under.len()), (1, 2));
     let gone = world
         .app
@@ -208,7 +217,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
         .token(&s.dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(people.len(), 2);
     let listed = world
         .app
@@ -217,7 +227,8 @@ async fn a_member_of_the_root_org_is_put_into_a_group_and_taken_out_and_access_f
         .query(&OrgGroupListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed[0].member_count, 2);
     // The group is named on the page of Web, and its members read it.
     let private = world
@@ -463,7 +474,8 @@ async fn a_suspended_member_is_shut_out_of_the_org_until_it_is_lifted() {
         .token(&s.boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1);
     let members = world
         .app
@@ -548,4 +560,45 @@ async fn nobody_suspends_themself_an_owner_or_a_system_admin_and_somebody_let_in
         suspend(&admin, nobody.id()).await.problem().code,
         ErrorCode::NotFound
     );
+}
+
+#[tokio::test]
+async fn a_department_name_search_finds_the_late_child_before_the_page_fills() {
+    use orch_api_contract::nodes::{NodeChildList, NodeChildListQuery, NodeKind};
+    let world = World::new().await;
+    let s = setup(&world).await;
+    for index in 0..13 {
+        make_department(
+            &world,
+            &s.boss,
+            s.acme,
+            &format!("Team {index:02}"),
+            &format!("team-{index}"),
+        )
+        .await;
+    }
+    for name in ["Team 00", "Team 12"] {
+        let page = world
+            .app
+            .call(NodeChildList, &[&s.acme])
+            .token(&s.boss.token)
+            .query(&NodeChildListQuery {
+                q: Some(name.into()),
+                kind: Some(NodeKind::Org),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            match page.items[0].as_visible().unwrap() {
+                Node::Org(org) => org.base.name.as_str(),
+                _ => panic!("the department is an org"),
+            },
+            name
+        );
+        assert!(page.next_cursor.is_none());
+    }
 }

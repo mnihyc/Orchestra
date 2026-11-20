@@ -8,6 +8,8 @@ summary: Preview imports, resolve conflicts and follow or undo jobs before expor
 
 # Import and export
 
+**Import** brings files or an Orch package into a place. **Export** saves what you can read as a package or as files. This page shows both, with the limits and what can be undone. To move a whole project between organizations or deployments, see [Move a project between orgs or deployments](move-a-project-between-orgs.md).
+
 ## Import
 
 Choose **Import…** from a place's menu or its Documents view. Drop files or choose
@@ -80,6 +82,6 @@ are included by default; earlier versions are optional. A package can be importe
 into another place. Documents have JSON records and readable Markdown and HTML copies,
 with their local files beside them.
 
-Native agent sessions, workspaces, secrets, usage and audit, personal state and
+The sessions of agent programs, workspaces, secrets, usage and audit, personal state and
 approvals do not come back. Web images remain links. The import review and report
 list these and any other losses.

@@ -48,6 +48,68 @@ fn fixture() -> (Registry, ThreadContext, OfferingRef) {
 }
 
 #[test]
+fn a_thousand_capability_resolutions_compile_one_route_declaration_and_check_each_offering() {
+    use orch_types::schema::{CacheLimits, check, testing::observe_compilations};
+    use std::sync::atomic::Ordering;
+
+    let (mut registry, mut context, _) = fixture();
+    let mut bundle = registry.extension("fixture").unwrap().clone();
+    let schema = json!({"$comment":new_id().to_string(), "required":["available_here"],
+        "properties":{"available_here":{"const":true}}});
+    let count = observe_compilations(&schema);
+    bundle
+        .interfaces
+        .get_mut("fixture-generation")
+        .unwrap()
+        .native_tools
+        .get_mut("lookup")
+        .unwrap()
+        .eligible_when = schema.clone();
+    bundle.routes.get_mut("native").unwrap().eligible_when = schema;
+    registry.register("fixture", bundle).unwrap();
+
+    for i in 0..1_000 {
+        if i == 1 {
+            // A live declaration still belongs to its registry after unrelated forms fill the idle cache.
+            for field in 0..=CacheLimits::default().entries {
+                check(&json!({"const":field})).unwrap();
+            }
+        }
+        let available = i % 2 == 0;
+        context.facts = json!({"available_here":available});
+        let result = registry.resolve(&context);
+        assert_eq!(result[0].route.is_some(), available);
+        if !available {
+            assert_eq!(result[0].reason.as_deref(), Some("route_not_applicable"));
+        }
+    }
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+
+    let previous = registry.clone();
+    let mut edited = registry.extension("fixture").unwrap().clone();
+    edited.routes.get_mut("native").unwrap().eligible_when = json!(false);
+    registry.register("fixture", edited).unwrap();
+    context.facts = json!({"available_here":true});
+    assert!(registry.resolve(&context)[0].route.is_none());
+    assert!(previous.resolve(&context)[0].route.is_some());
+}
+
+#[test]
+fn the_shipped_schema_check_includes_endpoint_predicates_while_unrelated_routes_remain_usable() {
+    let (mut registry, context, _) = fixture();
+    let mut extra = Declarations::default();
+    extra.endpoint_rules.push(EndpointRule {
+        when: json!({"type":"invalid"}),
+        ..EndpointRule::default()
+    });
+    registry.register("extra", extra).unwrap();
+    assert!(registry.check_route_schemas().is_err());
+    assert!(registry.resolve(&context)[0].route.is_some());
+    assert!(registry.remove("extra"));
+    assert!(registry.check_route_schemas().is_ok());
+}
+
+#[test]
 fn one_thread_resolution_keeps_native_defaults_and_requires_an_exact_explicit_paid_backend() {
     let (registry, mut context, reference) = fixture();
     let native = registry.resolve(&context);
@@ -1243,6 +1305,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "service",
         "auxiliary",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(
@@ -1275,6 +1338,7 @@ fn a_selected_backend_uses_its_actual_endpoint_and_ceiling_without_rebinding_the
         "live",
         "native",
         true,
+        &registry.predicates,
     )
     .unwrap();
     assert_eq!(native.facts["endpoint"]["interface"], "fixture-generation");

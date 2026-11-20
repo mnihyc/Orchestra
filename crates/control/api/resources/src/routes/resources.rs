@@ -8,6 +8,8 @@
 //!
 //! The requests are bound by kind of resource, each in a module of its own below.
 
+mod provider_trials;
+
 use crate::middleware::authorization;
 
 use crate::middleware::authorization::refusals;
@@ -295,6 +297,9 @@ pub mod host_storage;
 #[path = "resources/hosts.rs"]
 pub mod hosts;
 
+#[path = "resources/lifecycle_notifications.rs"]
+pub mod lifecycle_notifications;
+
 #[path = "resources/impact.rs"]
 pub mod impact;
 
@@ -364,11 +369,15 @@ pub mod provider_sources;
 #[path = "resources/provider_updates.rs"]
 pub mod provider_updates;
 
+mod provider_relay;
 #[path = "resources/providers.rs"]
 pub mod providers;
 
 #[path = "resources/read.rs"]
 pub mod read;
+
+#[path = "resources/child_pages.rs"]
+pub(crate) mod child_pages;
 
 #[path = "resources/sealing.rs"]
 pub mod sealing;

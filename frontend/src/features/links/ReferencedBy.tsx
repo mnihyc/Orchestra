@@ -1,10 +1,13 @@
 /** Referenced by: one row for each source that mentions this document, and under it, when opened, the line around each mention. */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ChevronRight } from 'lucide-react';
-import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { mentionsQuery } from '@/api/links';
+import { useLinkSourceState } from '@/features/links/sourceState';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { useDebounced } from '@/lib/debounce';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
 import { mentionPath, sourcePath, whereOf } from '@/features/links/anchors';
 import { useOpenLinked } from '@/features/links/open';
 import type { ListState } from '@/features/links/listState';
@@ -23,14 +26,14 @@ import { StateLine } from '@/ui/StateLine';
 /** Rows shown as placeholders while the first page comes. */
 const LOADING_ROWS = 3;
 
-export function ReferencedBy({ documentId, list }: { documentId: string; list: ListState }) {
+export function ReferencedBy({ documentId, list, filtered = false }: { documentId: string; list: ListState; filtered?: boolean }) {
   const { t } = useTranslation();
   const rows = list.rows;
   const labels = usePlaceLabels(rows.map((row) => ({ id: row.id, name: row.name ?? '', above: row.context })));
   if (list.pending) return <SkeletonRows read={list.read} rows={LOADING_ROWS} />;
   if (list.failed) return <ErrorAlert error={list.error} action={<Button size="sm" onClick={list.retry}>{t('common.tryAgain')}</Button>} />;
   // A page can hold nothing the reader may read and still be followed by more: the list then goes on by itself.
-  if (rows.length === 0 && !list.hasMore) return <StateLine title={t('links.referencedBy.empty')} compact />;
+  if (rows.length === 0 && !list.hasMore) return <StateLine title={t(filtered ? 'ui.combobox.empty' : 'links.referencedBy.empty')} compact />;
   return <div className="flex min-w-0 flex-col" data-links-list="referenced_by">
     {rows.length > 0 && <ul className="flex min-w-0 flex-col gap-1" aria-label={t('links.tabs.referenced_by')}>
       {rows.map((row) => <SourceRow key={`${row.kind}:${row.id}`} documentId={documentId} source={row} label={labels.get(row.id)} />)}
@@ -43,13 +46,16 @@ const chipKind = (kind: LinkedThing['kind']) => (kind === 'document' ? 'doc' : k
 
 function SourceRow({ documentId, source, label }: { documentId: string; source: LinkedThing; label?: string | undefined }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const { open, setOpen, text, setText } = useLinkSourceState(`${source.kind}:${source.id}`);
+  const q = useDebounced(text.trim()), waiting = q !== text.trim();
   const name = label ?? source.name ?? '';
   const of = `${source.kind}:${source.id}`;
-  const more = useInfiniteQuery({ ...mentionsQuery(documentId, of, source.next_mentions ?? ''), enabled: false });
+  const request = mentionsQuery(documentId, of, source.next_mentions ?? '', q);
+  const more = useInfiniteQuery({ ...request, enabled: open && q !== '' && !waiting });
+  usePickerCursorRestart(more, request.queryKey);
   const later = more.data?.pages.flatMap((page) => page.items[0]?.occurrences ?? []) ?? [];
-  const mentions = [...source.occurrences, ...later];
-  const hasMore = more.data === undefined ? source.next_mentions !== null : more.hasNextPage;
+  const mentions = waiting ? [] : q === '' ? [...source.occurrences, ...later] : later;
+  const hasMore = more.data === undefined ? q === '' && source.next_mentions !== null : more.hasNextPage;
   return <li className="min-w-0 rounded-md hover:bg-bg-subtle" data-link-source={source.id}>
     <div className="flex min-h-(--row-height) min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-1 py-1">
       <button type="button" aria-expanded={open} aria-label={t(open ? 'links.row.collapse' : 'links.row.expand', { name })} onClick={() => setOpen(!open)}
@@ -60,7 +66,11 @@ function SourceRow({ documentId, source, label }: { documentId: string; source: 
       <span className="text-sm text-text-muted">{source.mentions_more ? t('links.mentionsMore', { number: source.mentions }) : t('links.mentions', { count: source.mentions })}</span>
     </div>
     {open && <div className="ml-7 flex min-w-0 flex-col gap-2 pr-2 pb-2">
-      <ul className="flex min-w-0 flex-col gap-2" aria-label={t('links.row.mentions', { name })}>
+      <CollectionSearch name={t('links.row.mentions', { name })} text={text} onText={setText} />
+      {(waiting || more.isPending && q !== '') && <SkeletonRows rows={LOADING_ROWS} />}
+      {more.isError && !more.isFetchNextPageError && <ErrorAlert error={more.error} action={<Button size="sm" onClick={() => void more.refetch()}>{t('common.tryAgain')}</Button>} />}
+      {q !== '' && !waiting && !more.isFetching && !more.isError && mentions.length === 0 && !hasMore && <StateLine title={t('ui.combobox.empty')} compact />}
+      <ul className="flex max-h-[30dvh] min-w-0 flex-col gap-2 overflow-y-auto" aria-label={t('links.row.mentions', { name })}>
         {mentions.map((mention) => <Mention key={mentionKey(mention)} source={source} name={name} mention={mention} />)}
       </ul>
       <Pagination hasMore={hasMore} loading={more.isFetchingNextPage || more.isFetching} error={more.isFetchNextPageError ? more.error : undefined} onMore={() => void more.fetchNextPage({ cancelRefetch: false })} className="py-1" />

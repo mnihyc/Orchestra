@@ -11,8 +11,8 @@ import { TooltipProvider } from '@/ui/Tooltip';
 import { detailHost } from './resource-detail-fixtures';
 
 const reads = vi.hoisted(() => ({ hosts: vi.fn(), settings: vi.fn() }));
-vi.mock('@/api/admin', () => ({ settingsKey: ['admin', 'settings'], hostsQuery: { queryKey: ['admin', 'hosts'], queryFn: reads.hosts }, systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings } }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a> }));
+vi.mock('@/api/admin', () => ({ settingsKey: ['admin', 'settings'], hostsPageQuery: (q: string) => ({ queryKey: ['admin', 'hosts', 'pages', q], initialPageParam: null, queryFn: async () => ({ items: await reads.hosts() as unknown[], next_cursor: null }), getNextPageParam: () => null }), systemSettingsQuery: { queryKey: ['admin', 'settings'], queryFn: reads.settings } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="/">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: () => <span>Keeper</span> }));
 const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 afterEach(() => { cache.clear(); vi.clearAllMocks(); });
@@ -36,5 +36,5 @@ it('follows the accepted system value and threshold while retaining the host’s
   await accept('hosts.full_percent', 90, 'DELETE'); await waitFor(() => expect(sharedRow).toHaveTextContent('Full'));
   await accept('hosts.when_full', 'warn', 'DELETE'); await waitFor(() => expect(sharedRow).toHaveTextContent('Warns, and lets the host answer'));
   expect(reads.hosts).toHaveBeenCalledOnce(); expect(reads.settings).toHaveBeenCalledOnce();
-  expect(cache.getQueryData(['admin', 'hosts'])).toEqual([shared, own]);
+  expect(cache.getQueryData(['admin', 'hosts', 'pages', ''])).toEqual({ pages: [{ items: [shared, own], next_cursor: null }], pageParams: [null] });
 });
