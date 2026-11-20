@@ -14,7 +14,7 @@ use orch_api_contract::environment::ThroughThreadQuery;
 use orch_api_contract::source::{
     EnvironmentGitCommit, EnvironmentGitCommitBody, EnvironmentGitPush, EnvironmentGitPushBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{identity, jobs};
 use orch_types::{Hash, Id, Json, new_id};
@@ -94,7 +94,7 @@ async fn key(site: &Site, user: Id, target: Json, allow: Json) -> Key {
     assert!(scope.validate().is_empty());
     let scope = json!(scope);
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *site.world.conn().await,
         &identity::NewApiToken {
@@ -330,7 +330,7 @@ async fn push_keeps_operation_action_target_and_account_limits_and_browser_contr
 
 async fn legacy(site: &Site, scopes: &[String], node: Option<Id>) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *site.world.conn().await,
         &identity::NewApiToken {

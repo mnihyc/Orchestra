@@ -36,3 +36,6 @@ pub mod runtime;
 pub mod sources;
 pub mod units;
 pub mod volumes;
+
+/// Frozen, isolated native capability work.
+pub mod work;
