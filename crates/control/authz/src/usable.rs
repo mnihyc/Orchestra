@@ -26,6 +26,7 @@ use orch_db::queries::resources as rows;
 use orch_types::{Id, Time};
 
 use crate::engine::{Frame, Graph, Site};
+use crate::holders::FrameSubject;
 use crate::nodes::{Page, archive_allows};
 use crate::resources::{
     Batch, Lacking, Listing, Resource, assemble, read_into, site_of, use_permission,
@@ -176,9 +177,19 @@ impl Use {
     /// The allowances that allow all of what is wanted together.
     #[must_use]
     pub fn allowing(&self, wanted: &options::Wanted<'_>) -> Vec<&Allowance> {
+        self.allowing_for(wanted, wanted.purpose.grant())
+    }
+
+    /// The complete allowances that permit this use and its requested limits together.
+    #[must_use]
+    pub fn allowing_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> Vec<&Allowance> {
         self.each
             .iter()
-            .filter(|allowance| options::entry_allows(&allowance.provider, wanted))
+            .filter(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
             .collect()
     }
 
@@ -188,6 +199,18 @@ impl Use {
         self.each
             .iter()
             .any(|allowance| options::entry_allows(&allowance.provider, wanted))
+    }
+
+    /// Whether one complete allowance permits the specified use without borrowing limits from another.
+    #[must_use]
+    pub fn allows_for(
+        &self,
+        wanted: &options::Wanted<'_>,
+        purpose: orch_access_contract::permissions::ProviderUsePurpose,
+    ) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows_for(&allowance.provider, wanted, purpose))
     }
 
     /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
@@ -229,22 +252,67 @@ pub fn access(
     work: Option<&[Id]>,
     kept_to_its_owner: bool,
 ) -> Result<Result<Use, Access>, Error> {
+    access_inner(frame, resource, site, work, kept_to_its_owner, false)
+}
+
+pub(crate) fn for_provider_birth(
+    frame: &Frame<'_>,
+    resource: &Resource,
+    site: &Site,
+    work: Option<&[Id]>,
+    kept_to_its_owner: bool,
+    source: &crate::resources::ProviderBirth,
+) -> Result<Result<Use, Access>, Error> {
+    if !source.matches(frame.principal()) {
+        return Ok(Err(Access::None));
+    }
+    access_inner(frame, resource, site, work, kept_to_its_owner, true)
+}
+
+fn access_inner<S: FrameSubject>(
+    frame: &Frame<'_, S>,
+    resource: &Resource,
+    site: &Site,
+    work: Option<&[Id]>,
+    kept_to_its_owner: bool,
+    provider_birth: bool,
+) -> Result<Result<Use, Access>, Error> {
     let Some(permission) = use_permission(resource.kind) else {
         return Ok(Err(Access::None));
     };
+    access_for(frame, resource, site, work, kept_to_its_owner, permission)
+}
+
+/// The same resource-entry evaluator for an independently granted provider model act.
+pub fn access_for(
+    frame: &Frame<'_>,
+    resource: &Resource,
+    site: &Site,
+    work: Option<&[Id]>,
+    kept_to_its_owner: bool,
+    permission: Permission,
+) -> Result<Result<Use, Access>, Error> {
+    if use_permission(resource.kind) != Some(permission)
+        && !(resource.kind == ResourceKind::Provider && permission == Permission::ProviderRelay)
+    {
+        return Ok(Err(Access::None));
+    }
     let principal = frame.principal();
-    let caller = principal.caller();
     let mut site = site.clone();
     if let Some(path) = work {
         site.path = Some(path.to_vec());
     }
-    if !caller.permits(permission)
-        || !caller.reaches(site.path.as_deref())
+    if !provider_birth
+        && (!principal.permits(permission) || !principal.reaches(site.path.as_deref()))
         || principal.suspension().applies(&site.orgs)
     {
         return Ok(Err(Access::None));
     }
-    let ways = frame.ways(&site, permission);
+    let ways = if provider_birth {
+        frame.account_ways(&site, permission)
+    } else {
+        frame.ways(&site, permission)
+    };
     if kept_to_its_owner {
         // Used by its first owner alone, as an owner: what the page names for anybody else counts
         // for nothing while the policy holds, an admin's override among it.
@@ -303,7 +371,7 @@ pub fn access(
         .iter()
         .any(|way| matches!(way, Through::Owner | Through::SystemAdmin));
     let mut each = Vec::new();
-    if permission == Permission::ProviderUse && !unlimited {
+    if permission.has_provider_options() && !unlimited {
         for found in &in_use {
             each.push(Allowance {
                 entry: Some(found.entry.id),
@@ -336,7 +404,7 @@ pub fn access(
 /// The allowances of a use that no entry narrows: one, of no entry, for a provider; none for a
 /// resource whose options are not decided one entry at a time.
 fn unlimited_each(permission: Permission) -> Vec<Allowance> {
-    if permission == Permission::ProviderUse {
+    if permission.has_provider_options() {
         vec![Allowance {
             entry: None,
             provider: ProviderUse::unlimited(),
@@ -358,6 +426,7 @@ fn manage_of(kind: ResourceKind) -> Option<Permission> {
         ResourceKind::McpServer => Some(Permission::McpManage),
         ResourceKind::Mount => Some(Permission::MountManage),
         ResourceKind::Skill => Some(Permission::SkillManage),
+        ResourceKind::Pool => Some(Permission::PoolManage),
         ResourceKind::Environment => None,
     }
 }
@@ -419,6 +488,17 @@ pub async fn usable(
     node: Option<Id>,
     policies: &Policies,
 ) -> Result<Usable, Error> {
+    usable_for_subject(conn, principal, resource, node, policies).await
+}
+
+/// The same ordinary use evaluator for a sealed account dependency, without creating a caller.
+pub(crate) async fn usable_for_subject<S: FrameSubject>(
+    conn: &mut Conn,
+    principal: &S,
+    resource: Id,
+    node: Option<Id>,
+    policies: &Policies,
+) -> Result<Usable, Error> {
     let mut graph = Graph::default();
     if let Some(node) = node {
         graph.extend(conn, &[node]).await?;
@@ -448,12 +528,13 @@ pub async fn usable(
         return Ok(Usable::Unavailable(unavailable));
     }
     Ok(
-        match access(
+        match access_inner(
             &frame,
             &resource,
             &site,
             path.as_deref(),
             policy.keeps_to_its_owner(&resource),
+            false,
         )? {
             Ok(granted) => Usable::Yes(Box::new(granted)),
             Err(Access::KeptToItsOwner) => Usable::KeptToItsOwner,
@@ -839,6 +920,7 @@ struct ProviderVerdict {
     blockers: Vec<Blocker>,
     /// What they come to, when nothing stops it.
     grant: Option<TurnGrant>,
+    pool_denial: Option<Refusal>,
 }
 
 /// What is judged of a provider: where it lies, the work it is to run and what it is to run.
@@ -857,6 +939,9 @@ struct Judging<'a> {
     /// Where the work is to run, for work that runs in an environment; none for work that runs
     /// in none, which no entry holds to a place.
     at: Option<&'a Whereabouts>,
+    selection: Option<crate::pools::Selection<'a>>,
+    work_node: Id,
+    policies: &'a Policies,
 }
 
 /// Judges the use of a provider for what was chosen, for the person the frame is about.
@@ -873,8 +958,14 @@ async fn judge_provider(
         kept,
         state_matters,
         at,
+        selection,
+        work_node,
+        policies,
     } = *judging;
     let wanted_options = MissingOptions {
+        purposes: Some(vec![
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+        ]),
         services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
@@ -890,19 +981,99 @@ async fn judge_provider(
         lacking: Vec::new(),
         blockers: Vec::new(),
         grant: None,
+        pool_denial: None,
     };
-    let granted = match access(frame, provider, site, Some(path), kept)? {
-        Ok(granted) => granted,
-        Err(Access::KeptToItsOwner) => {
-            verdict
-                .lacking
-                .push(lack(Some(Closed::SubscriptionNotShared), wanted_options));
+    let pooled_models = if selection.is_some() {
+        Some(
+            rows::provider_model(conn, provider.id, chosen.model)
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let mut pool_entry = None;
+    if let Some(selection) = selection {
+        let Some(root) = selection.path.first() else {
+            return Err(Error::Stored(
+                "a pooled request needs its current saved path".into(),
+            ));
+        };
+        if !state_matters {
             return Ok(verdict);
         }
-        Err(Access::None) => {
-            verdict.lacking.push(lack(None, wanted_options));
+        let same_request = match selection.leaf {
+            orch_db::queries::pools::Leaf::Provider { id } => *id == provider.id,
+            orch_db::queries::pools::Leaf::Model { backend } => {
+                backend.offering.as_ref().is_some_and(|offering| {
+                    offering.provider == provider.id && offering.offering == chosen.model
+                })
+            }
+            _ => false,
+        };
+        if !same_request {
+            verdict.pool_denial = Some(Refusal::of(
+                Permission::PoolUse,
+                ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Pool,
+                    id: root.pool_id,
+                },
+                Vec::new(),
+            ));
             return Ok(verdict);
         }
+        let models = pooled_models.as_deref().unwrap_or_default();
+        let groups = models
+            .first()
+            .map_or(&[][..], |model| model.groups.as_slice());
+        let wanted = options::Wanted {
+            model: Some((chosen.model, groups)),
+            effort: chosen.effort,
+            arrangement: chosen.arrangement,
+            at,
+            ..Default::default()
+        };
+        let contribution = crate::pools::provider_choice(
+            conn,
+            frame.principal(),
+            selection.path,
+            selection.leaf,
+            Some(work_node),
+            &wanted,
+            orch_access_contract::permissions::ProviderUsePurpose::Work,
+            policies,
+        )
+        .await?;
+        let Some(contribution) = contribution else {
+            verdict.pool_denial = Some(Refusal::of(
+                Permission::PoolUse,
+                ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Pool,
+                    id: root.pool_id,
+                },
+                Vec::new(),
+            ));
+            return Ok(verdict);
+        };
+        pool_entry = contribution.member_entry();
+    }
+    let granted = if selection.is_some() {
+        None
+    } else {
+        Some(match access(frame, provider, site, Some(path), kept)? {
+            Ok(granted) => granted,
+            Err(Access::KeptToItsOwner) => {
+                verdict
+                    .lacking
+                    .push(lack(Some(Closed::SubscriptionNotShared), wanted_options));
+                return Ok(verdict);
+            }
+            Err(Access::None) => {
+                verdict.lacking.push(lack(None, wanted_options));
+                return Ok(verdict);
+            }
+        })
     };
     if !state_matters {
         return Ok(verdict);
@@ -912,7 +1083,10 @@ async fn judge_provider(
         Some(Unavailable::Deleted) => verdict.blockers.push(Blocker::ProviderDeleted),
         None => {}
     }
-    let models = rows::provider_models(conn, provider.id).await?;
+    let models = match pooled_models {
+        Some(models) => models,
+        None => rows::provider_models(conn, provider.id).await?,
+    };
     let nobody = ProviderUse::default();
     let known = models.iter().find(|model| model.model_name == chosen.model);
     let for_anybody = options::allowed_models(&models, &nobody, chosen.models_allowed);
@@ -949,6 +1123,81 @@ async fn judge_provider(
         at,
         ..options::Wanted::default()
     };
+    if let Some(selection) = selection {
+        let mut arrangements = Vec::new();
+        for allowed in &provider.arrangements {
+            let Ok(arrangement) = allowed.parse::<Arrangement>() else {
+                continue;
+            };
+            if chosen
+                .arrangement
+                .is_some_and(|chosen| chosen != arrangement)
+            {
+                continue;
+            }
+            let full = options::Wanted {
+                arrangement: Some(arrangement),
+                ..wanted
+            };
+            if crate::pools::provider_choice(
+                conn,
+                frame.principal(),
+                selection.path,
+                selection.leaf,
+                Some(work_node),
+                &full,
+                orch_access_contract::permissions::ProviderUsePurpose::Work,
+                policies,
+            )
+            .await?
+            .is_some()
+            {
+                arrangements.push(arrangement);
+            }
+        }
+        if arrangements.is_empty() {
+            let root = selection
+                .path
+                .first()
+                .ok_or_else(|| Error::Stored("a pooled request lost its saved path".into()))?;
+            verdict.pool_denial = Some(Refusal::of(
+                Permission::PoolUse,
+                ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Pool,
+                    id: root.pool_id,
+                },
+                Vec::new(),
+            ));
+            return Ok(verdict);
+        }
+        let models = vec![chosen.model.to_owned()];
+        let efforts = chosen
+            .effort
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        // This describes this one request. No Use, permission entry or reusable admission is made.
+        verdict.grant = Some(TurnGrant {
+            options: ProviderUse {
+                purposes: Some(vec![
+                    orch_access_contract::permissions::ProviderUsePurpose::Work,
+                ]),
+                models: Some(models.clone()),
+                services: Some(vec![]),
+                efforts: Some(efforts.clone()),
+                arrangements: Some(arrangements.clone()),
+                r#where: Some(at.and_then(Whereabouts::name).into_iter().collect()),
+            },
+            entry: pool_entry,
+            models,
+            efforts,
+            arrangements,
+            through: vec![],
+        });
+        return Ok(verdict);
+    }
+    let granted =
+        granted.ok_or_else(|| Error::Stored("a direct request lost its native Use".into()))?;
     let allowing = granted.allowing(&wanted);
     if allowing.is_empty() {
         // The place is what is lacking when an entry would allow the rest without it.
@@ -1028,29 +1277,46 @@ pub async fn place_of(conn: &mut Conn, environment: Id) -> Result<Whereabouts, E
         Some(machine) => orch_db::queries::environment_facts::machine_host(conn, machine).await?,
         None => None,
     };
-    Ok(Whereabouts {
-        environment: Some(environment),
-        host,
-        machine,
-    })
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: Some(environment),
+            host,
+            machine,
+        },
+    )
+    .await
 }
 
 /// Where an environment that is to be made on the host `host` will be: on the host and on its machine.
 pub async fn place_of_host(conn: &mut Conn, host: Id) -> Result<Whereabouts, Error> {
-    Ok(Whereabouts {
-        environment: None,
-        host: Some(host),
-        machine: orch_db::queries::environment_facts::host_machine(conn, host).await?,
-    })
+    let machine = orch_db::queries::environment_facts::host_machine(conn, host).await?;
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: None,
+            host: Some(host),
+            machine,
+        },
+    )
+    .await
 }
 
 /// Where an environment that is to be made as a directory of the machine `machine` will be.
 pub async fn place_of_machine(conn: &mut Conn, machine: Id) -> Result<Whereabouts, Error> {
-    Ok(Whereabouts {
-        environment: None,
-        host: orch_db::queries::environment_facts::machine_host(conn, machine).await?,
-        machine: Some(machine),
-    })
+    let host = orch_db::queries::environment_facts::machine_host(conn, machine).await?;
+    with_pool_locations(
+        conn,
+        Whereabouts {
+            pools: Vec::new(),
+            environment: None,
+            host,
+            machine: Some(machine),
+        },
+    )
+    .await
 }
 
 /// What a person comes to on a provider that is asked about alone, with no model, for work that
@@ -1107,6 +1373,11 @@ pub async fn judge_alone(
         site: site.clone(),
         permissions: vec![Permission::ProviderUse],
         options: Some(MissingOptions {
+            purposes: granted
+                .each
+                .iter()
+                .any(|allowance| allowance.provider.purposes.is_some())
+                .then(|| vec![orch_access_contract::permissions::ProviderUsePurpose::Work]),
             r#where: at.and_then(Whereabouts::name).map(|name| vec![name]),
             ..MissingOptions::default()
         }),
@@ -1181,6 +1452,36 @@ pub async fn check_turn_at(
     ask: &TurnAsk<'_>,
     policies: &Policies,
     at: Option<&Whereabouts>,
+) -> Result<TurnDecision, Error> {
+    // Keep the shared native frame and lending walk out of every caller's poll-frame layout.
+    Box::pin(check_turn_at_inner(conn, author, ask, policies, at, None)).await
+}
+/// The same native turn checks with one current selected pool path, without direct member Use.
+pub async fn check_turn_at_pool(
+    conn: &mut Conn,
+    author: Author<'_>,
+    ask: &TurnAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+    selection: crate::pools::Selection<'_>,
+) -> Result<TurnDecision, Error> {
+    Box::pin(check_turn_at_inner(
+        conn,
+        author,
+        ask,
+        policies,
+        at,
+        Some(selection),
+    ))
+    .await
+}
+async fn check_turn_at_inner(
+    conn: &mut Conn,
+    author: Author<'_>,
+    ask: &TurnAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+    selection: Option<crate::pools::Selection<'_>>,
 ) -> Result<TurnDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.thread]).await?;
     let thread = graph
@@ -1279,9 +1580,15 @@ pub async fn check_turn_at(
             kept,
             state_matters: lacking.is_empty(),
             at,
+            selection,
+            work_node: ask.thread,
+            policies,
         },
     )
     .await?;
+    if let Some(refusal) = verdict.pool_denial.take() {
+        return Ok(TurnDecision::Refused(Box::new(refusal)));
+    }
     lacking.append(&mut verdict.lacking);
     if let Some(site) = &environment_site
         && !uses_environment(&frame, site, &thread.path)
@@ -1463,6 +1770,38 @@ pub async fn check_binding_at(
     policies: &Policies,
     at: Option<&Whereabouts>,
 ) -> Result<BindingDecision, Error> {
+    Box::pin(check_binding_at_inner(
+        conn, principal, ask, policies, at, None,
+    ))
+    .await
+}
+/// The ordinary binding checks, including profile/environment, for one current pooled provider.
+pub async fn check_binding_at_pool(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &BindingAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+    selection: crate::pools::Selection<'_>,
+) -> Result<BindingDecision, Error> {
+    Box::pin(check_binding_at_inner(
+        conn,
+        principal,
+        ask,
+        policies,
+        at,
+        Some(selection),
+    ))
+    .await
+}
+async fn check_binding_at_inner(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &BindingAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+    selection: Option<crate::pools::Selection<'_>>,
+) -> Result<BindingDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.node]).await?;
     let node = graph
         .get(ask.node)
@@ -1556,6 +1895,7 @@ pub async fn check_binding_at(
         lacking: Vec::new(),
         blockers: Vec::new(),
         grant: None,
+        pool_denial: None,
     };
     let chosen_place = match (at, &ask.environment) {
         (Some(_), _) | (None, None) => None,
@@ -1585,9 +1925,15 @@ pub async fn check_binding_at(
                 kept: home_policy.keeps_to_its_owner(resource),
                 state_matters: lacking.is_empty(),
                 at: at.or(chosen_place.as_ref()),
+                selection,
+                work_node: ask.node,
+                policies,
             },
         )
         .await?;
+        if let Some(refusal) = verdict.pool_denial.take() {
+            return Ok(BindingDecision::Refused(Box::new(refusal)));
+        }
         lacking.append(&mut verdict.lacking);
     }
     let mut blockers = std::mem::take(&mut verdict.blockers);
@@ -1678,4 +2024,34 @@ pub async fn check_binding_at(
         provider: verdict.grant,
         created,
     })))
+}
+
+async fn with_pool_locations(conn: &mut Conn, mut at: Whereabouts) -> Result<Whereabouts, Error> {
+    use orch_access_contract::whereabouts::{WhereKind, WhereName};
+    let batch =
+        orch_settings::get::<i64>(conn, orch_settings::Place::System, "pools.read_batch_size")
+            .await
+            .map_err(|error| Error::Stored(error.to_string()))?
+            .ok_or_else(|| Error::Stored("the pool read batch has no default".into()))?;
+    for (kind, leaf) in [
+        (
+            WhereKind::EnvironmentPool,
+            at.environment
+                .map(|id| orch_db::queries::pools::Leaf::Environment { id }),
+        ),
+        (
+            WhereKind::HostPool,
+            at.host.map(|id| orch_db::queries::pools::Leaf::Host { id }),
+        ),
+    ] {
+        if let Some(leaf) = leaf {
+            at.pools.extend(
+                orch_db::queries::pools::structural_pools(conn, &leaf, batch)
+                    .await?
+                    .into_iter()
+                    .map(|id| WhereName { kind, id }),
+            );
+        }
+    }
+    Ok(at)
 }

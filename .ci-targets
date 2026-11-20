@@ -1,0 +1,4 @@
+test -p orch-api-core --lib
+test -p orch-api-core --test resource_groups --test search_names --test call_recovery
+test -p orch-api-core --test thread_access --test announcement_scopes --test schedule_operation_scopes
+test -p orch-api-core --test thread_creator_discovery_scopes --test threads_make --test binding_options

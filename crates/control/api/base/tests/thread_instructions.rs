@@ -241,6 +241,7 @@ async fn the_sources_a_session_was_opened_with_are_shown_as_each_reader_may_see_
         .call(NodeSettingSet, &[&thread, &"agent.instructions"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!("Answer in one line."),
             locked: None,
             expected_revision: None,
