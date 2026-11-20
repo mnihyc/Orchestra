@@ -178,6 +178,7 @@ pub struct ImportChoices {
 pub struct ImportRequest {
     /// A client-generated identity, one to two hundred characters: a repeated request of the same person
     /// names the same import again and makes nothing twice.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// What it is made from.
     pub source: ImportSource,
@@ -721,6 +722,7 @@ pub struct ImportUndoPlan {
 pub struct ImportUndoBody {
     /// A client-generated identity, one to two hundred characters: a repeated request names the same job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: Option<String>,
 }
 

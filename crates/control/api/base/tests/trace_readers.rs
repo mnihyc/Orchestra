@@ -771,7 +771,7 @@ async fn provider_endpoint_history_keeps_only_canonical_hosts_after_changes_and_
         .call(ProviderCreate, &[])
         .token(&ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Model server".to_owned(),
             home_id: org.base.id,
             access: None,

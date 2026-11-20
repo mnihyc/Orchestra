@@ -15,7 +15,7 @@ import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { show } from './support';
 
-const environment = { value: 'environment', name: 'Environment', description: 'Let people work in folders of this machine.' };
+const environment = { value: 'environment', name: 'Environment', description: 'Let people work in directories of this machine.' };
 const node = { value: 'node', name: 'Node', description: 'Let Orch make environments here.' };
 
 describe('compact names in the page, explanations inside open pickers', () => {
