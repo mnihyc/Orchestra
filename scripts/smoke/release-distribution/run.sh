@@ -55,6 +55,12 @@ refuses "the registry tag is absent from the consumer's image list" docker image
 serve_site distribution "$((EDGE_PORT + 2))" "$A" "$GOOD"
 if ORCH_RELEASE_URL="http://127.0.0.1:$((EDGE_PORT + 2))" update_sh latest --yes > "$EVIDENCE/site-update.log" 2>&1; then pass "the fetched release is installed"; else fail "the fetched release is installed"; fi
 expect "the reported version is the fetched release" "${TAG_B#v}" "$(edge_version)"
+if deployment_files_match "$B/orch-deploy-$TAG_B.tar.gz" > "$EVIDENCE/deployment-files.txt" 2>&1; then
+  pass "the files in the fresh installation match the fetched deployment archive"
+else
+  cat "$EVIDENCE/deployment-files.txt" >&2
+  fail "the files in the fresh installation match the fetched deployment archive"
+fi
 check "the updater fetched the manifest" grep -F "fetching http://127.0.0.1:$((EDGE_PORT + 2))/latest/download/version.json" "$EVIDENCE/site-update.log"
 check "the updater pulled the missing registry tag" grep -F "pulling $PULL_REF" "$EVIDENCE/site-update.log"
 check "the pulled image exists" docker image inspect "$PULL_REF"

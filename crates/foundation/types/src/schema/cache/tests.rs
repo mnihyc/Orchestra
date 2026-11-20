@@ -102,6 +102,32 @@ fn concurrent_first_users_share_one_compilation_and_each_checks_its_own_value() 
 }
 
 #[test]
+fn active_declarations_share_grammar_beyond_idle_retention_and_retire_with_their_owners() {
+    let cache = ValidatorCache::new(CacheLimits {
+        entries: 0,
+        schema_bytes: 0,
+    });
+    let rule = json!({"type":"boolean"});
+    let held = cache.prepare(&rule).unwrap();
+    let shared = cache.prepare(&rule.clone()).unwrap();
+    drop(held);
+    assert!(shared.is_valid(&json!(false)));
+    assert!(!shared.is_valid(&json!("false")));
+    cache.check(&rule).unwrap();
+    assert_eq!(compilations(&cache), 1);
+    assert_eq!(retained(&cache), (0, 0));
+    drop(shared);
+    cache.check(&rule).unwrap();
+    assert_eq!(compilations(&cache), 2);
+
+    let malformed = json!({"type":"unknown"});
+    let held = cache.prepare(&malformed).unwrap();
+    assert!(!held.is_valid(&json!(true)));
+    assert!(matches!(cache.check(&malformed), Err(Error::Schema { .. })));
+    assert_eq!(compilations(&cache), 3);
+}
+
+#[test]
 fn least_recently_used_entries_are_bounded_and_eviction_changes_only_reuse() {
     let cache = ValidatorCache::new(CacheLimits {
         entries: 2,
