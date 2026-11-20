@@ -25,7 +25,7 @@ use orch_api_contract::directory::{
     OrgGroupCreate, OrgGroupCreateBody,
 };
 use orch_api_contract::users::UserGet;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{chats, identity, threads};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
@@ -38,13 +38,14 @@ async fn key(world: &World, user: Id, target: Json, allow: Json) -> String {
         }]}))
         .unwrap();
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let stored = serde_json::to_value(policy).unwrap();
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Typed path control",
             token_hash: &hash,

@@ -12,7 +12,7 @@ mod support;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::threads::{ThreadQueueResume, ThreadQueueResumeBody};
 use orch_api_contract::topics::{AnnouncementCreateBody, NodeAnnouncementCreate};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
@@ -51,7 +51,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> (Id, String) {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
@@ -383,6 +383,7 @@ async fn notice_sender(s: &Scene, recipient: Id) {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: s.cai.id(),
                     node: recipient,
                     provider: s.on.provider,
@@ -598,6 +599,7 @@ async fn announcement_input_waits_for_its_receiving_owner_model_use_without_beco
             .provider_use(
                 &mut *s.rig.world.conn().await,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: s.eve.id(),
                     node: recipient,
                     provider: s.on.provider,

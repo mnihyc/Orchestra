@@ -1,0 +1,7 @@
+test -p orch-api-core --test resource_summaries --test summaries
+test -p orch-engine --lib -- summaries::
+test -p orch-engine --test goals -- helper_limits::
+test -p orch-engine --lib -- ask::
+test -p orch-engine --lib -- tools::source::tests::image_services::delegation::
+test -p orch-engine --test preflight -- an_input_held_for_a_tokens_missing_model_scope_does_not_acquire_its_users_full_authority
+test -p orch-engine --test call_recovery --test resource_summaries

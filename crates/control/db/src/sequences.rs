@@ -28,6 +28,16 @@ use sqlx::postgres::{PgListener, PgPoolOptions};
 /// The channel on which a thread's changes are announced; its payload is
 /// `<thread id>:<sequence>`.
 pub const THREAD_CHANNEL: &str = "orch_thread";
+/// Independent accepted Stop state, announced without taking the thread sequence row.
+pub const THREAD_STOP_CHANNEL: &str = "orch_thread_stop";
+
+/// Publish only from admission or post-commit cancellation, never while holding the thread row.
+pub async fn notify_stop(conn: &mut Conn, thread: Id, version: Seq) -> Result<(), DbError> {
+    announce(conn, THREAD_STOP_CHANNEL, &payload(thread, version)).await
+}
+
+/// A committed built-in HTTPS policy changed. The announcement contains no setting values.
+pub const EDGE_CHANNEL: &str = "orch_edge_settings";
 
 /// The next number of a thread's sequence, taken while the thread's row is
 /// locked until the transaction ends, so that numbers are given out in the
@@ -137,12 +147,41 @@ pub async fn notify_epoch(conn: &mut Conn, epoch: i64) -> Result<(), DbError> {
 
 /// Rechecks only this person's live credentials/second-step holds after commit.
 pub async fn notify_identity(conn: &mut Conn, user: Id) -> Result<(), DbError> {
+    advance_personal(conn, &[user]).await?;
     announce(conn, IDENTITY_CHANNEL, &user.to_string()).await
+}
+
+/// The committed personal, Inbox, metadata and authority cuts before a shell read or feed admission.
+/// A read taken at or after an admitted cut is already covered by the live source.
+pub async fn personal_revision(
+    conn: &mut Conn,
+    user: Id,
+) -> Result<Option<(Seq, Seq, Seq, Seq)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT COALESCE(p.seq, 0), i.inbox_seq, m.seq, a.epoch
+           FROM user_inboxes i LEFT JOIN personal_feed_state p ON p.user_id = i.user_id
+           CROSS JOIN public_meta_state m CROSS JOIN authz_state a
+          WHERE i.user_id = $1 AND m.id AND a.id",
+    )
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
+async fn advance_personal(conn: &mut Conn, users: &[Id]) -> Result<(), DbError> {
+    sqlx::query("SELECT orch_personal_mark($1)")
+        .bind(users)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// Announces changed public metadata inputs after commit, without enumerating people.
 /// Each API process tells only its connected personal-feed readers to reread their own Meta.
 pub async fn notify_meta_changed(conn: &mut Conn, request_id: Option<&str>) -> Result<(), DbError> {
+    sqlx::query("UPDATE public_meta_state SET seq = seq + 1 WHERE id")
+        .execute(&mut *conn)
+        .await?;
     let payload = match request_id.filter(|id| !id.is_empty()) {
         Some(id) => serde_json::json!({ "meta_changed": true, "request_id": id }),
         None => serde_json::json!({ "meta_changed": true }),
@@ -171,6 +210,7 @@ pub async fn notify_user_event(
     if per_notice == 0 {
         return Ok(false);
     }
+    advance_personal(conn, users).await?;
     for piece in users.chunks(per_notice) {
         let text = serde_json::json!({ "users": piece, "event": event }).to_string();
         announce(conn, USER_CHANNEL, &text).await?;
@@ -389,6 +429,290 @@ mod tests {
         assert_eq!(parse_payload(&payload(thread, 41)), Some((thread, 41)));
         assert_eq!(parse_payload("nothing"), None);
         assert_eq!(parse_payload(&format!("{thread}:x")), None);
+    }
+
+    #[tokio::test]
+    async fn a_personal_cut_sees_only_committed_changes_and_keeps_unrelated_people_current() {
+        let test = TestDb::fresh().await;
+        let (person, other) = (new_id(), new_id());
+        let mut conn = test.pool.acquire().await.unwrap();
+        insert_user(&mut conn, person, "first").await.unwrap();
+        insert_user(&mut conn, other, "other").await.unwrap();
+        let before = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        let unrelated = personal_revision(&mut conn, other).await.unwrap().unwrap();
+        let mut tx = test.pool.begin().await.unwrap();
+        notify_user_event(&mut tx, &[person], &serde_json::json!({"what":"favorites"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(before)
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(before)
+        );
+        let mut tx = test.pool.begin().await.unwrap();
+        notify_user_event(&mut tx, &[person], &serde_json::json!({"what":"favorites"}))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let after = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        assert_eq!(after, (before.0 + 1, before.1, before.2, before.3));
+        assert_eq!(
+            personal_revision(&mut conn, other).await.unwrap(),
+            Some(unrelated)
+        );
+        let mut tx = test.pool.begin().await.unwrap();
+        notify_meta_changed(&mut tx, None).await.unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(after)
+        );
+        tx.commit().await.unwrap();
+        let changed = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        assert_eq!(changed, (after.0, after.1, after.2 + 1, after.3));
+        assert_eq!(
+            personal_revision(&mut conn, other)
+                .await
+                .unwrap()
+                .unwrap()
+                .2,
+            changed.2
+        );
+
+        let mut tx = test.pool.begin().await.unwrap();
+        sqlx::query("UPDATE user_inboxes SET inbox_seq=inbox_seq+1 WHERE user_id=$1")
+            .bind(person)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(changed)
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some((changed.0, changed.1 + 1, changed.2, changed.3))
+        );
+        assert_eq!(
+            personal_revision(&mut conn, other)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            unrelated.1
+        );
+    }
+
+    #[tokio::test]
+    async fn following_a_thread_and_publishing_an_approval_can_finish_on_the_same_personal_feed() {
+        use crate::queries::{hierarchy, notifications::subscribers};
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let thread = thread(&mut conn).await;
+        let topic: Id = sqlx::query_scalar("SELECT parent_id FROM nodes WHERE id=$1")
+            .bind(thread)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        let person = new_id();
+        insert_user(&mut conn, person, "reader").await.unwrap();
+        let before = personal_revision(&mut conn, person).await.unwrap().unwrap();
+
+        let mut approval = test.pool.begin().await.unwrap();
+        assert!(hierarchy::lock(&mut approval, topic).await.unwrap());
+        let mut creation = test.pool.begin().await.unwrap();
+        assert!(
+            subscribers::follow(&mut creation, person, thread, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+
+        // Birth needs the topic for its access page after following the thread. A concurrent
+        // approval can already hold that topic when it publishes to the same reader.
+        tokio::join!(
+            async {
+                assert!(hierarchy::lock(&mut creation, topic).await.unwrap());
+                creation.commit().await.unwrap();
+            },
+            async {
+                assert!(
+                    notify_user_event(
+                        &mut approval,
+                        &[person],
+                        &serde_json::json!({"what":"approvals"})
+                    )
+                    .await
+                    .unwrap()
+                );
+                approval.commit().await.unwrap();
+            },
+        );
+        assert_eq!(
+            personal_revision(&mut conn, person)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            before.0 + 2
+        );
+        assert_eq!(
+            subscribers::level_of(&mut conn, person, thread)
+                .await
+                .unwrap(),
+            "all"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_readers_cursor_counts_only_the_changes_its_writer_keeps() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let (first, second) = (new_id(), new_id());
+        insert_user(&mut conn, first, "first").await.unwrap();
+        insert_user(&mut conn, second, "second").await.unwrap();
+        let event = serde_json::json!({"what":"favorites"});
+        let mut tx = test.pool.begin().await.unwrap();
+        notify_user_event(&mut tx, &[second, first, first], &event)
+            .await
+            .unwrap();
+        sqlx::query("SAVEPOINT trial")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        notify_user_event(&mut tx, &[second], &event).await.unwrap();
+        sqlx::query("ROLLBACK TO SAVEPOINT trial")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        notify_identity(&mut tx, first).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            personal_revision(&mut conn, first)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            2
+        );
+        assert_eq!(
+            personal_revision(&mut conn, second)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_writers_share_a_commit_order_without_upgrading_identity_rows() {
+        let test = TestDb::fresh().await;
+        let person = new_id();
+        let mut conn = test.pool.acquire().await.unwrap();
+        insert_user(&mut conn, person, "reader").await.unwrap();
+        // Credential admission can retain a shared identity lock while personal data changes.
+        let mut first = test.pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM users WHERE id = $1 FOR SHARE")
+            .bind(person)
+            .fetch_one(&mut *first)
+            .await
+            .unwrap();
+        let mut second = test.pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM users WHERE id = $1 FOR SHARE")
+            .bind(person)
+            .fetch_one(&mut *second)
+            .await
+            .unwrap();
+        notify_user_event(
+            &mut first,
+            &[person],
+            &serde_json::json!({"what":"favorites"}),
+        )
+        .await
+        .unwrap();
+        let writer = tokio::spawn(async move {
+            notify_user_event(
+                &mut second,
+                &[person],
+                &serde_json::json!({"what":"favorites"}),
+            )
+            .await
+            .unwrap();
+            second.commit().await.unwrap();
+        });
+        first.commit().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_sources_move_the_shell_cut_without_treating_connection_bookkeeping_as_a_change()
+     {
+        let test = TestDb::fresh().await;
+        let person = new_id();
+        let mut conn = test.pool.acquire().await.unwrap();
+        insert_user(&mut conn, person, "reader").await.unwrap();
+        let before = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        let mut tx = test.pool.begin().await.unwrap();
+        sqlx::query("UPDATE users SET display_name = 'Changed on another device' WHERE id = $1")
+            .bind(person)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(before)
+        );
+        tx.commit().await.unwrap();
+        let profile = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        assert_eq!(profile.0, before.0 + 1);
+        sqlx::query("UPDATE users SET last_seen_at = now(), updated_at = now(), totp_last_step = 42 WHERE id = $1")
+            .bind(person).execute(&mut *conn).await.unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person).await.unwrap(),
+            Some(profile)
+        );
+        let token = new_id();
+        sqlx::query("INSERT INTO email_tokens (id,user_id,purpose,token_hash,email,expires_at) VALUES ($1,$2,'verify_email',$3,'synthetic@example.invalid',now() + interval '1 day')")
+            .bind(token).bind(person).bind(b"synthetic-email-link".as_slice()).execute(&mut *conn).await.unwrap();
+        let pending = personal_revision(&mut conn, person).await.unwrap().unwrap();
+        assert_eq!(pending.0, profile.0 + 1);
+        sqlx::query("UPDATE email_tokens SET used_at = now() WHERE id = $1")
+            .bind(token)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            personal_revision(&mut conn, person)
+                .await
+                .unwrap()
+                .unwrap()
+                .0,
+            pending.0 + 1
+        );
+        // Cascading cleanup must not try to recreate a missing person's counter.
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(person)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(personal_revision(&mut conn, person).await.unwrap(), None);
     }
 
     #[test]
