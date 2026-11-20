@@ -142,10 +142,7 @@ export function formatRate(bitsPerSecond: number, locale: string): string {
 export function machineLinkWords(link: MachineLink | null, t: TFunction, locale: string): string {
   const missing = '–';
   if (link === null) return missing;
-  if (link.roundTripMs !== null && link.upBps !== null && link.downBps !== null) return t('machines.overview.linkValue', {
-    trip: formatNumber(link.roundTripMs, locale), up: formatRate(link.upBps, locale), down: formatRate(link.downBps, locale),
-  });
-  return t('machines.overview.linkPartial', {
+  return t('machines.overview.linkValue', {
     trip: link.roundTripMs === null ? missing : t('machines.overview.linkTrip', { value: formatNumber(link.roundTripMs, locale) }),
     up: link.upBps === null ? missing : formatRate(link.upBps, locale),
     down: link.downBps === null ? missing : formatRate(link.downBps, locale),

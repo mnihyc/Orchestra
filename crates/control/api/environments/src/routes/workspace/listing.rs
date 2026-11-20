@@ -153,7 +153,15 @@ pub async fn mark_cached(
     environment: Id,
     mount: Option<&str>,
     entries: &mut [DirEntry],
+    allowed: orch_access_contract::permissions::FileReach,
 ) -> ApiResult<()> {
+    if orch_engine::transfers::relay_on(conn, orch_settings::Place::Environment(environment)).await
+    {
+        for entry in entries {
+            entry.cached = false;
+        }
+        return Ok(());
+    }
     let keys: Vec<String> = entries
         .iter()
         .filter(|entry| entry.kind == DirEntryKind::File)
@@ -162,7 +170,7 @@ pub async fn mark_cached(
     if keys.is_empty() {
         return Ok(());
     }
-    let found = storage::cached_among(conn, environment, &keys).await?;
+    let found = storage::cached_among(conn, environment, &keys, allowed).await?;
     for entry in entries
         .iter_mut()
         .filter(|entry| entry.kind == DirEntryKind::File)
@@ -187,6 +195,7 @@ pub fn file_stat(entry: DirEntry, hash: Option<Hash>) -> FileStat {
         (media.to_owned(), crate::media::is_text_by_name(&entry.name))
     };
     FileStat {
+        facts: None,
         entry,
         hash,
         media_type,

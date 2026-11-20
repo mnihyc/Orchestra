@@ -363,7 +363,7 @@ impl Source for Native {
                     .map_err(orch_db::DbError::from)?;
             }
             if let Some(machine) = value.machine {
-                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+                sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                     .bind(machine)
                     .execute(&mut *conn)
                     .await

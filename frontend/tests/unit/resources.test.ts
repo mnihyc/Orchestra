@@ -63,10 +63,10 @@ describe('the facts a connector reports of its machine', () => {
       const partial = readMachineFacts({ rates: { round_trip_ms: 16, up_bps: null, down_bps: null } });
       expect(partial.link).toEqual({ upBps: null, downBps: null, roundTripMs: 16 });
       const words = machineLinkWords(partial.link, i18n.t, locale);
-      expect(words).toBe(i18n.t('machines.overview.linkPartial', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '–', down: '–' }));
+      expect(words).toBe(i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '–', down: '–' }));
       expect(words).not.toContain('0 bit/s');
       const measured = readMachineFacts({ rates: { round_trip_ms: 0, up_bps: 0, down_bps: 0 } });
-      expect(machineLinkWords(measured.link, i18n.t, locale)).toBe(i18n.t('machines.overview.linkValue', { trip: '0', up: '0 bit/s', down: '0 bit/s' }));
+      expect(machineLinkWords(measured.link, i18n.t, locale)).toBe(i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', {value:'0'}), up: '0 bit/s', down: '0 bit/s' }));
     } finally { await setLocale('en'); }
   });
 

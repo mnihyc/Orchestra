@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { LibraryCounts } from '@/features/resources/Library';
 import type { ResourceFacts } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 vi.mock('@/features/people/NamedChip',()=>({KnownNodeChip:({node}:{node:{name:string}})=><span>{node.name}</span>}));
@@ -64,4 +64,31 @@ it('keeps only 50 Given names in the DOM across a 100000-name result and can rea
  await user.click(screen.getByRole('button',{name:'Back to beginning'}));
  expect(await screen.findByText('Visible place 1')).toBeVisible();
  expect(screen.getAllByRole('listitem')).toHaveLength(50);
+});
+
+
+it('opens a pool reference count with the ordinary protected names and keeps missing usage unrecorded',async()=>{
+ const user=userEvent.setup();
+ show(<LibraryCounts facts={{...facts,subject:{kind:'resource',object:{kind:'pool',id:'pool'}},uses:null,
+  dependents:[{relation:'explicit_giving',count:2,hidden:1,until:null,visible:[
+   {object:{kind:'thread',id:'visible'},name:'Uses this pool',relation:'explicit_giving',until:null},
+  ]}]}}/>);
+ await user.click(screen.getByRole('button',{name:'Given 2 places'}));
+ expect(await screen.findByText('Uses this pool')).toBeVisible();
+ expect(screen.getByText('and 1 more')).toBeVisible();
+ expect(screen.queryByText(/Used/)).not.toBeInTheDocument();
+});
+
+
+it('finds a visible pool reference beyond the displayed page using the same protected names',async()=>{
+ const visible=Array.from({length:60},(_,index)=>({object:null,name:`Visible settings place ${index+1}`,relation:'explicit_giving' as const,until:null}));
+ const user=userEvent.setup();
+ show(<LibraryCounts facts={{...facts,subject:{kind:'resource',object:{kind:'pool',id:'pool'}},uses:null,
+   dependents:[{relation:'explicit_giving',count:62,hidden:2,until:null,visible}]}}/>);
+ await user.click(screen.getByRole('button',{name:'Given 62 places'}));
+ expect(screen.queryByText('Visible settings place 60')).not.toBeInTheDocument();
+ await user.type(screen.getByRole('searchbox',{name:i18n.t('library.search')}),'place 60');
+ expect(await screen.findByText('Visible settings place 60')).toBeVisible();
+ expect(screen.getAllByRole('listitem')).toHaveLength(1);
+ expect(screen.getByText('and 2 more')).toBeVisible();
 });
