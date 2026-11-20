@@ -54,7 +54,7 @@ async fn provider_of(firm: &Firm, by: &Who) -> Id {
         .call(ProviderCreate, &[])
         .token(&by.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Team key".to_owned(),
             home_id: firm.desk.org,
             access: None,

@@ -36,9 +36,37 @@ pub(super) fn mapped(error: continuing::Error) -> ApiError {
 impl Opening {
     pub async fn capture(ctx: &Ctx, environment: Id, path: &str) -> ApiResult<Self> {
         let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
-        let source = FileSource::capture(&mut tx, guard.principal().caller(), environment, path)
-            .await
-            .map_err(ApiError::engine)?;
+        let reach = match orch_authz::file_reach::effective(
+            &mut tx,
+            guard.principal(),
+            environment,
+            orch_authz::Policy::default(),
+        )
+        .await
+        {
+            Ok(reach) => reach,
+            Err(error) => {
+                return Err(crate::middleware::authorization::engine_problem(
+                    &mut tx,
+                    guard.principal(),
+                    error,
+                )
+                .await);
+            }
+        };
+        let access = orch_link_contract::commands::FsAccess {
+            view: reach.view,
+            manage: None,
+        };
+        let source = FileSource::capture(
+            &mut tx,
+            guard.principal().caller(),
+            environment,
+            path,
+            access,
+        )
+        .await
+        .map_err(ApiError::engine)?;
         let raw = http_origin::capture_operation(ctx, &mut tx, source.origin()).await?;
         let frame = raw
             .prepare::<Reader>(&mut tx, ctx.app.clock.as_ref(), source.clone())
@@ -54,6 +82,9 @@ impl Opening {
             .check_deadline(ctx.app.clock.as_ref())
             .map_err(mapped)?;
         Ok(Self { source, raw })
+    }
+    pub fn access(&self) -> orch_link_contract::commands::FsAccess {
+        self.source.access()
     }
     pub async fn current(
         &self,
@@ -89,11 +120,25 @@ impl Opening {
         machine: Id,
         body: &B,
     ) -> ApiResult<Result<B::Result, crate::routes::workspace::problems::Failure>> {
-        let mut command = Outgoing::new(orch_types::new_id(), machine, SerialKey::None, body)
-            .map_err(ApiError::internal)?;
-        command.deadline = Some(Time::new(
-            ctx.app.clock.now() + chrono::Duration::seconds(i64::from(B::KIND.deadline_secs())),
-        ));
+        self.run_as(ctx, orch_types::new_id(), machine, body, None)
+            .await
+    }
+    /// A memory relay owns its command identity so a dropped reader can cancel that exact source.
+    pub async fn run_as<B: CommandBody>(
+        &mut self,
+        ctx: &Ctx,
+        id: Id,
+        machine: Id,
+        body: &B,
+        deadline: Option<Time>,
+    ) -> ApiResult<Result<B::Result, crate::routes::workspace::problems::Failure>> {
+        let mut command =
+            Outgoing::new(id, machine, SerialKey::None, body).map_err(ApiError::internal)?;
+        command.deadline = Some(deadline.unwrap_or_else(|| {
+            Time::new(
+                ctx.app.clock.now() + chrono::Duration::seconds(i64::from(B::KIND.deadline_secs())),
+            )
+        }));
         let mut tx = ctx.app.db.begin().await?;
         let frame = self.current(ctx, &mut tx).await?;
         self.raw = frame
@@ -110,6 +155,7 @@ impl Opening {
         let queued = dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine: command.machine,
                     kind: command.kind.as_str().into(),
@@ -153,7 +199,12 @@ impl Opening {
         frame
             .check_deadline(ctx.app.clock.as_ref())
             .map_err(mapped)?;
-        Ok(answer.map_err(crate::routes::workspace::live::command_failure))
+        match answer.map_err(crate::routes::workspace::live::command_failure) {
+            Err(failure) if failure.code() == Some("files.reach_denied") => {
+                Err(failure.problem(crate::routes::workspace::problems::Doing::Reading))
+            }
+            answer => Ok(answer),
+        }
     }
     pub async fn retain(self, ctx: &Ctx) -> ApiResult<()> {
         let mut tx = ctx.app.db.begin().await?;

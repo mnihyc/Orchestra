@@ -391,7 +391,7 @@ async fn enrollment_roles_sections_and_dedication_are_bound_to_the_token_and_eac
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent],
     };
     assert_eq!(
@@ -900,6 +900,61 @@ async fn a_machine_asked_for_its_facts_again_answers_with_them_and_a_machine_tha
         .await
         .problem();
     assert_eq!(stranger.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn policy_applicability_and_authority_follow_the_current_native_roles_and_delegation() {
+    let world = World::new().await;
+    let owner = person(&world, "owner").await;
+    let machine = machine_with_policy(&world, &owner, &["mcp.add"]).await;
+    let before = world
+        .app
+        .call(MachinePolicyGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let before = serde_json::to_value(before).unwrap();
+    let keys = before["limits"]["applicable_keys"]
+        .as_array()
+        .expect("native applicability is reported with the policy");
+    let terminal = keys
+        .iter()
+        .find(|key| key["key"] == "environment.terminal")
+        .unwrap();
+    assert_eq!(terminal["governing_resource"], "environment");
+    assert_eq!(terminal["authority_source"], "physical_operator");
+    assert_eq!(
+        keys.iter().find(|key| key["key"] == "mcp.add").unwrap()["authority_source"],
+        "delegated"
+    );
+    sqlx::query("UPDATE machines SET roles=ARRAY['provider'],revision=revision+1 WHERE id=$1")
+        .bind(machine)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let after = world
+        .app
+        .call(MachinePolicyGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    let after = serde_json::to_value(after).unwrap();
+    assert!(
+        !after["limits"]["applicable_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["key"] == "environment.terminal")
+    );
+    assert!(
+        after["limits"]["applicable_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["key"] == "provider.upstreams")
+    );
 }
 
 #[tokio::test]
@@ -2245,7 +2300,54 @@ async fn a_native_harness_delegation_refusal_keeps_its_policy_key_and_writes_no_
 }
 
 #[tokio::test]
-async fn role_replacements_refuse_stale_revisions_before_dispatch_and_legacy_bodies_still_work() {
+async fn a_moved_native_program_choice_is_not_reported_as_an_outdated_edit_revision() {
+    use orch_api_contract::machine_programs::MachineProgramsCommand;
+    use orch_api_contract::resources::MachineProgramsChange;
+    let world = World::new().await;
+    let owner = person(&world, "program-choice-owner").await;
+    let machine = machine_with_policy(&world, &owner, &["agent.harnesses"]).await;
+    online(&world, machine).await;
+    let request = serde_json::from_value::<MachineProgramsCommand>(json!({
+        "action":"confirm_harness","kind":"codex","path":"/controlled/bin/codex"
+    }))
+    .unwrap();
+    let database = world.db.pool.clone();
+    let native = tokio::spawn(async move {
+        for _ in 0..400 {
+            let changed=sqlx::query("UPDATE commands SET state='failed',error=$2 WHERE machine_id=$1 AND kind='machine.programs' AND state IN ('queued','sent','accepted')")
+                .bind(machine).bind(json!({"code":"conflict","detail":"The discovered program changed","retryable":false}))
+                .execute(&database).await.unwrap().rows_affected();
+            if changed > 0 {
+                return changed;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("no native program command was admitted");
+    });
+    let refused = world
+        .app
+        .call(MachineProgramsChange, &[&machine])
+        .token(&owner.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert_eq!(native.await.unwrap(), 1);
+    assert_eq!(refused.code, ErrorCode::ConflictConcurrentChange);
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action='machine.programs_changed'",
+    )
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audits, 0,
+        "a rejected native selection has no success audit"
+    );
+}
+
+#[tokio::test]
+async fn role_replacements_check_configuration_revisions_and_allow_an_omitted_revision() {
     use orch_api_contract::resources::{MachineGet, MachineRolesSet, MachineRolesSetBody};
     let world = World::new().await;
     let owner = person(&world, "roles-owner").await;
@@ -2304,6 +2406,8 @@ async fn role_replacements_refuse_stale_revisions_before_dispatch_and_legacy_bod
         machine,
         json!({"roles":original.roles,"reconnecting":false}),
     );
+    // A fresh presence report cannot turn the open role choice into an outdated edit.
+    online(&world, machine).await;
     let accepted = world
         .app
         .call(MachineRolesSet, &[&machine])
@@ -2346,7 +2450,7 @@ async fn role_replacements_refuse_stale_revisions_before_dispatch_and_legacy_bod
         machine,
         json!({"roles":original.roles,"reconnecting":false}),
     );
-    let legacy = world
+    let unversioned = world
         .app
         .call(MachineRolesSet, &[&machine])
         .token(&owner.token)
@@ -2358,13 +2462,13 @@ async fn role_replacements_refuse_stale_revisions_before_dispatch_and_legacy_bod
         .await
         .ok()
         .into_full()
-        .expect("an ordinary legacy role replacement keeps its native full acknowledgement");
+        .expect("a role replacement without an expected revision keeps its native acknowledgement");
     native.await.unwrap();
-    assert!(legacy.machine_view.revision > accepted.machine_view.revision);
+    assert!(unversioned.machine_view.revision > accepted.machine_view.revision);
 }
 
 #[tokio::test]
-async fn every_machine_row_write_advances_its_exposed_revision() {
+async fn a_machine_edit_stays_current_through_presence_and_factual_reports() {
     use orch_api_contract::resources::MachineGet;
     let world = World::new().await;
     let owner = person(&world, "revision-owner").await;
@@ -2382,6 +2486,15 @@ async fn every_machine_row_write_advances_its_exposed_revision() {
         .execute(&world.db.pool)
         .await
         .unwrap();
+    online(&world, machine).await;
+    sqlx::query(
+        "UPDATE machines SET connector_version='new connector',rate_up_bps=123,
+        facts=jsonb_set(facts,'{observed}',jsonb_build_object('cpu',0.1),true) WHERE id=$1",
+    )
+    .bind(machine)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
     let after = world
         .app
         .call(MachineGet, &[&machine])
@@ -2390,7 +2503,38 @@ async fn every_machine_row_write_advances_its_exposed_revision() {
         .await
         .ok()
         .revision;
-    assert_eq!(after, before + 1);
+    assert_eq!(after, before, "observations do not stale a pending edit");
+    sqlx::query("UPDATE machines SET name='Renamed machine' WHERE id=$1")
+        .bind(machine)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let renamed = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        renamed.revision,
+        before + 1,
+        "a person's name change is an edit"
+    );
+    sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy,policy.delegated}','[\"machine.roles\"]',true) WHERE id=$1")
+        .bind(machine).execute(&world.db.pool).await.unwrap();
+    let policy_changed = world
+        .app
+        .call(MachineGet, &[&machine])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        policy_changed.revision,
+        renamed.revision + 1,
+        "reported editable policy is still configuration"
+    );
 }
 
 #[tokio::test]

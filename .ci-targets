@@ -1,0 +1,5 @@
+test -p orch-api-core --test binding_options
+test -p orch-engine --lib -- binding::
+web typecheck
+web lint
+web test -- tests/component/binding-lists.test.tsx tests/component/provider-screen-regressions.test.tsx

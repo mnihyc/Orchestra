@@ -3,7 +3,7 @@
 OpenAI Responses wire-protocol implementation.
 
 Codex remote compaction uses `compaction_trigger` inputs on ordinary `POST /responses`.
-The separate `/responses/compact` route is not relayed.
+The stateless `/responses/compact` and `/responses/input_tokens` routes use the same model admission.
 
 The relay of the Responses format of OpenAI: it lets through `POST /responses` and
 `GET /models`, and gates `POST /alpha/search` on the endpoint's native binding and the admitted thread resolution. It presents the key and the endpoint's headers and query as its options say, refuses in

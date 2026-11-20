@@ -11,6 +11,7 @@ import { cx } from '@/ui/cx';
 import { ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
 import { NetworkError } from '@/lib/requests';
+import { ReadAttemptDetails } from '@/ui/ReadAttemptDetails';
 
 /** The read that owns these shapes, including an aggregate's independent initial reads.
  * Non-query waits can keep using the same shapes without reporting a request state.
@@ -18,6 +19,7 @@ import { NetworkError } from '@/lib/requests';
 export interface SkeletonRead {
   data?: unknown;
   failureCount?: number;
+  failureReason?: unknown;
   isFetching?: boolean;
   isError?: boolean;
   error?: unknown;
@@ -45,10 +47,10 @@ export function SkeletonGroup({ children, className, read, reads = [] }: { child
   if (failed !== undefined) return <ErrorState compact error={failed.error}
     message={failed.error instanceof NetworkError ? t('ui.read.failed') : undefined}
     onRetry={failed.refetch === undefined ? undefined : () => { void failed.refetch?.(); }} className={className} />;
-  const retrying = waiting.some((query) => (query.failureCount ?? 0) > 0);
+  const retrying = waiting.find((query) => (query.failureCount ?? 0) > 0);
   return (
     <div role="status" aria-busy className={className}>
-      {retrying ? <StateLine compact message={t('ui.read.retrying')} className="text-text-muted" /> : <span className="sr-only">{t('common.loading')}</span>}
+      {retrying !== undefined ? <StateLine compact message={<ReadAttemptDetails error={retrying.failureReason} fallback={t('ui.read.retrying')} />} className="text-text-muted" /> : <span className="sr-only">{t('common.loading')}</span>}
       {children}
     </div>
   );
