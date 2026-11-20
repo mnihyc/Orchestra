@@ -8,10 +8,10 @@ const row = (id: string, kind: TreeNode['kind'], parent_id: string | null): Tree
 
 describe('a tag in the finder', () => {
   const tag = { id: 'tag-id', name: 'Urgent', node: { id: 'research', kind: 'org' as const, name: 'Research', redacted: false } };
-  it('offers only readable projects in the defining subtree, including a readable child through a private ancestor', () => {
-    const nodes = [row('root', 'org', null), row('research', 'org', 'root'), row('web', 'project', 'research'), row('outside', 'project', 'root'), row('inside', 'project', 'private'), row('thread', 'thread', 'web')];
-    expect(projectsForTag(tag, nodes, [{ id: 'private', parent_id: 'research' }]).map((project) => project.id)).toEqual(['inside', 'web']);
-    expect(projectsForTag(tag, nodes).map((project) => project.id)).toEqual(['web']);
+  it('keeps admitted matches through private ancestry and never promotes context rows into choices', () => {
+    const inside=row('inside','project','private'),web=row('web','project','research');
+    const page={nodes:[inside,web,row('thread','thread','web')],ancestors:[row('outside','project','root')]};
+    expect(projectsForTag(page).map((project)=>project.id)).toEqual(['inside','web']);
   });
   it('writes the selected project and the exact tag as the route’s array filter', () => {
     const url = new URL(pathOf(tagProjectDestination(tag, 'web')), 'https://orch.invalid');

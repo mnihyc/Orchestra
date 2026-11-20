@@ -163,19 +163,21 @@ impl Effect for Imports {
                         &scope,
                         body.directory.as_deref(),
                         &body.name,
+                        body.origin.as_deref(),
                     ) {
                         return Err(ApiError::not_found());
                     }
                     (*input).clone()
                 }
                 None => {
-                    let selected = environment_mcp::select_import(
+                    let selected = environment_mcp::select_import_from(
                         conn,
                         environment,
                         &body.source,
                         scope,
                         body.directory,
                         &body.name,
+                        body.origin.as_deref(),
                     )
                     .await
                     .map_err(policy_error)?;
@@ -335,6 +337,7 @@ async fn forget(ctx: &Ctx, copy: CopyCommand) {
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                content_transit: false,
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().to_owned(),
@@ -406,6 +409,7 @@ impl ApplyOwned for Imports {
                 .dispatcher()
                 .issue_stored_before(
                     StoredCommand {
+                        content_transit: false,
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().to_owned(),
