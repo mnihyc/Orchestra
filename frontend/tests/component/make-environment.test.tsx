@@ -6,8 +6,11 @@ import { ApiError } from '@/api/client';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
 import { i18n, setLocale } from '@/i18n';
 import { useSelectedOrg } from '@/shell/org';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
 import { detailHost, detailTemplate } from './resource-detail-fixtures';
+
+skipOverflowFallback();
 
 const server = vi.hoisted(() => ({
   create: vi.fn<(body: Record<string, unknown>, key: string) => Promise<{ id: string; name: string }>>(),
@@ -16,7 +19,7 @@ const server = vi.hoisted(() => ({
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => server.navigate, useLocation: () => ({ pathname: '/resources/environments', search: {}, searchStr: '' }) }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/environments/DataSources', () => ({
   DataSourcesEditor: () => null,
   madeDataSources: () => ({ workspace: { kind: 'made_by_orch' }, home: { kind: 'made_by_orch' } }),
@@ -109,6 +112,9 @@ it.each(['en', 'zh-CN'] as const)('keeps Who may use it compact and puts every o
   expect(own).toHaveAccessibleDescription(`${about} ${i18n.t('resources.access.admins', { home })}`);
   expect(view.container.querySelector('[data-choice-selected-description]')).toBeNull();
   expect(server.create).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('radio', { name: i18n.t('choiceCatalog.resourceAccess.defaults.name', { home }) }));
+  await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
+  await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ home_node_id: 'beta', access: 'defaults' }), expect.any(String)));
 });
 
 it('keeps a current topic selectable without replacing it with one of the orgs', async () => {
@@ -185,4 +191,12 @@ for (const locale of ['en', 'zh-CN'] as const) it(`retains an unavailable preset
   expect(within(host).getByText(i18n.t('resourceChoices.hostUse'))).toBeVisible();
   await user.click(host);
   expect(server.create).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<MakeEnvironmentDialog onClose={server.close} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('environments.make.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });

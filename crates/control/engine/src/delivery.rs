@@ -567,6 +567,7 @@ impl Engine {
             machine,
             SerialKey::Environment(delivering.environment.id),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: delivering.environment.id,
                 job_id: None,
@@ -756,6 +757,7 @@ impl Phased for Delivery {
             self.machine,
             SerialKey::Environment(self.environment),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: self.environment,
                 job_id: Some(job.id()),

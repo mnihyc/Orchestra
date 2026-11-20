@@ -250,12 +250,11 @@ impl Drop for Api {
 /// An API token of `user`, which never expires; the token as it is given in
 /// `ORCH_TOKEN`.
 pub async fn api_token(db: &Db, user: Id) -> String {
-    let token = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let id = new_id();
+    let token = orch_api_core::middleware::authentication::new_api_token(id);
     let hash = orch_api_core::middleware::authentication::token_hash(&token);
     let mut conn = db.acquire().await.unwrap();
-    rows::insert_api_token(&mut conn, user, &hash)
+    rows::insert_api_token(&mut conn, id, user, &hash)
         .await
         .unwrap();
     token

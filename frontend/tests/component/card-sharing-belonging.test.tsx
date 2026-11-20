@@ -36,9 +36,9 @@ vi.mock('@/api/profile', async (original) => ({ ...await original<typeof Profile
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),
   nodeQuery: (id: string) => ({ queryKey: ['card-home', id], queryFn: calls.home }),
 }));
-vi.mock('@/features/navigation/places', () => ({ PlaceLink: ({ place, children, className }: { place: NodeRef; children: ReactNode; className?: string }) =>
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(), PlaceLink: ({ place, children, className }: { place: NodeRef; children: ReactNode; className?: string }) =>
   <a href={`/org/${place.id}`} className={className}>{children}</a> }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: (...args: unknown[]) => { calls.open(...args); } }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: (...args: unknown[]) => { calls.open(...args); } }));
 
 const previousTheme = document.documentElement.dataset.theme;
 const wasDark = document.documentElement.classList.contains('dark');
@@ -115,7 +115,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     show(<CardSharing target={target} />);
     expect(screen.getByText(i18n.t('linkCards.sharingChecking'))).toBeInTheDocument();
     expect(screen.queryByText(i18n.t('linkCards.sharing', { access: i18n.t('access.general.private') }))).not.toBeInTheDocument();
-    expect(document.body).not.toHaveTextContent(i18n.t('choiceCatalog.resourceAudience.owner.name'));
+    expect(document.body).not.toHaveTextContent(i18n.t('choiceCatalog.resourceAccess.only_me.name'));
     const share = screen.getByRole('button', { name: i18n.t('linkCards.share') }); expect(share).toHaveAttribute('aria-disabled', 'true');
     await userEvent.click(share); expect(calls.open).not.toHaveBeenCalled();
     await act(async () => { finish?.(pageFor('document')); await Promise.resolve(); });
@@ -127,7 +127,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     show(<CardSharing target={target} />);
     await screen.findByText(i18n.t('linkCards.sharingUnavailable'));
     expect(screen.queryByText(i18n.t('linkCards.sharing', { access: i18n.t('access.general.private') }))).not.toBeInTheDocument();
-    expect(document.body).not.toHaveTextContent(i18n.t('choiceCatalog.resourceAudience.owner.name'));
+    expect(document.body).not.toHaveTextContent(i18n.t('choiceCatalog.resourceAccess.only_me.name'));
     expect(screen.getByRole('button', { name: i18n.t('linkCards.share') })).toHaveAttribute('aria-disabled', 'true');
     await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
     await screen.findByText(i18n.t('linkCards.sharing', { access: i18n.t('access.general.defaults', { place: TOPIC.name }) }));
