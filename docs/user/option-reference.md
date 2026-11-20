@@ -1,8 +1,8 @@
 ---
 group: providers
-screens: [/help, /thread/$threadId, /resources/providers/$id]
+screens: [/help, /thread/$threadId, /resources/providers/$id, /settings/interface, /topic/$topicId]
 keywords: [reference, settings, options, states, errors, 参考, 设置, 选项, 状态, 错误]
-summary: Every request option a provider endpoint accepts, and what it changes.
+summary: Shipped request, interface and provider options, and what they change.
 ---
 
 # Option field reference
@@ -11,11 +11,496 @@ An option is offered only where its interface or program declares it. Provider l
 
 ## Entries
 
+Provider revisions describe editable configuration. Factual refreshes, runtime status and learned source metadata keep that revision current; a concurrent configuration edit still makes an explicitly supplied revision stale.
+
 | Reference | Meaning |
 | --- | --- |
-| `option:ask.models.*.model` | The enabled API model’s routing name. Together with provider_id it identifies one allowed Ask model; child lists can narrow the choices while retaining the parent’s order. |
-| `option:ask.models.*.provider_id` | The API provider’s identity for this allowed Ask model. The person and current payer must still be allowed to use that provider and model in the conversation’s organization. |
+| `option:JobRef.clone` | Received bytes and objects for the current source clone and its idle allowance. |
+| `option:CloneProgress.bytes` | Repository transfer bytes received by this attempt. |
+| `option:CloneProgress.objects` | Objects Git has received during this attempt. |
+| `option:CloneProgress.idle_seconds` | Seconds without progress that stop this attempt. |
+| `option:Problem.allowed_upstreams` | Allowed upstream addresses disclosed by the machine-policy refusal only to a current machine manager; an empty list means none, while omission withholds the list. |
+| `option:Problem.field` | The exact request field associated with structured refusal facts; a machine-upstream refusal points to its upstream URL field. |
+| `option:Problem.reason` | A machine_upstream refusal reports the provider.upstreams policy and, for a machine manager, its allowed addresses; a harness_error retains its native startup cause. |
+| `option:Problem.policy` | The exact policy key reported by the deciding gate for a harness or upstream refusal. It stays structured through public error sanitization; the interface names the policy and its recovery act. |
+| `option:AgentRuntime.build` | Exact system-listed artifact for a missing harness. The machine uses the same verified cache as a host, subject to agent.programs and tools.fetch; explicit local programs take precedence. |
+| `option:AgentRuntime.build.name` | The registered harness kind; it must match the selected agent. |
+| `option:AgentRuntime.build.version` | The selected catalogue version, including any profile pin. |
+| `option:AgentRuntime.build.url` | The catalogue artifact address, never a path supplied by the thread. |
+| `option:AgentRuntime.build.sha256` | The exact artifact SHA-256 checked before publication or execution. |
+| `option:AgentRuntime.build.job_id` | Absent for a harness start; only a provisioning job owns tool-download progress. |
+| `option:ProviderDiscoverModels.max_report_bytes` | Captured whole-response allowance for this discovery, including the complete normalized catalogue; resolved from providers.upstream_whole_bytes, whose default is 16 MiB. |
+| `option:UploadSessionPutReply.expires_at` | The idle expiry retained by the receiving carrier after the acknowledged prefix. Progress renews the captured interval; a later default edit does not change an existing session. |
+| `option:UploadSessionCreateBody.to` | The workspace destination selected before any bytes are sent. Omission retains a private upload on the API. File relay chooses the native carrier; the actual machine and incarnation stay bound until this session ends. |
+| `option:UploadDestination.environment_id` | The logical destination environment. Its current Files management and remote-write policy still govern staging and publication. |
+| `option:UploadDestination.path` | The initial workspace-relative path, including the file name. Replace and Keep both choose the final checked path after upload. |
+| `option:UploadDestination.thread` | An optional thread beside which the person is working. It supplies no permission to write the environment. |
+| `option:UploadedBlob.relay` | The verified native upload session when content is staged only at its destination. It grants no retained private attachment source; absence means ordinary stored upload custody. |
+| `option:UploadSessionCompletion.file` | The actual verified file receipt in the ready alternative. Pending verification has no file receipt. |
+| `option:UploadSessionCompletion.retry_after_ms` | The resolved file-relay retry pause before checking native verification again. Asking again does not resend accepted bytes. |
+| `option:EnvironmentUploadWriteBody.relay` | The verified native session for this workspace write. The job prepares without the environment key, then publishes after checking the target version; omission uses an authorized retained blob. |
+| `option:FetchState.reason` | Why the selected file cannot be read: offline for a live relay, offline_not_cached for cached mode without a retained version, ignored, too_large or not_found. Pending source hashing stays fetching until its native completion or failure. |
+| `option:CredentialForm.expires` | An access-token copy expires at the time its issuer reports for that copy, even when no fixed duration is declared. It carries no renewal credential. |
+| `option:ArrangementConsentForm.expires` | The shared credential has an expiry reported by its sign-in; an absent fixed lifetime is not a promise that it lasts indefinitely. |
+| `option:TokenCreated.token` | The API key secret, shown once: opat_, the key’s own lowercase hyphenated UUID, an underscore, 43 unpadded base64url characters holding 256 random secret bits, and a six-character zero-padded Base62 CRC-32/ISO-HDLC checksum over all preceding text. Older opaque forms are refused. |
+| `option:TokenCreateReceipt.token` | The same canonical identity-bound API key as TokenCreated.token, shown once in an acknowledgement; null on a repeated creation. |
+| `option:CreateProvider.runtime_location` | The connection location: a new container using its host/template choices, a person’s machine, or an existing environment the caller may use. Environment connections follow its availability and persistent home. |
+| `option:ProviderConnectionLocation.kind` | container, machine or environment selects one location through the same control. |
+| `option:ProviderConnectionLocation.machine_id` | The selected machine for a machine location; its declared connection services and current Use authority apply. |
+| `option:ProviderConnectionLocation.environment_id` | The selected logical environment. Its current own connector supplies the connection after a move or rebuild; credentials placed there are readable to its agents and terminal users. |
+| `option:ProviderSetup.environments` | Existing environments the caller may use, with actual connector services; unavailable choices retain their reason. |
+| `option:ProviderSetupEnvironment.environment` | The environment name and current state for the connection location choice. |
+| `option:ProviderSetupEnvironment.connector` | The current own connector and declared services; absent when no own connector exists. |
+| `option:Provider.connection_environment` | The environment keeping this connection, including stopped or removed state. A separately selected credential keeper remains independent. |
+| `option:ProviderListQuery.connection_environment_id` | List readable providers whose connection belongs to this environment. |
+| `option:AgentRuntime.environment_home` | Keep an environment-hosted connection’s own harness home under that environment’s persistent home, so ordinary home transfer carries it. An explicitly chosen existing directory remains explicit. |
+| `option:FileRenameResult.kept_entries` | Entries observed left at the source after a cross-filesystem move, including their containing directories. Only copied entries whose identity and version still match are removed, children first; ignored, new or changed entries stay. An unreadable subtree counts once. Filesystems without stable file identities keep the source copy. |
+| `option:ProviderStartStopBody.force` | Stop a provider even while its own work is stuck. Other work and running turns can still require a separate decision. The record stops at once; the host is told again until it confirms. |
+| `option:HostRuntimeStopBody.force` | Apply the same forced-stop behavior to a provider runtime from its host page. Environment runtimes do not support this option and return an explicit refusal. |
+| `option:HostRuntimeDeleteQuery.force` | End the provider’s own work that prevents deletion, then remove its runtime with the chosen volume treatment. Work that has committed and a replaced runtime keep their explicit safeguards. |
+| `option:ProviderRuntime.detail` | The reason for the runtime’s current state. A forced stop says that host confirmation is pending, then becomes the ordinary person-requested stop once the host confirms. Host-supplied diagnostics remain the host’s own words. |
+| `option:native_model.program_output.max_output_tokens` | The admitted program model step’s output allowance in tokens. It stays with that request across process restarts. |
+| `option:native_model.program_output.schema` | The response schema supplied by the model consumer when its adapter enforces structured output. It grants no source access or tool authority. |
+| `option:BackendRef.config.environment_id` | For program-session backends without a source thread environment, the exact environment to admit. Ordinary thread work always keeps its real environment and directory; no first-online environment is selected. |
+| `option:BackendRef.config.helper_topic_id` | An existing topic in the source governance root for a program helper when its real source has no topic. A source topic takes precedence. Placement grants no creator, environment or provider permission. |
+| `option:CapabilityBackendQuery.place` | The actual node for a capability backend preview. Omit it only when choosing a global summary or Ask model policy; that reads provider metadata and current Use, without claiming source policy, placement or caps. Actual work always checks its own source. |
+| `option:SummaryModelChoice.backend` | The complete backend for one explicitly requested summary, including its route, sign-in, model and placement. A retry retains that choice and its options; no API-only identity is reconstructed. |
+| `option:SummarySnapshot.problem.reason.source_changed` | The source changed after model work may have begun. Keep the prior paragraph; Summarize again is a new explicit paid act. |
+| `option:SummarySnapshot.problem.reason.settings_changed` | The accepted summary policy changed. Keep the prior paragraph and review the current choice before asking again. |
+| `option:SummarySnapshot.problem.reason.content_changing` | The source exhausted its configured unpaid rereads before model admission. Keep the prior paragraph and wait for stable content or ask again deliberately. |
+| `option:SummarySnapshot.program` | Retained subscription execution facts. The ordinary helper and its owner appear only with current helper Read; the actual sign-in and its plan appear only with current provider Read. Opening these facts performs no model work. |
+| `option:SessionOpen.program_work.input_files` | Content hashes of frozen images that the selected model receives by file. The connector verifies their bytes and stages them under hash-derived names in the disposable unit. |
+| `option:DriverDescriptor.program_units` | This placement's actual support and unavailable reason for isolated capability units. A restricted proxy and an enforced network boundary are required; another placement's support grants nothing here. |
+| `option:TicketWanted.program.expires_at` | The original work's absolute deadline for its private program channel. Re-signing a stored command cannot extend it or grant source Read. |
+| `option:ProgramPlacement.environment_id` | The explicit environment reference of a threadless program consumer. Null leaves placement unset; a missing, malformed or empty reference cannot start work. |
+| `option:ProgramPlacement.helper_topic_id` | The explicit helper topic when the producer has no actual topic. It must belong to the producer governance root. Provider credentials and arbitrary program input are not placement fields. |
+| `option:CapabilityFailure.reason.program_sign_in_changed` | The opened private program context belongs to a previous native sign-in. A fresh request can use the current sign-in. |
+| `option:Resolution.reason.program_unit_unavailable` | The selected sign-in has no available node for an isolated capability unit. |
+| `option:Resolution.reason.program_unit_network_unavailable` | The node driver needs a restricted provider proxy and an isolated network to run this capability. |
+| `option:SummaryWait.reason.usage_measurement` | Automatic subscription work waits for a current plan measurement before it can apply the chosen reserve. |
+| `option:SummaryWait.reason.plan_reserve` | Automatic subscription work waits while an applicable window is at or below its configured reserve. The previous paragraph stays readable. |
+| `option:Resolution.reason.program_placement_invalid` | The selected program backend contains malformed placement references or fields that do not belong in placement. Correct the choice; the backend is retained and no alternative sign-in or environment is selected automatically. |
+| `option:Support.execution` | The actual program adapter reports implemented input/result codecs and verified streaming, read-tool bridge and confinement support. A delegated mode or provider name alone proves none of them. |
+| `option:Route.execution` | Required input/result codecs and execution facilities for this route. Preview and execution both require matching installed code; choosing a route starts no work. |
+| `option:ResolvedRoute.execution` | The exact declared consumer requirements retained with the selected route until execution. They are technical requirements, not credentials or access grants. |
+| `option:ExecutionSupport.input` | The exact input codec identifier understood by the installed adapter. Different request shapes need their actual codec. |
+| `option:ExecutionSupport.result` | The exact result codec identifier. A text answer, viewed file or attached image does not prove another result family. |
+| `option:ExecutionSupport.streaming` | True only when native incremental events and durable replay are implemented; required by consumers that stream answers. |
+| `option:ExecutionSupport.read_tools` | True only when a source-bound read-tool bridge is implemented. This does not grant source Read. |
+| `option:ExecutionSupport.confined_tools` | True only when native execution is verified to confine tools to the admitted consumer catalogue. An instruction asking the program to behave is insufficient. |
+| `option:Resolution.reason` | A safe reason why the chosen capability route is unavailable. execution_codec_unavailable means its installed executor lacks a required codec or facility; program_execution_unavailable means the native adapter has not verified this consumer. No other provider is selected automatically. |
+| `option:ExportLimits.max_file_bytes` | The current server allowance for one exported file, shown beside the archive allowance in the plan. A larger file is omitted and reported; this does not raise or replace the place's total archive allowance. |
+| `option:ExportJobResult.omitted_items` | The completed archive's actual omission count. Unknown stays unknown when final metadata cannot be read. A ready archive with omissions says Partial; its download keeps the omission report, also offered beside it when the saved report is available. |
+| `option:SystemComponent.issue` | A diagnosed operational issue beside the service's existing reason. It does not replace its own detail or imply that the API has stopped serving. |
+| `state:SystemComponentIssue.metrics_listener_unavailable` | The API could not bind its optional metrics listener. Management names this beside the API's status; the API keeps serving, and certificate renewal and backup-record reconciliation continue unchanged. |
+| `option:MetricSeries.resolution` | The chart names whether its returned readings come from minute or hourly stored data. This does not claim complete history, an oldest retained boundary, or one point per raw sample. |
+| `option:ThreadQueue.eligibility` | The existing preflight’s checked selection, not the first loaded message. No read reserves work. |
+| `option:QueueEligibility.input_ref` | The exact selected pending input, never a bare display identifier. |
+| `option:QueueEligibility.safe_author` | Original author under the current safe person projection. |
+| `option:QueueEligibility.safe_authority` | The actual person whose authority was checked, which can differ from the author. |
+| `option:QueueEligibility.blocking_reason` | The typed thread-wide condition that still prevented this eligible input from starting. |
+| `option:QueueEligibility.evaluated_at` | When this actual eligibility observation was captured. |
+| `option:QueueEligibility.queue_revision` | The queue revision checked by this observation; dependency or queue changes make it unreported until rechecked. |
+| `state:QueueEligibility.selected` | An actual pending input passed the checked per-person rules. |
+| `state:QueueEligibility.none` | The checked queue had no eligible input; this is not an inference from an empty loaded page. |
+| `state:QueueEligibility.unreported` | The observation is missing or invalidated. Opening Details does not rerun preflight. |
+| `option:Turn.start_wait` | Captured policy and absolute deadline for this exact admitted native start; missing records stay unreported. |
+| `option:ThreadStartWait.stage` | Native acceptance, native start confirmation, or actual event-ingestion grace. |
+| `option:ThreadStartWait.began_at` | When the server entered this observed stage. |
+| `option:ThreadStartWait.deadline` | This admission’s actual absolute deadline. A finite calendar overflow is not indefinite waiting. |
+| `option:ThreadStartWait.after_millis` | Captured finite stage allowance where milliseconds can represent it. |
+| `option:ThreadStartWait.admitted_default_source` | Setting scope recorded at admission, never replaced with a later effective default. |
+| `option:ThreadStartWait.closed_at` | Confirmed native start or terminal time closes this wait; old receipts do not describe later work. |
+| `state:ThreadStartWaitStage.acceptance` | Waiting for the native start command to be accepted. |
+| `state:ThreadStartWaitStage.start` | Acceptance succeeded; the native start event is still awaited using the captured latest-acceptance bound. |
+| `state:ThreadStartWaitStage.events` | The session’s native events are still being ingested, within the captured extra grace. |
+| `option:Approval.delivery` | Native decision delivery is separate from the accepted decision. Old missing receipts are not assumed applied. |
+| `option:ApprovalDelivery.recipient_kind` | The actual destination kind; no other person’s delivery route is disclosed. |
+| `option:ApprovalDelivery.state` | Pending, acknowledged applied, or unknown after delivery could not be confirmed. |
+| `option:ApprovalDelivery.last_attempt_at` | Last actual new delivery attempt, not a later read or replay of the same command. |
+| `option:ApprovalDelivery.problem` | Typed delivery problem; it does not rewrite the person’s accepted answer or expose native private text. |
+| `state:ApprovalDeliveryRecipient.native_harness` | The native harness receives this retained decision. |
+| [Decision accepted · Delivery pending](state-reference.md#state:ApprovalDeliveryState.pending) | The decision is accepted and delivery remains due until a native acknowledgement. |
+| [Applied](state-reference.md#state:ApprovalDeliveryState.applied) | The native delivery command acknowledged success. |
+| [Decision accepted · Delivery unknown](state-reference.md#state:ApprovalDeliveryState.unknown) | Delivery was not confirmed; this is not a claim that the decision was lost. |
+| `state:ApprovalDeliveryProblem.rejected` | The native request could not accept this decision. |
+| `state:ApprovalDeliveryProblem.timed_out` | The actual delivery command deadline passed. |
+| `state:ApprovalDeliveryProblem.cancelled` | The delivery command was cancelled. |
+| `state:ApprovalDeliveryProblem.delivery_failed` | The attempt could not confirm native receipt. |
+| `option:InputSchedule.timing_policy` | Typed rules for the current schedule preview, separate from old occurrence receipts. |
+| `option:InputScheduleRun.outcome.timing_policy` | The actual rules captured when this occurrence was decided, independent of later timing edits. |
+| `option:InputScheduleOccurrenceOutcome.timing_policy` | Captured rules for this occurrence; absent rules remain unreported. |
+| `option:InputTimingPolicy.clock` | Civil, UTC cron, or a fixed chosen instant. |
+| `option:InputTimingPolicy.repeated_time` | Recurring civil folds use the earlier instant; once schedules keep the explicitly chosen instant. |
+| `option:InputTimingPolicy.missing_time` | Recurring civil gaps are skipped; invalid once times are refused. UTC has no civil gap. |
+| `option:InputTimingPolicy.overdue` | A recurring backlog coalesces to the latest occurrence; a once schedule has one occurrence. |
+| `option:InputTimingPolicy.paused_dates` | Paused dates are not replayed when a schedule resumes. |
+| `state:InputTimingClock.fixed_instant` | The explicitly chosen absolute instant. |
+| `state:InputTimingClock.civil` | Recurring local date/time in the authored zone. |
+| `state:InputTimingClock.utc` | Cron is evaluated in UTC. |
+| `state:InputTimingFold.explicit_instant` | The author chose the instant explicitly. |
+| `state:InputTimingFold.earlier_instant` | A recurring repeated time occurs once at its earlier instant. |
+| `state:InputTimingFold.not_applicable` | No civil repeated-time rule applies. |
+| `state:InputTimingGap.refused` | Invalid authored once times cannot be saved. |
+| `state:InputTimingGap.skipped` | A nonexistent recurring local time is recorded as skipped. |
+| `state:InputTimingGap.not_applicable` | No civil missing-time rule applies. |
+| `state:InputTimingOverdue.single_occurrence` | The schedule has one occurrence. |
+| `state:InputTimingOverdue.latest_occurrence` | Earlier overdue occurrences coalesce into the latest due one. |
+| `state:InputTimingPause.not_replayed` | Paused dates do not replay on resume. |
+| `option:ThreadInput.delivery_resolution` | Original requested/applied delivery, captured only when this input actually used a fallback. |
+| `option:AnnouncementPayload.delivery_resolution` | The same captured delivery resolution beside the retained announcement, independent of later edits. |
+| `option:InputDeliveryResolution.requested` | The original requested delivery, never inferred from current capabilities. |
+| `option:InputDeliveryResolution.applied` | The applied input mode; this does not certify native receipt. |
+| `option:InputDeliveryResolution.reason` | Captured typed fallback cause. |
+| `option:InputDeliveryResolution.source` | The explicit send choice or effective setting origin captured at acceptance. |
+| `option:InputDeliveryResolution.resolved_at` | When the receiver accepted this delivery decision. |
+| `option:InputFallbackOrigin.value` | Captured fallback value, retained even after policy changes. |
+| `option:InputFallbackOrigin.scope` | Captured setting scope; unchecked ancestor identities remain private. |
+| `state:InputFallbackOrigin.request` | The sender explicitly chose this fallback for the send. |
+| `state:InputFallbackOrigin.setting` | The effective broadcast fallback setting supplied this choice. |
+| `state:InputDeliveryResolutionReason.steer_unavailable` | No steering was available in this actual receiving turn. |
+| `state:InputDeliveryResolutionReason.steer_unavailable_and_reach_limited` | Steering was unavailable and the sender could not interrupt this turn. |
+| `option:MarkerSessionReopened.outcome` | Confirmed native result of this exact opening; an earlier intent or an old record does not claim a successful resume. |
+| `option:MarkerAgentHistory.outcome` | Reconstruction confirmed by an accepted native import or actual handoff delivery, kept with this history record. |
+| `option:Segment.session_outcome` | Last confirmed outcome for inspection; never evidence that the native conversation is still alive now, and never a substitute for an old marker’s own facts. |
+| `option:NativeSessionOutcome.kind` | A verified resume and an applied recorded-history reconstruction are distinct outcomes. |
+| `option:NativeSessionOutcome.reason` | Known recorded reopen cause; absent means it was not reported. |
+| `option:NativeSessionOutcome.carried_method` | Actual reconstruction method; not applicable to a native resume that carries no replacement history. |
+| `option:NativeSessionOutcome.coverage` | Recorded turn selection and a delivered transcript file have separate coverage, without claiming completeness of raw native events or original output bytes. |
+| `option:NativeSessionOutcome.coverage.recorded_turns` | All or a suffix of the recorded turns was represented; a summary without captured selection says not reported. |
+| `option:NativeSessionOutcome.coverage.transcript_file` | Coverage of the full recorded transcript actually made available to the new session; native-only import does not claim a file transfer. |
+| `option:NativeSessionOutcome.at` | Server observation of the successful native acknowledgement or actual reconstruction delivery. |
+| `state:NativeSessionOutcomeKind.verified_resume` | The native program acknowledged resuming the retained identity. |
+| `state:NativeSessionOutcomeKind.reconstructed` | The recorded conversation was actually imported or its handoff delivered. |
+| `state:SessionHistoryCoverage.complete` | All recorded turns of this selected range were represented, or the whole recorded transcript was supplied. |
+| `state:SessionHistoryCoverage.partial` | Only the recorded newest suffix was represented. |
+| `state:SessionHistoryCoverage.not_applicable` | This result did not carry that kind of material. |
+| `state:SessionHistoryCoverage.not_reported` | This retained result did not capture that coverage; it is not silently treated as complete. |
+| `option:Turn.offline_episode` | The current or last captured outage of this exact turn; absence means not reported, not indefinite waiting. |
+| `option:ThreadOfflineEpisode.began_at` | The recorded start of this outage, independent of later setting edits or API restarts. |
+| `option:ThreadOfflineEpisode.deadline` | Tagged finite or indefinite policy captured for this actual outage. |
+| `option:ThreadOfflineEpisode.deadline.after_seconds` | Captured finite duration, with no added upper cap. A calendar overflow does not change it into indefinite waiting. |
+| `option:ThreadOfflineEpisode.deadline.at` | Captured absolute deadline where representable; otherwise the finite duration remains explicit. |
+| `option:ThreadOfflineEpisode.policy_source` | The captured setting-source scope; unchecked private ancestor identities are not disclosed. |
+| `option:ThreadOfflineEpisode.episode_revision` | Changes only for a new outage of this turn, so a duplicate offline report does not retime it. |
+| `option:ThreadOfflineEpisode.closed_at` | When this observation stopped being current; it is not proof that native work ended. |
+| `state:OfflineEpisodeDeadline.finite` | A captured finite duration and its representable deadline. |
+| `state:OfflineEpisodeDeadline.indefinite` | This outage was explicitly captured without a deadline. |
+| `option:RetainedInput.id` | The original input identity; it is not a manufactured native Item. |
+| `option:RetainedInput.continuation_id` | The input’s owning suffix under the selected read projection. Reading it does not select execution. |
+| `option:RetainedInput.author` | Original sender through the current safe person reference; missing names are not replaced with identifiers. |
+| `option:RetainedInput.submitted_at` | Original submission time for display, independent of its anchor-based position. |
+| `option:RetainedInput.native_action` | The explicit native action retained with the original input; the same input visibility still applies. |
+| `option:RetainedInputContinuation.after_item` | The anchor whose retained inputs continue, or the position before all items. |
+| `option:RetainedInputContinuation.cursor` | Opaque ordinary timeline continuation for the same anchor and observed history cut. Opening it neither repeats Items nor runs work. |
+| `option:InputScheduleRun.outcome` | Captured occurrence decision; omission means not reported. It is separate from the input’s later queued, held, started or failed state. |
+| `option:InputScheduleRun.outcome.reason_code` | Typed acceptance, pending-input skip, nonexistent civil time, ended schedule or admission refusal. Never inferred from an English sentence. |
+| `option:InputScheduleRun.outcome.coalesced_count` | Earlier occurrences actually combined into this accepted input; zero adds no coalescing note and a skip never claims an accepted input. |
+| `option:InputScheduleRun.outcome.scheduled_for` | The recorded occurrence instant; null for a nonexistent local time. Later schedule edits do not replace it. |
+| `option:InputScheduleRun.outcome.zone` | Time zone captured for this occurrence, independent of the schedule’s current definition. |
+| `option:InputScheduleRun.outcome.accepted_input_ref` | Accepted input identity only while its destination is currently readable; otherwise withheld. |
+| `option:ThreadInput.cancellation` | Retained cancellation cause, time and actor. Missing facts are not guessed from current permissions or defaults. |
+| `option:InputCancellation.cause` | The actual recorded reason: access changed, a person removed it, Stop, edited away, superseded, thread ended, or the selected source became unavailable. A held Stop queue is not a cancellation. |
+| `option:InputCancellation.at` | The recorded cancellation instant, not the time the reader opened the conversation. |
+| `option:InputCancellation.by` | The recorded actor through the current safe person reference; absent for an automatic outcome or an unshared identity. |
+| `option:ThreadSync.retained_inputs` | Cancelled authored inputs in this opening or sync, separate from Items and valid even with no native segment. Their existing input visibility still applies. |
+| `option:ThreadSync.retained_inputs_next` | Intent-read continuations for anchor groups that do not fit the window’s shared byte allowance. |
+| `option:ThreadItemListReply.retained_inputs` | Retained inputs owned by this page’s anchors, each returned once in an ordinary cursor walk. |
+| `option:ThreadItemListReply.retained_inputs_next` | More input records for each returned anchor, without repeating the Item body. |
+| `option:ThreadItemListQuery.retained_inputs_cursor` | Continue one retained-input group through the ordinary timeline reader; current thread/history authorization is checked again. |
+| `option:RetainedInput.after_item` | Last preceding conversation Item, or no anchor before all Items. Clients use the anchor and recorded input order, never clock comparisons. |
+| `option:RetainedInput.seq_created` | Immutable submission order among inputs sharing an anchor. |
+| `option:RetainedInput.seq_updated` | Outcome revision used to merge live cancellation once. |
+| `option:RetainedInput.outcome` | Captured cancellation facts; null means the reason and time were not reported. |
+| `option:RetainedInput.parts` | Original authored parts under the input’s existing visibility, without manufacturing native delivery. |
+| `option:ThreadData.retained_inputs` | Live retained input records from the same currently authorized thread projection. |
+| `option:ThreadData.retained_inputs_next` | Retained-input continuations accompanying the same authorized live cut. |
+| `state:InputScheduleOccurrenceReason.accepted` | An ordinary input was accepted; coalescing remains an independent recorded count. |
+| `state:InputScheduleOccurrenceReason.previous_input_pending` | This occurrence was skipped because the previous input still waited. |
+| `state:InputScheduleOccurrenceReason.nonexistent_local_time` | The captured local time did not exist in its time zone. |
+| `state:InputScheduleOccurrenceReason.schedule_ended` | The accepted schedule allowance ended before this claim. |
+| `state:InputScheduleOccurrenceReason.admission_failed` | Current admission refused this occurrence; its actual problem remains separate. |
+| `state:InputCancellationCause.access_changed` | The original author can no longer send to this thread. |
+| `state:InputCancellationCause.person` | A person explicitly removed the queued input. |
+| `state:InputCancellationCause.stop` | A Stop actually cancelled this input; queue holding alone does not qualify. |
+| `state:InputCancellationCause.edited_away` | An accepted edit removed this input from future work. |
+| `state:InputCancellationCause.superseded` | Another accepted input replaced this one. |
+| `state:InputCancellationCause.thread_ended` | The thread ended before taking this input. |
+| `state:InputCancellationCause.source_unavailable` | The selected source was removed or disabled. The cancelled words remain in the conversation; this does not claim the thread itself ended. |
+| `option:TurnLost.reason` | The connector’s explanation of the lost turn. |
+| `option:TurnLost.turn_id` | Identifies the admitted turn the connector could no longer follow after restart. |
+| `option:ThreadSideCreateBody.acting` | Choose an independent session that can act in the parent workspace. Omit for a verified read-only side. |
+| `option:ThreadSides.acting` | The parent has a bound agent, provider and environment for an acting side session. The ordinary side-thread policy also applies. |
+| `option:NoticeDecision.requested_but_suppressed` | True for a withheld turn notice when the reader had manually followed at a matching level, allowed that notice kind and was away from the thread at the decision. |
+| `option:AskMoveOutPlan.preflight_id` | A caller-owned review of the full built-in conversation copy and original native Delete. Confirmation rechecks current Copy, Export, destination creation, ownership and every deleted resource. |
+| `option:AskMoveOutPlan.delete_plan` | The same native original-deletion footprint used by other thread moves. A changed footprint requires a fresh review and creates no copy. |
+| `option:AskMoveOutPlan.open_side_threads` | Independent open sides that must be closed or kept before moving their main conversation. Names follow current View authority. |
+| `option:AskMoveOutBody.preflight_id` | Confirms that review atomically, preserving the built-in program, copying all conversation history, applying destination access defaults and choosing destination governance. A creation retry acknowledges the one result even after its original ended. |
+| `option:SessionSpec.opening_command` | The controller opening whose native launch supplies a configuration receipt. It is carried internally, never entered by a person or taken from a session credential. |
+| `option:SessionOpened.mcp` | Names of Orch servers actually supplied by the adapter. An absent receipt remains unreported until a delayed native launch reports its configuration; an empty list confirms none were supplied. |
+| `option:SessionOpenResult.mcp` | The same actual supplied-server receipt on the connector acknowledgement. Requested servers alone do not prove delivery; changing only the model transport preserves existing tool membership. |
+| `option:MarkerHarnessChanged.value.opening_command` | Associates native MCP configuration with the exact controller opening. A different opening or a closed process cannot inherit its delivery facts; a native same-name definition is not attributed to the ignored Orch resource. |
+| `option:ThreadMoveAudience.people` | Every currently eligible original contributor, excluding the mover. Author reads page internally; the notification choice has no fixed recipient cutoff. |
+| `option:ThreadMoveAudience.preview_id` | The same private Move review used by the searchable, paginated people list; absent only for an empty audience. |
+| `option:ThreadMoveOutPreviewResponse.notification` | The complete reviewed contributor count for the optional Move notification, absent on a write-only plan receipt. |
+| `option:EnvironmentMcp.connections` | The requested thread’s actual program connections. They include reported servers without a static importable configuration, so an incomplete discovery cannot hide a running connection. |
+| `option:McpConnection.name` | The server name reported by that program opening. |
+| `option:McpConnection.source` | The kind of program reporting this connection. |
+| `option:McpConnection.state` | The reported state in this actual opening, or unreported until a state arrives. A resumed or restarted program cannot inherit an older opening’s ready state. |
+| `option:McpConnection.using` | The native configuration or Orch definition selected for this opening. |
+| `option:MarkerHarnessChanged.value.epoch` | The identity of the actual program opening whose MCP setup and connection reports belong together. It is observation metadata, never a user-entered identifier. |
+| `option:MarkerHarnessChanged.value.servers` | A program-opening MCP setup snapshot. It replaces prior evidence even when the new setup has no servers; each entry names the server and supplied definition source. |
+| `option:McpServer.spec.imported.origin` | The opaque native discovery origin retained with an imported copy. Private provider/profile routing remains in controller evidence and never becomes a public resource specification. |
+| `option:EnvironmentMcpImportCreateBody.origin` | The opaque identity carried by the discovery row selected in the existing list. It distinguishes profiles whose native servers share a name; omission is accepted only when that entry is unambiguous. No person types this identity. |
+| `option:McpFound.origin` | The stable native entry identity used by Import and its retry receipt. Provider identities stay private; the row and action carry this value automatically. |
+| `option:McpFound.profile` | The native agent profile’s readable name, omitted when this reader may not view that profile. Connection observations and the opaque import identity do not grant profile access. |
+| `option:McpProfileRef.id` | The admitted agent profile behind this named native configuration, rendered with the existing resource chip. |
+| `option:McpProfileRef.name` | The name of that readable native profile; its home, command, address and credentials are not disclosed here. |
+| `option:McpImport.profile` | The actual provider and agent profile selected by discovery for a native definition copy. The connector reads that exact hosted profile instead of choosing another program with the same server name. |
+| `option:McpImportAsk.profile` | A local machine import keeps the same selected native profile on its authenticated request channel. |
+| `option:EnvironmentFactsMcp.profile` | The hosting connector’s private provider/profile association for a discovered native definition. It separates same-named servers without publishing their launch data. |
+| `option:EnvironmentMcpGetQuery.thread_id` | Read the current native MCP connection observations of this thread in its present environment. The caller must also hold View on that thread; omission shows discoveries without borrowing any thread’s runtime state. |
+| `option:McpFound.state` | The program’s last reported connection state in the requested thread’s selected native segment. No report remains unreported; an old segment, child conversation or before-Orch history cannot supply its current state. |
+| `option:McpFound.using` | The supplied definition behind that program connection: native configuration or an Orch server. Importing alone does not change the program’s own definition. |
+| `state:McpDefinitionSource.native` | The local program retains its own global or directory definition. A shared name keeps this native definition; the Orch copy can still be used in other environments. |
+| `state:McpDefinitionSource.orch` | The program received the server enabled for this environment in Orch. Its connection state is distinct from the environment host’s server state. |
+| `option:MarkerHarnessChanged.value.definition_source` | A native MCP connection observation names the definition supplied at that session’s opening: native or Orch, without its command, address or credentials. An unknown source remains unreported. |
+| `option:FilesPlan.source_policy` | The source domain selected by this workspace read/copy operation, captured in the admitted review rather than inferred by the interface from a current path or environment. |
+| `option:FilesPlan.home_policy` | Whole-root owned-data policy for the actually measured home copy. Workspace exclusions do not apply; ordinary caller and operation permissions still govern writes. |
+| `option:FilesPlan.file_states_policy` | Whole-root owned-data policy for the measured recorded-data copy, independently of workspace exclusions. Older uncaptured plans stay Not reported. |
+| `option:UserMessagePayload.native_image_delivery` | Applied image decisions for the original admitted command, including the accepted allowance, resolution time and safe setting source. Missing historical receipts stay Not reported; private nested setting sources stay Not shared. |
+| `option:ThreadInput.native_image_delivery` | The same captured image delivery decisions on a queued or delivered input. Editing a setting later does not rewrite them. |
+| `state:NativeImageDelivery.native` | Original image bytes accompanied the admitted native command. |
+| `state:NativeImageDelivery.path` | The admitted input names the verified materialized image path. Only an actual positive-byte refusal says Image allowance exceeded; zero says Images use paths. |
+| `state:NativeImageDelivery.unavailable` | Neither native bytes nor a verified materialized path was available; this does not claim path delivery. |
+| `option:UploadSessionCreateReply.policy` | Sizing and shared admission accepted for this upload; later setting edits do not rewrite it. |
+| `option:UploadSessionCreateReply.chunk_bytes` | Accepted maximum piece bytes, from the captured policy. |
+| `option:UploadSessionPutQuery.offset` | Any in-bounds offset. Identical acknowledged overlap is safe to retry; different bytes are refused. |
+| `option:UploadSessionStatus.received` | Total distinct durable bytes, including an acknowledged suffix beyond a missing middle. |
+| `option:UploadSessionStatus.ranges` | Sorted, coalesced durable intervals from GET session status; retry only their holes. |
+| `option:UploadSessionStatus.policy` | This session’s accepted transfer policy. The status read changes no upload bytes. |
+| `option:UploadRange.start` | First byte, counted from zero. |
+| `option:UploadRange.len` | Number of bytes; the interval excludes start + len. |
+| `option:TransferStatus.progress` | Distinct received bytes; complete means size and whole-content hash were verified. |
+| `option:TransferStatus.ranges` | Machine progress JSON keeps durable ranges out of HTTP headers. |
+| `option:TransferStatus.policy` | Accepted machine-upload policy, or current system policy before a transfer begins. |
+| `option:TransferPolicy.initial_requests` | Small initial bandwidth probes, bounded by the shared request and byte allowances. |
+| `option:TransferPolicy.initial_piece_bytes` | Bytes sent for the first bandwidth measurement, before the line rate is known. |
+| `option:TransferPolicy.min_piece_bytes` | Smallest ordinary file piece; a final piece may be smaller. |
+| `option:TransferPolicy.max_piece_bytes` | Maximum bytes in one file piece. Each unfinished upload keeps its accepted policy. |
+| `option:TransferPolicy.target_window_ms` | Target data duration of the shared window, before adding measured round-trip headroom. |
+| `option:TransferPolicy.window_rtts` | Round trips of data kept in flight ahead of acknowledgements, within the byte ceiling. |
+| `option:TransferPolicy.max_window_bytes` | Maximum in-flight file bytes shared by simultaneous files from one sender. |
+| `option:TransferPolicy.requests` | Simultaneous piece requests shared by files. Five leaves one HTTP/1.1 connection for other work. |
+| `option:UploadSessionStatus.completed` | Completed receipt retained until session expiry; recovering a lost completion answer sends no file bytes and restores no released custody. |
+| `option:FileTransferReply.transfer` | The announced native manifest transfer for the current environment, machine and generation. It is unrelated to browser upload sessions; reading starts no native work. |
+| `option:FileTransferFacts.expires_at` | Last accepted piece plus the idle allowance captured at the first piece. No date is invented when the original receipt is absent; a later setting edit changes neither this expiry nor its source. |
+| `option:FileTransferFacts.retention_source` | The captured registry-default or System setting source. Cleanup retains this receipt after removing expired pieces. |
+| [Transferring](state-reference.md#state:FileTransferState.transferring) | The native publisher announced a transfer that has not completed; no successful publication is implied. |
+| [Interrupted](state-reference.md#state:FileTransferState.interrupted) | The native publisher reported interruption of this exact transfer. Its recorded expiry still applies. |
+| [Expired](state-reference.md#state:FileTransferState.expired) | Cleanup confirmed removal of the unfinished transfer after its recorded idle expiry. |
+| `option:Preview.allowance` | The specific refusal with its captured limit, measured amount when known and setting source; an unknown refusal does not invent an allowance. |
+| `option:Preview.viewer_allowance` | The accepted original-read allowance for the interactive viewer, distinct from decoding source bytes. |
+| `option:Preview.facts` | Authorized native source facts are added after the derived-content cache; different owners of the same hash cannot share source policy or authority. |
+| `state:PreviewAllowanceKind.decoded_source_bytes` | Original bytes exceeded the static decoder allowance. |
+| `state:PreviewAllowanceKind.pixels` | Original image pixels exceeded the decoder or renderer allowance. |
+| `state:PreviewAllowanceKind.encoded_preview_bytes` | Even the smallest encoded static preview exceeded its byte allowance. |
+| `state:PreviewAllowanceKind.viewer_bytes` | The original exceeds the interactive viewer read allowance; Download remains available under its ordinary permission. |
+| `option:DirListing.facts` | Native source, applicable exclusion and installed watcher facts captured with the authorized directory observation. Absence is Not reported; opening the facts performs no tree scan. |
+| `option:FileStat.facts` | Native source policy and applicable exclusion facts for this read. Retained manifests keep their captured policy; uncaptured child rule provenance stays Not reported. |
+| `option:FileSourceFacts.policy` | Classifies workspace, read-only mount or whole owned-data root. A writable source still requires the caller’s ordinary operation permission. |
+| `option:FileSourceFacts.inclusion` | Applicable configured and ancestor-local Orch rules, shallow to deep. Deeper rules override, excluded parents prevent traversal, and native agent access remains separate. Hidden rule names are Not shared; patterns and omitted children are not exposed. |
+| `option:FileSourceFacts.watch` | The installed native watcher’s scope, fallback interval and observation identity. A later configuration edit does not change an already captured interval; a retained manifest has no live watch. |
+| `option:FileSourceFacts.observed_at` | The native capture time of these facts, independent of when the disclosure is opened. |
+| `state:DirEntryKind.permission_denied` | The machine can list the name but its account cannot read the entry. |
+| `state:DirEntryKind.vanished` | The name disappeared while the directory was being read. |
+| `state:DirEntryKind.unreadable` | The machine encountered another filesystem error reading this entry. |
+| `state:FileSourceKind.workspace` | The attached workspace uses Orch exclusions and protected control-file rules. |
+| `state:FileSourceKind.mount` | An attached read-only root without workspace exclusions. |
+| `state:FileSourceKind.owned_data` | An owned root copied whole without workspace exclusions. |
+| `state:FileRuleKind.configured` | Configured Orch patterns contributed to this path’s inclusion. |
+| `state:FileRuleKind.local` | An applicable local exclusion file contributed; its name is redacted when excluded. |
+| `state:FileWatchSource.machine_configuration` | The fallback interval was supplied by the machine configuration accepted by the installed watcher. |
+| `option:Item.text_replacements` | Replacement operations applied to source U+0000 characters in the item's received text and keys. The safe display uses U+FFFD; repeated full updates can contribute further operations. |
+| `option:Item.storage_gap` | The last source event that could not be stored after text repair. Its safe refusal facts remain with the last good item contents while later events continue. |
+| `option:ItemStorageGap.sqlstate` | PostgreSQL's data or program-limit refusal code, without the rejected value or database statement. |
+| `option:ItemStorageGap.event_seq` | The rejected native event's sequence number, when a native event supplied it. |
+| `option:ItemStorageGap.at` | When the refusal was recorded. |
+| `option:OutputRef.inline_source_len` | Positive original byte count represented by a repaired inline preview; an empty preview omits this member. It keeps retained byte boundaries exact when a replacement glyph has more UTF-8 bytes than the source character. |
+| `error:storage.data` | A source value still could not be stored after repair. Its item retains an explicit gap; this value is not retried and later native events continue. |
+| `option:Turn.sandbox_resolution` | The connector’s captured requested and applied sandbox for this turn. Absent means not reported; later machine-policy edits do not rewrite it. |
+| `option:ThreadBinding.sandbox_resolution` | The last captured sandbox decision for this current native session, separate from a later turn’s decision. |
+| `option:SandboxResolution.requested` | The sandbox requested before the machine applied its ceiling. |
+| `option:SandboxResolution.applied` | The sandbox actually passed to the native program, rather than the current machine setting. |
+| `option:SandboxResolution.governing_policy` | The typed source that governed this selection. Local policy contents and unrelated settings are not exposed. |
+| `option:SandboxResolution.command_id` | The exact native command whose applied sandbox was captured; it grants no permission to inspect that command. |
+| `option:SandboxResolution.at` | When the connector confirmed the applied command, rather than the time of a later read. |
+| `option:Machine.spool` | Last authenticated out-of-band output-storage observation. It remains reportable while authoritative spool writes are held. An offline machine shows this as last reported. |
+| `option:MachineListRow.spool` | The same storage-backpressure fact in compact machine rows, without an extra detail read. |
+| `option:SpoolStatus.problem` | Null when storage has no current failure; otherwise full, write, sync, damaged or event_rejected. Native text and filesystem paths are not included. |
+| `option:SpoolStatus.waiting_events` | Events held by their publishers until whole-record storage and durability succeed; a failed append is retried without acknowledging or retiring the native event. |
+| `state:SpoolProblem.full` | Storage or quota has no space. Authoritative output waits and automatically retries; it is not discarded to satisfy the diagnostic byte allowance. |
+| `state:SpoolProblem.write` | A write or rollback failed. The original publication remains held, while the machine can still report its state and handle controls. |
+| `state:SpoolProblem.sync` | Forcing accepted bytes to durable storage failed. Dirty revisions and publisher receipts remain pending for another force. |
+| `state:SpoolProblem.damaged` | Startup found damaged retained output. The report distinguishes this from ordinary network disconnection. |
+| `state:SpoolProblem.event_rejected` | The current link cannot admit an event. The harness retains the failed event and its terminal identity for retry rather than dropping its batch. |
+| `option:ToolCallPayload.masked_fields` | JSON pointers to native public fields changed by capture masking. A changed address is displayed as text and is never used as an executable link; original execution operands remain encrypted and private. |
+| `option:InstructionSource.path_redacted` | The native source address was masked. Its row explains why it cannot open that address; the native source remains private. |
+| `option:RawEvent.masking` | Why native diagnostic text is withheld: pending native end, unknown continuity, or incomplete matching context. Complete captured text is joined before it is masked. |
+| `state:NativeTraceMasking.pending` | The adapter-declared native text stream has not ended; only an encrypted private copy is retained meanwhile. |
+| `state:NativeTraceMasking.unclassified` | The native protocol did not classify text continuity, so enabled capture masking withholds that text. |
+| `state:NativeTraceMasking.incomplete` | The matching prefix was not captured or is outside retention. Remaining text stays hidden; an adapter-declared new field has its own complete context. |
+| `option:NativeTraceText.start` | The adapter declares a native field beginning with fresh complete matching context. After a capture gap, continuity is not inferred before a new start or a complete snapshot. |
+| `option:RawFrame.text` | Adapter-declared semantic text streams, fragment JSON pointers and native end markers. Their operands are private; masking joins fragments before ordinary diagnostic storage. |
+| `option:RawFrame.text_complete` | The adapter certifies that all other frame text is complete. Unclassified continuity is hidden while native masking is enabled. |
+| `option:ResourceNotificationQuery.notify` | Notify the reviewed affected people once for this deletion. Absent or false leaves notification off; personal routes remain a separate choice. |
+| `option:ResourceNotificationQuery.notification_review` | The caller-bound audience from the current impact review, required when Notify is selected. A changed audience requires a fresh review. |
+| `option:ResourceStopQuery.note` | An optional one-line note for threads waiting on the disabled provider. |
+| `option:ResourceStopQuery.notify` | Notify the reviewed affected people once for this provider stop. Absent or false leaves notification off. |
+| `option:ResourceStopQuery.notification_review` | The caller-bound audience from the current impact review, required when Notify is selected. |
+| `option:ResourceImpact.notification` | The unique current audience for the operation choice, initially off; its preview supplies the people list. |
+| `option:ResourceImpactQuery.skill_publication` | For a skill publication, count current delivered thread contexts whose effective choice follows Latest, including personal choices and inherited locks. Pins are excluded even when pinned to the current Latest. Absent or false counts all current deliveries for a resource-wide change. Valid only for skills. |
+| `option:CreateThread.workspace_edits` | File edits saved in the thread's start plan. Opening the editor creates no workspace. Creation applies these after source and environment initialization, before the first agent input; a conflict retains both texts and holds the start. Applied edits are consumed and future turns read the real shared files. |
+| `option:WorkspaceFileEdit.path` | A distinct file path relative to the selected thread directory, with no absolute path or parent traversal. The shared instructions editor uses AGENTS.md. |
+| `option:WorkspaceFileEdit.text` | The exact saved file text, retained in the start plan until its conditional write succeeds. Conversation metadata does not disclose this file content. |
+| `option:WorkspaceFileEdit.expected_hash` | The source version the person read. Absent or null means create only if missing; an existing file brought by an unknown source requires review rather than an unconditional overwrite. |
+| `option:WorkspaceFileEdits.revision` | The current start-file plan and bound workspace identity. Replacing edits requires this revision so a newer edit, directory or environment is never silently overwritten. |
+| `option:WorkspaceFileEdits.edits` | File edits still waiting to be applied, read under the bound thread's View and the environment's files.view authority. Empty after successful application. |
+| `option:EnvironmentSourceEditsQuery.thread_id` | The actual thread bound to the selected environment whose pending start-file edits are read. It grants no additional file or thread access. |
+| `option:EnvironmentSourcePrepareBody.workspace_edits` | Explicitly replace the pending file edits after reviewing the source. An empty list accepts the source's files; omission keeps the saved edits. File writes still require the existing native source and workspace permissions. |
+| `option:EnvironmentSourcePrepareBody.workspace_edit_revision` | Required when replacing workspace_edits. A mismatch keeps the newer saved plan and refuses the stale replacement. |
+| `option:MountSpec.resource_id` | The resource identity carried with the actual native attachment, not an authorization grant. It keeps an applied mount associated with its source when names or targets change; absent identity remains unreported. |
+| `option:ResourceImpact.applications` | Current native tool and skill deliveries, and running units that retain an attachment or recipe. Each group counts distinct threads, environments or providers at its own application boundary; empty groups are omitted. Explicit giving and historical recovery references are not live users. |
+| `option:ResourceImpact.application_complete` | Whether the native sources account for every current delivery and attachment. False keeps missing evidence explicit rather than turning it into zero affected work. |
+| `option:ResourceApplicationGroup.when` | The boundary at which this resource change reaches the group's existing native dependents. |
+| `option:ResourceApplicationGroup.object_kind` | The count's unit: thread, environment or provider. Different kinds are never added into one unlabeled figure. |
+| `option:ResourceApplicationGroup.count` | Distinct current dependents, including those whose names this reader cannot see. Repeated attachment observations count once. |
+| `option:ResourceApplicationGroup.visible` | Names independently readable under this impact operation's native name sources. Reading the resource itself does not grant these names. |
+| `option:ResourceApplicationGroup.hidden` | Current dependents whose names and identities remain private; only their count is shown. |
+| `option:ResourceApplicationGroup.apply` | The existing Update or Recreate act that applies these pending unit inputs, absent for call or turn boundaries. |
+| `option:ResourceApplicationGroup.apply_targets` | Only independently named dependents this current caller may manage. The existing plan rechecks every target and its consequences before confirmation. |
+| `state:ResourceApplicationWhen.now` | Calls through a switched-off or deleted MCP resource are refused now in these current thread contexts. |
+| `state:ResourceApplicationWhen.before_next_turn` | These current tool or skill deliveries are resolved again before the next turn. |
+| `state:ResourceApplicationWhen.updated` | These running units still hold an earlier mount or recipe. Apply the offered Update or Recreate plan; restarting the same unit does not apply a different definition. |
+| `state:ResourceApplicationAction.update` | The existing Update plan reviews and applies the pending configuration, including unit replacement when required. This is not the same-unit Restart act. |
+| `option:ThreadOutlineGetQuery.selection` | Choose conversation for the ordinary outline, messages for human prompts with sender and turn-change facts, or agents for compact child records including older history. Omitting it selects conversation. |
+| `option:ThreadOutlineGetQuery.q` | A literal text or sender search within the selected readable history, applied before paging. A matching prompt may contain the words after its displayed first line. |
+| `option:ThreadOutlineGetQuery.include_changes` | Include admitted whole-turn added and removed line counts for a messages list, on by default for that selection. False leaves these optional counts unreported and avoids reading changes for navigation. |
+| `option:SearchListQuery.stream` | Limit item matches to one conversation stream, such as main or a reported child stream, inside the authorized search scope before paging. |
+| `option:SearchStreamListQuery.stream` | The streamed search uses the same conversation-stream selection as ordinary search; other conversations do not fill its result pages. |
+| `option:PersonalState.sidebar.open_links` | The person’s Open links in choice, kept with sidebar state: automatic by default, this or new. Automatic keeps each destination in one view; this replaces the current view and new opens a view. An already open target is focused. Choose it in Interface or a tab menu; explicit clones and browser modifier clicks keep their usual behavior. |
+| `option:TopicSearch.q` | The thread-name search on a topic’s Overview and Threads tab. It filters the visible live collection, travels in the topic address and is not retained as a device default. |
+| `option:codex.cyber_access_program` | The Codex access program offered by the model and enabled for the provider. The selected name reaches the native turn unchanged, including names outside the Daybreak family. Normal model/account eligibility and provider access still apply. |
+| `option:InputScheduleCreateBody.plan` | The authored Plan choice of every future occurrence. Required at creation; true requests a planning turn and false requests work. It is kept when the occurrence is accepted, including when an ordinary mode boundary makes it wait. |
+| `option:InputScheduleCreateBody.delivery` | Required queue, steer or interrupt choice for future input. Saved and rechecked through the ordinary input writer when due; creating a schedule does not deliver it immediately. |
+| `option:InputScheduleUpdateBody.plan` | An explicit Plan change is an author-only, revision-checked definition edit. Omission keeps the reviewed choice. |
+| `option:InputScheduleUpdateBody.delivery` | An explicit queue, steer or interrupt change is an author-only, revision-checked definition edit. Omission keeps the reviewed choice; pausing or resuming alone does not replace it. |
+| `option:ThreadGoalUpdateBody.action` | Pause, resume, or accept an unchecked completion report. Accept is the person's explicit Mark met decision; Resume on an unchecked report means Keep working and claims no verification. |
+| `option:AgentProfile.config.native_result_wait_ms` | Codex's optional retained-result wait in milliseconds. Omission uses the registered system default, fitted within the engine's interrupt window. A profile's explicit valid wait is kept or refused with its reason. |
+| `option:AgentProfile.config.native_result_buffer_bytes` | Codex's optional byte budget for ordered later input during an evidence read. Omission uses the registered system default. Pressure ends optional proof without dropping input or stopping another session. |
+| `option:SessionSettings.web_action_wait_secs` | The resolved inherited native web-row wait sent to an agent session. Codex uses receipt time and retains ownership for a late real end; the wait never interrupts the turn. |
+| `option:SessionOpen.web_action_wait_secs` | Required resolved web-row wait on the connector's session-open command, carried into the session settings and its reopen fingerprint. |
+| `option:x_turn_end_delays.delays.*.default_setting` | The program's declared system registry key supplying an omitted profile wait in milliseconds. The engine resolves it and fits that default under its interrupt window; an explicit profile wait is not shortened. |
+| `option:x_turn_end_delays.delays.*.pending_buffer` | A program's declaration of optional ordered-input buffering during its evidence wait. Pressure must end optional evidence and continue the input, rather than drop or refuse frames. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.pointer` | JSON pointer to this byte budget in the program profile's configuration. An explicit valid profile value is retained. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_bytes` | The program's fallback byte default. The engine supplies the declared registered system default when the profile leaves the pointer unset. |
+| `option:x_turn_end_delays.delays.*.pending_buffer.default_setting` | The declared system registry key for the pending-input byte default. It must name an available unsigned integer setting. |
+| `option:AskModelOption.unavailable_reason.selected_backend_unavailable` | The saved backend is unavailable. Choose a currently allowed model to send the next question. |
+| `option:AskModelOption.unavailable_reason.placement_unavailable` | The program needs a readable, usable environment and a helper topic in the conversation’s root organization. |
+| `option:AskModelOption.unavailable_reason.invalid_backend` | Choose an offering and a declared Ask route in the model policy. |
+| `option:ask.models.*.backend` | Exact dialogue route, account offering and adapter configuration. Child organizations narrow whole entries in parent order. |
+| `option:ask.models.*.backend.route` | The declared route used for this offering. |
+| `option:ask.models.*.backend.offering` | Account and enabled model selected together. |
+| `option:ask.models.*.backend.offering.provider` | The selected account. Both the person asking and the current payer need Use. |
+| `option:ask.models.*.backend.offering.offering` | Routing name of the enabled model on that account. |
+| `option:ask.models.*.backend.config` | The selected route’s configuration, including placement references when required. |
+| `option:AccessOptions.purposes` | Uses requested from a provider: Ask or other work. Requesting Ask alone does not authorize ordinary turns with the same model. |
+| `option:ProviderUse.purposes` | Allowed uses: Ask, other work, or both. Omitted permits both; an empty list permits neither. A single entry must allow the use, model, effort and place together. |
+| `option:ProviderUpdateBody.expected_revision` | The editable configuration revision. Facts, runtime status and source observations leave it current; another configuration edit requires reading the new revision. |
+| `option:ProviderModelDefaultsQuery.model_name` | The exact routing name to preview with the provider home’s catalogue policy. This reads stored facts; it neither starts discovery nor adds a model. An explicit create parameters object saves the complete enabled definition and keeps cleared optional choices off. |
+| `option:Meta.interface_defaults` | Installation defaults for retaining recently closed views, loading indications and read freshness. Each person may override them in their own interface preferences. |
+| `option:InterfaceDefaults.kept_closed_tabs` | Additional recently closed views to retain. Open views are always retained. |
+| `option:InterfaceDefaults.progress_delay_ms` | Milliseconds before a read shows its spinner. |
+| `option:InterfaceDefaults.catch_up_above_items` | Effective installation threshold for the automatic catch-up card. A missing fact stays Not reported; it is not zero. The reader’s saved Interface choice overrides it. |
+| `option:InterfaceDefaults.read_freshness_ms` | Freshness windows for directory, lookup, report and status reads, in milliseconds. |
+| `option:PersonalState.interface` | The signed-in person’s reading choices. Omitted fields use the installation defaults; changing a preference preserves the other fields. Showing a tab changes none of them. |
+| `option:PersonalState.interface.kept_closed_tabs` | This person’s retained closed views, presentation and Reopen-history count. Zero keeps only the last Reopen locator. |
+| `option:Workspace.closedLimit` | Last confirmed retention count in this person’s device workspace. It bounds close history before the shell returns; it never overrides the next confirmed native preference. |
+| `option:ReadAttemptFacts.read_attempt` | Observed attempt of this browser’s current safe read, starting at one. Shared observers use the same flight; replacement readers receive no former facts. |
+| `option:ReadAttemptFacts.reader` | Browser reader generation that owns the observation. It is a fence, not a displayed identity or permission grant. |
+| `option:ReadAttemptFacts.operation` | The observation describes a safe read. Opening it never repeats a write. |
+| `option:ReadAttemptFacts.phase` | The actual reading, accepted wait or failed phase of this attempt. Cancellation retires it. |
+| `option:ReadAttemptFacts.scheduled_retry_at` | Device-clock instant captured when the actual scheduler accepts a retry. It is eligibility, not a promise of delivery or a deadline reconstructed from current defaults. An uncaptured time is Not reported. |
+| `state:ReadAttemptPhase.reading` | This admitted read attempt is running. Opening its facts sends nothing. |
+| `state:ReadAttemptPhase.waiting` | The safe read has an accepted retry wait. Cancelling or leaving its owner retires that wait and its facts. |
+| `state:ReadAttemptPhase.failed` | The actual read failed without another accepted retry. The affected part retains its existing recovery action. |
+| `option:SessionState.renewal` | This browser’s observed renewal phase and times, without credentials or another session’s details. A replacement grant retires the former observation. |
+| `option:RenewalObservation.scheduled_at` | Next timer actually scheduled by this browser. A failed manual renewal preserves an already scheduled timer; an unknown next attempt is Not reported. |
+| `option:RenewalObservation.renewed_at` | Device-clock instant when this held session’s renewal succeeded. A direct sign-in or replacement grant is not labelled as that earlier renewal. |
+| `option:RenewalObservation.phase` | This browser's actual scheduled, running, completed or failed renewal, separate from the native session list. |
+| `state:RenewalPhase.scheduled` | This browser has scheduled renewal. Healthy routine scheduling adds no standing explanation. |
+| `state:RenewalPhase.in_progress` | The current reader’s actual renewal is running. Concurrent requests share it. |
+| `state:RenewalPhase.completed` | This held session was actually renewed. The recorded completion stays separate from its next scheduled timer. |
+| `state:RenewalPhase.failed` | This renewal failed. A temporary connection failure retains the held session; it does not invent an ended-session cause or replay a mutation. |
+| `option:SessionState.sessionEnd` | Only an attested outcome for this browser's own ended session. A replacement sign-in retires it; missing evidence keeps the generic session-ended notice. |
+| `option:SessionEndObservation.at_if_known` | Native end time when known, otherwise Not reported. The browser never calculates it from a token lifetime or the present time. |
+| `option:SessionEndObservation.cause` | Only the native attested expired, revoked or account-unavailable cause for the session this browser held. Extra native fields are not retained. |
+| `option:DeviceChoiceObservation.scope` | The choice's existing kind, field and optional item on this person's browser. Scope identifiers are not display names or another person's device inventory. |
+| `option:DeviceChoiceObservation.reader` | The signed-in browser reader generation that may see the receipt. Reader replacement makes former writers inert and retires their facts. |
+| `option:DeviceChoiceObservation.origin` | Actual address, item, kind, default or current-page source. Each control validates membership against the choices it really offers. |
+| `option:DeviceChoiceObservation.read_result` | Result of the same storage read that supplied the value, distinguishing available, refused, invalid and memory-held choices. Details performs no second read. |
+| `option:DeviceChoiceObservation.write_result` | Captured saved, failed or not-checked outcome. Successful reads never imply a successful write. Live controls retain their refused value independently of the unobserved fallback cache. |
+| `option:DeviceChoiceObservation.chosen` | The actual requested or retained choice before availability is applied. An unavailable saved choice is preserved. |
+| `option:DeviceChoiceObservation.effective` | The current value actually used by this control. An explicit address wins; fallback does not rewrite an unavailable saved value. |
+| `option:DeviceChoiceObservation.saved` | The saved value known from this choice's observed read. Unknown or unreadable names are Not reported, never an opaque identifier. |
+| `option:DeviceChoiceObservation.saved_choice_availability` | Available, unavailable or unreported under the control's actual offered choices. This is separate from whether device storage could be read or written. |
+| `state:DeviceChoiceOrigin.address` | The current explicit address supplies the value. |
+| `state:DeviceChoiceOrigin.item` | This item's deliberate device choice supplies the value. |
+| `state:DeviceChoiceOrigin.kind` | This kind's saved device choice supplies the value. |
+| `state:DeviceChoiceOrigin.default` | The control uses its actual default, preserving any unavailable saved intention. |
+| `state:DeviceChoiceOrigin.page` | This page's retained choice or current in-memory fallback supplies the value; it is not a promise of persistence. |
+| `state:DeviceChoiceRead.available` | The existing device read succeeded. Absence remains a default, rather than a saved zero or Off. |
+| `state:DeviceChoiceRead.unavailable` | The actual device read was refused or unavailable. The device inventory must not call this empty. |
+| `state:DeviceChoiceRead.invalid` | Saved bytes were readable but not a usable choice. They remain distinct from a storage-read failure. |
+| `state:DeviceChoiceRead.memory` | The current choice is held in this browser's fallback memory. An unmounted fallback may later be evicted. |
+| `state:DeviceChoiceSave.saved` | The observed device write succeeded. This promises neither permanent browser storage nor another device's state. |
+| `state:DeviceChoiceSave.failed` | The actual device write failed. The current control keeps its in-memory choice; a disappeared control retains only a safe kind/save observation. |
+| `state:DeviceChoiceSave.not_checked` | No current write outcome was captured. It is not inferred success. |
+| `option:DeviceChoiceFailure.kind` | Allowlisted safe category for a disappeared control's refused save, including file viewers, windows and list choices. No private value, identifier or false stored-byte figure is retained here. |
+| `option:DeviceChoiceFailure.write_result` | The actual failed save for that current reader, retained in On this device. Clearing it does not claim an earlier save succeeded. |
+| `option:Started.setupObservation` | The same private server read that supplies the last successful setup, scoped to the current account reader. Details opens no additional read and reports saved choices only through the current native options; remembered arrangement is never new credential consent. |
+| `option:PersonalState.interface.progress_delay_ms` | This person’s loading-indication delay in milliseconds. Zero shows it immediately. |
+| `option:PersonalState.interface.catch_up_above_items` | This person’s nonnegative automatic catch-up threshold. Omission follows the installation default; zero includes any unread range. Explicit catch-up is independent. Saving other Interface choices preserves this field without creating an override. |
+| `option:PersonalState.interface.read_freshness_ms` | This person’s directory, lookup, report and status freshness overrides, in milliseconds. |
+| `state:PersonalStateKey.interface` | The native personal-state key that keeps interface reading choices separately from named layouts, sidebar choices and keyboard bindings. |
+| `option:ThreadItemOutputGetQuery.expected_blob` | The exact retained blob selected by this reader. A changed output refuses this page before bytes are read, preventing mixed output pages. |
+| `option:OutputRef.inline_limit` | The accepted live inline byte allowance. Small capture budgets keep equally small live and durable tails; the original total still counts every produced byte. |
+| `option:OutputRef.retained` | The exact original byte interval stored in this output blob; absent for inline-only capture. A retained blob can contain only part of the produced output. |
+| `option:OutputRef.retained.offset` | Original byte offset of the retained interval. Bytes before this boundary may be missing. |
+| `option:OutputRef.retained.len` | Actual retained blob bytes, without a synthetic gap marker; offset plus length is the exclusive original end. |
+| `option:SessionLost.uncertain` | A session-level report that the native outcome is unknown keeps the input for explicit recovery. When restart reconciliation loses an identified turn, its turn report ends that turn in Orch. |
+| `option:EverythingListQuery.resource_rows` | Return compact table rows and the readable sharing summary once per home in the page. Full configuration is read from each resource when opened. |
+| `option:EverythingListQuery.resource_details` | Return full resource views when table rows are not requested. This is used by choices that draw the full configuration. |
+| `option:SearchListQuery.source_details` | Read only the serving facts captured for this streamed query's receipt cursor. It starts neither another search nor a model request; current search access and safe names are checked again. |
+| `option:SearchListQuery.source_offset` | Continue within the same query's captured serving sources. Use the returned next offset; a native sequence gap is not an omitted source. |
+| `option:SearchListQuery.source_filter` | Filter captured serving sources by their currently shared place or captured model name before paging. Withheld names and identifiers are not searched. |
+| `option:ThreadOpeningGetQuery.limit` | Positive item count for this opening, overriding the resolved threads.opening_items default. Older items remain available through history cursors. |
+| `option:ThreadOpeningGetQuery.continuation_id` | Choose the history continuation for this read without changing which continuation executes. |
+| `option:ThreadOpeningGetQuery.projection_revision` | Name the known history projection. A stale value returns the native reset with sync.complete=false and the current selector, which can be used to open a fresh window. |
+| `option:ThreadModelParameter.options_partial` | True when only first-paint parameter traits and the current or visibly recorded models are supplied. Read full parameters when a control opens for its complete choices, help and forms. |
+| `option:ThreadOpening.screen` | Independent activity and plan-answer facts for this actual thread. A failed part is retried through GET /threads/{id}/screen-facts without loading model metadata or the full settings list. |
+| `option:ThreadOpening.parameters` | Compact current values and source/default facts for the first screen. Approval offers, reviewer details, subagent controls and port-tool facts come from the full GET /threads/{id}/parameters when their control opens. |
+| `option:ThreadComposer.approval_default` | True when the native approval choice is supplied outside this thread. The closed approval chip can show its default mark without reading the full settings panel. |
+| `option:ThreadComposer.sandbox_mode` | Effective native sandbox value for the compact control; null when no value is reported. Full choices, locks and writable revisions are read when the control opens. |
+| `option:ThreadComposer.sandbox_default` | True when the sandbox choice is supplied outside this thread. Its compact control retains the default mark before its settings panel is read. |
+| `option:ThreadScreenFacts.silent_after_secs` | Effective thread.silent_after_secs value in seconds. It controls the running thread's silence notice and uses the registered default unless a place sets it differently. |
+| `option:ThreadScreenFacts.plan_answered_by` | Effective thread.plan_answered_by policy, writers or managers. Proposed plans use it before enabling an answer; it is read independently from model choices. |
+| `option:Feed.provider_row` | The provider-row:{id} live feed carries the same authorized compact provider facts as a thread's opening. Provider View is checked again at delivery. It carries no models, source configuration or private login progress; the provider page keeps its full resource feed. |
+| `option:ProviderRowEvent.provider` | Current compact thread-provider facts on a changed event. Null withdraws the previous facts when their native View authority is lost. |
 | `option:AccessOptions.models` | The models. |
+| `option:InvitationCreateBody.expires_in_minutes` | Invitation lifetime in whole minutes. The default and longest permitted lifetime come from invitations.default_minutes and invitations.max_minutes. The expiry is rounded down to its displayed minute. A policy default beyond the public clock ends at its last minute in year 9999; an explicit length outside that representation is refused. |
+| `option:OrgTreeGetQuery.parent_id` | Read only the direct children of this node in the named root organization. Its cursor stays bound to that branch and reader; use a snapshot rather than a since sequence. |
+| `option:OrgTreeGetQuery.limit` | Positive hierarchy page size. Branches default to navigation.tree_page_size; a larger explicit page is allowed. Full-tree reads keep the ordinary sync batch default. |
 | `option:AccessOptions.services` | Enabled provider services this Use grant allows, by name, family or group. Omitted permits every enabled service; this list is independent of generation models. |
 | `option:AccessOptions.efforts` | The efforts. |
 | `option:AccessOptions.where` | The environment, or the host or machine of one that is to be made, that a refused use was asked for; it tells where the provider's entry does not reach. |
@@ -25,6 +510,7 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:BindingOptions.providers` | The providers, each with its models and agents. |
 | `option:BindingOptions.environments` | Every existing environment the caller manages. This topic's come first (its default, then those its threads use or that were made for it), and the rest follow. |
 | `option:BindingOptions.environment_default` | What a new thread does about its environment unless told. |
+| `option:BindingOptions.default_environment` | The environment the nearest setting names as the default, wherever it is set, and why the reader cannot use it when they cannot; absent when no setting names one and when an existing thread is bound again. |
 | `option:BindingOptions.source` | Safe resolved repository settings and the place supplying the repository address. |
 | `option:BindingOptions.access` | The permission page that a thread created here would begin with. |
 | `option:BindingOptions.agent_access` | Agent privilege choices for this creation context. Rebinding an existing holder does not create another contribution and leaves this field absent. |
@@ -50,6 +536,8 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:ImportOptions.same_source` | What is done with an object that an earlier import of the same thing made: `replace` unless given. |
 | `option:ImportOptions.same_name` | What is done with an object whose name another of the place has: `keep_both` unless given. |
 | `option:ParameterOptions.from_model` | Which list. |
+| `option:protocols.google-interactions.web_search.search_types` | Gemini native search types: web_search for text sources and image_search for image sources. These configure an enabled Live search tool and preserve the caller’s functions. |
+| `option:EndpointOptions.auth` | How the endpoint receives its credential. Gemini Interactions uses x-goog-api-key by default; bearer, x-api-key, a named header and no credential remain available for other endpoints. |
 | `option:protocols.openai-responses.web_search.search_context_size` | The amount of search context requested: low, medium or high. |
 | `option:protocols.openai-responses.web_search.return_token_budget` | The declared return-token budget: default or unlimited. |
 | `option:protocols.openai-responses.web_search.filters` | Domain filters for this search; allow and block lists cannot be supplied together. |
@@ -92,7 +580,612 @@ An option is offered only where its interface or program declares it. Provider l
 | `option:protocols.anthropic-messages.native_tools.page_fetch.request.citations` | Whether fetched pages are returned with citations the answer can point to. |
 | `option:protocols.anthropic-messages.native_tools.page_fetch.request.citations.enabled` | Turns citations for fetched pages on or off. |
 | `option:ModelGroupOptions.request_options` | Request option forms and constraints keyed by interface; `native` names program parameters. The endpoint, group and offering constraints still apply. |
+| `option:ModelParameters.purposes` | A provider manager's explicit model purposes replace discovery: generation, embedding, image generation, transcription, speech generation, reranking or structured decisions. Omission follows the reported purposes; an empty list offers this model for no work. |
+| `option:ModelRecent.provider_id` | The provider of this person's chosen model; the same routing name at another provider is a distinct choice. History confers no access to the provider. |
+| `option:ModelRecent.model_name` | The exact chosen routing name. Deliberate selection and admitted native use update private recency; opening a picker does not. |
+| `option:ModelRecents.recent` | This person's model identities in server-accepted order, across devices and threads. Another person's history is never included; pickers match only their current suitable choices. |
+| `option:ModelRecents.recent_count` | The current interface.recent_models default for the short group. Other choices keep their ordinary order and remain searchable. |
+| `option:PersonalState.thread_setup` | The last successful native setup, saved atomically with birth and revalidated before reuse. Explicit place defaults and locks win; an environment is remembered only for that place. Failed creation does not replace it. |
+| `state:PersonalStateKey.thread_setup` | The caller's portable successful setup preference; never another person's or authority to use its resources. |
+| `state:UserEvent.model_recents` | This person's accepted model history changed. Their open pickers reread the private order without replacing unrelated preferences. |
+| `option:ModelOffered.purposes` | Work reported by the model listing. A shared list does not prove every entry can chat. Purpose facts are separate from enabled speeds, costs and access. |
+| `option:ProviderModel.purpose` | Read-only model and current endpoint purpose facts. They never rewrite editable parameters or make an unchanged model editor stale. |
+| `option:ModelOption.purpose` | The same current work facts on a thread or Ask model choice, without provider configuration or credentials. |
+| `option:ModelPurposeInfo.declared` | The manager’s choice takes precedence. Otherwise Orch uses the listing, a recognized family or routing name, then a dedicated endpoint. An unknown model stays selectable with “Purpose not reported”. |
+| `option:ModelPurposeInfo.reachable` | Work reachable through the current declared endpoint kinds. A model-purpose override does not create a missing interface. Unknown interfaces do not invent a restriction. |
+| `state:ModelPurpose.generation` | Conversational text, agent turns, Ask and summaries. |
+| `state:ModelPurpose.embedding` | Text vectors for semantic retrieval. |
+| `state:ModelPurpose.image_generation` | Image generation rather than conversational text. |
+| `state:ModelPurpose.transcription` | Speech converted into text. |
+| `state:ModelPurpose.speech_generation` | Generated speech rather than conversational text. |
+| `state:ModelPurpose.rerank` | Reranking existing retrieval results. |
+| `state:ModelPurpose.decision` | Choosing among supplied structured alternatives; this alone does not declare conversational generation. |
 | `option:providers.presets.*.credential_hints` | Public key-format hints that propose this preset and a credential role. They never verify a key or enable an offering; the normal first read after saving confirms the vendor facts. |
 | `option:providers.presets.*.credential_hints.*.prefix` | The plain public beginning of a key format. Matching only proposes a choice; the complete key stays in the form until Save. |
 | `option:providers.presets.*.credential_hints.*.role` | The proposed role: model access or an admin credential for the facts source. A role the client does not recognize requires an explicit supported choice. |
 | `option:providers.presets.*.credential_hints.*.field` | Optional declared secret-field name for the proposed admin credential in the selected facts source. It is kept separate from model access and must be offered by that source. |
+| `option:TranslationOptions.allowed` | Whether a selected pairing may use format conversion under its current place policy. |
+| `option:TranslationOptions.output_tokens` | The captured fallback output allowance when neither the request nor the offering supplies one. |
+| `option:ProtocolTranslation.from` | The caller or harness interface of the selected conversion. |
+| `option:ProtocolTranslation.to` | The actual outgoing upstream interface. |
+| `option:ProtocolTranslation.title` | The converter name shown with the selected pairing. |
+| `option:ProtocolTranslation.losses` | Declared preserved, approximated and omitted behavior for this conversion. |
+| `option:ConversionLosses.preserved` | Behavior whose meaning is preserved across the interfaces. |
+| `option:ConversionLosses.approximated` | Behavior carried in an equivalent or reduced form, including custom tool grammars and caching. |
+| `option:ConversionLosses.dropped` | Features with no translated equivalent; these are disclosed before choosing the pairing. |
+| `option:Isolation.translation` | The selected conversion and its fidelity, when reported; absence is direct or unreported. |
+| `option:Resolution.translation` | The actual generation conversion captured with the capability resolution. |
+| `option:Provider.translated_protocols` | Additional converted interfaces offered by the provider, separate from its native endpoints. |
+| `option:UpstreamSide.model` | Captured model declarations and reported output maximum for this exact translated request. |
+| `option:UpstreamSide.output_tokens` | Captured fallback output allowance used only if the request and offering have none. |
+| `option:UpstreamSide.session` | Opaque stable session cache key; it contains no original session identity or person. |
+| `option:ProviderStart.translation_output_tokens` | The resolved translated-output default captured when the provider is started. |
+| `option:Provider.relay` | The key provider’s explicit public relay choice, shown only to its current configuration reader. |
+| `option:ProviderRelayOptions.enabled` | Permit direct model API calls; off by default. |
+| `option:ProviderRelayOptions.models` | Exact enabled model names opened to public calls; empty opens none. |
+| `option:ProviderRelay.lease` | The one admitted model lease for this public call; no model credential. |
+| `option:ProviderRelay.relay_id` | Command-bound memory exchange, first for the request and then its response. |
+| `option:ProviderRelay.path` | The interface’s allowed request path below the public SDK base. |
+| `option:ProviderRelay.headers` | Admitted interface headers without the Orch credential. |
+| `option:ProviderRelay.request_bytes` | Exact normalized request length, used to bound the input phase. |
+| `option:ProviderRelay.request_hash` | Request digest verified before any upstream call. |
+| `option:ProviderRelay.idle_secs` | Captured silence allowance of the memory exchange. |
+| `option:ProviderRelay.retry_ms` | Captured transient retry interval. |
+| `option:ProviderRelayHead.status` | Actual upstream HTTP status. |
+| `option:ProviderRelayHead.headers` | Repeated response header octets, with connection, credential and cookie headers removed. |
+| `option:ProviderRelay.max_request_bytes` | The captured public request setting also limits the outgoing native request, so raising it needs no separate connector setting. |
+| `state:UsagePurpose.relay` | Direct model API calls through a key provider, counted for their actual caller. Empty cap purpose filters include Relay. |
+| `option:ProviderRelay.start` | Current provider configuration and credential references delivered only to the keeping connector; no Orch API credential or model input. |
+| `option:ProviderUpdateBody.relay` | Replace a key provider’s public relay switch and exact opened models; the normal revision and configuration reader apply. |
+| `option:ModelParameters.request_options.common` | One vendor-neutral schema for declared cache and schema-output options, composed through the same endpoint, group and model layers. |
+| `option:ModelGroupOptions.request_options.common` | The common feature rules of an existing named model group. |
+| `option:EndpointOptions.request_options.common` | Common feature rules on the actually selected native endpoint. |
+| `option:common.cache` | Declared key/retention controls. Each interface supplies its native fields; unsupported members or retention values are refused with their reason. |
+| `option:common.structured_output` | Declared output schema, with optional name and strictness where the native interface represents them. |
+| `option:LeaseOpen.request_options.common` | Explicit thread choices from the same common schema; they override overlapping format-specific choices and do not reopen a blocked value. |
+| `option:FeatureBinding` | A wire format’s data mapping from a common feature to native JSON paths, discriminators and creation defaults. |
+| `option:FeatureField` | A canonical feature member’s native pointer, intrinsic value schema, available choices and factual default. |
+| `option:common.structured_output.name` | Logical schema name retained with the common choice; interfaces with a schema-name field also send it. |
+| `option:AgentDescriptor.features` | The program’s declared feature IDs and shipped on/off states. Explicit agent.features settings override these values, including false. |
+| `option:ProviderModel.parameter_forms` | Read-only request-option forms keyed by interface, projected from this model’s effective constraints. The same forms serve thread and place-default editors. |
+| `option:AgentModel.parameter_forms` | The same effective request-option forms exposed with the agent’s model entry; the selected program and model still determine applicability. |
+| `option:SettingParameterFormBody.definitions` | Native parameter declarations from the selected program descriptor. Resolves form metadata without opening a session or making a model call. |
+| `option:SettingParameterFormBody.model` | The selected model’s enabled parameters and effective native constraints; discovery offers alone do not enable a choice. |
+| `option:SettingParameterFormBody.feature_defaults` | Shipped feature states from the selected program descriptor, before explicit place choices are applied. |
+| `option:SettingParameterFormBody.features` | Explicit resolved feature choices at the place. Each entry overrides the program’s shipped value; false keeps that feature off. |
+| `option:SettingParameterFormBody.provider_kind` | The selected provider kind, api or subscription, used to evaluate declared parameter conditions. |
+| `option:SettingParameterFormBody.scope` | Optional org, project, topic or thread scope; the form includes only parameters writable at that scope. |
+| `option:SettingParameterFormBody.harness_version` | The selected program’s reported version when known, used for version-dependent parameter conditions. |
+| `option:ResolvedSetting.inherited` | The effective value and its source with this place’s contribution omitted; supplied when the reader has the place context. The own contribution remains the stored choice. |
+| `option:SettingInheritance.value` | The value the inherited choice gives; null means no scope supplies one. It is computed by the same native merge and default rules. |
+| `option:SettingInheritance.source` | The place or declared default supplying the inherited value; concealed names retain their ordinary privacy boundary. |
+| `option:ThreadInterruptBody.turn_id` | The turn last seen by the caller. Stop acts on the work currently running or preparing in the thread. If the named turn just ended, Stop can still hold its queue. |
+| `option:ThreadStop.state` | The immediate Stop acknowledgement: stopping while work remains, or stopped when the target has ended. The accepted request continues after this response. |
+| `option:ThreadStop.requested_at` | When Stop was requested; the elapsed stopping time begins here, including a wait for another change to finish. |
+| `option:ThreadStop.turn` | The named turn as it stands in the acknowledgement. Absent when stopping preparation before a turn exists. |
+| `option:Thread.stopping` | Independently versioned accepted Stop state, shared by the thread's controls and activity line even while an ordinary row write waits. Absent before any native Stop has been accepted. |
+| `option:ThreadStop.stopping` | The same accepted state in the Stop answer. A read-only program that already returns a canonical completed turn needs no separate observation. |
+| `option:ThreadStopping.version` | Commit-ordered version of accepted Stop state, separate from the thread history sequence. An older observation never replaces a newer one. |
+| `option:ThreadStopping.requested_at` | Start of the shared stopping clock, retained while the canonical completion catches up. |
+| `option:ThreadStopping.pending` | True while acceptance, cancellation or the interrupted turn still waits. A completed observation cannot revive an older activity line. |
+| `option:ThreadStopping.idle` | When true, the Stop has finished and the thread was idle. The composer can show Send immediately. |
+| `option:ThreadStopping.thread_seq` | The thread history sequence when the server observed the Stop. |
+| `option:ThreadStopping.state_seq` | The ordinary Thread state row that completes this observation. A newer queued-input or turn response alone does not prove that the activity row has arrived. |
+| `option:Turn.interrupted_at` | When somebody requested this turn's Stop. Absent when nobody stopped it; this is separate from its eventual completion time. |
+| `option:MarkerSessionReopened.reason` | The recorded reason the session opened again before a turn, such as changed instructions or a program restart. Unchanged observable instructions keep the existing session. |
+| `option:PortOpening.refused_until` | The stored time after which an identical refused effect may be asked again. The opening remains refused; this metadata does not reopen it or create another approval. |
+
+| `option:ModelOptionReason.shared_for_ask_only` | Shared for Ask only; this model cannot be chosen for a thread. |
+| `option:ModelOptionReason.shared_for_other_work_only` | Shared for other work only; this model cannot be chosen for personal Ask. |
+| `option:AskModelOption.unavailable_reason.shared_for_ask_only` | Shared for Ask only. |
+| `option:AskModelOption.unavailable_reason.shared_for_other_work_only` | Shared for other work only. |
+
+| `option:OrgTreeGetQuery.path_to` | One ancestry path, without siblings. |
+| `option:OrgTreeGetQuery.q` | Server-side name search; empty lists a bounded first page. |
+| `option:OrgTreeGetQuery.kind` | The native node kind selected by a paged place picker. |
+| `option:OrgTreeGetQuery.below_id` | Places inside this node, including itself. |
+| `option:OrgTreeGetReply.ancestors` | Authorized structural ancestors outside the page window. |
+| `option:OrgTreeGetReply.feed` | The current bounded metadata feed for exactly this page. |
+| `option:TreeNode.folded` | Readable children and folded unread, mentions, decisions and current work inside the branch. |
+| `option:TreeFold.archived` | Authorized archived paths have their own counts and attention. Show archived includes this group; hiding archived paths uses only the ordinary fields. Neither group contains a chat signal without Chat View. |
+| `option:TreeNode.chat` | The node’s known chat identity does not grant Chat View. Its message position is null while that independent View is withheld. |
+| `option:TreeNodeChat.seq` | The node’s known chat identity does not grant Chat View. Its message position is null while that independent View is withheld. |
+| `option:DocumentTreeView.hierarchy` | The current reader’s bounded hierarchy pages across roots in one metadata subscription; every page uses its own native rooted admission. No whole tree or durable replay. |
+| `option:DocumentTreeData.hierarchy` | A complete replacement of its one subscribed hierarchy page. |
+
+| `option:BindingProvider.setup` | The current setup issue shown in a thread’s provider picker. Expired subscription tokens take priority over an empty model list. |
+| `option:BindingProviderSetup.reason` | Sign-in expired, sign-in needed, or no model enabled, according to the provider’s last reported credential and configured models. |
+| `option:BindingProviderSetup.can_sign_in` | On a lapsed subscription, a provider manager can open Credentials to sign in again. |
+| `option:BindingProvider.reason.shared_for_ask_only` | Shared for Ask only; asking for other work remains available. |
+
+| `option:OrgTreeGetReply.page_size` | The effective page default for this opening; small trees that fit keep their familiar initial expansion. |
+
+| `option:DocumentTreeData.hierarchy.window` | The client-chosen routing number of the one page replaced; it conveys no authority. |
+| `option:DocumentTreeData.hierarchy.problem` | An existing refusal code for this page; other open pages continue. The screen uses its ordinary localized reason. |
+
+
+### Live file reads
+
+| Reference | Meaning |
+| --- | --- |
+| `option:Thread.starting_since` | When the current preparation began; absent when no start is under way. |
+| `option:Thread.starting_work` | The current preparation, its command and what is ahead of it. |
+| `option:StartingWork.command` | The accepted native command for this preparation, when one is running or in line. |
+| `option:StartingWork.behind` | The work that actually holds the serial line ahead; finished capture uploads do not hold later starts. |
+| `option:Turn.files_changed` | Known changed paths at the turn end, from complete before/end coverage or the native change journal; absent means unknown. |
+| `option:Turn.files_changed_paths` | The relative changed paths known for this turn, including changes made without a file-tool patch. |
+| `option:Turn.files_changed_complete` | True means complete change coverage; false means known scoped changes, which keep independently reported tool edits. |
+| `option:WorkspaceObserveResult.changed_paths_complete` | Whether native watcher coverage is complete for the observed interval; degraded coverage still returns paths it actually saw. |
+| `option:WorkspaceObserve.sealed` | Omit to seal prepared end metadata and observed paths; supply that exact result to publish it without reading newer live files. |
+| `option:WorkspaceObserveResult.end_patch_blob` | Immutable changed metadata over a prepared base; keeps a complete end state while the full manifest is encoded and published in the background. |
+| `state:RecordKind.source` | Job-owned Current files capture, independent of automatic recording days/bytes and held by its native worktree recovery journal. |
+| `option:Turn.recording_notice` | The first affected turn keeps its recording-coverage reason; a later refresh does not move the notice. |
+| `option:Turn.recording_indexing` | Indexing progress when this turn started before whole recording was ready; absent progress is not guessed. |
+| `option:TurnRecordingProgress.done` | Entries prepared when the turn started. |
+| `option:TurnRecordingProgress.total` | Entries in that preparation pass; percentage is shown only when this is known. |
+| `option:EnvironmentFileSearchQuery.cursor` | Continue the same names or content query, source and filters; omit it to start fresh. |
+| `option:FileSearchNames.entries` | Matching path observations in this page; their source is stated beside the results. |
+| `option:FileSearchNames.next_cursor` | The next part of the same traversal; null means it reached the end. |
+| `option:FileSearchNames.source` | Live traversal, or the last complete cached file index when that is the source. |
+| `option:FileSearchNames.searched` | Entries checked so far; this is not a claim that the whole directory has this many entries. |
+| `option:FileSearchNames.as_of` | The end of this page observation or the cached manifest time. |
+| `option:FileSearchNames.observed_from` | When the live observation began; cached results retain their own observation time. |
+| `option:FileSearchContent.next_cursor` | Continue text search after this window, including a time slice with no matches. |
+| `option:FileSearchContent.observed_from` | When this live text traversal began. |
+| `option:EnvironmentArchiveListQuery.cursor` | Continue the same open archive and folder without rereading the compressed prefix. |
+| `option:EnvironmentArchiveListQuery.q` | Match child names of the selected archive folder, without regard to case. |
+| `option:ArchiveListing.next_cursor` | Continue the same archive reader; a time slice can return no rows and still continue. |
+| `option:EnvironmentGitDiffGetQuery.cursor` | Continue the output of the same native Git process; omitted starts a fresh difference. |
+| `option:EnvironmentGitDiffGetQuery.max_bytes` | Preferred bytes in this difference page; omitted uses the workspace default and the wire page still applies. |
+| `option:DocumentFileArchiveListQuery.cursor` | Continue this currently authorized immutable document archive. |
+| `option:DocumentFileArchiveListQuery.q` | Filter the selected archive folder by child name. |
+| `option:UploadBlobGetQuery.cursor` | Continue an archive page only after the caller independently holds the source blob again. |
+| `option:UploadBlobGetQuery.q` | Filter child names while listing this draft archive. |
+| `option:UploadBlobGetQuery.limit` | Rows in this archive window; omitted uses the current archive-row default. |
+| `option:EnvAttach.workspace` | Resolved file-reader defaults for this attachment; they do not make large directories unavailable. |
+| `option:FsRecord.wait_for_indexing` | A chosen wait also waits for indexing; the shipped turn default starts without waiting for initial indexing. |
+| `option:FsRecordResult.indexing` | Current preparation progress when whole recording is not ready. |
+| `option:FsRecordResult.reason` | Why whole recording is unavailable; cancelled records a Stop and a resumed input asks again. |
+| `option:FsSearch.scope` | Names or text content, both with live continuation. |
+| `option:FsSearch.cursor` | Continue exactly this live query and attachment. |
+| `option:FsArchiveList.cursor` | Continue the same open archive traversal. |
+| `option:FsArchiveList.query` | A case-insensitive substring of the displayed child name. |
+| `option:GitDiff.cursor` | Continue the same process output instead of running its prefix again. |
+| `option:GitDiff.max_bytes` | Preferred bytes in the next page, within the existing wire representation. |
+| `option:CmdAck.key_phase` | Actual queued, running or released ownership; acceptance alone does not pause a recording deadline. |
+| `option:EnvironmentFacts.recording` | Current whole-recording coverage; incomplete coverage is never reported as a complete state. |
+| `option:EnvironmentFacts.exclusion_problem` | The unapplied exclusion source, line when known and safe reason; no rule contents are disclosed. |
+| `option:ExclusionProblem.path` | The relative exclusion source or configured-rule name that needs correction. |
+| `option:ExclusionProblem.line` | The one-based invalid line when known. |
+| `option:ExclusionProblem.reason` | A safe reason such as unreadable, linked, oversized, invalid encoding or invalid pattern. |
+| `option:WorkspaceLimits.directory_entries` | Resolved workspace.directory_entries default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.search_results` | Resolved workspace.search_results default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.archive_results` | Resolved workspace.archive_results default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.index_entries` | Resolved workspace.index_entries default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.index_scan_secs` | Resolved workspace.index_scan_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.ignore_max_bytes` | Resolved workspace.ignore_max_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.ignore_cache_bytes` | Resolved workspace.ignore_cache_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_idle_secs` | Resolved workspace.directory_idle_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_slots` | Resolved workspace.directory_slots default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_cache_bytes` | Resolved workspace.directory_cache_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_builds` | Resolved workspace.directory_builds default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.directory_page_bytes` | Resolved workspace.directory_page_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.search_slice_secs` | Resolved workspace.search_slice_secs default for this attachment; explicit requests and continuation keep the act available. |
+| `option:WorkspaceLimits.git_diff_bytes` | Resolved workspace.git_diff_bytes default for this attachment; explicit requests and continuation keep the act available. |
+| `option:Problem.database_wait` | Safe facts for this request's known native database timeout; absent for other failures. |
+| `option:DatabaseWait.phase` | Captured acquisition, statement or idle-transaction timeout phase; never inferred from a generic cancellation. |
+| `option:DatabaseWait.applied_limit_ms` | Original applied deadline in milliseconds; null means the pool profile was not reported, never zero or an indefinite wait. |
+| `option:DatabaseWait.service` | The answering service, currently api; contains no database address, SQL or configuration origin. |
+| `option:DatabaseWait.occurrence_id` | The failed request's identifier; matches request_id and does not identify a database object. |
+| [Database connection wait expired](state-reference.md#state:DatabaseWaitPhase.acquire) | The native connection-pool wait expired. |
+| [Database statement timed out](state-reference.md#state:DatabaseWaitPhase.statement) | PostgreSQL explicitly cancelled a statement because its statement deadline expired. |
+| [Database transaction expired](state-reference.md#state:DatabaseWaitPhase.idle_transaction) | PostgreSQL explicitly ended a transaction because its idle deadline expired. |
+| `option:NodeSettingSetBody.model_choice` | Only with a thread’s agent.model write: reviewed effort and parameter cleanup values commit atomically with the model; each supplied own revision must still match. |
+| `option:WithheldParameter.requirement` | The actual public failed condition and declared alternatives; no private configuration expression is exposed. |
+| `option:WithheldParameter.inapplicable_selected_value` | The stored choice that is not applied; an explicit null is kept apart from no stored choice. |
+| `option:ParameterRequirement.kind` | All, any, not, credential path, provider kind, placement, model feature or value, program version, agent support, feature enablement or provider rule. |
+| `option:ParameterRequirement.requirements` | Every declared condition in this group is required. |
+| `option:ParameterRequirement.alternatives` | Any declared alternative can satisfy this requirement; none is inferred from a broad refusal category. |
+| `option:ParameterRequirement.requirement` | The typed condition whose negation is required. |
+| `option:ParameterRequirement.path` | Native, forwarded, shared or handed-over model credentials, as the program declares. |
+| `option:ParameterRequirement.provider_kind` | The API key or subscription kind that the declaration requires. |
+| `option:ParameterRequirement.placement` | The managed or connected environment kind that the declaration requires. |
+| `option:ParameterRequirement.feature` | The declared model capability required for this parameter. |
+| `option:ParameterRequirement.list` | The effort, speed or access-program list required by the declaration. |
+| `option:ParameterRequirement.value` | The declared model-list choice that is required. |
+| `option:ParameterRequirement.range` | The public agent-version range required by the declaration. |
+| `option:ThreadParameters.approval_choices` | Native approval choices with their current conformance and admission reasons; the ordinary writer still rechecks every gate. |
+| `option:ApprovalModeChoice.mode` | The native mode, including a dim Auto choice explaining why its conformance is unavailable. |
+| `option:ApprovalModeChoice.available` | Whether policy, reviewer access and actual isolation currently admit this choice. |
+| `option:ApprovalModeChoice.reason` | The actual known reviewer, policy, isolation or build refusal category. |
+| `option:ApprovalModeChoice.requirement` | The missing native reviewer, model Use, policy allowance, isolation or build support. |
+| `option:ToolError.rate_limit` | The deciding tool limiter’s captured allowance, source and reported wait; ordinary errors omit it. |
+| `option:ToolPayload.rate_limit` | Typed refusal facts carried through the native tool result; absence is not zero or a current retry promise. |
+| `option:ToolRateLimit.allowed_calls` | The per-thread call allowance in force at this refusal. |
+| `option:ToolRateLimit.period_secs` | The unit period of that recorded allowance. |
+| `option:ToolRateLimit.retry_at` | The reported historical retry instant, absent only when it cannot be represented; no automatic retry is added. |
+| `option:ToolRateLimit.observed_at` | The captured refusal time; later settings and limiter restarts do not rewrite it. |
+| `option:ToolRateLimit.source` | The supplying setting identity; its current name remains under the current reader’s authority. |
+| `option:ProviderRefreshReply.trial` | The actual recovery check receipt; it never infers a reservation from credential-error status. |
+| `option:ProviderTrial.state` | Reserved, native Running, Used or Not reserved; no captured record is explicitly unreported. |
+| `option:ProviderTrial.at` | The recorded state time; a reservation is not a successful sign-in or a promised start. |
+| `option:ProviderTrial.input_ref` | The exact reserved input, only within current live thread and input visibility. |
+| `option:ProviderTrial.thread_ref` | The currently authorized thread reference; a provider-only key does not acquire it. |
+| `option:ProviderTrial.reserved_for` | The captured responsible person, projected only when the original input is currently readable. |
+| [Reserved](state-reference.md#state:ProviderTrialState.reserved) | One specific input has the single trial reservation. |
+| [Running](state-reference.md#state:ProviderTrialState.running) | The reserved native turn is actually running. |
+| [Used](state-reference.md#state:ProviderTrialState.consumed) | The admitted trial ended or verified recovery consumed its reservation; this does not assert vendor success. |
+| [Not reserved](state-reference.md#state:ProviderTrialState.not_reserved) | This observed check holds no active trial reservation. |
+| `option:AnnouncementPayload.delivered_as` | The actual queued, steered, interrupted or deferred recipient outcome, separate from requested delivery. |
+| `option:ThreadBinding.call_route` | The active admitted failover and current return context; absent when no route is reported, including retained inspection. |
+| `option:ThreadCallRoute.configured` | The person’s configured route, separate from a temporary override; unknown older origins stay unreported. |
+| `option:ThreadCallRoute.active_override` | The actual admitted override, retired when the person’s binding or choice changes. |
+| `option:ThreadCallRoute.original` | The captured original route, without its private parameters. |
+| `option:ThreadCallRoute.return_policy` | The current next-turn-when-ready or stay policy, rechecked on the next call. |
+| `option:ThreadCallRoute.return_state` | The actual returning state or current policy; never readiness inferred from a pending candidate. |
+| `option:ThreadCallRoute.observed_at` | When the current route facts were observed. |
+| `option:CallRouteChoice.provider_id` | The admitted route’s provider identity; this carries no provider configuration or credentials. |
+| `option:CallRouteChoice.model` | The admitted model’s routing name; normal screens use its safe resource name. |
+| `option:CallRouteChoice.display_name` | The admitted display name captured with the route, or unreported on older receipts. |
+| [When ready on a later turn](state-reference.md#state:CallReturnState.when_ready) | Return when ready on a later eligible turn; no start is promised. |
+| [Stay on failover](state-reference.md#state:CallReturnState.stay_on_failover) | Keep the admitted failover route until an ordinary change. |
+| [Returning](state-reference.md#state:CallReturnState.returning) | The engine has actually begun returning to the original route. |
+| [Not reported](state-reference.md#state:CallReturnState.unreported) | The original route or return fact was not captured. |
+| `option:ModelChoiceSettings.effort` | A changed writable effort committed with the model; omission keeps an unchanged or independently locked effort. |
+| `option:ModelChoiceSettings.params` | The reviewed own parameter map after incompatible choices are removed, committed in the same transaction. |
+| `option:ModelChoiceSetting.value` | The explicit related setting value; null follows the model’s effort default. |
+| `option:ModelChoiceSetting.expected_revision` | The displayed own revision; zero requires an absent own row. A stale component refuses the whole model choice. |
+| `option:ProviderModelUpdateBody.expected` | The definition read when opening a draft; editors submit it and a changed baseline refuses the whole save. Omission is a deliberate unconditional replacement, which requires no prior Read. |
+| `option:ProviderModelState.parameters` | The enabled model options on which the draft was based, compared under the model row lock. |
+| `option:ProviderModelState.groups` | The ordered model groups on which the draft was based. |
+| `option:BindingDefaults.locks` | Each creation default has its own lock; one fixed choice leaves unrelated choices available. |
+| `option:BindingDefaultLocks.provider` | Whether the default provider is fixed; models within it remain separately selectable. |
+| `option:BindingDefaultLocks.agent` | Whether the default agent profile is fixed. |
+| `option:BindingDefaultLocks.model` | Whether the model routing name is fixed, independently of effort. |
+| `option:BindingDefaultLocks.effort` | Whether effort is fixed; compatible model choices remain available. |
+
+| `option:BindingAgent.approval_resolution` | The approval preference and the actual declared replacement in a start proposal; absent when the program has not reported its modes. |
+| `option:ApprovalDefaultResolution.preferred` | The effective inherited approval preference. |
+| `option:ApprovalDefaultResolution.effective` | The program mode selected by the same rule used at creation; null when no ordinary replacement is declared. |
+| `option:ApprovalDefaultResolution.reason` | Why the inherited preference needs replacement, when it does. |
+| `option:ApprovalDefaultResolution.source` | The protected setting source of the preference. |
+| `option:ApprovalDefaultResolution.revision` | Identifies this observed preference, source and declared modes; creation still checks current authority and inputs. |
+| `state:ApprovalDefaultReason.not_declared` | The program does not declare the preferred mode. |
+| `state:ApprovalDefaultReason.no_ordinary_mode` | The program declares no ordinary replacement. |
+
+| `option:ParameterRequirement.actual` | The safe observed credential, provider or placement category, or reported program version, at the same eligibility check; absence is unreported. |
+| `option:ThreadParameters.orch_tools` | A small summary of the current native session’s accepted tool offer; current settings do not rewrite it. |
+| `option:OrchToolsSummary.session_revision` | Identifies the exact accepted catalogue and captured inputs. |
+| `option:OrchToolsSummary.offered_count` | The number actually offered, including measured zero. |
+| `option:OrchToolsSummary.accepted_at` | When the offer was accepted. |
+| `option:OrchToolFact.key` | The declared native tool key. |
+| `option:OrchToolFact.offered` | Whether the accepted session was given this tool. |
+| `option:OrchToolFact.reason` | The captured build, setting, continuation, goal or capability exclusion. |
+| `option:OrchToolFact.source` | The supplying setting source, only under current settings-read authority. |
+| `option:OrchToolsQuery.cursor` | Native continuation within the same accepted session offer. |
+| `option:OrchToolsQuery.search` | Filters declared tool names within this retained catalogue. |
+| `option:OrchToolsQuery.session_revision` | Requires the displayed accepted offer; a changed session must be read again. |
+| `option:OrchToolsPage.summary` | The actual session summary, or null when no offer was captured. |
+| `option:OrchToolsPage.tools` | One native page of offered and excluded declarations; follow its continuation for more. |
+| `option:NativeImageReceipt.native_image_bytes` | The effective native image byte maximum at admission; zero selects materialized paths. |
+| `option:NativeImageReceipt.source` | The captured allowance source; its name remains protected by current authority. |
+| `option:NativeImageReceipt.resolved_at` | The actual resolver observation time. |
+| `state:OrchToolUnavailable.not_built` | This engine does not implement the declaration. |
+| `state:OrchToolUnavailable.off_here` | The tool is off at this place. |
+| `state:OrchToolUnavailable.read_only` | The continuation permits reading tools only. |
+| `state:OrchToolUnavailable.no_tools` | The continuation receives no tools. |
+| `state:OrchToolUnavailable.goal_required` | No active goal supplies the goal tool. |
+| `state:OrchToolUnavailable.capability_unavailable` | The native capability gate did not offer this tool. |
+| `state:OrchToolUnavailable.program_unsupported` | The program does not accept Orch tools. |
+| `state:OrchToolUnavailable.environment_tools_off` | The environment turns Orch tools off. |
+| `state:OrchToolUnavailable.capability_work` | This capability-work continuation receives no Orch tools. |
+| `option:SubFrame.window` | Incremental page change on an existing hierarchy metadata subscription; it keeps other pages and uses no extra subscription slot. |
+| `option:HierarchyWindow.kind` | query registers consecutive selector fragments; remove releases that page. |
+| `option:HierarchyWindow.window` | Connection-local page routing number, retained only while that page is held. |
+| `option:HierarchyWindow.data` | Consecutive URL-safe unpadded base64 fragments of UTF-8 selector JSON, each inside the announced physical frame boundary. |
+| `option:HierarchyWindow.complete` | The final fragment validates and follows the bounded selector; invalid selectors affect only that page. |
+| `option:ReadyFrame.max_client_frame_bytes` | Native maximum bytes of one client JSON frame, including its envelope; metadata selectors are split to fit it. |
+| `option:HierarchyWindow.root` | Actual root of this page selector; it does not grant View. Every update uses the same rooted native authorization as HTTP. |
+| `option:TreeFold.has_children` | A native View-authorized direct child exists in this visibility class. Expand stays available without counting or retaining a quiet subtree. |
+| `option:TreeFold.small_tree` | The root’s permission-resolved descendants fit this initial page. This optional opening fact preserves the initial small-tree shape; live refreshes omit it and larger trees remain fully browsable one level at a time. |
+| `option:OrgTreeGetQuery.include_threads` | False excludes threads before a place page is filled; omission includes them. It is not combined with path_to, and its effective value is bound into the cursor. |
+| `option:OrgTreeGetQuery.sort` | Order the whole eligible set before paging. Navigation uses the caller’s saved choice, then the org default; explicit newest, changed, name and custom are also available. Omission uses native identity order. |
+| `option:OrgTreeGetQuery.locale` | en or zh-CN chooses navigation’s numeric, base-letter name ordering. The API process locale does not change it. |
+| `option:OrgTreeGetReply.ordering` | The effective order and safe partial sibling ordering for already returned identities, without exposing raw saved preference maps. |
+| `option:HierarchySort` | navigation resolves saved preferences; newest, changed, name and custom request one mode directly. |
+| `option:HierarchyOrderBy` | The resolved newest, changed, name or custom mode used for this window. |
+| `option:HierarchyLocale` | en and zh-CN follow their numeric, case/accent-insensitive name order. |
+| `option:HierarchyOrdering.by` | The effective mode, including an org default a reader follows without reading the whole settings page. |
+| `option:HierarchyOrdering.revision` | Opaque order-and-locale revision for retiring stale cursors and partial sibling constraints. |
+| `option:HierarchyOrdering.known_order` | Only relative orders of visible or inspectable identities already in the response. Private ranks and other saved identities are absent. |
+| `option:DirListing.revision` | The identity of this folder observation; small stable folders use an immutable snapshot, while a wide or changing folder continues its live native reader. Pages are ordered within their window and state their observation interval. |
+| `option:FsListPageResult.revision` | The same native folder-observation identity across its byte-bounded pages, rather than a claim of an instantaneous whole-folder cut. |
+
+
+### Captured provider operation facts
+
+| Reference | Meaning |
+| --- | --- |
+| `option:ProviderRuntimeSupport.retry_after_secs` | Resolved creation retry interval; manual Start retries immediately. |
+| `option:Provider.facts_refresh` | Read-only current Refresh eligibility under the same durable claim; opening the page does not observe the vendor. |
+| `option:ProviderRefreshEligibility.eligible` | Whether ordinary explicit Refresh may claim a read now. |
+| `option:ProviderRefreshEligibility.next_at` | Next known eligibility from the durable attempt, deployment interval and source minimum; absent before an attempt or outside representable time. |
+| `option:ProviderRefreshEligibility.source_minimum` | The source minimum, rather than the deployment interval, controls reuse. |
+| `option:HarnessState.home` | Evidence from this process start; current settings never relabel an older report. |
+| `option:HarnessHome.path` | The home passed to the actual adapter; absent when the native program chooses its own unreported path. |
+| `option:HarnessHome.source` | The runtime choice, profile choice, managed binding or preserved native default captured for the actual start. |
+| `option:AgentStartResult.home` | Native home evidence also returned when reusing the existing process. |
+| `option:ProviderStart.upstream_policy` | Operational model exchange policy captured by the same settings resolver for native and public calls. |
+| `option:UpstreamPolicy.head_secs` | Seconds to wait for response headers or a whole reply. |
+| `option:UpstreamPolicy.idle_secs` | Seconds without a streamed response fragment. |
+| `option:UpstreamPolicy.whole_bytes` | Whole reply and owned generation byte allowance; only addressable memory bounds the representation. |
+| `option:CommandError.details.upstream` | The failed upstream rule with its captured seconds or bytes, retained in the normal failure line. |
+| `state:HarnessHomeSource.runtime` | An explicit runtime home choice. |
+| `state:HarnessHomeSource.profile` | The profile home choice. |
+| `state:HarnessHomeSource.managed` | A home made or bound by the managed connector. |
+| `state:HarnessHomeSource.native` | The existing native home is preserved; an unknown path stays unreported. |
+
+
+### Recorded placement calculation
+
+| Reference | Meaning |
+| --- | --- |
+| `option:PlaceHost.calculation` | Actual scheduler calculation captured for this proposal; absent means no recorded calculation. |
+| `option:Job.result.calculation` | The actual placement calculation retained with the change result; it never borrows current defaults. |
+| `option:RuntimeIsolation.assumptions` | Captured sources of boundary, stop persistence and overhead; absent on an unreported record. |
+| `option:PlacementCalculation.captured_at` | When the deciding scheduler captured its inputs. |
+| `option:PlacementCalculation.declared_totals` | Existing units’ declared CPU, memory and disk before overhead, never measured utilization. |
+| `option:PlacementCalculation.applied_totals` | The exact totals used by this scheduler’s capacity tests. |
+| `option:PlacementCalculation.runtime_overhead` | Runtime memory additional to unit declarations, with unknown and excluded amounts kept distinct. |
+| `option:PlacementCalculation.capacities` | The capacity report used for this calculation. |
+| `option:PlacementCalculation.capacities_as_of` | Receipt time of that actual capacity report; unknown stays absent. |
+| `option:PlacementCalculation.thresholds` | Captured fullness threshold and incoming memory need. |
+| `option:PlacementCalculation.consequence` | The actual warn or block policy at calculation time. |
+| `option:PlacementCalculation.sources` | Declaration and setting layers actually used, without private machine policy or hidden resource names. |
+| `option:PlacementCalculation.isolation` | Isolation resolved from the selected driver, runtime and template before placement. |
+| `option:PlacementRuntimeOverhead.existing_memory_mb` | Additional memory actually counted for existing units, in MiB. |
+| `option:PlacementRuntimeOverhead.incoming_memory_mb` | The incoming runtime class’s declared overhead, or absent when unknown. |
+| `option:PlacementRuntimeOverhead.incoming_included` | Whether incoming overhead was included in the actual room test. |
+| `option:PlacementRuntimeOverhead.source` | Declared class or unknown fallback behind the incoming overhead. |
+| `option:PlacementThresholds.full_percent` | The effective hosts.full_percent used by this decision. |
+| `option:PlacementThresholds.incoming_memory_mb` | The incoming declared memory used for the free-room comparison. |
+| `option:PlacementCalculationSources.needs` | The resolver branch supplying each incoming resource need. |
+| `option:PlacementCalculationSources.capacity_unreported` | Missing capacity members; a numeric fallback does not make them measured zero. |
+| `option:PlacementCalculationSources.template_revision` | The actual template revision read for the decision. |
+| `option:PlacementCalculationSources.full_percent` | System setting supplying the fullness percentage. |
+| `option:PlacementCalculationSources.consequence` | Host choice or system setting supplying warn versus block. |
+| `option:RuntimeAssumptions.boundary_source` | Source of the effective isolation boundary. |
+| `option:RuntimeAssumptions.stop_persistence_source` | Source of the stop-persistence claim; unreported never means data is lost. |
+| `option:RuntimeAssumptions.overhead_source` | Source of runtime memory overhead; unknown never becomes measured zero. |
+| `state:RuntimeAssumptionSource.runtime_declaration` | Selected runtime class declaration. |
+| `state:RuntimeAssumptionSource.driver_declaration` | Driver confinement declaration. |
+| `state:RuntimeAssumptionSource.unknown_runtime_fallback` | The runtime was unresolved and the implementation used its fallback. |
+| `state:RuntimeAssumptionSource.not_reported` | No declaration supplied this fact. |
+| `state:PlacementNeedSource.resolved_needs` | Explicit or inherited needs setting. |
+| `state:PlacementNeedSource.template_needs` | Template needs declaration. |
+| `state:PlacementNeedSource.resolved_resources` | Effective resource limits, including template ceilings. |
+| `state:PlacementNeedSource.template_resources` | Template resource declaration. |
+| `state:PlacementNeedSource.not_reported` | No declared value; the scheduler used its existing zero fallback. |
+| `state:PlacementSettingSource.system` | The system setting, including its declared default. |
+| `state:PlacementSettingSource.host` | The host’s explicit when-full choice. |
+| `option:Job.calculation` | The actual placement calculation retained with the job, including later failure or cancellation. Old records remain unreported; current settings never fill them. |
+| `option:HarnessStatus.home` | Fresh actual process home carried by the ordinary status report, including supervised recovery and connector reconciliation. Missing evidence never selects a new home. |
+
+| Reference | Meaning |
+| --- | --- |
+| `option:SummarySnapshot.result_facts` | Captured native output transformations and request counts of the readable paragraph. Later settings do not reconstruct them; absence means Not reported. The paragraph’s current source governors also guard these facts. |
+| `option:SummaryResultFacts.flattened` | Whether the captured conformance normalized whitespace; null means the fact was not captured. |
+| `option:SummaryResultFacts.first_line_only` | Whether the first nonempty line of a multiline answer was kept; null means not captured. |
+| `option:SummaryResultFacts.removed_characters` | Characters cut by the actual character allowance after formatting. A whole rejected handoff is not counted as a shortened valid answer. |
+| `option:SummaryResultFacts.unknown_tags` | Captured count of supplied tag names absent from the offered choices. |
+| `option:SummaryResultFacts.duplicate_tags` | Captured count of supplied tag names already retained in the answer. |
+| `option:SummaryResultFacts.over_budget_tags` | Captured count of known, nonduplicate tags beyond the chosen allowance. |
+| `option:SummaryResultFacts.rejected_whole` | Whether the handoff was rejected whole; no raw rejected command or path prefix is retained in these facts. |
+| `option:SummaryResultFacts.captured_usage` | Canonical reported request token counts retained with the result, including measured zero; missing counts stay unknown and never become a quote or refund. |
+| `option:SummarySnapshot.refresh_proposal` | Read-only current model, usage owner and rendered request estimate before Refresh; it reserves nothing and never enables automation. |
+| `option:SummaryRefreshProposal.revision` | Revision of the observed choice and source inputs; never an admission or payment token. |
+| `option:SummaryRefreshProposal.usage_owner` | The actual manual requester’s safe person reference; never inferred from the resource owner. |
+| `option:SummaryRefreshProposal.input_estimate_tokens` | Estimated tokens of the actual rendered prompt, separate from base prices and character targets. |
+| `option:SummaryRefreshProposal.output_allowance_tokens` | Actual output reservation, including applicable reasoning room; a maximum rather than a quote. |
+| `option:GoalReport.helper` | Captured helper admission and actual outcome; old or agent-only records have no invented helper facts. |
+| `option:GoalHelperReceipt.checked` | True only for an interpreted helper answer; false for a captured pending or unchecked attempt, null when unreported. A person accepting a report does not manufacture a helper result. |
+| `option:GoalHelperReceipt.input_allowance_tokens` | The admitted input allowance captured with this attempt, never a later default. |
+| `option:GoalHelperReceipt.output_allowance_tokens` | The actual admitted output allowance, separate from explanation characters. |
+| `option:GoalHelperReceipt.last_turn` | Actual material coverage of the selected last turn; null remains Not reported. |
+| `option:NodeBase.automatic_fields` | Independent title/tag outcomes and durable scheduling facts, read under current node/thread authority. Manual ownership remains authoritative. |
+| `option:SummaryAttemptFacts.captured_usage` | Canonical reported usage retained even when the result is discarded. Missing measurements never become zero. |
+| `option:AutomaticFieldSchedule.due_at` | The recorded trigger due time, separate from interval/retry eligibility. |
+| `option:AutomaticFieldSchedule.next_at` | Actual recorded interval/retry eligibility, not a browser prediction from a default. |
+| `option:AutomaticFieldSchedule.last_attempt_at` | The actual last attempt, including failures; it is not last success. |
+| `option:AutomaticFieldSchedule.last_success_at` | This field’s actual last successful write, never another field’s write time. |
+| `option:AutomaticFieldSchedule.retry_ceiling` | The retry ceiling captured when the recorded timing was decided; the setting source links to its existing control. |
+| `option:HistoryReport.handoff` | Actual retained handoff facts, separate from a plan estimate or the full transcript’s coverage. |
+| `option:BindingEnvironment.room` | Measured CPU and available RAM from the connected machine or current host, with its sample time. An absent reading means the source has not reported it. |
+| `option:PlaceEnvironment.room` | Room measured on this admitted placement source at the recorded time. |
+| `option:PlaceHost.room` | The selected host’s latest measured free CPU and memory. |
+| `option:PlaceHost.running_threads` | Primary threads currently running in this host’s current environment units. |
+| `option:MachineFacts.room` | Aggregate available memory and measured unused logical CPU time on this machine. |
+| `option:PlaceRoom.cpu_free_millis` | Unused processor capacity in thousandths of a core. An absent measurement is unknown. |
+| `option:PlaceRoom.memory_free_bytes` | Available RAM in bytes. Zero is a measured value. |
+| `option:PlaceRoom.observed_at` | Time of the resource sample. |
+| `option:Job.handoff_result` | The completed change's same retained handoff receipt under current job read authority; progress-only reads withhold it. Missing capture stays Not reported. |
+| `option:HandoffResult.input_coverage` | Captured per-turn reading and omission decisions of this bounded handoff input. |
+| `option:HandoffResult.result_facts` | Actual output conformance and canonical request usage; rejected raw text is not retained. |
+| `option:HandoffInputCoverage.read_turn_bytes` | The per-turn byte allowance used by the material decision, not a later setting. |
+| `option:HandoffInputCoverage.included_turn_ranges` | Inclusive native turn ranges actually included as text, distinct from older index lines and the full transcript. |
+| `option:HandoffInputCoverage.oversized_turn_ranges` | Inclusive native ranges omitted whole for exceeding the captured read allowance. |
+| `option:HandoffInputCoverage.omitted_prefix` | Earlier selected history remained outside the actual bounded input. |
+| `state:GoalHelperCoverage.none` | No last-turn material was present in this helper request. |
+| `state:GoalHelperCoverage.included` | The selected last turn was included whole. |
+| `state:GoalHelperCoverage.start_omitted` | The beginning of the selected turn was omitted to fit the admitted allowance. |
+| `state:GoalHelperCoverage.oversized` | The turn was omitted whole because it exceeded the captured byte allowance. |
+| `state:GoalHelperCoverage.items_exceeded` | The turn was omitted whole because it exceeded the chosen item allowance. |
+| `state:SummaryDiscardReason.access_changed` | The publication authority generation changed. |
+| `state:SummaryDiscardReason.history_changed` | The selected continuation changed before publication. |
+| `state:SummaryDiscardReason.source_changed` | The source revision changed before publication. |
+| `state:SummaryDiscardReason.producer_changed` | The selected field producer changed before publication. |
+| `state:SummaryDiscardReason.archived` | The subject was archived before publication. |
+| `state:SummaryDiscardReason.changed_by_person` | A person’s field ownership wins over this generated result. |
+| `state:SummaryAttemptOutcome.published` | The result passed publication; an identical value need not be rewritten. |
+| `state:SummaryAttemptOutcome.discarded` | A current publication predicate discarded this result; the current field stays authoritative. |
+| `state:SummaryAttemptOutcome.unusable` | Native conformance rejected the answer while recorded usage remains counted. |
+| `state:SummaryAttemptOutcome.failed` | The producer did not complete this attempt. |
+| `state:AutomaticSkipReason.no_producer` | No automatic producer was selected. |
+| `state:AutomaticSkipReason.cap_no_room` | The actual usage cap had no room for the attempt. |
+| `state:AutomaticSkipReason.not_allowed` | Current source or model access was unavailable. |
+| `state:AutomaticSkipReason.provider_unavailable` | The provider could not be used for the attempt. |
+| `state:AutomaticSkipReason.call_rule_paused` | The call rules reserved no automatic continuation. |
+| `state:AutomaticSkipReason.source_unavailable` | The selected source was unavailable. |
+| `state:AutomaticSkipReason.unsupported` | The producer does not write this field. |
+| `state:AutomaticSkipReason.failed` | The producer failed this attempt. |
+| [Next update](state-reference.md#state:AutomaticScheduleState.queued) | Actual accepted automatic work is queued or claimed; eligibility is not a promised start. |
+| [Waiting to retry](state-reference.md#state:AutomaticScheduleState.retrying) | An actual failed attempt has a recorded retry eligibility. |
+| [Skipped · No summarizer](state-reference.md#state:AutomaticScheduleState.skipped) | The last attempt was skipped or paused with no current queued work. |
+| `state:AutomaticScheduleState.idle` | No automatic work is currently queued. |
+
+### Native approval checks
+
+| Reference | Meaning |
+| --- | --- |
+| `option:AgentDescriptor.approval_auto` | Current server-owned proof for Auto at the selected program build; profile overrides cannot create it. |
+| `option:ThreadComposer.auto_unavailable` | Whether the stored Auto approval can run, shown on the closed control. True means it is unavailable. |
+| `option:AutoApprovalCheck.machine_id` | Selected machine for the native check. |
+| `option:AutoApprovalCheck.sha256` | Digest of the exact selected program build. |
+| `option:ApprovalCheckTarget.machine_id` | Machine selected for the retry. |
+| `option:ApprovalCheckTarget.sha256` | Only this checksum may be checked for the selected machine. |
+| `option:HarnessCheckQuery.machine_id` | Select the machine together with the build checksum for a retry. |
+| `option:HarnessCheckQuery.sha256` | Digest supplied together with the machine for a single-build retry. |
+| `option:MachineFactsHarness.sha256` | Digest of a confirmed executable read by its connector. |
+| `option:RunningHarnessBuild.check_machine_id` | The machine that can check the selected running build. |
+| `option:AutoApprovalCheck.declared` | Whether the original program declaration offered Auto, retained so a passing recheck can restore it. |
+| `option:AutoApprovalCheck.state` | Not proven, failed, passed or no check available for this program. |
+| `option:AutoApprovalCheck.check_available` | Whether this kept program build has an Auto conformance case that can be checked. |
+| `option:ResolvedSetting.approval_choices` | Approval mode choices with their actual current proof, policy, reviewer and isolation reasons, including dim choices. |
+| `option:ApprovalModeChoice.check` | The existing program check to offer beside unavailable Auto; only current system administrators may start it. |
+| `option:ApprovalCheckTarget.kind` | The program whose kept build is checked. |
+| `option:ApprovalCheckTarget.version` | The exact program version checked through the ordinary build check action. |
+| `option:Problem.session_end` | Own-session ending facts, only after an exact retained browser credential match. Unknown credentials, purged records and automation keys receive no cause. |
+| `option:SessionEnd.cause` | The native expired, revoked or account_unavailable outcome. Access-token expiry alone does not end a browser session. |
+| `option:SessionEnd.at_if_known` | The stored expiry or revocation instant; omitted when no ending instant was retained. Observation time is never substituted. |
+| `state:SessionEndCause.expired` | The proven browser session passed its recorded idle deadline. |
+| `state:SessionEndCause.revoked` | The proven browser session was explicitly revoked at its recorded time. |
+| `state:SessionEndCause.account_unavailable` | The proven browser session belongs to an unavailable account; no unrecorded suspension time is implied. |
+| `option:MachinePorts.loopback_tcp` | Exact nonzero TCP port numbers the machine permits for personal loopback forwarding. The list starts empty. |
+| `option:PortTicketClaims.machine_reach` | The signed personal TCP use carries an explicit Machine reach. The connector checks the selected port against its current policy. |
+| `option:PortTarget.named_loopback` | The current reader has Machine reach for a loopback port declared by the operator. The connector checks that it is listening when a connection opens. |
+| `option:FileAccess.reach` | On Ports View, Roots covers environment listeners. An explicit Machine entry also permits personal TCP forwarding to loopback ports named by the operator. Roots is the default for Files View and Manage entries. Machine must be named explicitly and reaches only paths the environment’s own OS user can open; it grants no missing permission and cannot exceed the giver or machine ceiling. |
+| `state:FileReach.roots` | The environment workspace and its attached mounts, checked against canonical native targets. |
+| `state:FileReach.machine` | Every native path the environment’s own user may open, subject to the machine’s current ceiling and ordinary operation restrictions. |
+| `option:LocalPolicy.environment.files_reach` | The machine-owned ceiling for human file reach: roots or machine. Machine is the ceiling default, not a Files grant; individual file entries still default to roots. Agent confinement is separate. |
+| `option:ConnectorConfig.environment.files_reach` | The connector’s environment.files_reach policy value. The machine enforces it locally and reports it with its current facts. |
+| `option:FsAccess.view` | The native read reach admitted for this command; null admits no read. |
+| `option:FsAccess.manage` | The native mutation reach admitted for this command; a broader read never widens it. |
+| `error:files.reach_denied` | The target is outside the current holder or machine file reach; no file is opened through that refused act. |
+| `option:Environment.file_reach` | Current caller file reach on the full environment page; absent from a limited through-thread read. |
+| `option:PermissionPage.file_reach` | The current caller’s file reach and native bound beside an environment’s permission choices. |
+| `option:FileReachFacts.view` | Current read reach after the machine bound; null grants no read. |
+| `option:FileReachFacts.manage` | Current mutation reach, kept separate from read reach; null grants no mutation. |
+| `option:FileReachFacts.view_from_terminal` | Usable Terminal widened an existing Files View grant for this same credential. |
+| `option:FileReachFacts.manage_from_terminal` | Usable Terminal widened an existing Files Manage grant without inventing a missing act. |
+| `option:FileReachFacts.machine_bound` | The current native machine policy ceiling, independent of a named entry or agent sandbox. |
+| `state:FileSourceKind.machine` | An intentional native path outside attached roots, opened as the environment’s own user without workspace indexing. |
+| `option:FsFetchResult.minimum_reach` | The minimum reach proved by the native resolver for these exact bytes, retained with cached content so a relative symlink cannot turn machine data into roots data. |
+| `option:EnvironmentFileListQuery.prefix` | Optional case-insensitive child-name prefix for one-level path completion, filtered before pagination. |
+| `option:FsList.prefix` | The same native directory-name prefix; completion reads one level and uses the existing bounded observation cursor. |
+| `option:ReferencePreviewQuery.path` | A relative attached-root path or explicit native absolute address. The current reader’s file reach and original native source are checked for live and retained file data. |
+
+<a id="resource-pool-targets"></a>
+
+## Resource pool targets
+
+| Option | Meaning |
+| --- | --- |
+| `pool` | A configured resource group with its own View, Use and Manage. Pool Use alone grants no member access. |
+| `pool_own` | The pool's own inherited routing-default source. |
+| `model`, `provider`, `environment`, `host` | Pool member family; a choice accepts only its own family. |
+| `single`, `pool` | One exact target or a configured pool; resolved members remain separate from selected intent. |
+| `ordered`, `weighted`, `round_robin`, `least_cost`, `least_loaded` | Explicit policy: saved order, proportional weights, rotation, comparable cost or reported load. |
+| `cpu`, `memory`, `combined`, `threads`, `processes` | Reported load measure; threads and processes are counts without an invented percentage denominator. |
+
+| Reference | Meaning |
+| --- | --- |
+| `option:PoolDefinition.kind` | Model, provider, environment or host; immutable after creation. |
+| `option:PoolDefinition.enabled` | Enables selection and lending through this pool; a disabled pool remains inspectable and its saved Where set remains meaningful. |
+| `option:PoolDefinition.policy` | An explicit selection policy is required before enabling. Preview never reserves a member. |
+| `option:PoolDefinition.lend_members` | Allows this pool to receive a member's current Through pools consent. It grants no direct member Use or Read. |
+| `option:PoolMember.priority` | Optional priority tier; absence follows the inherited default. |
+| `option:PoolMember.weight` | Optional positive decimal weight; absence follows the inherited default. |
+| `option:PoolMemberRule.grouping` | The exact live display group, including missing home, owner, machine or tag metadata. It is not a snapshot of the loaded page. |
+| `option:PoolLendingPutBody.matcher` | A named pool, pools homed at a place, or pools managed by a named person. Each native use rechecks the match and giver. |
+| `option:PoolLendingPutBody.options` | One complete allowance, including provider purpose/model/service/effort/arrangement/Where, host or template limits. Different consents cannot supply fragments of one request. |
+| `option:PoolLendingPutBody.show_names` | Permits member identity in the admitted pool context; it gives no definition Read or general member access. |
+| `option:PoolLendingPutBody.expires_at` | Explicit expiry; outside sharing also obeys the current inherited lifetime bound. Reads never renew it. |
+| `option:PoolUse.provider` | Provider limits stay together through every nested pool. |
+| `option:PoolUse.host` | Host creation, storage, template and resource limits. |
+| `option:PoolUse.template` | Template capability and resource limits. |
+| `option:WhereName.environment_pool` | A live structural set of existing environments. Membership grants no environment Use. |
+| `option:WhereName.host_pool` | Every environment on a current host member; selection policy, cooling and a disabled pool do not change the saved location set. |
+| `state:PoolMember.member_hidden` | The current reader cannot inspect this member's identity; the authored row stays present without its target. |
+| `option:PoolMemberMetadataBody.enabled` | Enables or disables only the saved member row; the native writer preserves its hidden target. |
+| `option:PoolMemberMetadataBody.priority` | Explicit tier or inherited default, without replacing the rule. |
+| `option:PoolMemberMetadataBody.weight` | Positive decimal weight or inherited default, without replacing the rule. |
+| `option:PoolMemberMetadataBody.position` | Saved written-rule order, guarded by the observed pool revision. |
+| `option:PoolMemberPutBody.position` | Omit to append a new rule after every saved row, or preserve an existing rule's place. An explicit position changes only that row. |
+| `option:PoolDeleteBody.expected_revision` | Removes the pool the manager reviewed. Shared member resources and historical receipts remain; live pool or Where references must first be replaced. |
+| `state:PoolMember.member_unavailable` | The current saved target or offering is missing. A continued preview checks this again before showing its row. |
+| `state:PoolMember.request_required` | Inspected facts are available; actual eligibility still needs the accepted request's purpose, placement, limits and native capability checks. Inspection spends nothing. |
+| `option:Pool.target` | The canonical typed selection intent for this pool; it grants no Use and is distinct from the eventual admitted member. |
+| `option:EverythingListQuery.resource_kind` | A template's unit kind, an environment's machine/template origin, or a pool's model/provider/environment/host family. Filtering happens before pagination. |
+| `option:PoolPolicy.least_cost` | Compares known request-credit estimates within the first feasible priority tier. Unknown prices follow known prices and use the saved weights. Nested pools propose under their own policy first; unchosen rotation never advances. |
+| `option:PoolPolicy.least_loaded` | Compares the selected actual observation with its native denominator; missing data is unavailable. Combined is the greater of normalized CPU and memory, while threads/processes remain counts. Native capacity is still rechecked at admission. |
+| `option:NodeLoad.pids` | Actual process count in the reporting host scope, supplied with native load observations; missing is unknown. This is a count without a percentage denominator. |
+| `option:PoolRecoveryBody.expected_revision` | The reviewed pool revision for Try again now. This releases only its local suppression, retains shared facts and outstanding native trials, and sends no probe. |
+| `state:PoolMember.member_cooling` | Qualifying current native evidence suppresses this member under the pool’s own window and cooldown. |
+| `state:PoolMember.member_trial_in_progress` | An actual native recovery attempt already owns the permitted trial; inspection never starts another. |
+| `option:Candidate.target` | The canonical exact model/backend, provider, model pool or provider pool. The actual resolved member is stored separately and rechecked by the native source. |
+| `option:FallbackView.pool_kind` | An unresolved pool family in a rule preview; it discloses no pool members or backend configuration. |
+| `state:CallRecovery.pool_exhausted` | No untried member is eligible under the reviewed pool budget and caller rules. Only a configured later step can choose elsewhere. |
+| `state:PoolMember.member_already_tried` | The same canonical leaf has already belonged to this logical recovery chain, including its initial failed execution. Different exact placements or configuration remain distinct. |
+| `option:ResourceLeaf.model.backend.config` | Exact adapter configuration participates in identity. The generation.model route applies its object as native parameters, with explicit candidate parameters overriding matching keys; native option validation still applies. |
+| `option:NewEnvironment.host_id` | Canonical single-host or host-pool target. Omission inherits Default; explicit null chooses Most room. Accepted creation stores one exact host choice, rechecks both lending authorities and every capacity audience, and keeps it across native job replay. |
+| `option:ForkNewEnvironment.host_id` | The same typed host intent for an explicitly new environment in the ordinary fork/switch plan. Merely changing a default never relocates an existing environment. |
+| `option:env.host_id.type` | single for an exact host or pool for a managed host pool. |
+| `option:env.host_id.resource` | The exact host leaf of a single target. |
+| `option:env.host_id.resource.kind` | host; another family is refused before placement. |
+| `option:env.host_id.resource.id` | The actual host identifier of a single target. |
+| `option:env.host_id.id` | The host pool identifier; the admitted host is stored separately. |
+| `option:env.host_id.kind` | host; membership does not grant direct Host Use. |
+| `option:runtime.host_id.type` | single for an exact host or pool for a managed host pool. |
+| `option:runtime.host_id.resource` | The exact host leaf of a single target. |
+| `option:runtime.host_id.resource.kind` | host; another family is refused before placement. |
+| `option:runtime.host_id.resource.id` | The actual host identifier of a single target. |
+| `option:runtime.host_id.id` | The host pool identifier; the admitted host is stored separately. |
+| `option:runtime.host_id.kind` | host; membership does not grant direct Host Use. |
+| `option:HostUse.max_environments` | Counts undeleted environment and provider registrations made through the real Host Use entry. Pool and lending audiences keep their independent limits; native placement locks and counts them again before accepting a new unit. |
+
+| Reference | Meaning |
+| --- | --- |
+| `state:Turn.pool_access_changed` | Current pool, member or lending access no longer permits the admitted work. Its actual native turn stops; direct users of the member keep working and no replacement is chosen implicitly. |
+| `error:pool_access_changed` | The safe localized stop reason, without private pool, member or giver names. The original task stays stopped until a permitted selection is restored. |
+
+| Reference | Meaning |
+| --- | --- |
+| `option:PoolDuplicateBody.expected_revision` | The source revision reviewed for copying; a changed source requires a fresh review. |
+| `option:PoolDuplicateBody.home_id` | The actual destination home, checked through ordinary pool creation authority. |
+| `option:PoolDuplicateBody.name` | The new pool name. Every written rule and own routing setting is copied without selecting a member. |
+| `option:PoolDuplicateBody.access` | The new pool starts with this explicit access choice; source permissions, member consents, health, rotation and usage are not copied. |
+
+| Reference | Meaning |
+| --- | --- |
+| `option:PoolChoicesQuery.before_created_at` | The saved time of the last row on the previous newest-first page; supply it together with before_id. |
+| `option:PoolChoicesQuery.before_id` | The immutable choice ID paired with before_created_at. A cursor grants no access and never reserves a member. |
+| `option:PoolChoiceDetailsQuery.after_ordinal` | Continue the original recorded walk after this ordinal. Current membership is not expanded or executed. |
+| `option:PoolChoiceView.resource` | The saved selected leaf, disclosed only under current Read for every pool on its path and the leaf, including the actual key response-content sources. |
+| `option:PoolChoiceView.policy` | The actual saved root policy of the selected path. Reading it never advances rotation. |
+| `option:PoolChoiceView.details_expired_at` | When verbose expansion details expired; the original selection, policy receipt and native execution association remain. |
+| `option:PoolChoiceDetailsReply.expired_at` | An explicit expired detail receipt, rather than an invented empty expansion. No member is selected again. |
+| `option:PoolChoiceDetail.cost` | The recorded request estimate in credits, available only with the candidate Read sources. Absent means unknown, never free; this is not a usage bill. |
+| [Choosing](state-reference.md#state:PoolChoiceState.building) | The accepted choice is still being recorded; inspection starts no work. |
+| [Selected](state-reference.md#state:PoolChoiceState.selected) | One exact saved leaf was selected by the native consumer. Current Read still controls disclosure. |
+| [No eligible member](state-reference.md#state:PoolChoiceState.exhausted) | The recorded attempt found no eligible member. Inspection does not retry it. |
+| `option:PoolChoiceView.id` | An independent read identity, separate from the private native producer or job ID. Current pool Read is required again on every detail page. |

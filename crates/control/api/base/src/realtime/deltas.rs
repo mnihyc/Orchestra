@@ -46,6 +46,8 @@ use orch_realtime_contract::feeds::Feed;
 
 use orch_realtime_contract::frames::DeltaFrame;
 
+use orch_realtime_contract::frames::PongFrame;
+
 use orch_realtime_contract::frames::ResyncFrame;
 
 use orch_realtime_contract::frames::ServerFrame;
@@ -135,6 +137,7 @@ pub struct PendingFrame {
     pub(super) tag: Option<Tag>,
     pub(super) event: bool,
     pub(super) resource: bool,
+    pub(super) heartbeat: bool,
 }
 
 #[derive(Debug)]
@@ -157,6 +160,8 @@ enum What {
     Control(String),
     /// A frame that is never dropped.
     Row(String),
+    /// Sequenced history retains its relative order when a Stop arrives.
+    Sync(String),
     /// A pending reset must survive replacement by another authority reset.
     Resync(String),
     /// A frame that is dropped when the queue is shed.
@@ -188,9 +193,8 @@ struct Entry {
 #[derive(Debug)]
 struct Queue {
     entries: VecDeque<Entry>,
-    /// The number of the entry at the front: entries are numbered one after
-    /// the other, and only the front is ever removed, so that an entry's
-    /// place is its number less this.
+    /// Sequence number of the front entry. Inserting ahead of history shifts the
+    /// saved positions of open deltas that follow the insertion.
     front: u64,
     /// The entries that can still take in text, by what they are of.
     open: HashMap<Key, u64>,
@@ -261,6 +265,7 @@ impl Queue {
 pub struct Outbox {
     queue: Mutex<Queue>,
     wake: Notify,
+    heartbeat: Notify,
     clock: Arc<dyn Clock>,
 }
 
@@ -278,6 +283,7 @@ impl Outbox {
             || queue.entries.iter().any(|entry| match &entry.what {
                 What::Control(text)
                 | What::Row(text)
+                | What::Sync(text)
                 | What::Resync(text)
                 | What::Event { text, .. } => text.contains(needle),
                 What::Delta {
@@ -343,6 +349,7 @@ impl Outbox {
                 closing: None,
             }),
             wake: Notify::new(),
+            heartbeat: Notify::new(),
             clock,
         }
     }
@@ -412,7 +419,7 @@ impl Outbox {
             }
         }
         let size = bytes_of(&text);
-        queue.push(tag, size, What::Row(text));
+        queue.push(tag, size, What::Sync(text));
         self.after_push(&mut queue);
     }
 
@@ -444,6 +451,59 @@ impl Outbox {
                 resource,
             },
         );
+        self.after_push(&mut queue);
+    }
+
+    /// Deliver the latest Stop ahead of ordinary thread history while preserving subscription,
+    /// presence and reset boundaries. The writer checks the reader again before sending it.
+    pub(crate) fn push_stopping(&self, tag: Tag, thread: Id, text: String) {
+        let mut queue = lock(&self.queue);
+        if queue.closing.is_some() {
+            return;
+        }
+        let size = bytes_of(&text);
+        let what = What::Event {
+            id: tag.id,
+            feed: Feed::Thread(thread),
+            text,
+            resource: false,
+        };
+        let at = queue
+            .entries
+            .iter()
+            .rposition(|entry| {
+                matches!(
+                    entry.what,
+                    What::Control(_) | What::Row(_) | What::Resync(_)
+                )
+            })
+            .map_or(0, |last| last + 1);
+        if let Some(old) = queue.entries.iter_mut().skip(at).find(|entry| {
+            entry.tag == tag
+                && matches!(
+                    entry.what,
+                    What::Event {
+                        feed: Feed::Thread(_),
+                        ..
+                    }
+                )
+        }) {
+            let previous = std::mem::replace(&mut old.size, size);
+            old.what = what;
+            queue.bytes = queue.bytes.saturating_sub(previous).saturating_add(size);
+        } else {
+            let last = queue.entries.len();
+            queue.push(tag, size, what);
+            if at < last {
+                let number = queue.front + at as u64;
+                for position in queue.open.values_mut() {
+                    if *position >= number {
+                        *position += 1;
+                    }
+                }
+                queue.entries.make_contiguous()[at..].rotate_right(1);
+            }
+        }
         self.after_push(&mut queue);
     }
 
@@ -512,17 +572,20 @@ impl Outbox {
         self.after_push(&mut queue);
     }
 
-    /// Queues a frame that leaves before everything that waits, such as the
-    /// answer to a ping, whose delay would be taken for the line's.
-    pub fn push_urgent(&self, text: String) {
+    /// Only a heartbeat may bypass projection guards while a data frame waits on the database.
+    pub(super) fn push_pong(&self, pong: PongFrame) {
+        let Ok(text) = ServerFrame::Pong(pong).encode() else {
+            return;
+        };
         let mut queue = lock(&self.queue);
         if queue.closing.is_some() {
             return;
         }
         queue.bytes = queue.bytes.saturating_add(bytes_of(&text));
         queue.urgent.push_back(text);
+        self.after_push(&mut queue);
         drop(queue);
-        self.wake.notify_one();
+        self.heartbeat.notify_one();
     }
 
     /// Takes everything that waits for one subscription out of the queue: it
@@ -598,6 +661,7 @@ impl Outbox {
                     CloseCode::NotKeepingUp.code(),
                     "the connection did not keep up",
                 );
+                self.heartbeat.notify_one();
             }
         }
         action
@@ -673,6 +737,7 @@ impl Outbox {
         Self::close_in(&mut queue, code, reason);
         drop(queue);
         self.wake.notify_one();
+        self.heartbeat.notify_one();
     }
 
     /// Why and with what code the connection is to be closed, where it is.
@@ -703,7 +768,7 @@ impl Outbox {
             let size = bytes_of(&text);
             queue.bytes = queue.bytes.saturating_sub(size);
             queue.in_flight = size;
-            let frame = Self::track_frame(&mut queue, tracked, None, false, false);
+            let frame = Self::track_frame(&mut queue, tracked, None, false, false, true);
             return Some((Next::Frame(text), frame));
         }
         while let Some(entry) = queue.entries.pop_front() {
@@ -723,6 +788,7 @@ impl Outbox {
                 What::Gone => continue,
                 What::Control(text)
                 | What::Row(text)
+                | What::Sync(text)
                 | What::Resync(text)
                 | What::Event { text, .. } => text,
                 What::Delta {
@@ -747,7 +813,7 @@ impl Outbox {
                 }
             };
             queue.in_flight = bytes_of(&text);
-            let frame = Self::track_frame(&mut queue, tracked, tag, event, resource);
+            let frame = Self::track_frame(&mut queue, tracked, tag, event, resource, false);
             return Some((Next::Frame(text), frame));
         }
         None
@@ -759,6 +825,7 @@ impl Outbox {
         tag: Option<Tag>,
         event: bool,
         resource: bool,
+        heartbeat: bool,
     ) -> Option<PendingFrame> {
         if !tracked {
             queue.flight = None;
@@ -770,6 +837,7 @@ impl Outbox {
             tag,
             event,
             resource,
+            heartbeat,
         };
         queue.flight = Some(Flight {
             frame,
@@ -803,6 +871,39 @@ impl Outbox {
             }
             notified.await;
         }
+    }
+
+    /// A separate wake lets the writer retain a cancellable data flight during a slow check.
+    pub(super) async fn heartbeat_available(&self) {
+        loop {
+            let notified = self.heartbeat.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let queue = lock(&self.queue);
+                if queue.closing.is_some() || !queue.urgent.is_empty() {
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Called after socket capacity, without replacing the waiting data frame's cancellation
+    /// ticket or accounting. Heartbeats contain only the client's number, never projected data.
+    pub(super) fn accept_heartbeat<E>(
+        &self,
+        send: impl FnOnce(String) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let mut queue = lock(&self.queue);
+        if queue.closing.is_some() || queue.urgent.is_empty() {
+            return Ok(false);
+        }
+        let Some(text) = queue.urgent.pop_front() else {
+            return Ok(false);
+        };
+        queue.bytes = queue.bytes.saturating_sub(bytes_of(&text));
+        send(text)
     }
 
     /// Called only after the real sink reported capacity. Existing purge/reset can still cancel it.
@@ -1130,6 +1231,27 @@ pub mod tests {
         )
     }
 
+    #[doc(hidden)]
+    pub fn a_stopped_thread_can_report_idle_before_queued_history_without_losing_any_text() {
+        let clock = clock();
+        let outbox = outbox(&clock, 1 << 20, 30);
+        let thread = new_id();
+        let feed = Feed::Thread(thread);
+        let item = new_id();
+        outbox.push_control(tag(1), r#"{"op":"subscribed"}"#.into());
+        outbox.push_delta(tag(1), &feed, item, text(0, "First"));
+        outbox.push_sync(tag(1), row(1), &[]);
+        outbox.push_stopping(tag(1), thread, r#"{"pending":true}"#.into());
+        outbox.push_stopping(tag(1), thread, r#"{"pending":false,"idle":true}"#.into());
+        outbox.push_delta(tag(1), &feed, item, text(5, " and last"));
+        let frames = drain(&outbox);
+        assert_eq!(frames.len(), 4);
+        assert_eq!(frames[0]["op"], "subscribed");
+        assert_eq!(frames[1]["idle"], true);
+        assert_eq!(frames[2]["data"], "First and last");
+        assert_eq!(frames[3]["seq"], 1);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn deltas_that_wait_for_a_slow_reader_become_one_larger_delta_and_lose_nothing() {
         let clock = clock();
@@ -1327,10 +1449,34 @@ pub mod tests {
         let clock = clock();
         let outbox = outbox(&clock, 1 << 20, 30);
         outbox.push_sync(tag(1), row(1), &[]);
-        outbox.push_urgent("{\"op\":\"pong\",\"n\":3}".to_owned());
+        outbox.push_pong(PongFrame { n: 3 });
         let taken = drain(&outbox);
         assert_eq!(taken[0]["op"], "pong");
         assert_eq!(taken[1]["op"], "sync");
+
+        outbox.push_sync(tag(1), row(2), &[]);
+        let (_, pending) = outbox.take_pending().unwrap();
+        let pending = pending.unwrap();
+        let in_flight = outbox.waiting_bytes();
+        outbox.push_pong(PongFrame { n: 4 });
+        assert!(
+            outbox
+                .accept_heartbeat::<std::convert::Infallible>(|text| {
+                    let pong: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(pong["n"], 4);
+                    Ok(true)
+                })
+                .unwrap()
+        );
+        assert_eq!(outbox.waiting_bytes(), in_flight);
+        outbox.purge(1);
+        assert!(
+            !outbox
+                .accept::<std::convert::Infallible>(pending, || {
+                    panic!("a heartbeat must not replace a data frame's cancellation ticket")
+                })
+                .unwrap()
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

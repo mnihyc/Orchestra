@@ -388,7 +388,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -749,7 +749,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -803,6 +803,7 @@ impl Cluster {
         });
         engine.start();
         let state = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
@@ -1336,6 +1337,7 @@ impl Cluster {
             move |command| {
                 lock(&told).push(serde_json::to_string(command).unwrap());
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(key_separated_agent()).unwrap(),
@@ -1361,6 +1363,7 @@ impl Cluster {
                 };
                 *lock(&session) = Some((open.thread_id, open.segment_id, ticket.clone()));
                 Ok(CommandResult::SessionOpen(SessionOpenResult {
+                    mcp: None,
                     native_session_ref: format!("native-{}", open.segment_id),
                     resumed: false,
                     import_report: None,
@@ -1396,6 +1399,7 @@ impl Cluster {
             .publish(
                 &Stream::Machine,
                 &Event::MachineFacts(MachineFacts {
+                    room: None,
                     data_directory: None,
                     gateway: None,
                     role_management: None,
@@ -1415,6 +1419,7 @@ impl Cluster {
                         kind: "fake".to_owned(),
                         path: handler_program.clone(),
                         version: "1.0.0".to_owned(),
+                        sha256: None,
                         daemon: false,
                     }],
                     adapters: vec![MachineFactsAdapter {
@@ -1597,6 +1602,8 @@ async fn a_thread_made_over_http_runs_its_turn_on_a_real_connector_that_was_give
         .ask(
             SerialKey::Provider(on.provider),
             &ProviderDiscoverModels {
+                max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default()
+                    .whole_bytes,
                 provider_id: on.provider,
                 models: None,
             },
@@ -2140,6 +2147,8 @@ async fn a_key_typed_on_the_machine_serves_a_turn_without_the_system_ever_holdin
         .ask(
             SerialKey::Provider(on.provider),
             &ProviderDiscoverModels {
+                max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default()
+                    .whole_bytes,
                 provider_id: on.provider,
                 models: None,
             },
@@ -2336,6 +2345,8 @@ async fn a_directory_of_a_real_connector_is_attached_in_each_session_and_a_turn_
         .ask(
             SerialKey::Environment(directory),
             &orch_link_contract::commands::FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: directory,
                 mount: None,
                 path: "web".to_owned(),

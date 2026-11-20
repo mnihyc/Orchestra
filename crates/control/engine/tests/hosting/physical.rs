@@ -147,6 +147,7 @@ pub fn existing_thread_directory(
                 ));
             }
             Ok(CommandResult::FsStat(FileStat {
+                facts: None,
                 entry: DirEntry {
                     name: expected.rsplit('/').next().unwrap_or_default().to_owned(),
                     path: expected.clone(),
@@ -174,6 +175,8 @@ pub fn existing_thread_directory(
             assert_eq!(body.environment_id, environment);
             assert_eq!(body.directory, expected);
             Ok(CommandResult::FsRecord(FsRecordResult {
+                indexing: None,
+
                 state: RecordState::Unavailable,
                 tree_ref: None,
                 repository_head: None,

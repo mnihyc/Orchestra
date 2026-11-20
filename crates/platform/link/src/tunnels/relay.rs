@@ -233,6 +233,7 @@ impl Relay {
         use orch_link_contract::tunnels::TunnelKind;
         [
             TunnelKind::Exec,
+            TunnelKind::Program,
             TunnelKind::Llm,
             TunnelKind::Mcp,
             TunnelKind::Pty,
@@ -1269,7 +1270,11 @@ impl Relay {
         }
         if !matches!(
             claims.kind,
-            TunnelKind::Exec | TunnelKind::Mcp | TunnelKind::Llm | TunnelKind::Port
+            TunnelKind::Exec
+                | TunnelKind::Program
+                | TunnelKind::Mcp
+                | TunnelKind::Llm
+                | TunnelKind::Port
         ) || !Side::Machine.owns(resume.channel)
             || self.lookup(from, resume.channel).is_some()
             || self.channels_of(from) >= self.limits.max_channels as usize
@@ -1578,6 +1583,7 @@ mod retained_host_tests {
             tool_executor_version: None,
             exp: at.unix_millis().div_euclid(1000) + 3600,
             port: Some(PortTicketClaims {
+                machine_reach: false,
                 environment_id: new_id(),
                 generation: 2,
                 port: 9000,

@@ -8,6 +8,10 @@
 mod common;
 #[path = "turns/offline_deadline.rs"]
 mod offline_deadline;
+#[path = "turns/session_kept.rs"]
+mod session_kept;
+#[path = "turns/stop_at_once.rs"]
+mod stop_at_once;
 
 use common::{
     World, eventually, interrupting, meanwhile, message_done, queued, said, steering, turn_ended,
@@ -90,6 +94,30 @@ async fn a_second_queued_input_starts_the_next_turn_when_the_first_one_ends() {
     for input in [first.input.id, second.input.id] {
         assert_eq!(world.input_state(input).await.0, "delivered");
     }
+}
+
+#[test]
+fn a_fresh_summary_route_accepts_generation_and_refuses_an_unavailable_offering() {
+    use orch_summarizer_model::capabilities::{ROUTE, declarations};
+    use orch_types::schema::{Error, ValidatorCache};
+    use serde_json::json;
+
+    let routes = declarations();
+    let schema = &routes.routes[ROUTE].eligible_when;
+    let cache = ValidatorCache::default();
+    let facts = |enabled| json!({"offering":{"kind":"model","capabilities":{"generation":{"enabled":enabled}}}});
+    assert!(cache.validate(schema, &facts(true)).is_ok());
+    assert!(matches!(
+        cache.validate(schema, &facts(false)),
+        Err(Error::Value { .. })
+    ));
+}
+
+#[test]
+fn a_first_provider_route_compiles_on_an_ordinary_worker_stack() {
+    common::on_default_stack(
+        "a_fresh_summary_route_accepts_generation_and_refuses_an_unavailable_offering",
+    );
 }
 
 #[test]
@@ -362,6 +390,111 @@ async fn a_steer_into_a_thread_with_no_turn_waits_first_and_starts_one() {
         .await;
     world.wait_input(steer.input.id, "delivered").await;
     assert_eq!(world.ran(CommandKind::TurnSteer), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_steer_returned_after_stop_waits_with_the_queue_and_runs_once_on_resume() {
+    let world = World::new().await;
+    let thread = world.thread("Stop with a steer in flight").await;
+    let caller = Caller::session(world.ada);
+    let (turn, _) = world.running_turn(thread, "First").await;
+    let queued = world
+        .engine()
+        .submit_input(&caller, thread, queued("Waiting"))
+        .await
+        .unwrap();
+    world.machine.handler.hold(CommandKind::TurnSteer);
+    let steer = world
+        .engine()
+        .submit_input(&caller, thread, steering("My steer"))
+        .await
+        .unwrap();
+    world.wait_began_or_issued("turn.steer").await;
+    world
+        .engine()
+        .interrupt(&caller, thread, turn.turn_id)
+        .await
+        .unwrap();
+    world.wait_ran(CommandKind::TurnInterrupt, 1).await;
+    world
+        .say(thread, turn_ended(turn.turn_id, TurnOutcome::Interrupted))
+        .await;
+    world.wait_input(steer.input.id, "pending").await;
+    world.machine.handler.release();
+    let sync = world.sync(thread).await;
+    for id in [steer.input.id, queued.input.id] {
+        assert!(sync.inputs.iter().any(|row| row.id == id && row.queue_held));
+    }
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    world
+        .engine()
+        .resume_queue(&caller, thread, sync.thread.queue.revision)
+        .await
+        .unwrap();
+    let second = world.run_turn(thread, 1, "Steer done").await;
+    assert!(second.text.contains("My steer"));
+    let third = world.run_turn(thread, 2, "Queue done").await;
+    assert!(third.text.contains("Waiting"));
+    assert_eq!(world.turn_starts(thread).len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recording_found_behind_stop_on_restart_returns_its_input_until_resume() {
+    let world = World::new().await;
+    let thread = world.thread("Interrupted recording").await;
+    let caller = Caller::session(world.ada);
+    let (turn, _) = world.running_turn(thread, "First").await;
+    let waiting = world
+        .engine()
+        .submit_input(&caller, thread, queued("Preserve me"))
+        .await
+        .unwrap();
+    world
+        .engine()
+        .interrupt(&caller, thread, turn.turn_id)
+        .await
+        .unwrap();
+    world
+        .say(thread, turn_ended(turn.turn_id, TurnOutcome::Interrupted))
+        .await;
+    world.wait_state(thread, "idle").await;
+    world.wait_followed_up(thread).await;
+    world.engine().stop();
+    // Recreate the persisted cut after an in-flight input returned to a held queue and entered preparation.
+    let mut tx = world.pool.begin().await.unwrap();
+    sqlx::query("UPDATE threads SET state='starting',starting_step='recording' WHERE node_id=$1")
+        .bind(thread)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE thread_inputs SET state_detail='files',queue_held=false WHERE id=$1")
+        .bind(waiting.input.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let recordings = world.ran(CommandKind::FsRecord);
+    world.restart_api().await;
+    world.wait_state(thread, "idle").await;
+    let sync = world.sync(thread).await;
+    assert!(
+        sync.inputs
+            .iter()
+            .any(|row| row.id == waiting.input.id && row.queue_held)
+    );
+    assert_eq!(world.ran(CommandKind::FsRecord), recordings);
+    world
+        .engine()
+        .resume_queue(&caller, thread, sync.thread.queue.revision)
+        .await
+        .unwrap();
+    assert!(
+        world
+            .run_turn(thread, 1, "Done")
+            .await
+            .text
+            .contains("Preserve me")
+    );
 }
 
 /// How long the engine waits in the tests of a harness that does not answer an interrupt: long enough
@@ -852,6 +985,19 @@ async fn a_send_racing_a_nonempty_stop_joins_the_hold_whichever_takes_the_thread
     );
     stopped.unwrap();
     let sent = sent.unwrap();
+    eventually(
+        "the accepted Stop has settled before reading its queue",
+        || async {
+            world
+                .count(
+                    "SELECT count(*) FROM thread_stops WHERE thread_id=$1 AND applied_at IS NULL",
+                    thread,
+                )
+                .await
+                == 0
+        },
+    )
+    .await;
     let sync = world.sync(thread).await;
     assert!(sync.thread.queue.held);
     assert_eq!(sync.thread.queue.held_inputs, 2);
@@ -867,7 +1013,7 @@ async fn a_send_racing_a_nonempty_stop_joins_the_hold_whichever_takes_the_thread
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stop_of_an_older_turn_while_a_newer_one_runs_changes_nothing_and_names_the_newer() {
+async fn a_stop_from_an_older_view_interrupts_the_current_turn_and_holds_its_queue() {
     let world = World::new().await;
     let thread = world.thread("Stale stop").await;
     let ada = Caller::session(world.ada);
@@ -885,17 +1031,18 @@ async fn a_stop_of_an_older_turn_while_a_newer_one_runs_changes_nothing_and_name
         .await
         .unwrap();
 
-    let stale = world.engine().interrupt(&ada, thread, first.turn_id).await;
-    assert!(
-        matches!(
-            stale,
-            Err(orch_engine::turns::InterruptError::NotRunning { current_turn_id: Some(current) })
-                if current == second.turn_id
-        ),
-        "{stale:?}"
-    );
-    assert_eq!(world.turn_state(second.turn_id).await, "running");
-    assert!(!world.sync(thread).await.thread.queue.held);
+    let stopped = world
+        .engine()
+        .interrupt(&ada, thread, first.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(stopped.id, second.turn_id);
+    world.wait_ran(CommandKind::TurnInterrupt, 1).await;
+    world
+        .say(thread, turn_ended(second.turn_id, TurnOutcome::Interrupted))
+        .await;
+    world.wait_turn(second.turn_id, "interrupted").await;
+    assert!(world.sync(thread).await.thread.queue.held);
     assert_eq!(world.input_state(waiting.input.id).await.0, "pending");
 }
 
@@ -951,11 +1098,26 @@ async fn a_harness_that_does_not_answer_an_interrupt_is_forced_after_the_wait() 
         0,
         "a forced controller end cannot close a session that may hold earlier retained commands"
     );
+    let forced = world
+        .engine()
+        .thread_stopping(thread)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(forced.pending && !forced.idle);
     world.machine.handler.release();
     world
         .say(thread, turn_ended(start.turn_id, TurnOutcome::Interrupted))
         .await;
     world.wait_state(thread, "idle").await;
+    let confirmed = world
+        .engine()
+        .thread_stopping(thread)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!confirmed.pending && confirmed.idle);
+    assert!(confirmed.version > forced.version);
     assert_eq!(world.turn_state(start.turn_id).await, "interrupted");
     assert!(
         world
@@ -1185,3 +1347,121 @@ async fn a_person_who_may_not_use_the_provider_cannot_send_any_kind_of_input() {
 
 #[path = "turns/prompt_cache_ttl.rs"]
 mod prompt_cache_ttl;
+
+#[path = "turns/native_diff.rs"]
+mod native_diff;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scheduled_interrupt_preserves_its_mode_and_runs_only_after_its_occurrence_commits() {
+    use orch_api_contract::threads::{ContentPart, Delivery};
+    use orch_engine::inputs::InputRequest;
+    let world = World::new().await;
+    let thread = world.thread("Scheduled interruption").await;
+    let (first, _) = world.running_turn(thread, "Existing work").await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let taken = world
+        .engine()
+        .submit_scheduled_input(
+            &mut tx,
+            &Caller::session(world.ada),
+            thread,
+            &InputRequest {
+                content: vec![ContentPart::Text {
+                    text: "The reviewed scheduled work".into(),
+                }],
+                delivery: Delivery::Interrupt,
+                client_id: "scheduled-interrupt".into(),
+                plan: false,
+                bypass: None,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(taken.submitted.input.delivery, Delivery::Interrupt);
+    assert_eq!(taken.interrupt, Some(first.turn_id));
+    assert_eq!(world.ran(CommandKind::TurnInterrupt), 0);
+    tx.commit().await.unwrap();
+    taken.after_commit(&world.engine()).await.unwrap();
+    world.wait_ran(CommandKind::TurnInterrupt, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scheduled_steer_reaches_the_existing_turn_after_its_occurrence_commits() {
+    use orch_api_contract::threads::{ContentPart, Delivery};
+    use orch_engine::inputs::InputRequest;
+    let world = World::new().await;
+    let thread = world.thread("Scheduled steering").await;
+    let (first, _) = world.running_turn(thread, "Existing work").await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let taken = world
+        .engine()
+        .submit_scheduled_input(
+            &mut tx,
+            &Caller::session(world.ada),
+            thread,
+            &InputRequest {
+                content: vec![ContentPart::Text {
+                    text: "The scheduled guidance".into(),
+                }],
+                delivery: Delivery::Steer,
+                client_id: "scheduled-steer".into(),
+                plan: false,
+                bypass: None,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(taken.submitted.input.delivery, Delivery::Steer);
+    assert_eq!(taken.submitted.input.turn_id, Some(first.turn_id));
+    assert_eq!(taken.interrupt, None);
+    assert_eq!(world.ran(CommandKind::TurnSteer), 0);
+    tx.commit().await.unwrap();
+    taken.after_commit(&world.engine()).await.unwrap();
+    world.wait_ran(CommandKind::TurnSteer, 1).await;
+    assert_eq!(world.turn_starts(thread).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_scheduled_plan_keeps_its_mode_instead_of_becoming_work_in_a_running_turn() {
+    use orch_api_contract::threads::{ContentPart, Delivery};
+    use orch_engine::inputs::InputRequest;
+    let world = World::new().await;
+    let mut descriptor = common::descriptor();
+    descriptor["capabilities"]["plan_mode"] = serde_json::json!(true);
+    world.declares(descriptor).await;
+    let thread = world.thread("Scheduled planning").await;
+    let (first, _) = world.running_turn(thread, "Existing work").await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let taken = world
+        .engine()
+        .submit_scheduled_input(
+            &mut tx,
+            &Caller::session(world.ada),
+            thread,
+            &InputRequest {
+                content: vec![ContentPart::Text {
+                    text: "Plan this change".into(),
+                }],
+                delivery: Delivery::Steer,
+                client_id: "scheduled-plan".into(),
+                plan: true,
+                bypass: None,
+            },
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    assert!(taken.submitted.input.plan);
+    assert_eq!(taken.submitted.input.delivery, Delivery::Steer);
+    assert_eq!(taken.submitted.input.turn_id, None);
+    tx.commit().await.unwrap();
+    taken.after_commit(&world.engine()).await.unwrap();
+    assert_eq!(world.ran(CommandKind::TurnSteer), 0);
+    world
+        .say(thread, turn_ended(first.turn_id, TurnOutcome::Completed))
+        .await;
+    let plan = world.turn_start(thread, 1).await;
+    assert!(plan.plan);
+}

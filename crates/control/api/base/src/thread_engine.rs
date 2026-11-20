@@ -101,6 +101,7 @@ fn outcome_of(outcome: CommandOutcome) -> Outcome {
 /// Why a command could not be handled, in the engine's words.
 fn commands_error(error: DispatchError) -> CommandsError {
     match error {
+        DispatchError::Db(error) => CommandsError::Database(error),
         DispatchError::BeforeEffect(error) => CommandsError::BeforeEffect(error),
         DispatchError::UnknownMachine => CommandsError::UnknownMachine,
         DispatchError::Revoked => CommandsError::Revoked,
@@ -123,6 +124,10 @@ fn stage_of(state: &str) -> Stage {
 
 #[async_trait]
 impl Commands for DispatchCommands {
+    fn machine_connected(&self, machine: Id) -> bool {
+        self.dispatcher.machine_connected(machine)
+    }
+
     async fn retained_return_source(
         &self,
         id: Id,
@@ -141,6 +146,16 @@ impl Commands for DispatchCommands {
             .map_err(commands_error)?
             .map(|row| row.body))
     }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        self.dispatcher
+            .retained_session_offer(id)
+            .await
+            .map_err(commands_error)
+    }
+
     async fn retained_command(
         &self,
         id: Id,
@@ -212,6 +227,7 @@ impl Commands for DispatchCommands {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         let stored = StoredCommand {
+            content_transit: command.content_transit,
             authority: command.authority,
             id: Some(command.id),
             machine: command.machine,
@@ -220,12 +236,16 @@ impl Commands for DispatchCommands {
             deadline: command.deadline,
             body: command.body,
         };
-        match before {
-            Some(before) => self.dispatcher.issue_stored_before(stored, before).await,
-            None => self.dispatcher.issue_stored(stored).await,
-        }
-        .map(|_| ())
-        .map_err(commands_error)
+        self.dispatcher
+            .issue_stored_with_input_facts(
+                stored,
+                command.input_facts,
+                command.session_offer,
+                before,
+            )
+            .await
+            .map(|_| ())
+            .map_err(commands_error)
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
@@ -291,6 +311,11 @@ impl EngineApplier {
 /// What the link is told when the engine could not apply events: a failed
 /// database is the database's, and anything else sends the events again.
 fn apply_error(error: EngineError) -> ApplyError {
+    if let Some(code) = error.data_code() {
+        return ApplyError::Db(orch_db::DbError::Data {
+            code: code.to_owned(),
+        });
+    }
     match error {
         EngineError::Db(error) => ApplyError::Db(error),
         other => ApplyError::Other(other.to_string()),
@@ -299,6 +324,21 @@ fn apply_error(error: EngineError) -> ApplyError {
 
 #[async_trait]
 impl EventApplier for EngineApplier {
+    async fn storage_gap(
+        &self,
+        conn: &mut Conn,
+        machine: Id,
+        delivery: &Delivery,
+        code: &str,
+    ) -> Result<(), ApplyError> {
+        for event in &delivery.events {
+            self.engine
+                .record_storage_gap(conn, machine, &delivery.stream, event, code)
+                .await
+                .map_err(apply_error)?;
+        }
+        Ok(())
+    }
     async fn command_reply(
         &self,
         tx: &mut Conn,
@@ -534,6 +574,14 @@ pub mod tests {
 
     #[cfg(any(test, feature = "test-support"))]
     fn what_the_dispatcher_cannot_do_is_told_in_the_engines_words() {
+        let data = EngineError::from(commands_error(DispatchError::Db(orch_db::DbError::Data {
+            code: "22P05".to_owned(),
+        })));
+        assert_eq!(
+            data.data_code(),
+            Some("22P05"),
+            "command work retains a deterministic storage refusal"
+        );
         assert!(matches!(
             commands_error(DispatchError::UnknownMachine),
             CommandsError::UnknownMachine
