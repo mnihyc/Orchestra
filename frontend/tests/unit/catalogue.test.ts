@@ -94,7 +94,7 @@ async function translationReader(englishCatalogue: Catalogue, chineseCatalogue: 
 function copiedEnglishKeys(englishTexts: Map<string, string>, chineseTexts: Map<string, string>, read: ReadTranslation): string[] {
   const words = (text: string) => text.replace(/\{\{[^}]*\}\}/g, '');
   // Native tool/language/file names label choices and fields; explanatory prose still needs translation.
-  const technicalNames = new Set(['Docker', 'KVM', 'MCP', 'API', 'Node', 'Python', 'Rust', 'Java', 'JavaScript', 'TypeScript', 'JSON', 'YAML', 'Markdown', 'HTML', 'PDF', 'Typst', 'HTTP', 'HTTPS', 'TCP', 'UDP', 'Git', 'SSH', 'OAuth', 'OIDC', 'SMTP', 'SSE', 'WebSocket', 'OpenAI', 'Anthropic', 'Claude', 'Claude Code', 'Codex', 'Linux', 'macOS', 'Windows', 'x86_64', 'aarch64', 'JSON Lines', 'Dockerfile', 'Ptrace', 'Tmpfs']);
+  const technicalNames = new Set(['Docker', 'KVM', 'MCP', 'API', 'Node', 'Python', 'Rust', 'Java', 'JavaScript', 'TypeScript', 'JSON', 'YAML', 'Markdown', 'HTML', 'PDF', 'Typst', 'HTTP', 'HTTPS', 'TCP', 'UDP', 'Git', 'SSH', 'OAuth', 'OIDC', 'SMTP', 'SSE', 'WebSocket', 'OpenAI', 'Anthropic', 'Claude', 'Claude Code', 'Codex', 'Linux', 'macOS', 'Windows', 'x86_64', 'aarch64', 'JSON Lines', 'Dockerfile', 'Ptrace', 'Tmpfs', 'hCaptcha', 'SiteVerify', 'CreateAssessment']);
   return [...englishTexts].filter(([key, source]) => {
     const chineseSource = chineseTexts.get(key);
     const text = source.includes('$t(') ? read(key, 'en') : source;

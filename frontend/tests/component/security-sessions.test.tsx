@@ -1,6 +1,6 @@
 /** One confirmed bulk session act updates Security from its answer, with this browser retained. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import type * as Auth from '@/api/auth';
@@ -8,9 +8,11 @@ import type * as Users from '@/api/users';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 import { answerChanges } from '@/api/actAnswers';
+import { client as browser } from '@/api/client';
+import { NetworkError } from '@/lib/requests';
 import { Security } from '@/features/settings/personal/Security';
 import type { SessionInfo } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { me, meta } from '../doubles/fixtures';
 import { show } from './support';
 
@@ -28,6 +30,28 @@ const current: SessionInfo = { id: 'current', current: true, user_agent: 'Chrome
 const other: SessionInfo = { ...current, id: 'other', current: false, user_agent: 'Firefox/130 Windows' };
 
 beforeEach(async () => { vi.clearAllMocks(); await setLocale('en'); calls.list.mockResolvedValue([current, other]); });
+
+it('keeps the actual failed renewal on this browser alone without reading again and closes it for a replacement reader', async () => {
+  const before = browser.session.getState(), person = me(1, 'ada', 'Ada');
+  const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Synthetic connection refusal'));
+  const grant = { user: person, access_token: 'synthetic-held', access_expires_at: new Date(Date.now() + 900_000).toISOString() };
+  browser.adopt(grant); const next = browser.session.getState().renewal?.scheduled_at;
+  if (typeof next !== 'number') throw new Error('The held grant schedules its actual renewal');
+  await expect(browser.renew()).rejects.toBeInstanceOf(NetworkError);
+  const view = show(<Security />);
+  try {
+    const own = (await screen.findByText('Chrome (Linux)')).closest('li'), foreign = screen.getByText('Firefox (Windows)').closest('li');
+    if (own === null || foreign === null) throw new Error('Each native session keeps its own existing row');
+    expect(own).toHaveTextContent(i18n.t('clientFacts.renewalFailed'));
+    expect(within(foreign).queryByRole('button', { name: i18n.t('common.details') })).not.toBeInTheDocument();
+    await userEvent.click(within(own).getByRole('button', { name: i18n.t('common.details') }));
+    expect(document.querySelector(`[data-fact-disclosure-body] time[datetime="${new Date(next).toISOString()}"]`)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce(); expect(calls.list).toHaveBeenCalledOnce(); expect(document.body).not.toHaveTextContent('synthetic-held');
+    act(() => browser.adopt({ ...grant, user: me(2, 'replacement', 'Replacement'), access_token: 'synthetic-replacement', access_expires_at: new Date(Date.now() + 1_800_000).toISOString() }));
+    expect(screen.queryByText(i18n.t('clientFacts.renewalFailed'))).not.toBeInTheDocument();
+    expect(document.querySelector('[data-fact-disclosure-body]')).toBeNull();
+  } finally { view.unmount(); fetch.mockResolvedValue(new Response(null, { status: 204 })); await browser.signOut(); fetch.mockRestore(); browser.session.setState(before); }
+});
 
 it.each(['en', 'zh-CN'] as const)('confirms once, retains this browser and consumes the exact answer in %s', async (locale) => {
   await setLocale(locale);
@@ -72,4 +96,12 @@ it('retains the confirmation and session list after a refused act so it can be t
   expect(screen.getByText('Firefox (Windows)')).toBeInTheDocument();
   await user.click(within(confirm).getByRole('button', { name: 'Sign out other sessions' }));
   await waitFor(() => expect(calls.revoke).toHaveBeenCalledTimes(2));
+});
+
+it.each(['en','zh-CN'] as const)('names the sessions actual idle expiry in its existing source line in %s',async(locale)=>{
+  await setLocale(locale);show(<Security/>);
+  const browser=await screen.findByText('Chrome (Linux)'),row=browser.closest('li');
+  if(row===null)throw new Error('The session has its own row');
+  expect(row).toHaveTextContent(locale==='en'?'Idle expiry':'空闲到期');
+  expect(calls.list).toHaveBeenCalledTimes(1);
 });

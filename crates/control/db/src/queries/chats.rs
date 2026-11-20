@@ -724,6 +724,7 @@ pub struct MessageRow {
     /// Emoji to the people who reacted with it, in the order they did.
     pub reactions: Json,
     /// The value its author sent to make sending it again harmless.
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub client_id: Option<String>,
     /// Its text and the names of what it carries; none when it is not searched.
     pub search_text: Option<String>,
@@ -804,7 +805,7 @@ pub async fn insert_message(conn: &mut Conn, new: &NewMessage<'_>) -> Result<Mes
     .bind(new.reply_to_id)
     .bind(new.mentions)
     .bind(new.mentions_all)
-    .bind(new.client_id)
+    .bind(new.client_id.map(orch_types::storable::encode_key))
     .bind(new.search_text)
     .bind(new.seq)
     .bind(new.at)
@@ -900,7 +901,7 @@ pub async fn message_by_client(
     ))
     .bind(chat)
     .bind(author)
-    .bind(client_id)
+    .bind(orch_types::storable::encode_key(client_id))
     .fetch_optional(conn)
     .await?)
 }
@@ -1835,7 +1836,7 @@ pub async fn renew_notice(
 ) -> Result<Option<Announced>, DbError> {
     let written: Option<(Id, i64)> = sqlx::query_as(
         "WITH bumped AS (
-            UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1 RETURNING inbox_seq
+            UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1 RETURNING inbox_seq
          )
          INSERT INTO notifications (id, user_id, kind, node_id, chat_id, title, body, data, dedupe_key, inbox_seq, created_at)
          SELECT $2, $1, $3, $4, $5, $6, $7, $8, $9, bumped.inbox_seq, $10 FROM bumped
@@ -1884,8 +1885,8 @@ pub async fn read_notices_through(
     at: DateTime<Utc>,
 ) -> Result<Option<i64>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (SELECT 1 FROM notifications n WHERE user_id = $1 AND chat_id = $2 AND read_at IS NULL
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (SELECT 1 FROM notifications n WHERE user_id = $1 AND chat_id = $2 AND read_at IS NULL
              AND ($3::bigint IS NULL OR EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id=$2 AND m.id::text=n.data->>'message_id' AND m.seq_created <= $3)))
       RETURNING inbox_seq",
     )

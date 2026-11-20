@@ -38,7 +38,7 @@ function resize(width: number) {
 }
 
 interface Row { id: string; name: string; version: string; machine: string; image: string }
-const row: Row = { id: 'profile', name: 'Team profile', version: 'The default build', machine: 'world2-sub', image: 'gcr.io/distroless/static-debian12:nonroot' };
+const row: Row = { id: 'profile', name: 'Team profile', version: 'The default version', machine: 'world2-sub', image: 'gcr.io/distroless/static-debian12:nonroot' };
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`keeps full values once and folds facts into their row at a narrow width (${locale}, ${theme})`, async () => {

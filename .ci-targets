@@ -1,0 +1,5 @@
+test -p orch-engine --lib -- source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger
+test -p orch-engine --test turns -- a_second_queued_input_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger --exact
+test -p orch-engine --lib -- a_formerly_accepted_stale_candidate_is_revalidated_before_the_first_close
+test -p orch-engine --test forks -- confirmed_source::historical_unconfirmed_words_are_refused_instead_of_copied_out_of_their_original_queue --exact
+test -p orch-engine --test forks -- confirmed_source::review::a_nonempty_confirmation_with_a_missing_cut_refuses_without_losing_the_original_authored_queue --exact
