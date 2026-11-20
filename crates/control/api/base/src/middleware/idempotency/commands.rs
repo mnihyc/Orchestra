@@ -301,6 +301,7 @@ pub mod tests {
                         link::insert_command_with_authority(
                             &mut tx,
                             &NewCommand {
+                                content_transit: false,
                                 id,
                                 machine_id: machine,
                                 kind: kind.as_str(),
@@ -439,6 +440,7 @@ pub mod tests {
                     link::insert_command(
                         &mut tx,
                         &NewCommand {
+                            content_transit: false,
                             id,
                             machine_id: machine,
                             kind: "mcp.import",

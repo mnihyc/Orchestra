@@ -15,11 +15,12 @@
 import createClient, { type Client } from 'openapi-fetch';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 
-import type { AuthResult, ErrorCode, MissingAccess, NodeRef, paths, Problem, SignInProof } from '@/generated/api-types';
-import { NetworkError, sendUntilSilent } from '@/lib/requests';
+import type { AuthResult, DatabaseWait, ErrorCode, MissingAccess, NodeRef, paths, Problem, SignInProof } from '@/generated/api-types';
+import { NetworkError, sendUntilSilent, sendFilePiece } from '@/lib/requests';
 import { openingId } from '@/lib/opening';
 import { apiErrorSentence, fieldErrorSentence } from '@/i18n/errors';
 import { createServerClock, serverClock, type ServerClock } from '@/lib/serverClock';
+import { pageHtmlReads, type HtmlReads } from '@/api/htmlReads';
 
 /** Where every request of the API lives. */
 export const BASE_PATH = '/api/v1';
@@ -137,6 +138,22 @@ export class ApiError extends Error {
   }
 }
 
+/** A native timeout receipt belongs only to the request whose error carries it. */
+export function databaseWaitOf(error: unknown): DatabaseWait | null {
+  if (!(error instanceof ApiError) || error.code !== 'internal' || error.status < 500) return null;
+  return readDatabaseWait(error.problem.database_wait, error.requestId);
+}
+
+function readDatabaseWait(wait: unknown, requestId: string): DatabaseWait | null {
+  if (!isRecord(wait)) return null;
+  const phase = wait.phase;
+  const limit = wait.applied_limit_ms;
+  if (phase !== 'acquire' && phase !== 'statement' && phase !== 'idle_transaction') return null;
+  if (!(limit === null || (typeof limit === 'number' && Number.isSafeInteger(limit) && limit > 0))) return null;
+  if (wait.service !== 'api' || typeof wait.occurrence_id !== 'string' || wait.occurrence_id === '' || wait.occurrence_id !== requestId) return null;
+  return { phase, applied_limit_ms: limit, service: wait.service, occurrence_id: wait.occurrence_id };
+}
+
 /** Whether the invitation's maker can no longer authorize its grant. */
 export function invitationIssuerAuthorityLost(error: unknown): boolean {
   return error instanceof ApiError && error.problem.reason === 'invitation_issuer_authority_lost';
@@ -252,6 +269,29 @@ export interface SessionState {
   accessEndsAt: number | null;
   /** A refused renewal ended a session this device had previously held. No credential is stored. */
   sessionEnded?: boolean;
+  /** The actual browser renewal attempt and its next admitted timer, without credentials. */
+  renewal?: RenewalObservation | null;
+  /** An attested own-session outcome, without the native problem's private extra fields. */
+  sessionEnd?: SessionEndObservation | null;
+}
+
+export type SessionEndCause = 'expired' | 'revoked' | 'account_unavailable';
+export interface SessionEndObservation { cause: SessionEndCause; at_if_known: string | null }
+
+function sessionEndFact(problem: unknown): SessionEndObservation | null {
+  if (!isRecord(problem) || !isRecord(problem.session_end)) return null;
+  const value = problem.session_end, cause = value.cause;
+  if (cause !== 'expired' && cause !== 'revoked' && cause !== 'account_unavailable') return null;
+  const at = value.at_if_known;
+  const known = typeof at === 'string' && /^[+-]?\d{4,}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(at) && Number.isFinite(Date.parse(at));
+  return { cause, at_if_known: known ? at : null };
+}
+
+export type RenewalPhase = 'scheduled' | 'in_progress' | 'completed' | 'failed';
+export interface RenewalObservation {
+  phase: RenewalPhase;
+  scheduled_at: number | null;
+  renewed_at: number | null;
 }
 
 export type SessionEvent =
@@ -292,12 +332,14 @@ const WRITES: ReadonlySet<string> = new Set<Act['method']>(['POST', 'PUT', 'PATC
 export interface ApiClientOptions {
   /** The origin and base path requests go to; this page's own when absent. */
   baseUrl?: string;
-  /** What sends a request; the browser's `fetch` when absent. */
+  /** What sends a request; ordinary Fetch and progress-aware file PUTs when absent. */
   fetch?: (request: Request) => Promise<Response>;
   /** How long nothing may move before a request is given up. */
   silenceLimitMs?: number;
   /** The application's HTTP and realtime transports share this measured clock. */
   clock?: ServerClock;
+  /** Initial replies belonging only to this document; independent clients keep their own transports. */
+  startupReads?: HtmlReads;
 }
 
 export interface ApiClient {
@@ -334,12 +376,18 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const baseUrl = options.baseUrl ?? `${origin}${BASE_PATH}`;
   const basePath = new URL(baseUrl, origin || 'http://localhost').pathname;
   const cookieRequests = COOKIE_REQUESTS.map((path) => path.replace(BASE_PATH, basePath));
-  const send = options.fetch ?? ((request: Request) => fetch(request));
+  const send = options.fetch ?? ((request: Request, moved?: () => void) =>
+    request.method === 'PUT' && new URL(request.url).pathname.startsWith(`${basePath}/uploads/sessions/`)
+      && typeof XMLHttpRequest !== 'undefined' && moved !== undefined
+      ? sendFilePiece(request, moved) : fetch(request));
 
   let token: string | null = null;
   const clock = options.clock ?? createServerClock();
   let renewTimer: ReturnType<typeof setTimeout> | undefined;
-  let renewing: Promise<boolean> | null = null;
+  let renewalDueAt: number | null = null, sessionGeneration = 0;
+  let renewalPlan = Symbol('renewal');
+  let observedEnd: { generation: number; fact: SessionEndObservation } | null = null;
+  let renewing: { reader: number | undefined; generation: number; pending: Promise<boolean> } | null = null;
   let restoring: Promise<boolean> | null = null;
   const listeners = new Set<(event: SessionEvent) => void>();
   const actListeners = new Set<(act: Act) => void | Promise<void>>();
@@ -350,24 +398,36 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     hadSession = present;
     try { localStorage.setItem(sessionMarker, present ? '1' : '0'); } catch { /* Keep the fact in this page only. */ }
   }
-  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false }));
+  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false, renewal: null, sessionEnd: null }));
 
   const emit = (event: SessionEvent) => {
     for (const listener of listeners) listener(event);
   };
 
-  function forget(reason: 'ended' | 'refused' | 'deliberate'): void {
+  function forget(reason: 'ended' | 'refused' | 'deliberate', reported: SessionEndObservation | null = null): void {
+    options.startupReads?.cancel();
     clearTimeout(renewTimer);
+    const end = reason === 'deliberate' ? null : reported ?? (observedEnd?.generation === sessionGeneration ? observedEnd.fact : null);
+    observedEnd = null;
+    renewalDueAt = null; renewalPlan = Symbol('renewal'); sessionGeneration += 1;
     const wasSignedIn = session.getState().status === 'signed_in';
-    const sessionEnded = reason === 'ended' && (wasSignedIn || hadSession);
+    const sessionEnded = reason !== 'deliberate' && (end !== null || wasSignedIn || reason === 'ended' && hadSession);
     if (reason === 'deliberate') rememberSession(false);
     token = null;
-    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded });
+    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded, sessionEnd: end,
+      renewal: reason === 'deliberate' ? null : { phase: 'failed', scheduled_at: null, renewed_at: session.getState().renewal?.renewed_at ?? null } });
     if (wasSignedIn) emit({ type: 'signed_out' });
   }
 
   function adopt(result: AuthResult): void {
+    options.startupReads?.cancel();
+    sessionGeneration += 1;
+    accept(result, false);
+  }
+
+  function accept(result: AuthResult, renewed: boolean): void {
     const before = session.getState();
+    observedEnd = null;
     // The life of the token is counted on the server's clock, so that a device whose own clock is
     // wrong still renews in time.
     const life = Date.parse(result.access_expires_at) - (Date.now() + (clock.offset() ?? 0));
@@ -375,23 +435,31 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     token = result.access_token;
     rememberSession(true);
     const sameReader = before.status === 'signed_in' && before.userId === result.user.id;
-    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false });
-
+    const delay = Math.max(0, life - RENEW_BEFORE_END_MS);
     clearTimeout(renewTimer);
-    renewTimer = setTimeout(
-      () => {
-        // A renewal that could not be made is made by the next request, or by the answer that says so.
-        renew().catch(() => undefined);
-      },
-      Math.max(0, life - RENEW_BEFORE_END_MS),
-    );
+    const due = Date.now() + delay, plan = Symbol('renewal'); renewalPlan = plan;
+    renewalDueAt = Number.isFinite(new Date(due).getTime()) ? due : null;
+    const wait = () => {
+      if (renewalPlan !== plan) return;
+      const left = due - Date.now();
+      if (left > 0) { renewTimer = setTimeout(wait, Math.min(left, 2_147_483_647)); return; }
+      renewTimer = undefined; renewalDueAt = null;
+      // A renewal that could not be made is made by the next request, or by the answer that says so.
+      renew().catch(() => undefined);
+    };
+    renewTimer = setTimeout(wait, Math.min(delay, 2_147_483_647));
+    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false, sessionEnd: null,
+      renewal: { phase: renewed && sameReader ? 'completed' : 'scheduled', scheduled_at: renewalDueAt,
+        renewed_at: renewed && sameReader ? Date.now() : null } });
 
     const same = before.status === 'signed_in' && before.userId === result.user.id;
     emit({ type: same ? 'renewed' : 'signed_in', result });
   }
 
   function isCookieRequest(request: Request): boolean {
-    return cookieRequests.includes(new URL(request.url).pathname);
+    const path = new URL(request.url).pathname;
+    const threadSession = `${basePath}/auth/session/thread/`;
+    return cookieRequests.includes(path) || path.startsWith(threadSession) && /^[^/]+$/.test(path.slice(threadSession.length));
   }
 
   function carry(request: Request, bearer: string | null): Request {
@@ -402,16 +470,24 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   }
 
   async function dispatch(request: Request): Promise<Response> {
-    const sentAt = Date.now();
-    const response = await sendUntilSilent(request, send, options.silenceLimitMs);
-    clock.observe(response.headers.get('Date') ?? '', sentAt, Date.now());
+    const timing: { sentAt: number; receivedAt?: number } = { sentAt: Date.now() };
+    const startup = options.startupReads;
+    const transport = startup === undefined ? send : async (carried: Request) => {
+      const claimed = startup.take(carried);
+      const reply = claimed === null ? null : await claimed;
+      if (reply === null) return send(carried);
+      timing.sentAt = reply.sentAt; timing.receivedAt = reply.receivedAt;
+      return reply.response;
+    };
+    const response = await sendUntilSilent(request, transport, options.silenceLimitMs);
+    clock.observe(response.headers.get('Date') ?? '', timing.sentAt, timing.receivedAt ?? Date.now());
     return response;
   }
 
-  async function codeOf(response: Response): Promise<string | null> {
+  async function authProblemOf(response: Response): Promise<Problem | null> {
     try {
       const body: unknown = await response.clone().json();
-      return isProblem(body) ? body.code : null;
+      return isProblem(body) ? body : null;
     } catch {
       return null;
     }
@@ -460,30 +536,34 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   async function authorized(request: Request): Promise<Response> {
     if (isCookieRequest(request)) return dispatch(carry(request, null));
     const readerVersion = session.getState().readerVersion ?? 0;
+    const generation = sessionGeneration;
 
     const endsAt = session.getState().accessEndsAt;
     if (token !== null && endsAt !== null && Date.now() >= endsAt - RENEW_BEFORE_END_MS) {
       // Due, or overdue after a sleep: renew first and spare the request a refusal.
       await renew().catch(() => undefined);
     }
-    if (readerVersion !== (session.getState().readerVersion ?? 0)) return Response.json({ type: 'orch:error:auth.invalid_token', code: 'auth.invalid_token', title: 'Sign in again', detail: 'The requesting session changed.', status: 401, request_id: '' }, { status: 401 });
+    if (readerVersion !== (session.getState().readerVersion ?? 0) || generation !== sessionGeneration) return Response.json({ type: 'orch:error:auth.invalid_token', code: 'auth.invalid_token', title: 'Sign in again', detail: 'The requesting session changed.', status: 401, request_id: '' }, { status: 401 });
 
     const used = token;
     const again = used === null ? null : request.clone();
     const response = await dispatch(carry(request, used));
-    if (again === null || response.status !== 401) return response;
-    const code = await codeOf(response);
+    if (again === null || response.status !== 401 && response.status !== 403) return response;
+    const problem = await authProblemOf(response), code = problem?.code;
+    if (readerVersion !== (session.getState().readerVersion ?? 0) || generation !== sessionGeneration) return response;
+    const end = sessionEndFact(problem);
+    if (end !== null && (code === 'auth.invalid_token' || code === 'auth.required' || code === 'auth.suspended')) observedEnd = { generation, fact: end };
     if (code === 'auth.suspended') {
       // The person was suspended: nothing of theirs answers any more, and the page says so by signing out.
-      forget('refused');
+      forget('refused', end);
       return response;
     }
-    if (code !== 'auth.invalid_token') return response;
-    if (readerVersion !== (session.getState().readerVersion ?? 0)) return response;
+    if (code === 'auth.required' && end !== null) { forget('ended', end); return response; }
+    if (response.status !== 401 || code !== 'auth.invalid_token') return response;
     // The token is no longer good. One renewal serves every request that was refused with it, and
     // each of them is sent again exactly once.
     const signedIn = token !== used ? token !== null : await renew().catch(() => false);
-    if (!signedIn || token === null || readerVersion !== (session.getState().readerVersion ?? 0)) return response;
+    if (!signedIn || token === null || readerVersion !== (session.getState().readerVersion ?? 0) || generation !== sessionGeneration) return response;
     return dispatch(carry(again, token));
   }
 
@@ -491,30 +571,41 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   async function renewOnce(discover = false): Promise<boolean> {
     const reader = session.getState().readerVersion;
-    const answer = discover ? await api.POST('/auth/session') : await api.POST('/auth/refresh');
-    if (reader !== session.getState().readerVersion) return session.getState().status === 'signed_in';
-    if (answer.data === null) {
-      forget('ended');
-      return false;
+    const generation = sessionGeneration;
+    session.setState({ renewal: { phase: 'in_progress', scheduled_at: renewalDueAt, renewed_at: session.getState().renewal?.renewed_at ?? null } });
+    try {
+      const answer = discover ? await api.POST('/auth/session') : await api.POST('/auth/refresh');
+      if (reader !== session.getState().readerVersion || generation !== sessionGeneration) return session.getState().status === 'signed_in';
+      if (answer.data === null) {
+        forget('ended');
+        return false;
+      }
+      if (answer.data !== undefined) {
+        accept(answer.data, true);
+        return true;
+      }
+      const error = toError(answer.error, answer.response);
+      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+        // No session, an ended one, or a suspended person: nobody is signed in on this page.
+        forget(error.status === 401 ? 'ended' : 'refused', sessionEndFact(error.problem));
+        return false;
+      }
+      throw error;
+    } catch (error) {
+      if (reader !== session.getState().readerVersion || generation !== sessionGeneration) return session.getState().status === 'signed_in';
+      session.setState({ renewal: { phase: 'failed', scheduled_at: renewalDueAt, renewed_at: session.getState().renewal?.renewed_at ?? null } });
+      throw error;
     }
-    if (answer.data !== undefined) {
-      adopt(answer.data);
-      return true;
-    }
-    const error = toError(answer.error, answer.response);
-    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-      // No session, an ended one, or a suspended person: nobody is signed in on this page.
-      forget(error.status === 401 ? 'ended' : 'refused');
-      return false;
-    }
-    throw error;
   }
 
   function renew(discover = false): Promise<boolean> {
-    renewing ??= renewOnce(discover).finally(() => {
-      renewing = null;
-    });
-    return renewing;
+    const reader = session.getState().readerVersion;
+    if (renewing !== null && renewing.reader === reader && renewing.generation === sessionGeneration) return renewing.pending;
+    let accept!: (result: boolean) => void, refuse!: (error: unknown) => void;
+    const pending = new Promise<boolean>((resolve, reject) => { accept = resolve; refuse = reject; });
+    const owned = { reader, generation: sessionGeneration, pending }; renewing = owned;
+    void renewOnce(discover).then(accept, refuse).finally(() => { if (renewing === owned) renewing = null; });
+    return pending;
   }
 
   function restore(): Promise<boolean> {
@@ -556,7 +647,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 }
 
 /** The client of the application. */
-export const client = createApiClient({ clock: serverClock });
+export const client = createApiClient({ clock: serverClock, startupReads: pageHtmlReads() });
 
 /** The typed requests of the API, on the application's client. */
 export const api = client.api;

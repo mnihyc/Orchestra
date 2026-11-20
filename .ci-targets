@@ -1,0 +1,14 @@
+fmt
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- a_team_opening_reads_the_thread_status_and_participation_once_for_the_first_screen --nocapture
+test -p orch-api-core --test everything_scale -- read_facts:: --test-threads=1
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test threads_read
+test -p orch-api-core --test transaction_guards
+test -p orch-db --test commit_epochs
+test -p orch-authz --test ownership
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test
+web build

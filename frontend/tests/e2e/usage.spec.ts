@@ -628,7 +628,7 @@ test('the rates inside a project are read as they stand and are written for the 
   await page.getByRole('button', { name: 'See the rates' }).click();
   const dialog = page.getByRole('dialog', { name: 'Rates · Web' });
   await expect(rateRow(page, 'Claude Opus 5')).toContainText('≈ Estimate · "claude-*"');
-  await expect(dialog.getByText('Rates are written for an org as a whole, and count in everything inside it.')).toBeVisible();
+  await expect(dialog.getByText('Rates are written for an organization as a whole, and count in everything inside it.')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Copy to the rate card' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Add a rate' })).toHaveCount(0);
   await expect(dialog.getByRole('switch', { name: 'Estimates' })).toBeDisabled();
