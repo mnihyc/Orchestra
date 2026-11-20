@@ -4,6 +4,7 @@ import { api, ok } from '@/api/client';
 import { record } from '@/api/cache';
 import type { Change } from '@/api/acts';
 import type { EnrollmentProgress } from '@/generated/api-types';
+import { readAgain } from '@/api/readAgain';
 import { resourceFollowing } from '@/realtime/resourceFollowing';
 
 export const ENROLLMENT_PROGRESS = 'enrollment-progress';
@@ -29,6 +30,8 @@ export function enrollmentChanges(cache: QueryClient, change: EnrollmentChange['
 
 export const enrollmentProgressQuery = (receipt: string) => queryOptions({
   queryKey: enrollmentProgressKey(receipt), staleTime: Infinity, retry: false,
+  // The machine's arrival is told over the live connection, once. Until it is online the dialog reads again by itself.
+  refetchInterval: readAgain<EnrollmentProgress>((progress) => !(progress?.machine?.online === true || progress?.host?.machine.online === true)),
   // The cache owns this read across transient mounts. Native events cancel its pending result
   // before applying a newer receipt/resource, so a delayed answer cannot roll progress back.
   queryFn: async (): Promise<EnrollmentProgress> => {
