@@ -12,6 +12,10 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ACTS, applyChanges, type Change, covers, findAct, followWith, resourceChanges, threadRowChanges, treeChanges, userEventChanges } from '@/api/acts';
+
+it('retires the personal model order after another device uses a model without replacing unrelated state', () => {
+  expect(userEventChanges('model_recents', {})).toEqual([{ missing: [{ key: ['model-recents'] }], cancelPending: true }]);
+});
 import { browsersQuery } from '@/api/browsers';
 import { createApiClient, client } from '@/api/client';
 import { displaysQuery } from '@/api/displays';
@@ -20,11 +24,13 @@ import { inputScheduleQuery, inputScheduleRunsQuery, topicSchedulesQuery } from 
 import { documentLinksQuery } from '@/api/links';
 import { moveOutPath, supportsMoveOut } from '@/api/moveOut';
 import { portsKey } from '@/api/ports';
+import { repairPeople } from '@/api/peopleChanges';
 import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
 import type { DocumentLinks, MachinePrograms, TreeNode } from '@/generated/api-types';
 import type { HomeMoveKind } from '@/features/duplicate/move';
 import { me, org, userRef } from '../doubles/fixtures';
 import { inputSchedule } from '../doubles/input-schedules';
+import { agent as bindingAgent, options as bindingOptions, provider as bindingProvider } from './start-fixtures';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
 /** Parsing all source once takes seconds on the shared builder; this bounds the scan. */
@@ -38,6 +44,128 @@ const moveFamilies: Record<HomeMoveKind, unknown> = { ...duplicateObjects, host:
 const movePaths = [...new Set((Object.keys(moveFamilies) as HomeMoveKind[])
   .filter(supportsMoveOut)
   .flatMap((kind) => [false, true].map((draft) => moveOutPath({ kind, id: ANY, draft }))))];
+
+it('applies a real pool news row to its current reader without another detail read', async () => {
+  const cache=new QueryClient();
+  const key=['pool','shared-pool','reader:1'];
+  const before={id:'shared-pool',name:'Build hosts',enabled:true,revision:1,kind:'host',target:{type:'pool',kind:'host',id:'shared-pool'}};
+  const after={...before,enabled:false,revision:2};
+  const read=vi.fn(()=>Promise.resolve(after));
+  cache.setQueryData(key,before);
+  const stop=new QueryObserver(cache,{queryKey:key,queryFn:read,staleTime:Infinity}).subscribe(()=>undefined);
+  try {
+    await applyChanges(userEventChanges('resources',{kind:'pool',id:'shared-pool',row:after}),cache);
+    expect(cache.getQueryData(key)).toEqual(after);
+    expect(read).not.toHaveBeenCalled();
+  } finally {stop();cache.clear();}
+});
+
+it.each(['permission page','revoked member'] as const)('drops private pool rows before the current read after a %s change',async(source)=>{
+  const cache=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const key=['pool-members','pool',{after_id:null,after_position:null},'reader:1'];
+  const hidden=['pool-choice-details','hidden-pool','choice',null,'reader:1'];
+  const before={items:[{label:'Private member',rule:{type:'single',resource:{kind:'provider',id:'member'}}}],next:null};
+  const after={items:[{label:null,rule:null,reason:'member_hidden'}],next:null};
+  let finish:((value:typeof after)=>void)|undefined;
+  const read=vi.fn(()=>new Promise<typeof after>((resolve)=>{finish=resolve;}));
+  cache.setQueryData(key,before);cache.setQueryData(hidden,before);
+  const stop=new QueryObserver(cache,{queryKey:key,queryFn:read,staleTime:Infinity}).subscribe(()=>undefined);
+  try {
+    const changes=source==='permission page'?findAct('PATCH','/providers/member/permissions',{answer:{}})?.changes??[]
+      :resourceChanges('provider','member',{view_revoked:true});
+    const repairing=applyChanges(changes,cache);
+    await vi.waitFor(()=>expect(read).toHaveBeenCalledTimes(1));
+    expect(cache.getQueryData(key)).toBeUndefined();
+    expect(cache.getQueryState(hidden)).toBeUndefined();
+    finish?.(after);await repairing;
+    expect(cache.getQueryData(key)).toEqual(after);
+  } finally {finish?.(after);stop();cache.clear();}
+});
+
+it('rereads open trial and catalogue facts and retires closed facts when their source access changes', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const keys = [['provider-trial', 'p1'], ['accepted-orch-tools', 'thread', 'offer', '', 'reader']];
+  const before = { reserved_for: { display_name: 'Previous person' }, source: { name: 'Previous place' } };
+  const after = { reserved_for: null, source: null };
+  const reads = keys.map(() => vi.fn(() => Promise.resolve(after)));
+  const hidden = ['provider-trial', 'closed-provider'];
+  cache.setQueryData(hidden, before);
+  const stops = keys.map((key, index) => {
+    cache.setQueryData(key, before);
+    return new QueryObserver(cache, { queryKey: key, queryFn: reads[index]!, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  try {
+    await applyChanges(findAct('PATCH', '/nodes/source-topic/permissions')?.changes ?? [], cache);
+    for (const [index, key] of keys.entries()) {
+      expect(reads[index]).toHaveBeenCalledOnce();
+      expect(cache.getQueryData(key)).toEqual(after);
+    }
+    expect(cache.getQueryData(hidden)).toBeUndefined();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
+it.each(['model enabled', 'agent reported', 'provider access granted', 'model policy changed', 'binding hint', 'reach changed'])('refreshes every open thread choice after %s and retires hidden choices', async (event) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const before = bindingOptions({ providers: [bindingProvider('p1', { agents: [bindingAgent('a1', { reason: 'harness_unreported' })] })] });
+  const after = bindingOptions();
+  const keys = [['start-options', 'topic', ''], ['thread-binding-options', 'one'], ['thread-binding-options', 'two']];
+  const reads = keys.map(() => vi.fn(() => Promise.resolve(after)));
+  const hidden = ['thread-binding-options', 'hidden'];
+  cache.setQueryData(hidden, before);
+  const stops = keys.map((key, at) => {
+    cache.setQueryData(key, before);
+    return new QueryObserver(cache, { queryKey: key, queryFn: reads[at]!, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  try {
+    const changes = event === 'model enabled' ? resourceChanges('provider', 'p1', { row: { id: 'p1', models: [] } })
+      : event === 'agent reported' ? resourceChanges('agent', 'a1', { row: { id: 'a1', descriptor: { kind: 'codex' } } })
+      : event === 'provider access granted' ? findAct('PATCH', '/providers/p1/permissions', { answer: {} })?.changes ?? []
+      : event === 'binding hint' ? ACTS['PATCH /providers/{id}']?.(() => 'p1') ?? []
+      : findAct('PUT', '/nodes/topic/settings/models.allowed', { answer: { key: 'models.allowed', value: [] } })?.changes ?? [];
+    if (event === 'reach changed') await repairPeople(cache);
+    else await applyChanges(changes, cache);
+    keys.forEach((key, at) => { expect(cache.getQueryData(key)).toEqual(after); expect(reads[at]).toHaveBeenCalledTimes(1); });
+    expect(cache.getQueryState(hidden)).toBeUndefined();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
+it('refreshes a shown project selector after a tag changes and retires hidden selector data', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const visible = ['tree-places', 'root', { kind: 'project', below_id: 'root', q: '' }, 1];
+  const hidden = ['tree-places', 'root', { kind: 'project', below_id: 'root', q: 'hidden' }, 1];
+  const read = vi.fn(() => Promise.resolve({ nodes: ['current projects'] }));
+  cache.setQueryData(visible, { nodes: ['old projects'] });
+  cache.setQueryData(hidden, { nodes: ['old hidden projects'] });
+  const stop = new QueryObserver(cache, { queryKey: visible, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  try {
+    const change = findAct('PATCH', '/tags/tag1', { answer: { id: 'tag1', name: 'Renamed', color: 1, node: { id: 'root', kind: 'org', name: 'Root', redacted: false } } });
+    expect(change).not.toBeNull();
+    await applyChanges(change?.changes ?? [], cache);
+    expect(read).toHaveBeenCalledOnce();
+    expect(cache.getQueryData(visible)).toEqual({ nodes: ['current projects'] });
+    expect(cache.getQueryState(hidden)).toBeUndefined();
+  } finally { stop(); cache.clear(); }
+});
+
+it('keeps the latest binding choices when another change arrives during their repair', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['thread-binding-options', 'open-thread'];
+  const before = bindingOptions({ providers: [] }), after = bindingOptions();
+  let finish: ((value: typeof before) => void) | undefined;
+  const firstAnswer = new Promise<typeof before>((resolve) => { finish = resolve; });
+  const read = vi.fn<() => Promise<typeof before>>().mockReturnValueOnce(firstAnswer).mockResolvedValue(after);
+  cache.setQueryData(key, before);
+  const stop = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  try {
+    const first = applyChanges(resourceChanges('provider', 'p1', { row: { id: 'p1' } }), cache);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+    const second = applyChanges(resourceChanges('provider', 'p2', { row: { id: 'p2' } }), cache);
+    finish!(before);
+    await Promise.all([first, second]);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(cache.getQueryData(key)).toEqual(after);
+  } finally { stop(); cache.clear(); }
+});
 
 it.each(['PUT', 'DELETE'])('repairs visible native parameters omitted by a %s setting receipt without reading another thread', async (method) => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -675,6 +803,27 @@ describe('the registry of acts', () => {
       .toEqual([{ missing: [{ key: ['ask-history'] }], cancelPending: true }]);
   });
 
+  it('recognizes a personal port ticket without refreshing the list of openings', () => {
+    expect(findAct('POST', '/environments/env/ports/5900/use')?.changes).toEqual([]);
+  });
+
+  it('reads a parameter form without changing or invalidating any view', () => {
+    const form = findAct('POST', '/settings/parameters/form');
+    expect(form).not.toBeNull();
+    expect(form?.changes).toEqual([]);
+  });
+
+  it('keeps port and connection views unchanged when a port use is admitted or replayed', () => {
+    const ticketExpiresAt = '2026-01-01T00:01:00Z';
+    const answers = [
+      { id: 'use-1', environment_id: 'env-1', port: 5901, transport: 'tcp', opening_id: null, ticket: 'test-ticket', ticket_expires_at: ticketExpiresAt },
+      { projection: 'receipt', ticket_id: 'use-1', ticket_expires_at: ticketExpiresAt },
+    ];
+    for (const answer of answers) {
+      expect(findAct('POST', '/environments/env-1/ports/5901/use', { answer })?.changes).toEqual([]);
+    }
+  });
+
   it('has an entry for every request of the application that changes something', () => {
     const requests = writeRequests();
     // The two requests of the session are the client's own and change nothing a screen reads by themselves.
@@ -702,11 +851,13 @@ describe('the registry of acts', () => {
     expect(findAct('GET', '/nodes/n1')).toBeNull();
     const roles = findAct('POST', '/nodes/n%201/roles');
     expect(roles?.act).toBe('POST /nodes/{id}/roles');
-    const settings = findAct('PUT', '/nodes/t1/settings/model.default');
-    expect(settings?.changes).toHaveLength(1);
+    const settings = findAct('PUT', '/nodes/t1/settings/agent.model');
+    expect(settings?.changes).toHaveLength(2);
     const change = settings?.changes[0];
     if (change === undefined || !('missing' in change)) throw new Error('a setting without a native projection names its missing view');
     expect(change.missing).toContainEqual({key:['node'],id:'t1'});
+    expect(change.missing).toContainEqual({key:['accepted-orch-tools'],id:'t1'});
+    expect(settings?.changes[1]).toEqual({ missing: [{ key: ['start-options'] }, { key: ['thread-binding-options'] }], allObserved: true, cancelPending: true });
   });
 
   it('never marks a whole kind in any entry when the successful answer carries a row', () => {
@@ -957,7 +1108,8 @@ it('applies program acknowledgements and live machine registry changes without a
     descriptor:{kind:'new-agent',harness:{name:'New agent'},sandbox_modes:['open'],approval_modes:['on_request']},models:null,detail:null}],
     capabilities:[],config_file:'/data/config.toml',can_manage:true};
   const acknowledged=findAct('POST','/machines/machine/programs',{answer,input:{action:'reload'}});
-  expect(acknowledged?.changes).toEqual([{value:{key,data:answer}}]);
+  expect(acknowledged?.changes).toEqual([{value:{key,data:answer}},
+    {missing:[{key:['start-options']},{key:['thread-binding-options']}],allObserved:true,cancelPending:true}]);
   await applyChanges(acknowledged?.changes ?? [],cache);
   expect(cache.getQueryData(key)).toEqual(answer);
   const report:MachinePrograms={...answer,entries:answer.entries.map((entry)=>({...entry,ready:false,detail:'The program exited.'}))};
@@ -983,4 +1135,10 @@ it('applies the native recovery reply to every reader without another recovery r
     expect(two.getCurrentResult().data).toEqual(after);
     expect(read).not.toHaveBeenCalled();
   } finally {stopOne();stopTwo();cache.clear();}
+});
+
+it('resolves a native parameter form without changing any displayed data', () => {
+  const form = findAct('POST', '/settings/parameters/form');
+  expect(form?.act).toBe('POST /settings/parameters/form');
+  expect(form?.changes).toEqual([]);
 });

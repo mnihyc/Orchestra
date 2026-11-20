@@ -21,6 +21,7 @@ use orch_api_contract::common::FieldFault;
 
 use orch_api_contract::common::PROBLEM_JSON;
 
+use orch_api_contract::common::DatabaseWait;
 use orch_api_contract::common::Problem;
 
 use orch_api_contract::common::REQUEST_ID_HEADER;
@@ -35,6 +36,8 @@ pub struct ApiError {
     pub retry_after: Option<u64>,
     /// Trusted database failure category, never inferred from an HTTP status or serialized.
     database_retry: bool,
+    /// One field refusal whose native content the handler has authorized for this reader.
+    native_field: Option<FieldFault>,
 }
 
 /// What a handler returns.
@@ -45,6 +48,18 @@ impl ApiError {
     #[must_use]
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
         Problem::new(code, detail).into()
+    }
+
+    /// The selected model cannot do the work of a generation thread.
+    #[must_use]
+    pub fn generation_unsupported() -> Self {
+        let reason = "generation_unsupported";
+        let code = ErrorCode::ModelNotAllowed;
+        Self::new(
+            code,
+            orch_api_contract::messages::for_problem(code, Some(reason)),
+        )
+        .with("reason", reason)
     }
 
     /// Nothing is there, or the caller may not know that it is.
@@ -59,6 +74,18 @@ impl ApiError {
         Problem::invalid_at(path, message).into()
     }
 
+    /// Keeps a native field refusal after the handler has checked the original reader's current
+    /// authority to read it. The public envelope still uses the ordinary catalogue words.
+    #[must_use]
+    pub fn native_invalid(path: &str, message: &str) -> Self {
+        let mut error = Self::invalid(path, message);
+        error.native_field = Some(FieldFault {
+            path: path.to_owned(),
+            message: message.to_owned(),
+        });
+        error
+    }
+
     /// A failure nobody foresaw: logged with its cause, answered without.
     #[must_use]
     pub fn internal(cause: impl std::fmt::Display) -> Self {
@@ -70,11 +97,25 @@ impl ApiError {
         .into()
     }
 
+    /// Retains a typed native timeout through wrappers; every other cause stays generic.
+    #[must_use]
+    pub fn from_cause(cause: impl std::error::Error + 'static) -> Self {
+        let wait = database_wait(&cause);
+        let mut error = Self::internal(cause);
+        error.problem.database_wait = wait.map(Box::new);
+        error
+    }
+
     /// A failure of the engine. A commit refused because what it decided under changed meanwhile is the
-    /// caller's to send again, as any write's is (`conflict.stale_revision`); anything else is a failure
+    /// caller's to send again (`conflict.concurrent_change`); anything else is a failure
     /// nobody foresaw. A database fault of another kind stays the engine's: it is not the request's fault.
     #[must_use]
     pub fn engine(error: orch_engine::EngineError) -> Self {
+        if let Some(wait) = database_wait(&error) {
+            let mut answer = Self::internal(error);
+            answer.problem.database_wait = Some(Box::new(wait));
+            return answer;
+        }
         match error {
             orch_engine::EngineError::BackgroundRunning(_thread) => Self::new(
                 ErrorCode::PlanBlocked,
@@ -117,7 +158,7 @@ impl ApiError {
                     missing: None,
                 }],
             ),
-            other => Self::internal(other),
+            other => Self::from_cause(other),
         }
     }
 
@@ -125,6 +166,13 @@ impl ApiError {
     #[must_use]
     pub fn with(mut self, member: &str, value: impl serde::Serialize) -> Self {
         *self.problem = (*self.problem).clone().with(member, value);
+        self
+    }
+
+    /// Attach a native end only after an exact retained browser-session credential match.
+    #[must_use]
+    pub fn session_ended(mut self, fact: orch_api_contract::common::SessionEnd) -> Self {
+        self.problem.session_end = Some(Box::new(fact));
         self
     }
 
@@ -151,6 +199,7 @@ impl ApiError {
             "the operation could not be completed",
         ));
         self.problem.status = status;
+        self.native_field = None;
         self
     }
 
@@ -170,6 +219,9 @@ impl ApiError {
         let mut response = (status, body).into_response();
         let headers = response.headers_mut();
         headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
+        if problem.session_end.is_some() {
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        }
         if let Ok(value) = HeaderValue::from_str(request_id) {
             headers.insert(REQUEST_ID_HEADER, value);
         }
@@ -182,9 +234,43 @@ impl ApiError {
     /// The same native problem and retry hint used by an HTTP reply, for a bounded opening member.
     pub fn into_parts_for(mut self, request_id: &str) -> (Problem, Option<u64>) {
         self.problem.request_id = request_id.to_owned();
+        if let Some(wait) = &mut self.problem.database_wait
+            && wait.occurrence_id.is_empty()
+        {
+            wait.occurrence_id = request_id.to_owned();
+        }
+        // A replaced field or content-free envelope cannot borrow the old native field's authority.
+        // This provenance is private to the server; a deserialized Problem never supplies it.
+        let native_field = self.native_field.take().filter(|field| {
+            self.code() == ErrorCode::RequestInvalid
+                && !field.message.trim().is_empty()
+                && serde_json::to_value([field])
+                    .is_ok_and(|original| self.problem.extra.get("errors") == Some(&original))
+        });
         words::prepare(&mut self.problem);
+        if let Some(field) = native_field {
+            *self.problem = (*self.problem).clone().with("errors", [field]);
+        }
         (*self.problem, self.retry_after)
     }
+}
+
+fn database_wait(cause: &(dyn std::error::Error + 'static)) -> Option<DatabaseWait> {
+    let mut current = Some(cause);
+    while let Some(error) = current {
+        if let Some(timeout) = error.downcast_ref::<orch_db::pool::DatabaseTimeout>() {
+            return Some(DatabaseWait {
+                phase: timeout.phase,
+                applied_limit_ms: timeout
+                    .applied_limit
+                    .and_then(|limit| u64::try_from(limit.as_millis()).ok()),
+                service: "api".to_owned(),
+                occurrence_id: String::new(),
+            });
+        }
+        current = error.source();
+    }
+    None
 }
 
 impl From<Problem> for ApiError {
@@ -193,6 +279,7 @@ impl From<Problem> for ApiError {
             problem: Box::new(problem),
             retry_after: None,
             database_retry: false,
+            native_field: None,
         }
     }
 }
@@ -211,8 +298,8 @@ impl From<DbError> for ApiError {
             }
             DbError::Retry => {
                 let mut error = Self::new(
-                    ErrorCode::ConflictStaleRevision,
-                    "it was changed at the same moment; try again",
+                    ErrorCode::ConflictConcurrentChange,
+                    "a concurrent change interrupted this operation; try again",
                 );
                 error.database_retry = true;
                 error
@@ -232,7 +319,7 @@ impl From<DbError> for ApiError {
                     )
                     .into()
             }
-            other => Self::internal(other),
+            other => Self::from_cause(other),
         }
     }
 }
@@ -317,9 +404,18 @@ pub mod check_tests {
             ErrorCode::ConflictStaleRevision,
             "an explicit business revision conflict",
         );
-        assert_eq!(conflict.code(), revision.code());
+        assert_ne!(
+            conflict.code(),
+            revision.code(),
+            "a database race says nothing about a revision the caller supplied"
+        );
+        assert_eq!(conflict.code().as_str(), "conflict.concurrent_change");
         assert!(conflict.is_database_retry());
         assert!(!revision.is_database_retry());
+        assert!(
+            !ApiError::from((*conflict.problem).clone()).is_database_retry(),
+            "a serialized error code cannot authorize a server-side replay"
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
@@ -330,7 +426,8 @@ pub mod check_tests {
     #[cfg(any(test, feature = "test-support"))]
     fn an_engine_commit_that_lost_a_race_is_the_callers_to_send_again_and_nothing_else_is() {
         let lost = ApiError::engine(orch_engine::EngineError::Db(DbError::Retry));
-        assert_eq!(lost.problem.code, ErrorCode::ConflictStaleRevision);
+        assert_ne!(lost.problem.code, ErrorCode::ConflictStaleRevision);
+        assert_eq!(lost.problem.code.as_str(), "conflict.concurrent_change");
         assert_eq!(lost, ApiError::from(DbError::Retry));
         let broken = ApiError::engine(orch_engine::EngineError::Db(DbError::Check {
             table: "jobs".to_owned(),

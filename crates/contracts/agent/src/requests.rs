@@ -70,12 +70,15 @@ impl RequestOutcome {
 pub struct UsageRequest {
     /// Exact provisional adapter observation replaced by this source failure event, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub previous_ref: Option<String>,
     /// The previous adapter request when this is its native retry, rather than a new model step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub retry_of: Option<String>,
     /// Native tool item references emitted by this request; absent means no known association.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub tool_refs: Option<Vec<String>>,
     /// Refusal or vendor-specific reason, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +91,7 @@ pub struct UsageRequest {
     pub attempt: Option<i64>,
     /// Upstream request identity, separate from an adapter's own request reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub provider_request_id: Option<String>,
 
     /// Vendor-reported successful native searches; missing is not a measured zero.
@@ -97,6 +101,7 @@ pub struct UsageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetches: Option<i64>,
     /// Stable within the turn and reused by every observation of this request.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// The model actually used, where reported.
     pub model: Option<String>,

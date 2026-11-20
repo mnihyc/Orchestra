@@ -13,9 +13,9 @@ import { useTranslation } from 'react-i18next';
 import { type ScreenHeading, type TrailPart, useScreenHeading } from '@/shell/screen';
 
 /** The kinds of resource that have a list of their own. */
-export type ResourceKind = 'providers' | 'agents' | 'machines' | 'environments' | 'templates' | 'hosts' | 'mcp' | 'mounts' | 'skills';
+export type ResourceKind = 'providers' | 'agents' | 'machines' | 'environments' | 'templates' | 'hosts' | 'mcp' | 'mounts' | 'skills' | 'pools';
 
-const TARGET_KINDS: Record<ResourceKind, NameKind> = { providers:'provider', agents:'agent', machines:'machine', environments:'environment', templates:'template', hosts:'host', mcp:'mcp_server', mounts:'mount', skills:'skill' };
+const TARGET_KINDS: Record<ResourceKind, NameKind> = { providers:'provider', agents:'agent', machines:'machine', environments:'environment', templates:'template', hosts:'host', mcp:'mcp_server', mounts:'mount', skills:'skill', pools:'pool' };
 
 /** The section itself opens the landing, leaving each list's own filters intact. */
 const SECTION_TO = '/resources';
