@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { ApiError } from '@/api/client';
 import { threadLedgerQuery } from '@/api/provider-plan';
 import { providerQuery } from '@/api/resources';
+import { parametersQuery } from '@/api/threads';
 import { useRouteThread } from '@/features/files/door';
 import { LedgerFigures } from '@/features/resources/providers/Ledger';
 import { Limits } from '@/features/usage/Limits';
@@ -28,10 +29,13 @@ export function ThreadUsage({ thread }: { thread: Thread }) {
   const now = useNow();
   const ledger = useQuery(threadLedgerQuery(thread.id, thread.created_at, now));
   const providerId = thread.binding?.provider.id ?? '';
-  useProviderHealth(thread.binding?.provider.id ?? null);
-  const provider = useQuery({ ...providerQuery(providerId), enabled: providerId !== '', retry: false });
-  const denied = provider.error instanceof ApiError && (provider.error.status === 403 || provider.error.status === 404);
-  const readable = !denied && provider.data !== undefined && !privateProvider(provider.data);
+  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: providerId !== '', retry: false });
+  const named = parameters.data?.provider;
+  const mayView = !parameters.isError && !parameters.isPlaceholderData && named?.id === providerId && named.access.permissions.includes('provider.view');
+  useProviderHealth(providerId === '' ? null : providerId, mayView);
+  const provider = useQuery({ ...providerQuery(providerId), enabled: mayView, retry: false });
+  const denied = parameters.isSuccess && !mayView || provider.error instanceof ApiError && (provider.error.status === 403 || provider.error.status === 404);
+  const readable = mayView && !denied && provider.data !== undefined && !privateProvider(provider.data);
   return <div className="flex min-w-0 flex-col gap-4 p-4" data-thread-usage>
     <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4" aria-label={t('providerPlan.thisThread')}>
       <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-text">{t('providerPlan.thisThread')}</h2><Button size="sm" icon={<RefreshCw aria-hidden />} pending={ledger.isFetching} onClick={() => void ledger.refetch()}>{t('providers.overview.refresh')}</Button></div>
@@ -42,8 +46,10 @@ export function ThreadUsage({ thread }: { thread: Thread }) {
     <ThreadComposition thread={thread} />
     {thread.binding !== null && <section className="flex flex-col gap-2" aria-label={t('providerPlan.providerTitle', { name: thread.binding.provider.name })}>
       <h2 className="text-base font-semibold text-text">{t('providerPlan.providerTitle', { name: thread.binding.provider.name })}</h2>
-      {provider.isError && !denied && <ErrorState compact error={provider.error} message={t('implicitAvailability.usageFailed')} onRetry={() => void provider.refetch()} />}
-      {readable ? <PlanPanel provider={provider.data} /> : provider.isPending ? <SkeletonRows read={provider} rows={2} /> : !provider.isError || denied ? <div className="rounded-lg border border-border bg-surface p-4 text-sm text-text-muted"><p>{t('providerPlan.viewMissing')}</p><p>{thread.blocked?.detail ?? t(thread.binding.provider.status === 'exhausted' ? 'providerPlan.recovery.limit' : thread.binding.provider.status === 'error' || thread.binding.provider.status === 'needs_setup' ? 'providerPlan.recovery.signin' : 'providerPlan.recovery.unavailable')}</p></div> : null}
+      {parameters.isError ? <ErrorState compact error={parameters.error} message={t('implicitAvailability.usageFailed')} onRetry={() => void parameters.refetch()} /> : <>
+        {provider.isError && !denied && <ErrorState compact error={provider.error} message={t('implicitAvailability.usageFailed')} onRetry={() => void provider.refetch()} />}
+        {readable ? <PlanPanel provider={provider.data} /> : parameters.isPending ? <SkeletonRows read={parameters} rows={2} /> : mayView && provider.isPending ? <SkeletonRows read={provider} rows={2} /> : !provider.isError || denied ? <div className="rounded-lg border border-border bg-surface p-4 text-sm text-text-muted"><p>{t('providerPlan.viewMissing')}</p><p>{thread.blocked?.detail ?? t(thread.binding.provider.status === 'exhausted' ? 'providerPlan.recovery.limit' : thread.binding.provider.status === 'error' || thread.binding.provider.status === 'needs_setup' ? 'providerPlan.recovery.signin' : 'providerPlan.recovery.unavailable')}</p></div> : null}
+      </>}
     </section>}
     <Limits of={{ kind:'node',id:thread.id,name:thread.name,manage:thread.access.permissions.includes('usage.manage') }} metering={meteringOf(thread)} />
   </div>;

@@ -247,7 +247,7 @@ impl Fixture {
         );
         sqlx::query("UPDATE providers SET status='ready',runtime_config=$2 WHERE id=$1")
             .bind(world.provider)
-            .bind(json!({"runtime.host_id":selected_host,"runtime.template_id":selected_template}))
+            .bind(json!({"runtime.host_id":orch_provider_contract::pools::Target::host(selected_host),"runtime.template_id":selected_template}))
             .execute(&mut *tx)
             .await?;
         let hash = crate::updates::definition_hash("test", &definition, &json!({}), &[]);
