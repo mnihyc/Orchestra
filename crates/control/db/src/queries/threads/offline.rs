@@ -35,13 +35,25 @@ pub async fn begin(
     machine: Id,
     at: DateTime<Utc>,
     after_secs: Option<i64>,
+    receipt: &Json,
+    seq: Seq,
 ) -> Result<bool, DbError> {
-    let changed=sqlx::query("UPDATE turns SET offline_since=$3,offline_machine_id=$2,offline_after_secs=$4 WHERE id=$1 AND state IN ('starting','running') AND (offline_since IS NULL OR offline_machine_id IS DISTINCT FROM $2)").bind(turn).bind(machine).bind(at).bind(after_secs).execute(conn).await?;
+    let changed=sqlx::query("UPDATE turns SET offline_since=$3,offline_machine_id=$2,offline_after_secs=$4,
+        offline_episode=jsonb_set($5,'{episode_revision}',to_jsonb(COALESCE((offline_episode->>'episode_revision')::bigint,0)+1)),seq_updated=$6
+        WHERE id=$1 AND state IN ('starting','running') AND (offline_since IS NULL OR offline_machine_id IS DISTINCT FROM $2)")
+        .bind(turn).bind(machine).bind(at).bind(after_secs).bind(receipt).bind(seq).execute(conn).await?;
     Ok(changed.rows_affected() == 1)
 }
 /// A real reconnect/event or terminal transition clears only this exact turn's episode.
-pub async fn clear(conn: &mut Conn, turn: Id) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE turns SET offline_since=NULL,offline_machine_id=NULL,offline_after_secs=NULL WHERE id=$1 AND offline_since IS NOT NULL").bind(turn).execute(conn).await?.rows_affected()==1)
+pub async fn clear(
+    conn: &mut Conn,
+    turn: Id,
+    at: DateTime<Utc>,
+    seq: Seq,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE turns SET offline_since=NULL,offline_machine_id=NULL,offline_after_secs=NULL,
+        offline_episode=CASE WHEN offline_episode IS NULL THEN NULL ELSE jsonb_set(offline_episode,'{closed_at}',to_jsonb($2::timestamptz)) END,
+        seq_updated=$3 WHERE id=$1 AND offline_since IS NOT NULL").bind(turn).bind(at).bind(seq).execute(conn).await?.rows_affected()==1)
 }
 /// The existing supervisor selects due active turns in bounded batches, without a second timer queue.
 pub async fn due(conn: &mut Conn, now: DateTime<Utc>, limit: i64) -> Result<Vec<Id>, DbError> {
