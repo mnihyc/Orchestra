@@ -49,7 +49,9 @@ fn full_scope(s: &Scene) -> Vec<Json> {
 }
 fn body(s: &Scene, name: &str) -> NewEnvironment {
     let mut body = wanted(&s.team, name);
-    body.host_id = Some(Some(s.team.host));
+    body.host_id = Some(Some(orch_provider_contract::pools::Target::host(
+        s.team.host,
+    )));
     body
 }
 async fn call(s: &Scene, token: &str, name: &str) -> RawReply {

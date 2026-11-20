@@ -167,7 +167,7 @@ async fn current(
 /// close revocation/cancellation/replacement races through commit, never through IO.
 async fn seal(conn: &mut Conn, original: &Original) -> ApiResult<()> {
     let machine: Option<Id> = sqlx::query_scalar(
-        "SELECT id FROM machines WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR SHARE",
+        "SELECT id FROM machines WHERE id=$1 AND status='active' AND deleted_at IS NULL FOR KEY SHARE",
     )
     .bind(original.command.machine_id)
     .fetch_optional(&mut *conn)

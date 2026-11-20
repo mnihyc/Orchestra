@@ -11,11 +11,13 @@ import { useTranslation } from 'react-i18next';
 
 import { sideLimitOf, sidesQuery } from '@/api/forks';
 import { nodeQuery } from '@/api/nodes';
+import { composerWriter } from '@/features/composer/Draft';
 import { sideRefusal } from '@/features/side-threads/availability';
 import { useAskOnSide, useCloseSide, type OpenedSideAsk, useSideAsk } from '@/features/side-threads/ask';
 import { isComposing } from '@/lib/shortcuts';
 import { useThreadView } from '@/realtime/stores/thread';
 import { isCurrentThreadRead } from '@/api/threadRead';
+import { SegmentedControl } from '@/ui/SegmentedControl';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -24,9 +26,12 @@ import { Textarea } from '@/ui/Textarea';
 
 function AskDialog({ ask, open, instance, onClose }: { ask: OpenedSideAsk; open: boolean; instance: number; onClose: () => void }) {
   const { t } = useTranslation();
+  const [kind, setKind] = useState<'read_only' | 'acting'>('read_only');
   const [text, setText] = useState(ask.text);
   const start = useAskOnSide(ask.read ?? ask.threadId, { toTurn: ask.toTurn, origin: ask.origin, onAccepted: (_reply, question) => {
     if (useSideAsk.getState().instance !== instance) return;
+    if (ask.composerDraft !== undefined) composerWriter.clearAcceptedAside(ask.threadId, ask.composerDraft);
+    setKind('read_only');
     setText((current) => current.trim() === question.text.trim() ? '' : current);
     onClose();
   } });
@@ -35,7 +40,9 @@ function AskDialog({ ask, open, instance, onClose }: { ask: OpenedSideAsk; open:
   const held = view.thread;
   const read = useQuery({ ...nodeQuery(ask.threadId), enabled: open && held === null });
   const thread = held ?? (read.data?.kind === 'thread' ? read.data : null);
-  const refused = ask.origin !== undefined && !isCurrentThreadRead(ask.origin) ? t('messageVersions.activeActions') : sideRefusal(thread, t);
+  const frozen = start.unconfirmed || start.isPending;
+  const acting = frozen ? start.variables?.acting === true : kind === 'acting';
+  const refused = ask.origin !== undefined && !isCurrentThreadRead(ask.origin) ? t('messageVersions.activeActions') : sideRefusal(thread, t, acting);
   const mode = thread?.sides?.mode;
   const limit = sideLimitOf(start.error);
   const sides = useQuery({ ...sidesQuery(ask.threadId, 'open'), enabled: open && thread !== null && limit !== null });
@@ -45,7 +52,7 @@ function AskDialog({ ask, open, instance, onClose }: { ask: OpenedSideAsk; open:
   const empty = shownText.trim() === '';
   const submit = () => {
     if (empty || start.isPending || (refused !== false && !uncertain)) return;
-    const question = uncertain && start.variables !== undefined ? start.variables : { text: text.trim(), toTurn: ask.toTurn };
+    const question = uncertain && start.variables !== undefined ? start.variables : { text: text.trim(), toTurn: ask.toTurn, acting };
     start.mutate(question);
   };
   return (
@@ -68,7 +75,11 @@ function AskDialog({ ask, open, instance, onClose }: { ask: OpenedSideAsk; open:
       }
     >
       <div className="flex flex-col gap-3 py-2">
-        {mode !== null && mode !== undefined && <p className="text-sm text-text-muted">{t('side.ask.mode', { mode: t(`side.reading.${mode}`) })}</p>}
+        {(thread?.sides?.acting === true || acting) && <SegmentedControl
+          label={t('side.ask.access')} size="sm" value={acting ? 'acting' : 'read_only'} pending={frozen} onValueChange={setKind}
+          segments={[{ value: 'read_only', label: t('side.ask.readOnly'), disabled: !mode }, { value: 'acting', label: t('side.reading.acting'), disabled: !thread?.sides?.acting }]}
+        />}
+        {!acting && mode !== null && mode !== undefined && <p className="text-sm text-text-muted">{t('side.ask.mode', { mode: t(`side.reading.${mode}`) })}</p>}
         {refused !== false && <p role="status" className="text-sm text-text-muted">{refused}</p>}
         {read.error !== null && held === null && <ErrorAlert error={read.error} />}
         <Textarea
