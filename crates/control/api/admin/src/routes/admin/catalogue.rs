@@ -83,7 +83,7 @@ use orch_api_contract::admin::HarnessBuildList;
 
 use orch_api_contract::admin::HarnessBuildSource;
 
-use orch_api_contract::admin::HarnessBuildStatus;
+use orch_api_contract::admin::{HarnessBuildStatus, HarnessCheckQuery};
 
 use orch_api_contract::admin::HarnessBuildUsage;
 
@@ -382,33 +382,6 @@ async fn capability_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Capability
 
 // ---- harness builds ----
 
-/// The builds of harnesses the release lists, from the manifest in its payload. A release without
-/// one lists none, and an entry that does not read as a build is not one.
-pub(super) async fn release_builds(dir: &Path) -> Vec<HarnessBuild> {
-    let Ok(text) = tokio::fs::read_to_string(dir.join("version.json")).await else {
-        return Vec::new();
-    };
-    let Ok(manifest) = serde_json::from_str::<Json>(&text) else {
-        return Vec::new();
-    };
-    manifest
-        .get("harness_builds")
-        .and_then(Json::as_array)
-        .map(|listed| {
-            listed
-                .iter()
-                .filter_map(|entry| serde_json::from_value::<HarnessBuild>(entry.clone()).ok())
-                // The builds a release is made and tested with are its checked ones.
-                .map(|build| HarnessBuild {
-                    source: HarnessBuildSource::Release,
-                    status: HarnessBuildStatus::Checked,
-                    ..build
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// What names a build among the others: its harness, version, system and processor.
 fn identity(build: &HarnessBuild) -> (String, String, String, String) {
     let word = |value: &Json| value.as_str().unwrap_or_default().to_owned();
@@ -446,28 +419,35 @@ pub(crate) async fn builds_listed(
 ) -> Result<Vec<HarnessBuild>, DbError> {
     let mut by_identity: BTreeMap<(String, String, String, String), HarnessBuild> = BTreeMap::new();
     let trust_mirror = crate::harness_channels::trusts_mirror(conn).await?;
-    for stored in management::channel_harness_builds(conn).await? {
-        if !crate::harness_channels::checksum_trusted(&stored, trust_mirror) {
-            continue;
-        }
-        if let Ok(build) = serde_json::from_value::<HarnessBuild>(stored) {
-            let build = HarnessBuild {
-                is_default: false,
-                ..build
-            };
-            by_identity.insert(identity(&build), build);
-        }
-    }
-    for build in release_builds(payload).await {
+    let stored: BTreeMap<_, _> = management::stored_harness_builds(conn)
+        .await?
+        .into_iter()
+        .collect();
+    let approved = |prefix: &str| {
+        stored
+            .iter()
+            .filter(|(key, value)| {
+                key.starts_with(prefix)
+                    && crate::harness_channels::checksum_trusted(value, trust_mirror)
+            })
+            .filter_map(|(_, value)| serde_json::from_value::<HarnessBuild>(value.clone()).ok())
+            .collect::<Vec<_>>()
+    };
+    for mut build in approved(management::HARNESS_CHANNEL_PREFIX) {
+        build.is_default = false;
         by_identity.insert(identity(&build), build);
     }
-    for stored in management::added_harness_builds(conn).await? {
-        if !crate::harness_channels::checksum_trusted(&stored, trust_mirror) {
-            continue;
+    for mut build in crate::harness_checks::shipped::manifest(payload).await {
+        if let Some(value) = stored.get(&crate::harness_checks::shipped::key(&build)) {
+            let record: HarnessBuild = serde_json::from_value(value.clone())
+                .map_err(|e| DbError::Other(sqlx::Error::Protocol(e.to_string())))?;
+            build.status = record.status;
+            build.check = record.check;
         }
-        if let Ok(build) = serde_json::from_value::<HarnessBuild>(stored) {
-            by_identity.insert(identity(&build), build);
-        }
+        by_identity.insert(identity(&build), build);
+    }
+    for build in approved(management::HARNESS_BUILD_PREFIX) {
+        by_identity.insert(identity(&build), build);
     }
     // One default for each harness, system and processor: an added one wins.
     let admin_defaults: Vec<(String, String, String)> = by_identity
@@ -606,6 +586,7 @@ fn program_tools(
         .iter()
         .filter(|tool| tool.name != "orch-connector")
         .map(|tool| RunningHarnessBuild {
+            check_machine_id: None,
             kind: tool.name.clone(),
             harness: None,
             version: tool.version.clone(),
@@ -680,6 +661,7 @@ fn report_with_tools(
         .into_iter()
         .find(|program| program.kind == kind && program.version == version)
         .unwrap_or(RunningHarnessBuild {
+            check_machine_id: None,
             kind,
             harness: None,
             version,
@@ -688,7 +670,7 @@ fn report_with_tools(
 }
 
 async fn held_builds(
-    ctx: &Ctx,
+    builds: &[HarnessBuild],
     conn: &mut Conn,
     environments: &[orch_types::Id],
     providers: &[orch_types::Id],
@@ -709,7 +691,6 @@ async fn held_builds(
             .collect::<Vec<_>>(),
     )
     .await?;
-    let builds = all_builds(ctx, conn).await?;
     Ok(runtimes
         .into_iter()
         .map(|runtime| {
@@ -719,7 +700,10 @@ async fn held_builds(
                 .and_then(|(_, tools)| tools.clone())
                 .and_then(|tools| serde_json::from_value(tools).ok())
                 .unwrap_or_default();
-            let programs = program_tools(&tools, &builds);
+            let mut programs = program_tools(&tools, builds);
+            for program in &mut programs {
+                program.check_machine_id = runtime.machine_id;
+            }
             (runtime, programs)
         })
         .collect())
@@ -730,7 +714,8 @@ async fn environment_builds(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<RunningHa
     let principal = crate::middleware::authorization::principal(&ctx, &mut conn).await?;
     let id = ctx.id("id")?;
     let current = crate::routes::environments::show(&ctx, &mut conn, &principal, id).await?;
-    let mut held: Vec<_> = held_builds(&ctx, &mut conn, &[id], &[])
+    let builds = all_builds(&ctx, &mut conn).await?;
+    let mut held: Vec<_> = held_builds(&builds, &mut conn, &[id], &[])
         .await?
         .into_iter()
         .flat_map(|(_, programs)| programs)
@@ -748,11 +733,30 @@ async fn environment_builds(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<RunningHa
             orch_db::queries::environments::routes::machine_program_facts(&mut conn, &[machine.id])
                 .await?;
         if let Some((_, facts)) = facts.first() {
-            reported.extend(
-                crate::routes::environments::confirmed_machine_programs(facts)
-                    .into_iter()
-                    .map(|program| (program.kind, program.version)),
-            );
+            for program in crate::routes::environments::confirmed_machine_programs(facts) {
+                let digest = orch_engine::hosting::selected_program_digest(
+                    facts,
+                    &program.kind,
+                    &program.version,
+                );
+                if seen.insert((program.kind.clone(), program.version.clone())) {
+                    let build = builds
+                        .iter()
+                        .find(|b| {
+                            b.kind == program.kind
+                                && b.version == program.version
+                                && Some(b.sha256.as_str()) == digest
+                        })
+                        .cloned();
+                    held.push(RunningHarnessBuild {
+                        check_machine_id: build.as_ref().map(|_| machine.id),
+                        kind: program.kind,
+                        version: program.version,
+                        harness: None,
+                        build,
+                    });
+                }
+            }
         }
     }
     let used: Vec<(String,String)> = sqlx::query_as("SELECT DISTINCT a.harness_kind,h.harness_version FROM threads t JOIN environments e ON e.id=t.environment_id JOIN agents a ON a.id=t.agent_id JOIN harnesses h ON h.provider_id=t.provider_id AND h.agent_id=t.agent_id AND h.machine_id=e.machine_id WHERE e.id=$1 AND h.harness_version IS NOT NULL")
@@ -763,6 +767,7 @@ async fn environment_builds(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<RunningHa
             .into_iter()
             .filter(|program| seen.insert(program.clone()))
             .map(|(kind, version)| RunningHarnessBuild {
+                check_machine_id: None,
                 kind,
                 harness: None,
                 version,
@@ -892,7 +897,8 @@ async fn prepare_build_usage(
     let provider_refs =
         crate::routes::resources::view::provider_refs(conn, &providers, &[]).await?;
     let providers = provider_refs.iter().map(|(_, p)| p.id).collect::<Vec<_>>();
-    let held = held_builds(ctx, conn, &environments, &providers).await?;
+    let builds = all_builds(ctx, conn).await?;
+    let held = held_builds(&builds, conn, &environments, &providers).await?;
     let emitted = held
         .iter()
         .filter(|(_, programs)| !programs.is_empty())
@@ -1324,21 +1330,58 @@ async fn harness_channels_status(
 
 /// Checks every kept build of a harness at a version again (one for each system and processor), in the background,
 /// and lists the builds, those being checked marked so. A release's own builds are checked with the release.
-async fn harness_check(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuild>> {
-    queue_check(ctx.clone()).await?;
+async fn harness_check(ctx: Ctx, query: HarnessCheckQuery, (): ()) -> ApiResult<Vec<HarnessBuild>> {
+    queue_check(ctx.clone(), query).await?;
     let mut conn = ctx.app.db.acquire().await?;
     all_builds(&ctx, &mut conn).await
 }
 
 /// Claims exact-version checks under the same authority transaction, without loading the catalogue.
-pub(super) async fn queue_check(ctx: Ctx) -> ApiResult<u32> {
+pub(super) async fn queue_check(ctx: Ctx, query: HarnessCheckQuery) -> ApiResult<u32> {
     admin_of(&ctx)?;
     let kind = ctx.param("kind")?;
     let version = ctx.param("version")?;
     // The builds are marked as being checked in the transaction that checks the caller's authority again; their
     // checks run once it is committed.
     let (mut tx, guard) = super::action(&ctx).await?;
-    let kept = crate::harness_checks::kept(&mut tx, kind, version).await?;
+    let mut kept = crate::harness_checks::kept(&mut tx, kind, version).await?;
+    let releases = crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await;
+    let release = releases
+        .into_iter()
+        .filter(|build| build.kind == kind && build.version == version)
+        .collect::<Vec<_>>();
+    if !release.is_empty() {
+        guard.check_deadline(&ctx)?;
+        crate::harness_checks::shipped::register(&mut tx, &release, guard.now().get()).await?;
+        for build in crate::harness_checks::shipped::with_results(&mut tx, release).await? {
+            if kept.iter().any(|(_, other)| {
+                identity(other) == identity(&build)
+                    && matches!(
+                        other.source,
+                        HarnessBuildSource::Admin | HarnessBuildSource::Mirror
+                    )
+            }) {
+                continue;
+            }
+            kept.retain(|(_, other)| identity(other) != identity(&build));
+            kept.push((crate::harness_checks::shipped::key(&build), build));
+        }
+    }
+    let host_machine = match (&query.machine_id, &query.sha256) {
+        (Some(machine), Some(digest)) => {
+            let (os, arch, host): (String, String, orch_types::Id) = sqlx::query_as(
+                "SELECT m.platform_os,m.platform_arch,coalesce(h.machine_id,m.id) FROM machines m
+                 LEFT JOIN runtimes r ON r.id=m.runtime_id LEFT JOIN hosts h ON h.id=r.host_id WHERE m.id=$1"
+            ).bind(machine).fetch_optional(&mut *tx).await.map_err(DbError::from)?.ok_or_else(ApiError::not_found)?;
+            kept.retain(|(_, build)| {
+                let (_, _, system, processor) = identity(build);
+                &build.sha256 == digest && system == os && processor == arch
+            });
+            Some(host)
+        }
+        (None, None) => None,
+        _ => return Err(ApiError::not_found()),
+    };
     if kept.is_empty() {
         return Err(ApiError::not_found());
     }
@@ -1354,7 +1397,8 @@ pub(super) async fn queue_check(ctx: Ctx) -> ApiResult<u32> {
         guard.principal().caller(),
         orch_engine::build_checks::Destination::System,
     )
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::internal)?
+    .on_machine(host_machine);
     let mut first = true;
     let mut claimed = Vec::new();
     for (key, build) in kept {
@@ -1374,6 +1418,11 @@ pub(super) async fn queue_check(ctx: Ctx) -> ApiResult<u32> {
         .await?
         {
             claimed.push((key, build, claim));
+        } else if host_machine.is_some() {
+            return Err(ApiError::new(
+                ErrorCode::ConflictConcurrentChange,
+                "A check of this build is already running. Retry on the selected machine after it finishes.",
+            ));
         }
     }
     tx.commit().await.map_err(DbError::from)?;
@@ -1575,6 +1624,7 @@ pub mod tests {
             .unwrap();
         let mut programs: Vec<_> = (0..117)
             .map(|index| RunningHarnessBuild {
+                check_machine_id: None,
                 kind: match index % 3 {
                     0 => "fake",
                     1 => "named-external",

@@ -1,3 +1,6 @@
+import { useQuery } from '@tanstack/react-query';
+import { mcpQuery, mountQuery } from '@/api/resource-tools';
+import { currentResourceDetail, ResourceReadDialog, useCurrentResourceDetail } from './ReadDialog';
 import { homeMoveEntries } from '@/features/duplicate/move';
 import { resourceDuplicateEntries } from '@/features/duplicate/target';
 import { mcpCopySetup } from '@/features/duplicate/CopySetup';
@@ -8,7 +11,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { resourceReaders } from './inventory';
-import type { McpServer, Mount } from '@/generated/api-types';
+import type { McpServerListRow as McpServer, MountListRow as Mount } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { adminSpec } from '@/ui/AdminAct';
@@ -32,7 +35,12 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
   const [text, setText] = useState('');
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [editing, setEditing] = useState<NameRow | null>(null);
+  const [requested, setEditing] = useState<NameRow | null>(null);
+  const mcp = useQuery({ ...mcpQuery(requested?.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested) === undefined ? 0 : Infinity, enabled: requested !== null && 'spec' in requested });
+  const mount = useQuery({ ...mountQuery(requested?.id ?? ''), staleTime: (query) => currentResourceDetail(query.state.data, requested) === undefined ? 0 : Infinity, enabled: requested !== null && !('spec' in requested) });
+  const mcpDetail = useCurrentResourceDetail(mcp, requested !== null && 'spec' in requested ? requested : null);
+  const mountDetail = useCurrentResourceDetail(mount, requested !== null && !('spec' in requested) ? requested : null);
+  const editing = requested === null ? null : 'spec' in requested ? mcpDetail ?? null : mountDetail ?? null;
   const title = t(`screens.${kind}.title`);
   const Icon = kind === 'mcp' ? Plug : Box;
   const words = kind === 'mcp' ? 'resourceDetails.mcp.list' : 'resourceDetails.mount.list';
@@ -80,6 +88,7 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
       />
       {importing && <ImportFromMachine onClose={() => setImporting(false)} />}
       {adding && (kind === 'mcp' ? <EditMcp onClose={() => setAdding(false)} onCreated={(row) => void navigate({ to: '/resources/mcp/$id', params: { id: row.id } })} /> : <EditMount onClose={() => setAdding(false)} onCreated={(row) => void navigate({ to: '/resources/mounts/$id', params: { id: row.id } })} />)}
+      {requested !== null && editing === null && <ResourceReadDialog name={requested.name} read={'spec' in requested ? mcp : mount} onClose={() => setEditing(null)} />}
       {editing !== null && ('spec' in editing ? <EditMcp server={editing} onClose={() => setEditing(null)} /> : <EditMount mount={editing} onClose={() => setEditing(null)} />)}
     </>
   );

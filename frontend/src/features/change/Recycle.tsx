@@ -48,7 +48,6 @@ export function Recycle({ scope, open, onClose }: RecycleProps) {
   const dry = useQuery({
     queryKey: ['recycle-dry-run', scope.kind, scope.id, rested, withProcesses],
     queryFn: () => call(ask(true)),
-    staleTime: 0,
     gcTime: 30_000,
     retry: false,
     placeholderData: keepPreviousData,

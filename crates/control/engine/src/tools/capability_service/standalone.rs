@@ -234,6 +234,7 @@ impl Engine {
         );
         let key = command.key.wire();
         let proposed = link::NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -274,8 +275,10 @@ impl Engine {
                     &caller,
                     paid.origin.place()?,
                     provider,
-                    &paid.offering,
-                    &paid.groups,
+                    (&paid.offering, &paid.groups),
+                    orch_access_contract::permissions::UsagePurpose::for_capability(
+                        &paid.capability,
+                    ),
                     self.inner.clock.as_ref(),
                 )
                 .await?
@@ -316,6 +319,7 @@ impl Engine {
             let mut tx = self.db().begin().await?;
             let key = command.key.wire();
             let proposed = link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

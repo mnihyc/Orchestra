@@ -166,7 +166,7 @@ describe('the words of a plan', () => {
   it('says what stops a plan and what would lift it, in the words of the page', () => {
     const plan = { to: { provider: { name: 'OpenAI key' }, model: 'gpt-5.4', effort: 'high' } } as never;
     const blocker = (code: string, more: Partial<PlanBlocker> = {}): PlanBlocker => ({ code, message: `the server says ${code}`, ...more });
-    expect(blockerWords(blocker('model_not_allowed'), plan, t)).toEqual({ text: 'gpt-5.4 is not a model OpenAI key offers', lifts: 'Choose a model it offers.' });
+    expect(blockerWords(blocker('model_not_allowed'), plan, t)).toEqual({ text: 'Model gpt-5.4 on OpenAI key is unavailable here', lifts: 'Choose a model available here.' });
     expect(blockerWords(blocker('already_running'), null, t).lifts).toBe('Wait for it to end, or look at how far it has come.');
     expect(blockerWords(blocker('nothing_to_change'), null, t).text).toBe('This would change nothing');
     // A code that has no words here keeps the server's own sentence, and promises nothing.

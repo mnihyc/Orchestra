@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
 use futures::future::join_all;
@@ -29,6 +29,40 @@ struct Snapshot {
     kinds: Vec<String>,
     configured: BTreeMap<String, String>,
     found: Vec<Found>,
+    fingerprints: BTreeMap<PathBuf, Arc<OnceLock<Fingerprint>>>,
+}
+
+/// The file identity at observation time. A replacement invalidates the digest until the next refresh.
+#[derive(Debug)]
+struct Fingerprint {
+    size: u64,
+    modified: std::time::SystemTime,
+    sha256: String,
+}
+
+impl Fingerprint {
+    fn read(path: &Path) -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        std::io::copy(&mut file, &mut digest).ok()?;
+        let result = Self {
+            size: meta.len(),
+            modified: meta.modified().ok()?,
+            sha256: hex::encode(digest.finalize()),
+        };
+        result.matches(path).then_some(result)
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        path.metadata().is_ok_and(|meta| {
+            meta.len() == self.size && meta.modified().ok() == Some(self.modified)
+        })
+    }
 }
 
 /// The latest local observations, kept separate from the local authorization policy.
@@ -127,7 +161,7 @@ impl Discovery {
         };
         #[cfg(not(test))]
         let directories = search_directories(&search, configured.len() < kinds.len()).await;
-        let found = join_all(kinds.iter().map(|kind| {
+        let found: Vec<Found> = join_all(kinds.iter().map(|kind| {
             let names = self.programs[kind].iter().map(String::as_str).collect();
             discover_in(
                 kind,
@@ -143,6 +177,23 @@ impl Discovery {
         .into_iter()
         .flatten()
         .collect();
+        let fingerprints = found
+            .iter()
+            .filter(|f| configured.contains_key(&f.kind))
+            .map(|f| {
+                let path = f.path.clone();
+                let slot = Arc::new(OnceLock::new());
+                let pending = Arc::clone(&slot);
+                let changes = self.changes.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(fingerprint) = Fingerprint::read(&path) {
+                        let _ = pending.set(fingerprint);
+                        changes.send_replace(());
+                    }
+                });
+                (f.path.clone(), slot)
+            })
+            .collect();
         *self
             .snapshot
             .write()
@@ -151,6 +202,7 @@ impl Discovery {
             kinds,
             configured,
             found,
+            fingerprints,
         };
         self.changes.send_replace(());
     }
@@ -193,6 +245,12 @@ impl Discovery {
                             version: selected
                                 .map_or("unknown", |found| found.version.as_str())
                                 .into(),
+                            sha256: selected.and_then(|found| {
+                                let fingerprint = snapshot.fingerprints.get(&found.path)?.get()?;
+                                fingerprint
+                                    .matches(&found.path)
+                                    .then(|| fingerprint.sha256.clone())
+                            }),
                             daemon: false,
                         });
                 }
@@ -206,6 +264,7 @@ impl Discovery {
                             kind: kind.clone(),
                             path: found.path.to_string_lossy().into_owned(),
                             version: found.version.clone(),
+                            sha256: None,
                             daemon: false,
                         }),
                 );
@@ -863,6 +922,10 @@ mod tests {
         let selected = codex.display().to_string();
         *discovery.snapshot.write().unwrap() = Snapshot {
             observed: true,
+            fingerprints: BTreeMap::from([(
+                codex.clone(),
+                Arc::new(OnceLock::from(Fingerprint::read(&codex).unwrap())),
+            )]),
             kinds: vec!["codex".into(), "claude-code".into()],
             configured: BTreeMap::from([("codex".into(), selected.clone())]),
             found: vec![
@@ -901,6 +964,12 @@ mod tests {
         };
         let mut facts = machine(policy.clone());
         discovery.apply(&mut facts);
+        assert!(facts.harnesses[0].sha256.is_some());
+        assert!(
+            facts.discovered_harnesses.as_ref().unwrap()[0]
+                .sha256
+                .is_none()
+        );
         assert_eq!(
             facts
                 .harnesses
