@@ -17,7 +17,7 @@ use orch_api_contract::directory::{
     OrgServiceAccountCreate, OrgServiceAccountCreateBody, ServiceAccountTokenCreate,
 };
 use orch_api_contract::users::UserGet;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::{Id, Time, new_id};
 use places::Who;
@@ -93,10 +93,10 @@ async fn issuer(world: &World, user: Id, rules: Vec<KeyRule>) -> Issuer {
         ..Default::default()
     };
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let id = new_id();
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let raw = serde_json::to_value(&scope).unwrap();
-    let id = new_id();
     // Bound the fixture to one hour; requested child lifetimes stay strictly inside it.
     let expires = world.now() + Duration::hours(1);
     identity::create_api_token_scoped(
@@ -194,8 +194,9 @@ async fn an_admitted_key_issues_for_the_service_with_a_receipt_and_an_inherited_
     };
     let secret = created.token.unwrap();
     assert!(!created.already_created);
-    let row = identity::api_token_by_hash(
+    let row = identity::api_token_by_identity(
         &mut *s.world.conn().await,
+        orch_api_contract::api_keys::key_id(&secret).unwrap(),
         &token_hash(&secret),
         s.world.now(),
     )

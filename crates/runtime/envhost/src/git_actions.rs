@@ -5,6 +5,8 @@
 //! credential is held in one child's environment, checked against the exact HTTPS
 //! repository protocol, host and path, and is never written into a remote URL or shared Git config.
 
+mod clone_progress;
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -233,6 +235,8 @@ impl Run {
 pub struct RunOptions<'a> {
     /// Optional bytes supplied to this command's standard input.
     pub input: Option<&'a [u8]>,
+    /// Maximum silence during a repository clone.
+    pub clone_idle: Option<Duration>,
     /// Explicit environment entries; Git still clears the inherited environment.
     pub extra_env: &'a [(OsString, OsString)],
     /// One repository-scoped credential, held only for this command.
@@ -252,6 +256,7 @@ pub async fn run(
         input,
         extra_env,
         credentials,
+        clone_idle,
     } = options;
     files.gates().require_remote_write()?;
     let program = tool.program()?;
@@ -426,6 +431,12 @@ pub async fn run(
     }
     // Global -c options precede the subcommand. Passing them after clone would save them
     // into the new repository's config instead of keeping them command-only.
+    if clone_idle.is_some() {
+        command
+            .env("GIT_TRACE_CURL", "1")
+            .env("GIT_TRACE_REDACT", "1")
+            .env("GIT_PROGRESS_DELAY", "0");
+    }
     command.args(arguments);
     #[cfg(unix)]
     command.process_group(0);
@@ -443,7 +454,9 @@ pub async fn run(
         .take()
         .ok_or_else(|| HostError::Internal("the Git action has no error stream".to_owned()))?;
     let stdin = child.stdin.take();
-    let operation = async {
+    // Environment commands share a dispatcher future. Keep the Git pipe readers and
+    // clone progress buffer off the worker stack even when a different command runs.
+    let operation = Box::pin(async {
         let read_output = async {
             let mut bytes = Vec::new();
             (&mut stdout)
@@ -462,13 +475,21 @@ pub async fn run(
             Ok::<_, HostError>(bytes)
         };
         let read_error = async {
+            if let Some(idle) = clone_idle {
+                return clone_progress::read_until_stall(
+                    &mut stderr,
+                    idle,
+                    &mut Default::default(),
+                )
+                .await;
+            }
             let mut bytes = Vec::new();
             let _ = (&mut stderr)
                 .take(ERROR_KEEP_BYTES)
                 .read_to_end(&mut bytes)
                 .await;
             let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-            bytes
+            Ok(bytes)
         };
         let write_input = async {
             if let (Some(mut stdin), Some(input)) = (stdin, input) {
@@ -483,8 +504,7 @@ pub async fn run(
             }
             Ok::<_, HostError>(())
         };
-        let (output, errors, wrote) = tokio::join!(read_output, read_error, write_input);
-        wrote?;
+        let (output, errors, ()) = tokio::try_join!(read_output, read_error, write_input)?;
         let code = child
             .wait()
             .await
@@ -505,18 +525,22 @@ pub async fn run(
         };
         Ok::<_, HostError>(Run {
             code,
-            stdout: output?,
+            stdout: output,
             reason,
         })
-    };
+    });
     let deadline = Duration::from_secs(u64::from(
         orch_link_contract::commands::CommandKind::GitPrepare.deadline_secs(),
     ));
-    let result = tokio::time::timeout(deadline, operation)
-        .await
-        .map_err(|_| {
-            HostError::Timeout("the Git action exceeded its operation deadline".to_owned())
-        })?;
+    let result = if clone_idle.is_some() {
+        operation.await
+    } else {
+        tokio::time::timeout(deadline, operation)
+            .await
+            .map_err(|_| {
+                HostError::Timeout("the Git action exceeded its operation deadline".to_owned())
+            })?
+    };
     if result.is_ok() {
         group.0 = None;
     }
@@ -611,6 +635,7 @@ pub(crate) fn completed(
     )?)
     .map_err(|_| HostError::Unsupported("the source journal needs recovery".into()))?;
     let mut frozen = request.clone();
+    frozen.work = None;
     frozen.credential = None;
     let hash = Hash::of(
         &serde_json::to_vec(&frozen).map_err(|error| HostError::Internal(error.to_string()))?,
@@ -655,6 +680,7 @@ pub async fn cleanup(
     )?)
     .map_err(|_| HostError::Unsupported("the source journal needs recovery".into()))?;
     let mut frozen = request.clone();
+    frozen.work = None;
     frozen.credential = None;
     if journal.request_hash
         != Hash::of(
@@ -882,6 +908,7 @@ pub async fn prepare(
         }
     };
     let mut frozen = request.clone();
+    frozen.work = None;
     frozen.credential = None;
     let asked =
         serde_json::to_vec(&frozen).map_err(|error| HostError::Internal(error.to_string()))?;
@@ -1036,8 +1063,12 @@ pub async fn prepare(
             "protocol.git.allow=never",
             "-c",
             "core.sshCommand=ssh -o BatchMode=yes",
+            // Index every nonempty pack. The loose-object small-pack path emits no object progress.
+            "-c",
+            "fetch.unpackLimit=1",
             "clone",
             "--no-checkout",
+            "--progress",
             "--origin",
             "origin",
         ]);
@@ -1053,6 +1084,17 @@ pub async fn prepare(
             stage.path(),
             &args,
             RunOptions {
+                clone_idle: Some(Duration::from_secs(request.work.as_ref().map_or_else(
+                    || {
+                        orch_settings_contract::registry::get(
+                            orch_settings_contract::registry::keys::SOURCE_CLONE_IDLE_SECS,
+                        )
+                        .and_then(|def| def.default_value())
+                        .and_then(|value| value.as_u64())
+                        .ok_or_else(|| HostError::Internal("missing clone idle allowance".into()))
+                    },
+                    |work| Ok(work.timeout_secs),
+                )?)),
                 credentials: credentials.as_ref(),
                 ..Default::default()
             },
@@ -1370,6 +1412,7 @@ mod tests {
 
     fn source(directory: &str) -> GitPrepare {
         GitPrepare {
+            work: None,
             environment_id: new_id(),
             job_id: new_id(),
             directory: directory.to_owned(),
@@ -1378,6 +1421,102 @@ mod tests {
             destination: SourceDestination::MissingDirectory,
             credential: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_silent_https_origin_stops_after_the_clone_idle_allowance() {
+        let (_directory, files, states) = setup();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            client.read_to_end(&mut request).await.unwrap();
+            assert!(!request.is_empty(), "Git started the TLS handshake");
+        });
+        let mut request = source("silent-origin");
+        request.repository_url = format!("https://{address}/fixture.git");
+        request.work = Some(orch_link_contract::commands::WorkReport {
+            job_id: new_id(),
+            phase: "apply".into(),
+            timeout_secs: 1,
+            timeout_policy: None,
+            files_total: None,
+            bytes_total: None,
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            prepare(
+                &GitTool::discover(),
+                &files,
+                &states,
+                &request,
+                1,
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("the idle watchdog ends a silent TLS handshake")
+        .unwrap_err();
+        assert_eq!(result.code().as_str(), "clone_stalled");
+        assert!(result.to_string().contains("1 s"));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_clone_keeps_going_while_bytes_arrive_between_objects() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let moving = async move {
+            for _ in 0..5 {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                writer
+                    .write_all(
+                        b"12:34:56.123456 http.c:848 <= Recv data, 0000000016 bytes (0x00000010)\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+            writer
+                .write_all(b"Receiving objects: 100% (2/2), done.\r")
+                .await
+                .unwrap();
+        };
+        let ((), result) = tokio::join!(moving, async {
+            let mut counters = clone_progress::Counters::default();
+            // End the controlled stream after the last report.
+            clone_progress::read_until_stall(&mut reader, Duration::from_secs(1), &mut counters)
+                .await
+                .map(|_| (counters.bytes, counters.objects))
+        });
+        assert_eq!(result.unwrap(), (80, 2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_object_counts_do_not_keep_a_stalled_clone_alive() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let repeating = async move {
+            loop {
+                if writer
+                    .write_all(b"Receiving objects: 50% (1/2)\r")
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        };
+        let began = tokio::time::Instant::now();
+        let task = tokio::spawn(repeating);
+        let mut counters = clone_progress::Counters::default();
+        let result =
+            clone_progress::read_until_stall(&mut reader, Duration::from_secs(1), &mut counters)
+                .await;
+        assert!(matches!(result, Err(HostError::CloneStalled(1))));
+        assert!((Duration::from_secs(1)..Duration::from_millis(1250)).contains(&began.elapsed()));
+        assert_eq!(counters.objects, 1);
+        task.abort();
     }
 
     /// Actual Git prepares the fixture and performs clone/read-tree. This owned executable only
@@ -1502,6 +1641,7 @@ mod tests {
             let name = std::ffi::OsStr::new(&staging);
             parent.mkdir(name, 0o700).unwrap();
             let mut frozen = request.clone();
+            frozen.work = None;
             frozen.credential = None;
             let journal = PrepareJournal {
                 request_hash: Hash::of(&serde_json::to_vec(&frozen).unwrap()),

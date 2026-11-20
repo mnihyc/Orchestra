@@ -14,10 +14,10 @@ import { detailAccess, detailMachine } from './resource-detail-fixtures';
 
 const read = vi.hoisted(() => vi.fn<() => Promise<MachinePrograms>>());
 vi.mock('@/api/machinePrograms', () => ({ machineProgramsKey: (id: string) => ['machine-programs', id], machineProgramsQuery: (id: string) => ({ queryKey: ['machine-programs', id], queryFn: read }), changeMachinePrograms: vi.fn() }));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => () => 'Codex' }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => () => 'Codex' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/machines/Enrollment', () => ({ AddMachineDialog: () => null }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#machine">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#machine">{children}</a> }));
 
 const binary = { kind: 'codex', path: '/usr/local/bin/codex', version: '0.164.0', daemon: true };
 const report = (flag = false): MachinePrograms => ({ entries: [], capabilities: [], config_file: '/instance/config.toml', can_manage: flag });

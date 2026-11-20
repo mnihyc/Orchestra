@@ -188,7 +188,7 @@ describe('the rules an org gives its invitations', () => {
   it('say which places set them, once each, and none for what is shipped', () => {
     const rules = [
       setting({ key: 'invitations.forms', source: { scope: 'org', node: ACME } }),
-      setting({ key: 'invitations.max_hours', source: { scope: 'org', node: ACME } }),
+      setting({ key: 'invitations.max_minutes', source: { scope: 'org', node: ACME } }),
       setting({ key: 'invitations.max_uses', source: { scope: 'default', node: null } }),
     ];
     expect(ruleSources(rules)).toEqual(['Acme']);
