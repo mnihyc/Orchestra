@@ -201,3 +201,31 @@ fn any_source_can_report_exact_paid_amounts_while_invalid_values_keep_the_existi
         assert!(reports::normalized(&read).unwrap().extra_usage.is_none());
     }
 }
+
+#[test]
+fn a_large_vendor_catalogue_keeps_every_model_and_its_normalized_provenance() {
+    let origins: serde_json::Map<String, serde_json::Value> = (0..64)
+        .map(|index| {
+            (
+                format!("/parameters/reported_parameter_{index}"),
+                json!("vendor"),
+            )
+        })
+        .collect();
+    let catalogue = json!(
+        (0..469)
+            .map(|index| json!({
+                "model_name": format!("vendor/model-{index}"),
+                "display_name": format!("Vendor model {index}"),
+                "parameters": {}, "origins": origins
+            }))
+            .collect::<Vec<_>>()
+    );
+    assert!(serde_json::to_vec(&catalogue).unwrap().len() > 1024 * 1024);
+    let read = reports::models(&catalogue, &[]).unwrap();
+    let models = read.models.unwrap();
+    assert_eq!(models.len(), 469);
+    assert_eq!(models.last().unwrap().model_name, "vendor/model-468");
+    assert_eq!(models.last().unwrap().origins.len(), 64);
+    assert!(read.notes.is_empty());
+}
