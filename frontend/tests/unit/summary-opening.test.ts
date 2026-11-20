@@ -49,6 +49,23 @@ afterEach(() => {
   chatWriter.clear(); wire.mockReset(); client.session.setState(saved);
 });
 
+it('batches summary openings from different kept views of one query cache', async () => {
+  const world = new World(), person = world.people.get('ada')!, root = cache();
+  const scoped = new QueryClient({ queryCache: root.getQueryCache() });
+  world.summaries.control('/set', { ...target, text: 'Topic paragraph', state: 'fresh' });
+  world.summaries.control('/set', { ...thread, text: 'Thread paragraph', state: 'fresh' });
+  wire.mockImplementation(async (request) => {
+    const url = new URL(request.url);
+    const body = await request.json() as Record<string, unknown>;
+    const reply = world.summaries.handle(person, request.method, url.pathname.replace('/api/v1', ''), url.searchParams, body);
+    if (reply === null) throw new Error('The summary batch must have a native reply.');
+    return Response.json(reply.body, { status: reply.status });
+  });
+  const [topic, currentThread] = await Promise.all([root.query(resourceSummaryQuery(target)), scoped.query(resourceSummaryQuery(thread))]);
+  expect(topic.text).toBe('Topic paragraph'); expect(currentThread.text).toBe('Thread paragraph');
+  expect(wire).toHaveBeenCalledOnce();
+});
+
 it('seeds the first document summary observer from a full sync for its current reader', async () => {
   const world = new World(), person = world.people.get('ada')!, query = cache();
   const document = { kind: 'document', id: id(7, 1) } as const;
