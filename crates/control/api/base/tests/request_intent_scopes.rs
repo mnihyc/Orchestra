@@ -23,7 +23,7 @@ use orch_api_contract::access::{
     AccessRequestObject, HolderInput,
 };
 use orch_api_contract::approvals::{ApprovalCancel, ApprovalDecide};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Caller, Policy, Principal};
 use orch_db::queries::identity;
@@ -45,7 +45,8 @@ struct Key {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
-    let (id, secret) = (new_id(), new_token(API_TOKEN_PREFIX));
+    let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -65,7 +66,8 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     Key { id, secret }
 }
 async fn legacy(world: &World, actor: Id) -> Key {
-    let (id, secret) = (new_id(), new_token(API_TOKEN_PREFIX));
+    let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
