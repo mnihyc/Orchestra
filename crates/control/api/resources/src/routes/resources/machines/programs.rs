@@ -260,6 +260,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine: id,
                     kind: command.kind.as_str().into(),
@@ -284,7 +285,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some() && refusal.code == "conflict" =>
         {
-            ApiError::new(ErrorCode::ConflictStaleRevision, &refusal.detail)
+            ApiError::new(ErrorCode::ConflictConcurrentChange, &refusal.detail)
         }
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some()

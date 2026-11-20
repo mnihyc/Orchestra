@@ -152,6 +152,7 @@ async fn one_host_template_serves_two_tcp_callers_and_two_udp_senders_then_close
                 tool_executor_version: None,
                 exp: (clock.time().unix_millis() / 1000) + 300,
                 port: Some(PortTicketClaims {
+                    machine_reach: false,
                     environment_id: environment,
                     generation: 1,
                     port: target.port(),
