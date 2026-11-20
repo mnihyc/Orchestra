@@ -54,6 +54,7 @@ async fn a_withdrawn_registration_retries_its_committed_busy_detach_and_checkpoi
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
             id: original,
             machine_id: connector.id,
             kind: "env.detach",
@@ -107,8 +108,8 @@ async fn a_withdrawn_registration_retries_its_committed_busy_detach_and_checkpoi
 }
 
 #[tokio::test]
-async fn active_or_expired_registrations_cannot_be_claimed_for_background_busy_retry() -> TestResult
-{
+async fn a_busy_retry_preserves_ownership_and_cannot_be_claimed_while_active_or_expired()
+-> TestResult {
     let clock = Arc::new(orch_testkit::clock::manual());
     let world = World::with_clock(clock.clone()).await;
     let connector = hosting::primary(&world);
@@ -123,6 +124,7 @@ async fn active_or_expired_registrations_cannot_be_claimed_for_background_busy_r
     link::insert_command(
         &mut conn,
         &link::NewCommand {
+            content_transit: false,
             id: original,
             machine_id: connector.id,
             kind: "env.detach",
@@ -133,6 +135,7 @@ async fn active_or_expired_registrations_cannot_be_claimed_for_background_busy_r
         at,
     )
     .await?;
+    assert!(link::mark_accepted_phase(&mut conn, original, 2, at).await?);
     link::finish_command(&mut conn, original, &link::Ending::Failed(&error), at).await?;
     assert!(
         lifecycle::busy_registration_detaches(
@@ -146,6 +149,16 @@ async fn active_or_expired_registrations_cannot_be_claimed_for_background_busy_r
     );
     assert!(!lifecycle::claim_busy_registration_detach(&mut conn, original, new_id(), at).await?);
     environments::routes::remove_registration(&mut conn, environment, at).await?;
+    let retryable = lifecycle::busy_registration_detaches(
+        &mut conn,
+        at + chrono::Duration::seconds(1),
+        at,
+        100,
+    )
+    .await?;
+    assert_eq!(retryable.len(), 1);
+    assert_eq!(retryable[0].id, original);
+    assert_eq!(retryable[0].key_phase, 2);
     assert!(
         lifecycle::busy_registration_detaches(
             &mut conn,

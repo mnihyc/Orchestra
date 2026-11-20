@@ -1,0 +1,6 @@
+clippy
+test -p orch-api-base --lib -- middleware::authentication::
+test -p orch-api-core --test accounts -- only_an_exact_retained_browser_bearer_can_report_its_sessions_recorded_end
+test -p orch-api-core --test thread_opening_scopes --test retained_scopes --test threads_read
+test -p orch-db --lib --test released_migrations --test migration_progress
+test -p orch-authz --lib --test kept_holders
