@@ -14,7 +14,7 @@ fn failed_terminal_writes_keep_started_visible_and_retry_the_first_staged_outcom
     let cmd = Cmd::new(
         id,
         &SerialKey::Thread(new_id()),
-        now,
+        std::time::Duration::from_millis(30_000),
         &SessionClose {
             thread_id: new_id(),
         },
@@ -76,7 +76,7 @@ fn active_and_staged_entries_survive_age_collection_until_their_terminal_write_i
             &Cmd::new(
                 id,
                 &SerialKey::None,
-                now,
+                std::time::Duration::from_millis(30_000),
                 &SessionClose {
                     thread_id: new_id(),
                 },

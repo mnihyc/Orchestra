@@ -17,6 +17,8 @@ import { Markdown } from '@/ui/Markdown';
 import { show } from './support';
 import { CARD_OPEN_DELAY_MS } from '@/ui/inspection';
 
+/** How long to wait for an unreadable reference to be drawn as its chip: it is asked as a place, a document, a chat and a file, one after another. */
+const SETTLED = { timeout: 3000 };
 const THREAD = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e10';
 const DOC = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e11';
 const SECRET = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5e12';
@@ -106,7 +108,10 @@ it('opens a chip written with `#n` at that part: its card names the turn and ask
 
 it('keeps an unreadable `id:` reference as the words written, in a link and in backquotes, and asks no name for it', async () => {
   answer(`Here is [my own words](id:${SECRET}) and \`id:${SECRET}#2\`.`);
-  await waitFor(() => expect(calls.preview).toHaveBeenCalledWith({ kind: 'chat', id: SECRET }));
+  // The words stay as plain text until every question has been answered "no access"; only then is each drawn as its chip.
+  await screen.findByRole('button',{name:`id:${SECRET}#2`},SETTLED);
+  await screen.findByRole('button',{name:'my own words'},SETTLED);
+  expect(calls.preview).toHaveBeenCalledWith({ kind: 'chat', id: SECRET });
   expect(calls.preview).toHaveBeenCalledWith({ kind: 'node', id: SECRET });
   expect(calls.preview).toHaveBeenCalledWith({ kind: 'document', id: SECRET });
   expect(screen.getByText('my own words')).toBeInTheDocument();
@@ -115,6 +120,52 @@ it('keeps an unreadable `id:` reference as the words written, in a link and in b
   expect(screen.queryByRole('link')).not.toBeInTheDocument();
   expect(calls.node).not.toHaveBeenCalled();
   expect(calls.document).not.toHaveBeenCalled();
+});
+
+/** The answers held at the server until `release()` is called: the page between a question and its answer. Questions asked after that are answered at once. */
+function held() {
+  let open = false;
+  const waiting: (() => void)[] = [];
+  calls.preview.mockImplementation((reference) => new Promise((done, fail) => {
+    const answer = () => { const found = preview(reference); if (found === null) fail(new Error('not found')); else done(found); };
+    if (open) answer(); else waiting.push(answer);
+  }));
+  return { release: () => { open = true; for (const answer of waiting.splice(0)) answer(); } };
+}
+const resolving = () => Array.from(document.querySelectorAll<HTMLElement>('[data-reference-state="resolving"]'));
+
+it('draws an `id:` reference from its first paint as a chip with the words written, which is no link, no button and says nothing, until it is answered', async () => {
+  const server = held();
+  const view = answer(`Here is [my own words](id:${SECRET}), [the old name](id:${THREAD}) and \`id:${SECRET}#2\`.`);
+  // Nothing has been answered: every reference is a chip already, with its words, and a reader of the page finds the sentence as it was written.
+  expect(resolving().map((chip) => chip.textContent)).toEqual(['my own words', 'the old name', `id:${SECRET}#2`]);
+  expect(view.container.querySelectorAll('[data-chip-size]')).toHaveLength(3);
+  expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  for (const chip of resolving()) {
+    expect(chip.querySelector('[aria-live], [role], [aria-busy], [title], [aria-label], svg, a, button, [tabindex]')).toBeNull();
+    for (const name of ['role', 'aria-live', 'aria-busy', 'aria-label', 'title', 'tabindex']) expect(chip).not.toHaveAttribute(name);
+  }
+  expect(view.container.querySelector('[role="status"], [role="alert"], [aria-live]')).toBeNull();
+  server.release();
+  // Answered: the readable one is a link with its current name, the others the chip that says no access, and none is left resolving.
+  expect(await screen.findByRole('link', { name: 'Main thread' }, SETTLED)).toHaveAttribute('href', `/thread/${THREAD}`);
+  await screen.findByRole('button', { name: 'my own words' }, SETTLED);
+  await screen.findByRole('button', { name: `id:${SECRET}#2` }, SETTLED);
+  expect(resolving()).toHaveLength(0);
+  expect(screen.queryByText('the old name')).not.toBeInTheDocument();
+});
+
+it('keeps the words of a reference as the chip they are while it is asked as a place, a document, a chat and a file, one after another', async () => {
+  const server = held();
+  answer(`Here is [my own words](id:${SECRET}).`);
+  expect(resolving().map((chip) => chip.textContent)).toEqual(['my own words']);
+  // The first question is answered "no access": the next is put, and the chip is still the same chip.
+  await waitFor(() => expect(calls.preview).toHaveBeenCalledWith({ kind: 'node', id: SECRET }));
+  expect(resolving().map((chip) => chip.textContent)).toEqual(['my own words']);
+  server.release();
+  await screen.findByRole('button', { name: 'my own words' }, SETTLED);
+  expect(resolving()).toHaveLength(0);
 });
 
 it('still draws a shared-tree path as the chip its thread resolves', async () => {
@@ -128,7 +179,9 @@ it('still draws a shared-tree path as the chip its thread resolves', async () =>
 it('draws an `id:` reference in a chat message as the same chip', async () => {
   show(<Body text={`An agent's note: [the thread](id:${THREAD}#3), and [nothing to see](id:${SECRET}).`} originThread={AGENT_THREAD} />);
   expect(await screen.findByRole('link', { name: 'Main thread' })).toHaveAttribute('href', `/thread/${THREAD}`);
-  await waitFor(() => expect(calls.preview).toHaveBeenCalledWith({ kind: 'chat', id: SECRET }));
+  // The words stay as plain text until the last question is answered "no access".
+  await screen.findByRole('button', { name: 'nothing to see' }, SETTLED);
+  expect(calls.preview).toHaveBeenCalledWith({ kind: 'chat', id: SECRET });
   expect(screen.getByText('nothing to see')).toBeInTheDocument();
   expect(screen.getAllByRole('link')).toHaveLength(1);
 });

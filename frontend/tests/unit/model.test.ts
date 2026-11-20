@@ -1,6 +1,6 @@
 /** What a model can be run with and what a thread runs with: the entry as a form and the rules the server keeps to it, how a pattern names models, the sizes of a context, and the speed, access and context of a thread worked out from the entry and from what the thread chose. */
 import type { TFunction } from 'i18next';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from '@/api/client';
 import { chooserOf, contextStart, droppedFor, kindOf, programStart, readDef, speedStart, type State, statesOf, withChoice, withoutDropped } from '@/features/composer/modelState';
@@ -11,6 +11,8 @@ import { groupPattern, isGroupName, listNames, patternNames } from '@/features/m
 import { faultsOf, formOf, parametersOf, refusedAt } from '@/features/resources/providers/entry';
 import type { ModelParameters, Problem, ThreadParameters } from '@/generated/api-types';
 import { setLocale } from '@/i18n';
+import { modelPurpose, modelsForPurpose } from '@/features/models/purpose';
+import { splitRecent } from '@/features/models/history';
 
 /** A translation that says its key and what it was given, so that a test sees which sentence was chosen. */
 const t = ((key: string, options?: Record<string, unknown>) => (options === undefined ? key : `${key} ${JSON.stringify(options)}`)) as unknown as TFunction;
@@ -23,6 +25,50 @@ const OFFERED_ONLY: ModelParameters = {
 };
 
 describe("a model's entry as a form", () => {
+  it('does not rescan the catalogue for every obsolete personal model identity', () => {
+    const rows = ['first', 'second', 'third'].map((model_name) => ({ provider_id: 'current', model_name }));
+    const identity = vi.fn((row: typeof rows[number]) => row);
+    const recent = [...Array.from({ length: 10000 }, (_, at) => ({ provider_id: `gone-${at}`, model_name: 'first' })), rows[2]!];
+    expect(splitRecent(rows, { recent_count: 5, recent }, identity).recent).toEqual([rows[2]]);
+    expect(identity).toHaveBeenCalledTimes(rows.length);
+  });
+  it('counts only matching current choices toward Recent and keeps the remaining order at any configured size', () => {
+    const rows = ['first', 'second', 'third'].map((model_name) => ({ provider_id: 'source', model_name }));
+    const history = { recent_count: 1, recent: [{ provider_id: 'gone', model_name: 'third' }, rows[2]!, rows[0]!] };
+    expect(splitRecent(rows, history, (row) => row)).toEqual({ recent: [rows[2]], rest: [rows[0], rows[1]] });
+    expect(splitRecent(rows, { ...history, recent_count: 0 }, (row) => row)).toEqual({ recent: [], rest: rows });
+    expect(splitRecent(rows, { ...history, recent_count: 100 }, (row) => row)).toEqual({ recent: [rows[2], rows[0]], rest: [rows[1]] });
+    expect(splitRecent(rows, undefined, (row) => row)).toEqual({ recent: [], rest: rows });
+  });
+  it('keeps a provider purpose override until it is explicitly reset to the reported work', () => {
+    const reported: ModelParameters = { offered: { purposes: ['embedding'] } };
+    const generation = parametersOf({ ...formOf(reported), purposes: ['generation'] }, reported);
+    expect(modelPurpose({ parameters: generation }, 'generation')).toBe('supported');
+    expect(modelPurpose({ parameters: generation }, 'embedding')).toBe('unsupported');
+    const reset = parametersOf({ ...formOf(generation), purposes: null }, generation);
+    expect(reset.purposes).toBeUndefined();
+    expect(reset.offered).toEqual(reported.offered);
+    expect(modelPurpose({ parameters: reset }, 'embedding')).toBe('supported');
+    const inferred = { parameters: {}, model_name: 'LOCAL/MyEmbeddingModel:latest' };
+    expect(modelPurpose(inferred, 'embedding')).toBe('supported');
+    expect(modelsForPurpose([inferred], 'generation')).toEqual([]);
+    expect(modelPurpose({ ...inferred, parameters: { purposes: ['generation'] } }, 'generation')).toBe('supported');
+    expect(modelPurpose({ ...inferred, parameters: { offered: { purposes: ['generation'] } } }, 'embedding')).toBe('unsupported');
+    const unknown = { parameters: {}, model_name: 'embedding-team/private-alias' };
+    expect(modelsForPurpose([unknown], 'generation')).toEqual([unknown]);
+    expect(modelPurpose(unknown, 'generation')).toBe('unknown');
+    expect(modelsForPurpose([{ parameters: { purposes: [] } }], 'generation')).toEqual([]);
+    const onlyChat = { parameters: {}, purpose: { declared: null, reachable: ['generation'] as const } };
+    expect(modelPurpose({ ...onlyChat, purpose: { ...onlyChat.purpose, reachable: ['generation'] } }, 'embedding')).toBe('unsupported');
+    expect(modelPurpose({ ...onlyChat, purpose: { ...onlyChat.purpose, reachable: ['generation'] } }, 'generation')).toBe('unknown');
+  });
+  it('keeps unknown image support unknown and saves an explicit off choice as false', () => {
+    expect(formOf({}).images).toBeNull();
+    expect(parametersOf(formOf({}), {}).input_images).toBeUndefined();
+    const known = { input_images: true };
+    expect(parametersOf({ ...formOf(known), images: false }, known).input_images).toBe(false);
+  });
+
   it('keeps what the source offered and switches nothing on by itself', () => {
     const saved = parametersOf(formOf(OFFERED_ONLY), OFFERED_ONLY);
     expect(saved.offered).toEqual(OFFERED_ONLY.offered);
@@ -257,7 +303,7 @@ describe('what a thread runs with', () => {
     expect(speed).toMatchObject({ force: null, chosen: null, from: 'chosen', stale: false });
     expect(access).toMatchObject({ force: null, from: 'chosen' });
     expect(withChoice({}, speed!, null)).toEqual({ service_tier: null });
-    expect(withChoice({ service_tier: null }, speed!, 'fast')).toEqual({});
+    expect(withChoice({ service_tier: null }, speed!, 'fast')).toEqual({ service_tier: 'fast' });
   });
 
   it('has no speed, access or context for a model whose managers switched none on', () => {
@@ -297,11 +343,11 @@ describe('a change of model', () => {
 describe('a choice', () => {
   const [speed, , context] = all(SOL, { service_tier: 'fast' });
 
-  it('is written as the thread\'s own, and choosing what the model starts with puts the thread back to following it', () => {
+  it('keeps each choice explicit even when it equals the model default', () => {
     expect(withChoice({}, speed!, 'fast')).toEqual({ service_tier: 'fast' });
-    expect(withChoice({ service_tier: 'fast', other: 1 }, speed!, null)).toEqual({ other: 1 });
+    expect(withChoice({ service_tier: 'fast', other: 1 }, speed!, null)).toEqual({ service_tier: null, other: 1 });
     expect(withChoice({}, context!, 400_000)).toEqual({ context: 400_000 });
-    expect(withChoice({ context: 400_000 }, context!, 1_000_000)).toEqual({});
+    expect(withChoice({ context: 400_000 }, context!, 1_000_000)).toEqual({ context: 1_000_000 });
   });
 
   it('is credited to whoever last changed it, as far as the lines of the history say', () => {
@@ -380,4 +426,20 @@ describe("what a turn ran with, as its footer says it", () => {
     expect(ranWithParts({ service_tier: 'priority' }, defs, 'sol', options, 'en-US')).toEqual(['priority']);
     expect(ranWithParts({ service_tier: 'fast' }, defs, 'gone', options, 'en-US')).toEqual(['fast']);
   });
+});
+
+it('lets explicit Standard, None and the model context override different inherited choices', () => {
+  const data = parametersFor(SOL, [{ def: SPEED }, { def: ACCESS }, { def: CONTEXT }]);
+  const above = { service_tier: 'fast', cyber_access_program: 'Daybreak Blue', context: 400_000 };
+  data.parameters = data.parameters.map((view) => ({ ...view, value: above[view.key as keyof typeof above], source: { scope: 'topic', node: null } }));
+  const states = statesOf(data, {}, t);
+  for (const [kind, value] of [['speed', null], ['access', null], ['context', 1_000_000]] as const) {
+    const state = states.find((state) => state.kind === kind);
+    if (state === undefined) throw new Error('The inherited native choice is declared');
+    expect(state.from).toBe('above');
+    const own = withChoice({}, state, value);
+    expect(own).toEqual({ [state.key]: value });
+    const after = statesOf(data, own, t).find((next) => next.kind === kind);
+    expect(after).toMatchObject({ force: value, from: 'chosen', stale: false });
+  }
 });
