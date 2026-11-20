@@ -50,6 +50,8 @@ pub struct BackendRead<'a> {
 /// A disposable snapshot, recomputed on each read or admission boundary, never a permission cache.
 #[derive(Debug)]
 pub struct Snapshot {
+    /// Captured generation conversion; never derived later from edited provider settings.
+    pub translation: Option<orch_provider_contract::models::ProtocolTranslation>,
     /// Extensions may add their own interfaces, routes, offerings and installed execution ports here.
     pub registry: Registry,
     /// Actual current inputs for this one thread.
@@ -59,7 +61,19 @@ impl Snapshot {
     /// Dispatch planning and inspector projection share the contract's exact resolver.
     #[must_use]
     pub fn resolve(&self) -> Vec<Resolution> {
-        self.registry.resolve(&self.context)
+        let mut resolutions = self.registry.resolve(&self.context);
+        if let Some(generation) = resolutions
+            .iter_mut()
+            .find(|row| row.capability == "generation" && row.route_view.is_some())
+        {
+            generation.translation = self.translation.clone();
+            if self.translation.is_some() && self.context.facts["translation_allowed"] == false {
+                generation.route = None;
+                generation.route_view = None;
+                generation.reason = Some("disabled".into());
+            }
+        }
+        resolutions
     }
 }
 
@@ -92,8 +106,13 @@ pub fn setting_definitions(
             }
         }
     }
-    if let Some(def) = registry::get(registry::keys::CALLS_RULES) {
-        definitions.insert(def.key, def);
+    for key in [
+        registry::keys::CALLS_RULES,
+        registry::keys::PROVIDERS_TRANSLATION,
+    ] {
+        if let Some(def) = registry::get(key) {
+            definitions.insert(def.key, def);
+        }
     }
     definitions.into_values().collect()
 }
@@ -196,7 +215,45 @@ pub(crate) fn project_with_account(
             sources.capabilities().declarations().clone(),
         )
         .map_err(EngineError::unreadable)?;
+    let endpoints = account
+        .as_ref()
+        .map(|account| {
+            account
+                .account
+                .endpoints
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let direct = input
+        .descriptor
+        .forwarded_protocols
+        .iter()
+        .any(|protocol| endpoints.contains(&protocol.as_str()));
+    let translation = (input.access == "forwarded" && !direct)
+        .then(|| {
+            input
+                .descriptor
+                .forwarded_protocols
+                .iter()
+                .find_map(|protocol| {
+                    orch_model_contract::translator::builtin_translation(protocol, &endpoints)
+                })
+        })
+        .flatten();
     let mut program = input.descriptor.capability_program();
+    if let Some(translation) = &translation
+        && let Some(access) = program.access.get_mut(input.access)
+    {
+        if !access.interfaces.contains(&translation.to) {
+            access.interfaces.push(translation.to.clone());
+        }
+        // Vendor server tools do not survive this conversion; ordinary Orch services remain separate routes.
+        access
+            .native
+            .retain(|capability, _| matches!(capability.as_str(), "generation" | "image_input"));
+    }
     if let Some(row) = input
         .models
         .iter()
@@ -248,6 +305,12 @@ pub(crate) fn project_with_account(
         ..ThreadContext::default()
     };
     context.facts = json!({"arrangement":input.arrangement});
+    if let Some(allowed) = input
+        .settings
+        .get(orch_settings_contract::registry::keys::PROVIDERS_TRANSLATION)
+    {
+        context.facts["translation_allowed"] = allowed.clone();
+    }
     if !account.credential_roles.is_empty() {
         context
             .credential_roles
@@ -381,7 +444,11 @@ pub(crate) fn project_with_account(
     registry
         .register("thread", declaration)
         .map_err(EngineError::unreadable)?;
-    Ok(Snapshot { registry, context })
+    Ok(Snapshot {
+        registry,
+        context,
+        translation,
+    })
 }
 
 impl Engine {

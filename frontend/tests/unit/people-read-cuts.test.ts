@@ -31,6 +31,18 @@ it('does not repeat a successful native check begun after the hint was received'
   } finally { view.close(); }
 });
 
+it('shares one authority cut across view clients that use the same query cache', async () => {
+  const held = cache();
+  const viewClient = new QueryClient({ queryCache: held.getQueryCache(), mutationCache: held.getMutationCache(), defaultOptions: held.getDefaultOptions() });
+  const cut = capturePeopleHint(held), read = vi.fn(() => Promise.resolve('Current shared scopes'));
+  const view = watch(viewClient, read);
+  try {
+    await view.loaded(); await repairPeople(held, [], cut);
+    expect(read).toHaveBeenCalledOnce();
+    expect(held.getQueryData(key)).toBe('Current shared scopes');
+  } finally { view.close(); }
+});
+
 it('keeps an already-running post-hint native check rather than cancelling it for a duplicate', async () => {
   const held = cache(), cut = capturePeopleHint(held);
   let finish!: (value: string) => void, signal!: AbortSignal;

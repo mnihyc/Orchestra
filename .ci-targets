@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-db --lib --test released_migrations --test migration_progress
+test -p orch-authz --lib --test kept_holders
+test -p orch-api-core --lib

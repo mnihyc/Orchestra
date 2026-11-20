@@ -107,7 +107,7 @@ pub async fn any_outside(conn: &mut Conn, root: Id, holders: &[Holder]) -> Resul
 }
 
 /// How long an entry that lets somebody from outside the root tree in may run at one place, as
-/// `sharing.external_max_days` bounds it there: the fewest days of the system and of the places on the
+/// `sharing.external_max_minutes` bounds it there: the fewest minutes of the system and of the places on the
 /// way to it, and the place that sets that bound (`None` for the system).
 ///
 /// The bound is counted from the original grant or its last explicit expiry change. Reads never move
@@ -115,8 +115,8 @@ pub async fn any_outside(conn: &mut Conn, root: Id, holders: &[Holder]) -> Resul
 /// outside a stricter policy stays outside until its expiry is explicitly repaired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifeBound {
-    /// The most days.
-    pub days: i64,
+    /// The most minutes.
+    pub minutes: i64,
     /// Where it is set: an org, a project or a topic; `None` for the system.
     pub place: Option<Id>,
 }
@@ -125,12 +125,9 @@ impl LifeBound {
     /// The latest end allowed from a grant or an explicit expiry change at `now`.
     #[must_use]
     pub fn latest_end(self, now: Time) -> Time {
-        chrono::Duration::try_days(self.days)
-            .and_then(|span| now.get().checked_add_signed(span))
-            .map_or_else(
-                || Time::new(chrono::DateTime::<chrono::Utc>::MAX_UTC),
-                Time::new,
-            )
+        now.checked_add_minutes(self.minutes)
+            .unwrap_or_else(Time::maximum)
+            .to_minute()
     }
 
     /// Whether a proposed end is within the bound from its trusted grant time.
@@ -146,7 +143,7 @@ impl LifeBound {
     }
 }
 
-/// Where `sharing.external_max_days` is set, read once: the system's value and each node's.
+/// Where `sharing.external_max_minutes` is set, read once: the system's value and each node's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LifeBounds(Vec<(Option<Id>, i64)>);
 
@@ -154,7 +151,7 @@ impl LifeBounds {
     /// Reads where the bound is set: one statement.
     pub async fn load(conn: &mut Conn) -> Result<Self, Error> {
         Ok(Self(
-            orch_db::queries::outsiders::external_max_days(conn).await?,
+            orch_db::queries::outsiders::external_max_minutes(conn).await?,
         ))
     }
 
@@ -165,15 +162,15 @@ impl LifeBounds {
     }
 
     /// The bound at the place whose way from its root org is `way` (the place itself last): the fewest
-    /// days set at the system or on that way; none where none is.
+    /// minutes set at the system or on that way; none where none is.
     #[must_use]
     pub fn at(&self, way: &[Id]) -> Option<LifeBound> {
         self.0
             .iter()
-            .filter(|(place, days)| *days > 0 && place.is_none_or(|node| way.contains(&node)))
-            .min_by_key(|(_, days)| *days)
-            .map(|(place, days)| LifeBound {
-                days: *days,
+            .filter(|(place, minutes)| *minutes > 0 && place.is_none_or(|node| way.contains(&node)))
+            .min_by_key(|(_, minutes)| *minutes)
+            .map(|(place, minutes)| LifeBound {
+                minutes: *minutes,
                 place: *place,
             })
     }

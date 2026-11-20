@@ -36,7 +36,7 @@ export function templateSchema(kind: 'environment' | 'provider', base: Shape): S
     env: field('object', 'Variables', 'Plain variables, never credentials.', {}, { additionalProperties: { type: 'string' } }),
     mounts: field('array', 'Extra storage', 'Extra volumes or temporary storage.', [], { items: { type: 'object', required: ['type', 'target'], properties: {
       type: field('string', 'Storage kind', 'Volume, tmpfs or bind.', null, { enum: ['volume', 'tmpfs', 'bind'] }),
-      source: field('string', 'Storage source', 'Volume name or host path.'), target: field('string', 'Path inside the unit', 'An absolute path.', null, { pattern: '^/' }), read_only: field('boolean', 'Read-only storage', 'Prevent writes.', false),
+      source: field('string', 'Storage source', 'Volume name or host path.'), target: field('string', 'Path inside the environment', 'An absolute path.', null, { pattern: '^/' }), read_only: field('boolean', 'Read-only storage', 'Prevent writes.', false),
     } } }),
     needs: { ...amounts(), title: 'Needs free', description: 'Free capacity for placement, without a reservation.' },
     host_labels: field('array', 'Required host labels', 'The host must carry all labels.', [], { items: { type: 'string' } }),

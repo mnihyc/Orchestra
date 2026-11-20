@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { failedStart } from './failed-start-fixtures';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ to, params, search, children, className }: { to: string; params?: { id: string }; search?: { tab: string }; children: ReactNode; className?: string }) =>
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ to, params, search, children, className }: { to: string; params?: { id: string }; search?: { tab: string }; children: ReactNode; className?: string }) =>
   <a className={className} href={`${to.replace('$id', params?.id ?? '')}${search === undefined ? '' : `?tab=${search.tab}`}`}>{children}</a> }));
 const detail = (program = '0.164.0', agent = '0.165.0') => `Codex on Build machine is ${program}; this agent runs ${agent}. An environment manager can allow it on the environment's page.`;
 function blocked(raw = detail(), manages = false): Thread {
@@ -24,7 +24,7 @@ afterEach(async () => { cleanup(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
   const line = (program = '0.164.0', agent = '0.165.0') => locale === 'en' ? detail(program, agent)
-    : `Codex 在 Build machine 上的版本是 ${program === 'unknown' ? '未知' : program}；此代理运行的版本是 ${agent === 'unknown' ? '未知' : agent}。环境管理者可在环境页面允许使用该版本。`;
+    : `Codex 在 Build machine 上的版本是 ${program === 'unknown' ? '未知' : program}；此智能体运行的版本是 ${agent === 'unknown' ? '未知' : agent}。环境管理者可在环境页面允许使用该版本。`;
   it(`shows the exact known version mismatch without calling it a withdrawn arrangement (${locale})`, async () => {
     await setLocale(locale); const thread = blocked();
     expect(blockedDetail(detail(), i18n.getFixedT(locale))).toBe(line());
