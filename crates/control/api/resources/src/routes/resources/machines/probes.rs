@@ -169,6 +169,8 @@ pub(super) async fn probe(ctx: Ctx, (): (), (): ()) -> ApiResult<MachineProbeRes
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine: id,
                     kind: command.kind.as_str().into(),

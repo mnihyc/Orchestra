@@ -3,7 +3,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{identity, ports as rows};
 use orch_types::Json;
@@ -118,7 +118,7 @@ async fn key(scene: &Scene, user: Id, rules: Vec<Json>) -> Key {
             .all(|allow| known.contains(&allow.operation))
     );
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *scene.world.conn().await,
         &identity::NewApiToken {
@@ -142,7 +142,7 @@ async fn legacy(scene: &Scene) -> Key {
     let scopes = vec!["ports.view".to_owned(), "ports.manage".to_owned()];
     orch_authz::TokenGrant::from_stored(&scopes, None).unwrap();
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *scene.world.conn().await,
         &identity::NewApiToken {
@@ -245,6 +245,7 @@ impl Scene {
         let (world, manager, colleague, environment, place, machine) = setup().await;
         port_policy(&world, "port_host", "ask").await;
         let ports = orch_link_contract::policy::MachinePorts {
+            loopback_tcp: Default::default(),
             allowed: vec![PortOpeningKind::Host],
             publish: Some(HostPorts {
                 incoming_address: "publisher.example.test".into(),

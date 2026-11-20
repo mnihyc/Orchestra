@@ -305,10 +305,8 @@ impl Executor for CodexExecServer {
     }
 
     async fn available(&self, env: &EnvironmentContext) -> ExecutorAvailability {
-        if env.os != orch_agent_contract::facts::Os::Linux {
-            return ExecutorAvailability::unavailable(
-                "this executor is declared for Linux; this host's native execution has not been verified",
-            );
+        if let Some(reason) = env.native_execution_refusal() {
+            return ExecutorAvailability::unavailable(reason);
         }
         let mut found = self.found.lock().await;
         let usable = match (&*found, descriptor::locate(env)) {
@@ -342,8 +340,8 @@ impl Executor for CodexExecServer {
     }
 
     async fn start(&mut self, env: &EnvironmentContext) -> Result<ExecutorEndpoint, AdapterError> {
-        if env.os != orch_agent_contract::facts::Os::Linux {
-            return Err(AdapterError::HarnessUnavailable("this executor is declared for Linux; this host's native execution has not been verified".into()));
+        if let Some(reason) = env.native_execution_refusal() {
+            return Err(AdapterError::HarnessUnavailable(reason.into()));
         }
         if let Some(running) = &self.running {
             let endpoint = running.endpoint.clone();

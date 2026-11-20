@@ -418,6 +418,20 @@ pub fn source_can_verify(sources: &orch_types::Json, native_keeper: bool) -> boo
 }
 
 impl Engine {
+    /// The ordinary explicit Refresh claim's current reuse window; passive reads remain effect-free.
+    pub async fn provider_refresh_eligibility(
+        &self,
+        conn: &mut orch_db::Conn,
+        providers: &[orch_types::Id],
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<std::collections::HashMap<orch_types::Id, rows::RefreshEligibility>, EngineError>
+    {
+        Ok(
+            rows::refresh_eligibility(conn, providers, now, self.inner.config.provider_facts.page)
+                .await?,
+        )
+    }
+
     /// Inspects the due batch without claiming reads or starting runtimes. All four settings for
     /// all candidates share one ancestor/settings pass; the result limit applies after resolution.
     pub async fn due_provider_fact_reads(
@@ -479,7 +493,7 @@ impl Engine {
         Ok(rows::due_reads(conn, now, &schedules, limit).await?)
     }
 
-    /// Runs credential-expiry upkeep on the engine's clock, including the short-token notice rule.
+    /// Runs credential-expiry upkeep on the engine's clock with each provider's chosen notice interval.
     pub async fn watch_provider_credential_ends(&self) -> Result<(), EngineError> {
         self.watch_token_ends().await
     }

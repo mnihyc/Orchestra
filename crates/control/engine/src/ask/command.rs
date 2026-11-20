@@ -465,7 +465,7 @@ impl CommandSource {
             .await
             .map_err(DbError::from)?
             .ok_or_else(closed)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.machine)
             .fetch_optional(&mut *conn)
             .await
@@ -523,6 +523,8 @@ impl CommandSource {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
