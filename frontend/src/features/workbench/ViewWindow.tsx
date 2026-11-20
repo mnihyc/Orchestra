@@ -4,23 +4,28 @@ import { type KeyboardEvent, type PointerEvent, type ReactNode, useCallback, use
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useViewChoice } from '@/lib/viewChoices';
+import { useDeviceChoiceGroups } from '@/ui/DeviceChoiceFacts';
+import { FactDisclosure } from '@/ui/FactDisclosure';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { isComposing } from '@/lib/shortcuts';
 import { FLOATING_EDGE } from '@/ui/floating';
 import { IconButton } from '@/ui/IconButton';
 import { Button } from '@/ui/Button';
 import { StateLine } from '@/ui/StateLine';
 import { useFrameReady } from '@/shell/FrameReadiness';
-import type { Tab } from './layout';
+import { tabHidden, type Tab } from './layout';
 import { openingForView, showViewOpening } from './viewOpening';
 import { viewKey } from './viewIdentity';
 import { useWorkbench } from './store';
 
-/** A floating slot remains visible when its former bar closes, including on a restored workspace. */
+/** A floating slot remains visible when its former bar closes, including on a restored workspace; it is gone when its own section is closed. */
 export function ViewWindowLease({ tab }: { tab: Tab }) {
   const ready = useFrameReady();
   const [floating] = useViewChoice<boolean>('view-window', 'floating', false, tab.view);
+  const hidden = useWorkbench((state) => tabHidden(state.layout, tab.id));
   const key = viewKey(tab);
-  useLayoutEffect(() => floating && ready ? showViewOpening(key, openingForView(tab.id)) : undefined, [floating, ready, key, tab.id]);
+  useLayoutEffect(() => floating && ready && !hidden ? showViewOpening(key, openingForView(tab.id)) : undefined, [floating, ready, hidden, key, tab.id]);
   return null;
 }
 
@@ -46,15 +51,33 @@ export function ViewWindow({ name, tabId, title, actions, status, children, onCl
   name: string; tabId?: string; title: string; actions?: ReactNode; status?: ReactNode; children: ReactNode; onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const [floating, float] = useViewChoice<boolean>('view-window', 'floating', false, name);
-  const [maximized, maximize] = useViewChoice<boolean>('view-window', 'maximized', false, name);
-  const [saved, save] = useViewChoice('view-window', 'geometry', JSON.stringify(DEFAULT_WINDOW), name);
+  const { locale } = useFormatContext();
+  const [floating, float, floatingReceipt] = useViewChoice<boolean>('view-window', 'floating', false, name);
+  const [maximized, maximize, maximumReceipt] = useViewChoice<boolean>('view-window', 'maximized', false, name);
+  const [saved, save, geometryReceipt] = useViewChoice('view-window', 'geometry', JSON.stringify(DEFAULT_WINDOW), name);
   const [geometry, setGeometry] = useState(() => fitViewWindow(readGeometry(saved), innerWidth, innerHeight));
+  const placementName = (value: unknown) => typeof value === 'boolean' ? t(value ? 'clientFacts.device.floating' : 'clientFacts.device.docked') : undefined;
+  const placementFacts = useDeviceChoiceGroups(floatingReceipt, placementName(floating), placementName(floatingReceipt?.saved));
+  const boolName = (value: unknown) => typeof value === 'boolean' ? t(value ? 'common.on' : 'common.off') : undefined;
+  const maximumFacts = useDeviceChoiceGroups(maximumReceipt, boolName(maximized), boolName(maximumReceipt?.saved));
+  const savedGeometry = typeof geometryReceipt?.saved === 'string' ? readGeometry(geometryReceipt.saved) : null;
+  const boxName = (box: WindowGeometry) => `${formatNumber(box.width, locale)} × ${formatNumber(box.height, locale)} · ${formatNumber(box.x, locale)}, ${formatNumber(box.y, locale)}`;
+  const geometryFacts = useDeviceChoiceGroups(geometryReceipt === undefined ? undefined : { ...geometryReceipt, effective: geometry,
+    origin: readGeometry(saved) === DEFAULT_WINDOW ? 'default' : geometryReceipt.origin,
+    saved_choice_availability: savedGeometry === DEFAULT_WINDOW ? 'unavailable' : geometryReceipt.saved_choice_availability }, boxName(geometry), savedGeometry === null || savedGeometry === DEFAULT_WINDOW ? undefined : boxName(savedGeometry));
+  const deviceGroups = [
+    ...placementFacts.groups.map((group) => ({ ...group, key: 'window-placement', title: t('clientFacts.device.placement') })),
+    ...maximumFacts.groups.map((group) => ({ ...group, key: 'window-maximum', title: t('clientFacts.device.maximized') })),
+    ...geometryFacts.groups.map((group) => ({ ...group, key: 'window-geometry', title: t('clientFacts.device.windowBox') })),
+  ];
+  const deviceFragment = placementFacts.fragment ?? maximumFacts.fragment ?? geometryFacts.fragment;
   const actual = useRef(geometry);
   const minimumHeight = useRef(240);
   const header = useRef<HTMLDivElement>(null), body = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const [home] = useState(() => document.createElement('div'));
+  // Closing the window closes the view's section: a floating window of a closed section is not shown, and comes back with the section.
+  const closed = useWorkbench((state) => tabId !== undefined && tabHidden(state.layout, tabId));
   const drag = useRef<{ mode: 'move' | 'resize'; x: number; y: number; start: WindowGeometry } | null>(null);
   const update = useCallback((next: WindowGeometry) => {
     actual.current = fitViewWindow(next, innerWidth, innerHeight, minimumHeight.current);
@@ -67,10 +90,20 @@ export function ViewWindow({ name, tabId, title, actions, status, children, onCl
     return () => window.removeEventListener('resize', resize);
   }, [update]);
   useLayoutEffect(() => {
-    const parent = floating ? document.body : dock.current;
+    const parent = floating ? closed ? null : document.body : dock.current;
     parent?.appendChild(home);
     return () => home.remove();
-  }, [floating, home]);
+  }, [floating, closed, home]);
+  // Escape in a floating window closes it, unless something inside it (a menu, a list, a field that was composing) took the key.
+  useLayoutEffect(() => {
+    if (!floating) return;
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || isComposing(event)) return;
+      event.preventDefault(); event.stopPropagation(); onClose();
+    };
+    home.addEventListener('keydown', escape);
+    return () => home.removeEventListener('keydown', escape);
+  }, [floating, home, onClose]);
   useLayoutEffect(() => {
     if (tabId === undefined) return;
     const focus = () => useWorkbench.getState().focus(tabId);
@@ -128,6 +161,7 @@ export function ViewWindow({ name, tabId, title, actions, status, children, onCl
           <Move className="size-4 shrink-0 text-text-muted" aria-hidden /><span className="truncate">{title}</span>{status}
         </button> : <div className="flex min-w-0 flex-1 items-center gap-1 text-sm font-medium"><span className="truncate">{title}</span>{status}</div>}
         <div className="ml-auto flex max-w-full flex-wrap items-center gap-1">{actions}
+          <FactDisclosure groups={deviceGroups} fragment={deviceFragment} />
           <IconButton size="sm" label={t(floating ? 'viewWindow.dock' : 'viewWindow.popOut')} icon={floating ? <PanelRightClose aria-hidden /> : <SquareArrowOutUpRight aria-hidden />} onClick={() => float(!floating)} />
           {floating && <><IconButton size="sm" label={t(maximized ? 'viewWindow.restore' : 'viewWindow.maximize')} icon={maximized ? <Shrink aria-hidden /> : <Expand aria-hidden />} onClick={() => maximize(!maximized)} />
             <IconButton size="sm" label={t('common.close')} icon={<X aria-hidden />} onClick={onClose} /></>}

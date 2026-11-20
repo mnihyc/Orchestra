@@ -1,0 +1,3 @@
+test -p orch-api-core --test everything_scale -- --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes --test threads_read --test people_scale --test transaction_guards --test accounts --test session_others
+test -p orch-api-core --test access --test access_everything --test hierarchy_native_scopes --test holder_search_native_scopes --test search_content --test search_names --test search_native_scopes
