@@ -72,6 +72,7 @@ pub fn mount(registry: &mut Registry) {
     catalogue::mount(registry);
     programs::mount(registry);
     identity_providers::mount(registry);
+    human_check::mount(registry);
 }
 orch_api_base::__api_bind_6e6c1a7061!();
 
@@ -163,6 +164,9 @@ pub mod defaults;
 
 #[path = "admin/fleet.rs"]
 pub mod fleet;
+
+#[path = "admin/human_check.rs"]
+pub mod human_check;
 
 #[path = "admin/identity_providers.rs"]
 pub mod identity_providers;
