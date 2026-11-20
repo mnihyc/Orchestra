@@ -391,6 +391,19 @@ pub async fn prune(
     Ok(dropped)
 }
 
+/// The oldest restorable saved version, using the document/version index without reading its snapshot.
+pub async fn oldest_restorable(
+    conn: &mut Conn,
+    document: Id,
+) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_at FROM document_versions WHERE document_id = $1 ORDER BY version LIMIT 1",
+    )
+    .bind(document)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// What an entry of the history is narrowed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByAuthor {

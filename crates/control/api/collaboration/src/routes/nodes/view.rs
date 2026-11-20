@@ -120,6 +120,8 @@ pub use orch_api_base::routes::nodes::view::ReferenceDisclosure;
 pub use orch_api_base::routes::nodes::view::ReferenceAuthority;
 
 pub use orch_api_base::routes::nodes::view::named_admin_access;
+#[path = "automatic_fields.rs"]
+mod automatic_fields;
 /// A word of one contract as the same word of another.
 fn same<A: Serialize, B: DeserializeOwned>(word: &A) -> Option<B> {
     serde_json::to_value(word)
@@ -733,10 +735,15 @@ async fn build_with_name_sources(
         .collect();
     let used: Vec<&NodeDetail> = wanted.iter().filter_map(|id| details.get(id)).collect();
     let extras = extras(conn, &used, principal, now, topic_sources).await?;
+    let nodes_with_readmes: Vec<_> = used
+        .iter()
+        .filter(|detail| detail.readme_document_id.is_some())
+        .map(|detail| detail.id)
+        .collect();
     let readmes = Box::pin(readmes_for(
         conn,
         principal,
-        &wanted,
+        &nodes_with_readmes,
         now,
         policy,
         readme_sources,
@@ -748,6 +755,7 @@ async fn build_with_name_sources(
     for detail in &used {
         people.push(detail.owner_id);
         people.extend(detail.archived_by);
+        people.extend(automatic_fields::people(detail));
     }
     let people = user_refs(conn, &people).await?;
     let mut on_the_ways: Vec<Id> = used
@@ -764,6 +772,8 @@ async fn build_with_name_sources(
             .collect();
 
     let mut built = Vec::new();
+    let mut thread_bases = Vec::new();
+    let mut thread_positions = Vec::new();
     for id in wanted {
         let (Some(detail), Some(site)) = (details.get(&id), standing.sites.get(&id)) else {
             continue;
@@ -782,6 +792,9 @@ async fn build_with_name_sources(
             .filter_map(|place| standing.refs.get(place).cloned())
             .collect();
         let access = access_of(&standing, site, &detail.path, &subscriptions);
+        let automatic_fields = viewable(&standing, site)
+            .then(|| automatic_fields::project(detail, &path, &people))
+            .flatten();
         let common = Common {
             id,
             detail,
@@ -792,8 +805,15 @@ async fn build_with_name_sources(
             archived: site.is_archived(),
             archived_by: detail.archived_by.and_then(|by| people.get(&by).cloned()),
             access,
+            automatic_fields,
             tags: tags_of(detail.id, &extras, &standing),
         };
+        if node_kind(&detail.kind) == Some(NodeKind::Thread) {
+            thread_positions.push((built.len(), id, viewable(&standing, site)));
+            thread_bases.push(common.base(ThreadKind::Thread));
+            built.push(None);
+            continue;
+        }
         let node = match node_kind(&detail.kind) {
             Some(NodeKind::Org) => org(common.base(OrgKind::Org), detail, &extras, name_sources),
             Some(NodeKind::Project) => Node::Project(Project {
@@ -802,26 +822,50 @@ async fn build_with_name_sources(
                 project_count: extras.project_counts.get(&id).copied().unwrap_or_default(),
             }),
             Some(NodeKind::Topic) => topic(common.base(TopicKind::Topic), detail, &extras),
-            Some(NodeKind::Thread) => Node::Thread(
-                // The generic node reader carries this branch even when showing an org.
-                // Its binding/input/environment futures must not enlarge every node request.
-                Box::pin(crate::routes::threads::view::thread_with_name_sources(
-                    conn,
-                    principal,
-                    common.base(ThreadKind::Thread),
-                    now,
-                    name_sources,
-                ))
-                .await?,
-            ),
-            None => continue,
+            _ => continue,
         };
-        built.push(Built {
+        built.push(Some(Built {
             node,
             viewable: viewable(&standing, site),
-        });
+        }));
     }
-    Ok(built)
+    if !thread_bases.is_empty() {
+        // The generic reader carries this future even for an org-only page.
+        // Keep the native thread projection behind the same boxed family boundary.
+        let threads = Box::pin(crate::routes::threads::view::threads_with_name_sources(
+            conn,
+            principal,
+            thread_bases,
+            now,
+            name_sources,
+        ))
+        .await?;
+        if threads.len() != thread_positions.len() {
+            return Err(ApiError::internal(
+                "the native thread page omitted a requested projection",
+            ));
+        }
+        for ((position, id, viewable), thread) in thread_positions.into_iter().zip(threads) {
+            if thread.base.id != id {
+                return Err(ApiError::internal(
+                    "the native thread page changed its order",
+                ));
+            }
+            let slot = built
+                .get_mut(position)
+                .ok_or_else(|| ApiError::internal("the native thread position disappeared"))?;
+            *slot = Some(Built {
+                node: Node::Thread(thread),
+                viewable,
+            });
+        }
+    }
+    built
+        .into_iter()
+        .map(|row| {
+            row.ok_or_else(|| ApiError::internal("the native node page has an unfinished thread"))
+        })
+        .collect()
 }
 
 /// The READMEs the nodes `ids` name that are still their own documents and that the caller may read, as a list
@@ -895,6 +939,7 @@ struct Common<'a> {
     archived: bool,
     archived_by: Option<UserRef>,
     access: Access,
+    automatic_fields: Option<orch_api_contract::summary_facts::AutomaticFields>,
     tags: Vec<Tag>,
 }
 
@@ -919,6 +964,7 @@ impl Common<'_> {
             tags: self.tags.clone(),
             tags_source: source(detail.tags_source.as_deref().unwrap_or("auto")),
             auto_updated_at: detail.auto_updated_at.map(time),
+            automatic_fields: self.automatic_fields.clone(),
             page: self.page,
             chat_id: detail.chat_id.unwrap_or_else(Id::nil),
             archived: self.archived,

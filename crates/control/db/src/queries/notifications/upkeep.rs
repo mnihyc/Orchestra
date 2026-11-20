@@ -226,6 +226,72 @@ async fn referrers(conn: &mut Conn, table: &str) -> Result<Vec<(String, String)>
     .await?)
 }
 
+/// The same native reference predicate gates purge and a single restoration-authorized inspection.
+async fn soft_delete_guard(conn: &mut Conn, table: &str) -> Result<String, DbError> {
+    let mut guard = if table == "environments" {
+        " AND (t.removal_phase IS NULL OR t.removal_phase='purged')".to_owned()
+    } else {
+        String::new()
+    };
+    if table == "document_containers" {
+        // Composite parent references are deliberately deferred for whole-tree moves.
+        // Collect children first, including independently deleted children, before the parent.
+        guard.push_str(
+            " AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.parent_container_id=t.id)
+            AND NOT EXISTS(SELECT 1 FROM document_containers c WHERE c.parent_container_id=t.id)",
+        );
+    }
+    if matches!(table, "documents" | "document_containers") {
+        let kind = if table == "documents" {
+            "document"
+        } else {
+            "document_container"
+        };
+        guard.push_str(&format!(
+            " AND NOT EXISTS(SELECT 1 FROM audit_object_state s WHERE s.object_kind='{kind}'
+            AND s.object_id=t.id AND s.purge_at>$3)"
+        ));
+    }
+    if table == "nodes" {
+        guard.push_str(" AND NOT EXISTS(SELECT 1 FROM audit_object_state s WHERE s.purge_at>$3
+            AND ((s.object_kind='document' AND EXISTS(SELECT 1 FROM documents d WHERE d.id=s.object_id AND d.node_id=t.id))
+              OR (s.object_kind='document_container' AND EXISTS(SELECT 1 FROM document_containers c WHERE c.id=s.object_id AND c.node_id=t.id))))");
+    }
+    for (child, column) in referrers(conn, table).await? {
+        if is_plain_name(&child) && is_plain_name(&column) {
+            // A row that refers to itself (a root org is its own org) does
+            // not hold itself back.
+            let itself = if child == table {
+                " AND x.id <> t.id"
+            } else {
+                ""
+            };
+            guard.push_str(&format!(
+                " AND NOT EXISTS (SELECT 1 FROM \"{child}\" x WHERE x.\"{column}\" = t.id{itself}{})",
+                crate::queries::trace::live_reference_condition(&child)
+            ));
+        }
+    }
+    Ok(guard)
+}
+
+/// Whether retained references currently prevent this exact deleted node's physical purge.
+/// It does not extend the accepted restoration cutoff or disclose reference names.
+pub async fn node_cleanup_hold(
+    conn: &mut Conn,
+    node: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<bool>, DbError> {
+    let guard = soft_delete_guard(conn, "nodes").await?.replace("$3", "$2");
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT NOT(TRUE{guard}) FROM nodes t WHERE t.id=$1 AND t.deleted_at IS NOT NULL"
+    )))
+    .bind(node)
+    .bind(now)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// Removes the rows that were soft-deleted at or before `cutoff` and that
 /// nothing refers to any longer. A row that is still referred to stays, and
 /// goes in a later run when what referred to it has gone; an org whose
@@ -244,49 +310,7 @@ pub async fn purge_soft_deleted(
         .collect();
     let mut guards: Vec<String> = Vec::new();
     for table in SOFT_DELETED {
-        let mut guard = if *table == "environments" {
-            " AND (t.removal_phase IS NULL OR t.removal_phase='purged')".to_owned()
-        } else {
-            String::new()
-        };
-        if *table == "document_containers" {
-            // Composite parent references are deliberately deferred for whole-tree moves.
-            // Collect children first, including independently deleted children, before the parent.
-            guard.push_str(" AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.parent_container_id=t.id)
-                AND NOT EXISTS(SELECT 1 FROM document_containers c WHERE c.parent_container_id=t.id)");
-        }
-        if matches!(*table, "documents" | "document_containers") {
-            let kind = if *table == "documents" {
-                "document"
-            } else {
-                "document_container"
-            };
-            guard.push_str(&format!(
-                " AND NOT EXISTS(SELECT 1 FROM audit_object_state s WHERE s.object_kind='{kind}'
-                AND s.object_id=t.id AND s.purge_at>$3)"
-            ));
-        }
-        if *table == "nodes" {
-            guard.push_str(" AND NOT EXISTS(SELECT 1 FROM audit_object_state s WHERE s.purge_at>$3
-                AND ((s.object_kind='document' AND EXISTS(SELECT 1 FROM documents d WHERE d.id=s.object_id AND d.node_id=t.id))
-                  OR (s.object_kind='document_container' AND EXISTS(SELECT 1 FROM document_containers c WHERE c.id=s.object_id AND c.node_id=t.id))))");
-        }
-        for (child, column) in referrers(conn, table).await? {
-            if is_plain_name(&child) && is_plain_name(&column) {
-                // A row that refers to itself (a root org is its own org) does
-                // not hold itself back.
-                let itself = if child == *table {
-                    " AND x.id <> t.id"
-                } else {
-                    ""
-                };
-                guard.push_str(&format!(
-                    " AND NOT EXISTS (SELECT 1 FROM \"{child}\" x WHERE x.\"{column}\" = t.id{itself}{})",
-                    crate::queries::trace::live_reference_condition(&child)
-                ));
-            }
-        }
-        guards.push(guard);
+        guards.push(soft_delete_guard(conn, table).await?);
     }
     // Rows the database refused in this run: they are not asked for again,
     // so that a few that cannot go never keep the others from it.
@@ -495,16 +519,12 @@ async fn purge_members(
 /// Removes the raw events older than `cutoff` from the partitions that are
 /// only partly old, up to a bounded number of rows; the partitions that are
 /// wholly old are dropped apart (`migrations::drop_partitions_before`).
-pub async fn trim_raw_events(conn: &mut Conn, cutoff: DateTime<Utc>) -> Result<u64, DbError> {
-    Ok(sqlx::query(
-        "DELETE FROM raw_events WHERE (segment_id, n, at) IN
-            (SELECT segment_id, n, at FROM raw_events WHERE at < $1 LIMIT $2)",
-    )
-    .bind(cutoff)
-    .bind(RAW_EVENT_ROWS_PER_RUN)
-    .execute(conn)
-    .await?
-    .rows_affected())
+pub async fn trim_raw_events(
+    conn: &mut Conn,
+    cutoff: DateTime<Utc>,
+    at: DateTime<Utc>,
+) -> Result<u64, DbError> {
+    crate::queries::raw_events::trim_before(conn, cutoff, at, RAW_EVENT_ROWS_PER_RUN).await
 }
 
 /// The first day before `before` that has a minute whose hour is not folded

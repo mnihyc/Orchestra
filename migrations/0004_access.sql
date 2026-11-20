@@ -140,6 +140,13 @@ CREATE TABLE authz_state (
 
 INSERT INTO authz_state (id) VALUES (true);
 
+CREATE TABLE public_meta_state (
+    id boolean DEFAULT true PRIMARY KEY CHECK (id),
+    seq bigint DEFAULT 0 NOT NULL
+);
+
+INSERT INTO public_meta_state (id) VALUES (true);
+
 CREATE UNLOGGED TABLE commit_work (
     xact xid8 NOT NULL,
     CONSTRAINT commit_work_pkey PRIMARY KEY (xact)
@@ -259,7 +266,7 @@ CREATE TABLE permission_entries (
     CONSTRAINT permission_entries_holder_kind_check CHECK ((holder_kind = ANY (ARRAY['role'::text, 'group'::text, 'user'::text, 'node'::text, 'agents'::text, 'members'::text, 'everyone'::text]))),
     CONSTRAINT permission_entries_holder_role_check CHECK ((holder_role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
     CONSTRAINT permission_entries_note_check CHECK ((char_length(note) <= 500)),
-    CONSTRAINT permission_entries_object_kind_check CHECK ((object_kind = ANY (ARRAY['system'::text, 'node'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'machine'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'skill'::text, 'document'::text, 'document_container'::text, 'chat'::text]))),
+    CONSTRAINT permission_entries_object_kind_check CHECK ((object_kind = ANY (ARRAY['system'::text, 'node'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'machine'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'skill'::text, 'pool'::text, 'document'::text, 'document_container'::text, 'chat'::text]))),
     CONSTRAINT permission_entries_page_check CHECK ((page = ANY (ARRAY['live'::text, 'defaults'::text]))),
     CONSTRAINT permission_entries_profile_check CHECK ((profile = ANY (ARRAY['any'::text, 'managed'::text, 'connected'::text]))),
     CONSTRAINT permission_entries_source_check CHECK ((source = ANY (ARRAY['page'::text, 'creation'::text, 'request'::text, 'seed'::text]))),
@@ -271,10 +278,24 @@ CREATE TABLE permission_entries (
 CREATE UNIQUE INDEX permission_entries_active_key ON permission_entries USING btree (object_kind, object_id, page, profile, permission, holder_kind, holder_id, holder_role, share_inside, (CASE WHEN holder_kind = 'agents' THEN created_by END)) NULLS NOT DISTINCT WHERE (removed_at IS NULL);
 
 CREATE INDEX permission_entries_ending_idx ON permission_entries USING btree (expires_at) WHERE ((removed_at IS NULL) AND (expires_at IS NOT NULL) AND (object_kind = ANY (ARRAY['system'::text, 'node'::text])));
+CREATE INDEX permission_entries_any_ending_idx ON permission_entries(expires_at) WHERE removed_at IS NULL AND expires_at IS NOT NULL;
 
 CREATE INDEX permission_entries_hierarchy_idx ON permission_entries USING btree (object_id) WHERE ((object_kind = 'node'::text) AND (page = 'live'::text) AND (permission <> 'access.own'::text) AND (removed_at IS NULL));
 
-CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id) WHERE (removed_at IS NULL);
+CREATE INDEX permission_entries_holder_idx ON permission_entries USING btree (holder_kind, holder_id)
+    INCLUDE (object_kind, object_id, holder_role, expires_at) WHERE (removed_at IS NULL);
+
+CREATE INDEX permission_entries_named_view_holder_idx ON permission_entries (holder_kind,holder_id) INCLUDE (expires_at)
+    WHERE (holder_id IS NOT NULL OR holder_kind='everyone') AND removed_at IS NULL AND profile='any' AND object_kind IN ('system','node')
+      AND source<>'creation' AND permission<>'access.own' AND permission NOT LIKE 'thread.%';
+
+CREATE INDEX permission_entries_local_role_view_idx ON permission_entries (object_id)
+    WHERE object_kind='node' AND profile='any' AND removed_at IS NULL AND source<>'creation'
+      AND holder_kind='role' AND holder_id IS NULL;
+
+CREATE INDEX permission_entries_creation_holder_idx ON permission_entries (holder_id) INCLUDE (expires_at)
+    WHERE removed_at IS NULL AND profile='any' AND object_kind IN ('system','node')
+      AND source='creation' AND holder_kind='user' AND permission<>'access.own' AND permission NOT LIKE 'thread.%';
 
 CREATE INDEX related_agent_entrances_idx ON permission_entries USING btree (holder_id, expires_at, object_kind, object_id, permission) WHERE ((holder_kind = 'agents'::text) AND (removed_at IS NULL));
 
@@ -304,12 +325,15 @@ CREATE TABLE permission_rows (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     CONSTRAINT permission_rows_check CHECK (((page = 'defaults'::text) OR ((profile = 'any'::text) AND (NOT locked)))),
-    CONSTRAINT permission_rows_object_kind_check CHECK ((object_kind = ANY (ARRAY['system'::text, 'node'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'machine'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'skill'::text, 'document'::text, 'document_container'::text]))),
+    CONSTRAINT permission_rows_object_kind_check CHECK ((object_kind = ANY (ARRAY['system'::text, 'node'::text, 'provider'::text, 'agent'::text, 'environment'::text, 'host'::text, 'machine'::text, 'template'::text, 'mcp_server'::text, 'mount'::text, 'skill'::text, 'pool'::text, 'document'::text, 'document_container'::text]))),
     CONSTRAINT permission_rows_page_check CHECK ((page = ANY (ARRAY['live'::text, 'defaults'::text]))),
     CONSTRAINT permission_rows_profile_check CHECK ((profile = ANY (ARRAY['any'::text, 'managed'::text, 'connected'::text]))),
     CONSTRAINT permission_rows_pkey PRIMARY KEY (object_kind, object_id, page, profile, permission),
     CONSTRAINT permission_rows_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES users(id)
 );
+
+CREATE INDEX permission_rows_node_scope_idx ON permission_rows (object_kind)
+    WHERE profile='any' AND object_kind IN ('system','node');
 
 CREATE TRIGGER access_changed_delete AFTER DELETE ON permission_rows FOR EACH ROW WHEN ((old.object_kind = ANY (ARRAY['system'::text, 'node'::text]))) EXECUTE FUNCTION access_page_changed();
 
