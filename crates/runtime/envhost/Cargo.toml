@@ -59,6 +59,7 @@ zstd.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+orch-link.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

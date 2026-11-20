@@ -18,7 +18,7 @@ the move. Threads open when they are next used.
 ## Images read by tools
 
 In a Separated arrangement, a viewed image comes from the native tool's recorded
-result, not a same-named file on the provider runtime. The image uses the thread's
+result, not a same-named file in the provider's container. The image uses the thread's
 ordinary image viewer, and its complete original result is available under
 **Full output**. Cold resumes, replay and adoption use the same recorded bytes.
 The environment's original file stays in place; no copy is added to Files.
@@ -30,7 +30,7 @@ change an otherwise completed text turn into a failed turn.
 ## Fork checks
 
 A native fork at a particular turn also needs a complete check of that turn's
-position against the program's recorded conversation. **Native fork check size**
+position against the program's recorded conversation. **Built-in fork check size**
 defaults to 32 MiB. The program's record also has a 32 MiB limit. Raising the
 setting does not remove the record limit or the checks of content and order.
 
@@ -52,6 +52,6 @@ the session retains its original standing instructions. Instruction changes
 apply to the next new session. This line does not mean the turn failed.
 
 See [Carry a thread](../user/carry-a-thread.md),
-[agent build checks](harness-build-checks.md), and
+[how agent program builds are checked](agent-programs.md#3-read-how-a-build-is-checked), and
 [managed agent history](agent-history.md) for method selection, build validation
 and retention.

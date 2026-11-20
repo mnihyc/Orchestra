@@ -325,6 +325,7 @@ pub(super) async fn retain(
         .deadline
         .ok_or_else(|| EngineError::unreadable("The side command lost its native budget."))?;
     let proposed = NewCommand {
+        content_transit: false,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),

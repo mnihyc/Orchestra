@@ -1,0 +1,6 @@
+test -p orch-api-core --test providers
+test -p orch-api-core --lib -- machine_report_tests::
+test -p orch-api-core --test usage_caps
+web typecheck
+web lint
+web test
