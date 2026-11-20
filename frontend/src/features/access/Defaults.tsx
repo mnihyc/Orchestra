@@ -10,6 +10,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PoolLending, hasPoolLending } from '@/features/resources/pools/Lending';
 import { choiceOption } from '@/i18n/choices';
 
 import { type AccessRowTarget, permissionsQuery } from '@/api/access';
@@ -28,7 +29,7 @@ import { ChangeFailed, StaleNotice } from './ShortForm';
 /** The kinds of thing a place makes inside it that have a grid of their own, in the order a person goes down the tree. */
 const INSIDE = ['org', 'project', 'topic', 'thread', 'environment'] as const;
 /** The kinds of resource that people bring, whose defaults an org keeps for those whose home it is. */
-const BROUGHT = ['provider', 'agent', 'host', 'template', 'mcp_server', 'mount', 'skill'] as const;
+const BROUGHT = ['provider', 'agent', 'host', 'template', 'mcp_server', 'mount', 'skill', 'pool'] as const;
 
 type Inside = (typeof INSIDE)[number];
 
@@ -128,6 +129,7 @@ export function Defaults({ place }: { place: AccessRowTarget }) {
             className="self-start"
           />
           <Grids kind={kind} page={page} catalogue={catalogue} place={place} source={source} changes={changes} ask={setAsked} />
+          {kind === 'environment' && (place.kind === 'org' || place.kind === 'project' || place.kind === 'system') && <PoolLending scope={{ kind: 'defaults', at: place.kind === 'system' ? 'system' : place.id, resource_kind: 'environment' }} />}
         </>
       )}
 
@@ -157,6 +159,7 @@ export function Defaults({ place }: { place: AccessRowTarget }) {
                 <h4 className="text-sm font-medium text-text">{t(`access.kindsPlural.${entry}`)}</h4>
                 <p className="text-sm text-text-muted">{t('access.defaults.whoMayUse')}</p>
                 <Grids kind={entry} page={page} catalogue={catalogue} place={place} source={source} changes={changes} ask={setAsked} />
+                {hasPoolLending(entry) && <PoolLending scope={{ kind: 'defaults', at: place.kind === 'system' ? 'system' : place.id, resource_kind: entry as 'provider' | 'host' | 'template' | 'pool' }} />}
               </section>
             ))}
           </div>

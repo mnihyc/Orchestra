@@ -37,9 +37,7 @@ async fn kept_caller(world: &World, actor: Id, scope: KeyScope) -> Caller {
     assert!(scope.validate().is_empty());
     let id = new_id();
     let expires = world.now() + chrono::Duration::hours(1);
-    let secret = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let secret = orch_api_core::middleware::authentication::new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -156,6 +154,7 @@ async fn native_import_command_pins_the_actual_queue_frame_and_checks_current_so
             .dispatcher()
             .issue_stored_before(
                 StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine,
                     kind: "mcp.import".to_owned(),
@@ -460,6 +459,7 @@ async fn native_import_inverse_owns_only_the_successful_unfiled_copy_after_the_o
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                content_transit: false,
                 id: Some(command.id),
                 machine,
                 kind: "mcp.import".to_owned(),
@@ -597,6 +597,7 @@ async fn native_import_inverse_owns_only_the_successful_unfiled_copy_after_the_o
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                content_transit: false,
                 id: Some(cleanup.id),
                 machine,
                 kind: "mcp.forget".to_owned(),
@@ -784,6 +785,7 @@ async fn recorded_deletion_custody_requires_its_actual_journal_and_never_admits_
     let access = AuthzAccess::new(world.app.app.clock.clone());
     let lane = command.key.wire();
     let proposed = link::NewCommand {
+        content_transit: false,
         id: command.id,
         machine_id: machine,
         kind: "mcp.forget",
@@ -879,6 +881,7 @@ async fn recorded_deletion_custody_requires_its_actual_journal_and_never_admits_
             .link
             .dispatcher()
             .issue_stored(StoredCommand {
+                content_transit: false,
                 id: Some(fresh),
                 machine,
                 kind: "mcp.forget".into(),
