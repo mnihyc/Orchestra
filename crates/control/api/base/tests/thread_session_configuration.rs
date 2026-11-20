@@ -35,6 +35,7 @@ async fn setting(scene: &rig::Scene, node: Id, key: &str, value: Json) {
         .call(NodeSettingSet, &[&node, &key])
         .token(&scene.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,

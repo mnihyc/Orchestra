@@ -18,9 +18,7 @@ use orch_api_contract::environment::MachineEnvironmentCreate;
 
 use orch_api_contract::environment::MachineEnvironmentCreateBody;
 
-use orch_api_core::middleware::authentication::API_TOKEN_PREFIX;
-
-use orch_api_core::middleware::authentication::new_token;
+use orch_api_core::middleware::authentication::new_api_token;
 
 use orch_api_core::middleware::authentication::token_hash;
 
@@ -71,6 +69,7 @@ pub(super) async fn setup_with_domain(domain: &str) -> (World, Who, Who, Id, Id,
     let policy = orch_link_contract::policy::LocalPolicy {
         environment_roots: vec!["/srv/ports-core".into()],
         ports: orch_link_contract::policy::MachinePorts {
+            loopback_tcp: Default::default(),
             allowed: vec![
                 orch_api_contract::ports::PortOpeningKind::Place,
                 orch_api_contract::ports::PortOpeningKind::Link,
@@ -129,7 +128,7 @@ pub(super) async fn token(
     let scope:KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"environment","id":environment,"reach":"self"},"allow":[{"operation":operation,"actions":actions}]}]})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

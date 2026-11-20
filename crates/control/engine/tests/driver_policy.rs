@@ -136,7 +136,7 @@ async fn a_prospective_unit_uses_its_target_driver_without_borrowing_an_unselect
         "the driver is known before any physical machine is selected"
     );
     sqlx::query(
-        "UPDATE environments SET config=jsonb_build_object('env.host_id',$2::text) WHERE id=$1",
+        "UPDATE environments SET config=jsonb_build_object('env.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id=$1",
     )
     .bind(world.environment)
     .bind(host.id.to_string())

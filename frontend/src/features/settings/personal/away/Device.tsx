@@ -26,7 +26,7 @@ export function DeviceReadiness({ channelId }: { channelId: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const devices = useQuery(devicesQuery);
-  const here = useQuery({ queryKey: hereKey, queryFn: inspectDevice, retry: false, staleTime: 0 });
+  const here = useQuery({ queryKey: hereKey, queryFn: inspectDevice, retry: false });
   const key = useQuery(metaQuery).data?.push_public_key;
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
