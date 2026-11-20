@@ -1,15 +1,15 @@
 ---
-title: 代理程序构建
+title: 智能体程序构建
 screens: /admin
-keywords: 代理, 程序, 构建, 校验和, 镜像, 离线, 厂商, 信任, harness, checksum, mirror, offline
+keywords: 代理, 程序, 构建, 校验和, 镜像, 离线, 厂商, 信任, harness, checksum, mirror, offline, 智能体
 heading_id.校验和来源: checksum-sources
 heading_id.信任镜像: trusting-a-mirror
-summary: 选择代理程序构建前，查看校验和来源和兼容性检查结果。
+summary: 选择智能体程序构建前，查看校验和来源和兼容性检查结果。
 ---
 
-# 代理程序构建
+# 智能体程序构建
 
-系统管理员在**管理 → 代理程序**中管理构建。校验和来源与检查结果回答不同的问题：
+系统管理员在**管理 → 智能体程序**中管理构建。校验和来源与检查结果回答不同的问题：
 谁提供了预期的程序内容，以及兼容性检查是否通过。设为默认构建不会改变这两项事实。
 
 ## 校验和来源

@@ -4,7 +4,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::approvals::{ApprovalDecide, ApprovalGet};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity;
@@ -49,7 +49,7 @@ async fn key(
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

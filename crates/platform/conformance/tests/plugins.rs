@@ -137,7 +137,7 @@ fn text_translation() -> translator::Fixture {
                 {"role":"user","content":[{"type":"text","text":"你好"},{"type":"image","source":{"type":"base64","data":"not-an-image"}}]}],
             "tools":[{"name":"discarded","input_schema":{"type":"object"}}],"thinking":{"type":"enabled","budget_tokens":16},
             "max_tokens":32,"temperature":0.25,"stream":true}).to_string(),
-        upstream:UpstreamSide{base_url:"https://upstream.example/v1".into(),options:json!({}),
+        upstream:UpstreamSide{output_tokens:4096,session:None,model:None,base_url:"https://upstream.example/v1".into(),options:json!({}),
             credential:Some(Credential::new("unused-fixture-key"))},
         request:TranslatedRequest{method:"POST".into(),path:"/responses".into(),query:BTreeMap::new(),
             headers:BTreeMap::from([("content-type".into(),"application/json".into())]),authorized:false,

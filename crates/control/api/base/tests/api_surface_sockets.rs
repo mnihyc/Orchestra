@@ -7,7 +7,7 @@
 mod realtime_support;
 
 use futures::{SinkExt, StreamExt};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::new_id;
 use realtime_support::{PATIENCE, Rig};
@@ -20,11 +20,12 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn key(rig: &Rig) -> String {
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut rig.pool.acquire().await.unwrap(),
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: rig.ada,
             name: "Realtime surface",
             token_hash: &token_hash(&token),
