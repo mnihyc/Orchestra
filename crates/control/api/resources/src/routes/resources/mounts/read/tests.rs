@@ -9,8 +9,6 @@ use super::*;
 
 use crate::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
 use crate::middleware::authentication::new_token;
 
 use crate::middleware::authentication::token_hash;
@@ -182,11 +180,12 @@ enum Origin {
 }
 
 async fn credential(world: &World, user: Id, mount: Id, origin: Origin) -> String {
-    let secret = new_token(if matches!(origin, Origin::Session) {
-        ACCESS_TOKEN_PREFIX
+    let credential = orch_types::new_id();
+    let secret = if matches!(origin, Origin::Session) {
+        new_token(ACCESS_TOKEN_PREFIX)
     } else {
-        API_TOKEN_PREFIX
-    });
+        crate::middleware::authentication::new_api_token(credential)
+    };
     let hash = token_hash(&secret);
     let end = world.now() + chrono::Duration::seconds(1);
     if matches!(origin, Origin::Session) {
@@ -211,7 +210,7 @@ async fn credential(world: &World, user: Id, mount: Id, origin: Origin) -> Strin
         identity::create_api_token_scoped(
             &mut *world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: credential,
                 user_id: user,
                 name: "Native read cut",
                 token_hash: &hash,
@@ -486,7 +485,9 @@ async fn native_get_context_uses_actual_session_mode_and_the_same_principal_time
                     AND query LIKE $2 AND $1=ANY(pg_blocking_pids(pid)))",
             )
             .bind(blocker_pid)
-            .bind("%FOR KEY SHARE OF u FOR SHARE OF s, a%")
+            .bind(crate::testing::current_identity_query_pattern(
+                orch_api_contract::surface::HttpSurface::Browser,
+            ))
             .fetch_one(&world.db.pool)
             .await
             .unwrap();

@@ -75,7 +75,9 @@ pub struct DuplicateKind(pub CommandKind);
 
 /// Carries the commands of the system out.
 pub struct Dispatcher {
+    clock: Arc<dyn orch_types::Clock>,
     roles: HashMap<CommandKind, Vec<Arc<dyn RoleHandler>>>,
+    answer_roles: Vec<Arc<dyn RoleHandler>>,
     policy: Arc<PolicyStore>,
     facts: Arc<FactsNow>,
     local_harnesses: Option<(
@@ -92,6 +94,7 @@ pub struct Dispatcher {
         Arc<crate::role_changes::Requests>,
         Arc<crate::roles::Services>,
     )>,
+    gateway_control: Option<Arc<crate::gateway_control::Requests>>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -150,6 +153,7 @@ impl Dispatcher {
         };
         let cancel = context.cancel.clone();
         let call = Call {
+            work_deadline: None,
             context,
             clamps: gated.clamps,
         };
@@ -188,7 +192,9 @@ impl Dispatcher {
     #[must_use]
     pub fn new(policy: Arc<PolicyStore>, facts: Arc<FactsNow>) -> Self {
         Self {
+            clock: Arc::new(orch_types::SystemClock),
             roles: HashMap::new(),
+            answer_roles: Vec::new(),
             policy,
             facts,
             local_harnesses: None,
@@ -200,7 +206,13 @@ impl Dispatcher {
             )),
             programs: None,
             role_changes: None,
+            gateway_control: None,
         }
+    }
+
+    /// Use the same wall clock as the connector's native event suppliers.
+    pub fn clock(&mut self, clock: Arc<dyn orch_types::Clock>) {
+        self.clock = clock;
     }
 
     pub(crate) fn local_harnesses(
@@ -251,6 +263,10 @@ impl Dispatcher {
         self.role_changes = Some((requests, services));
     }
 
+    pub fn gateway_control(&mut self, requests: Arc<crate::gateway_control::Requests>) {
+        self.gateway_control = Some(requests);
+    }
+
     /// Hands the commands a role takes to it. A kind that another role takes already is refused, unless the
     /// catalogue addresses it to either of two roles.
     pub fn add(&mut self, role: &Arc<dyn RoleHandler>) -> Result<(), DuplicateKind> {
@@ -271,6 +287,7 @@ impl Dispatcher {
         for kind in role.takes() {
             self.roles.entry(*kind).or_default().push(Arc::clone(role));
         }
+        self.answer_roles.push(Arc::clone(role));
         Ok(())
     }
 
@@ -342,6 +359,26 @@ impl Dispatcher {
 
 #[async_trait]
 impl CommandHandler for Dispatcher {
+    fn tool_session_restrict(&self, update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {
+        for role in &self.answer_roles {
+            role.tool_session_restrict(update);
+        }
+    }
+    fn tool_session_refresh(&self) {
+        for role in &self.answer_roles {
+            role.tool_session_refresh();
+        }
+    }
+    fn tool_session_update(&self, update: &orch_link_contract::tool_sessions::ToolSessionUpdate) {
+        for role in &self.answer_roles {
+            role.tool_session_update(update);
+        }
+    }
+    fn tool_session_control(&self, available: bool) {
+        for role in &self.answer_roles {
+            role.tool_session_control(available);
+        }
+    }
     async fn interrupted(&self, id: orch_types::Id, command: &Command) -> Result<(), CommandError> {
         self.role_for(command)?.interrupted(id, command).await
     }
@@ -353,6 +390,12 @@ impl CommandHandler for Dispatcher {
         }
     }
     fn answered(&self, id: orch_types::Id) {
+        for role in &self.answer_roles {
+            role.answered(id);
+        }
+        if let Some(requests) = &self.gateway_control {
+            requests.answered(id);
+        }
         if let Some((requests, _)) = &self.role_changes {
             requests.answered(id);
         }
@@ -373,6 +416,48 @@ impl CommandHandler for Dispatcher {
             None
         };
         match command {
+            Command::MachineDirectoryList(body) => {
+                self.policy.reload_from_file().map_err(|_| {
+                    CommandError::new(
+                        ErrorCode::Internal,
+                        "Reading the machine's directory policy failed",
+                    )
+                })?;
+                let policy = self.policy.policy().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::PolicyRootNotAllowed,
+                        "environment.roots: this machine offers no directory roots",
+                    )
+                })?;
+                let roots = policy.environment_roots.clone();
+                let cancel = context.cancel.clone();
+                let due = std::time::Instant::now()
+                    + Duration::from_secs(u64::from(kind.deadline_secs()));
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::directory_listing::read(&body, &policy, &cancel, due)
+                })
+                .await
+                .map_err(|_| {
+                    CommandError::new(ErrorCode::Internal, "Reading the machine directory failed")
+                })??;
+                self.policy.reload_from_file().map_err(|_| {
+                    CommandError::new(
+                        ErrorCode::Internal,
+                        "Reading the machine's directory policy failed",
+                    )
+                })?;
+                if self
+                    .policy
+                    .policy()
+                    .is_none_or(|policy| policy.environment_roots != roots)
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::PolicyRootNotAllowed,
+                        "environment.roots: the machine's allowed roots changed while reading",
+                    ));
+                }
+                return Ok(CommandResult::MachineDirectoryList(result));
+            }
             Command::MachineProbe(_) => {
                 if let Some((discovery, _)) = &self.local_harnesses {
                     discovery.refresh(&self.policy).await;
@@ -380,8 +465,37 @@ impl CommandHandler for Dispatcher {
                 return Ok(CommandResult::MachineProbe((self.facts)()));
             }
             Command::MachineRolesSet(body) => return self.machine_roles_set(&context, body),
-            Command::MachinePrograms(request) => {
+            Command::MachineGatewaySet(body) => {
+                if context.cancel.is_cancelled() {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "The gateway change was cancelled.",
+                    ));
+                }
+                let requests = self.gateway_control.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::Unsupported,
+                        "This composition has no persisted gateway control.",
+                    )
+                })?;
+                let saved = requests.request(context.id, &body.choice)?;
+                return Ok(CommandResult::MachineGatewaySet(
+                    orch_link_contract::commands::MachineGatewaySetResult {
+                        choice: saved.choice,
+                        changed: saved.changed,
+                    },
+                ));
+            }
+            Command::MachinePrograms(native) => {
                 use orch_api_contract::machine_programs::MachineProgramsCommand;
+                if !native.coherent() {
+                    return Err(CommandError::new(
+                        ErrorCode::Unsupported,
+                        "the native program decision has no valid original manager attribution",
+                    ));
+                }
+                let confirmation = native.confirmation;
+                let request = native.request;
                 let harness = match &request {
                     MachineProgramsCommand::ConfirmHarness { kind, path } => {
                         Some((kind.as_str(), path.as_str(), true))
@@ -427,6 +541,7 @@ impl CommandHandler for Dispatcher {
                         kind,
                         selected.as_deref(),
                         confirm.then_some(path),
+                        confirmation,
                     )?;
                     discovery.refresh(&self.policy).await;
                     let facts = self.report_local_programs(publisher.as_ref()).await;
@@ -484,7 +599,18 @@ impl CommandHandler for Dispatcher {
                 }
                 return Ok(CommandResult::MachinePrograms(facts));
             }
-            Command::MachinePolicySet(body) => return self.machine_policy_set(&body.values),
+            Command::MachinePolicySet(body) => {
+                let reply = self.machine_policy_set(&body.values)?;
+                if body
+                    .values
+                    .contains_key(orch_link_contract::policy::PolicyKey::ExecPlatform.as_str())
+                {
+                    for role in &self.answer_roles {
+                        role.review_system().await?;
+                    }
+                }
+                return Ok(reply);
+            }
             Command::MachineUpdateNow(body) => {
                 let _ = self.policy.reload_from_file();
                 return self
@@ -502,10 +628,28 @@ impl CommandHandler for Dispatcher {
         let gated = self.policy.gate(command)?;
         let role = self.role_for(&gated.command)?;
         let body = gated.command.body().unwrap_or(serde_json::Value::Null);
+        // A clone's native watchdog follows received data. Its admission deadline still
+        // applies before acceptance, and cancellation drops the owned Git process group.
+        if kind == CommandKind::GitPrepare {
+            let cancel = context.cancel.clone();
+            let call = Call {
+                work_deadline: None,
+                context,
+                clamps: gated.clamps,
+            };
+            return tokio::select! {
+                result = role.handle(call, gated.command) => result,
+                () = cancel.cancelled() => Err(CommandError::new(ErrorCode::Conflict, "the repository clone was cancelled")),
+            };
+        }
         let reported = body.get("work").filter(|work| !work.is_null());
+        let allowance = match &gated.command {
+            Command::NodeServerUpdate(body) => Some(body.timeout_secs),
+            _ => None,
+        };
         let budget = Duration::from_secs(
-            reported
-                .and_then(|work| work["timeout_secs"].as_u64())
+            allowance
+                .or_else(|| reported.and_then(|work| work["timeout_secs"].as_u64()))
                 .unwrap_or(u64::from(kind.deadline_secs())),
         );
         let cooperative = reported.is_some()
@@ -514,6 +658,7 @@ impl CommandHandler for Dispatcher {
                 CommandKind::ProviderGenerate
                     | CommandKind::FsSnapshot
                     | CommandKind::FsMaterialize
+                    | CommandKind::FsMaterializeIfAbsent
                     | CommandKind::FsDataExport
                     | CommandKind::FsDataImport
                     | CommandKind::FsRestore
@@ -530,7 +675,45 @@ impl CommandHandler for Dispatcher {
                     | CommandKind::NodeRuntimeVolumeImport
             );
         let cancel = context.cancel.clone();
+        let accepted_at = self.clock.now();
+        let due = tokio::time::Instant::now()
+            .checked_add(budget)
+            .ok_or_else(|| {
+                CommandError::new(
+                    ErrorCode::Unsupported,
+                    "the operation's allowance is outside the native timer range",
+                )
+            })?;
+        let work_deadline = reported
+            .map(|value| {
+                let report: orch_link_contract::commands::WorkReport =
+                    serde_json::from_value(value.clone()).map_err(|_| {
+                        CommandError::new(ErrorCode::Internal, "the work report is invalid")
+                    })?;
+                let span = chrono::Duration::from_std(budget).map_err(|_| {
+                    CommandError::new(
+                        ErrorCode::Unsupported,
+                        "the operation's allowance is outside the native clock range",
+                    )
+                })?;
+                let at = accepted_at.checked_add_signed(span).ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::Unsupported,
+                        "the operation's deadline is outside the native clock range",
+                    )
+                })?;
+                Ok::<_, CommandError>(orch_api_contract::workspace::JobWorkDeadline {
+                    command: context.id,
+                    phase: report.phase,
+                    accepted_at: orch_types::Time::new(accepted_at),
+                    at: orch_types::Time::new(at),
+                    seconds: budget.as_secs(),
+                    policy: report.timeout_policy,
+                })
+            })
+            .transpose()?;
         let call = Call {
+            work_deadline,
             context,
             clamps: gated.clamps,
         };
@@ -539,7 +722,7 @@ impl CommandHandler for Dispatcher {
         if cooperative {
             return tokio::select! {
                 outcome = &mut operation => outcome,
-                () = tokio::time::sleep(budget) => {
+                () = tokio::time::sleep_until(due) => {
                     cancel.cancel();
                     // Keep owning the future until its helper, streams and blocking workers have joined.
                     let _ = operation.await;
@@ -547,7 +730,7 @@ impl CommandHandler for Dispatcher {
                 }
             };
         }
-        match tokio::time::timeout(budget, operation).await {
+        match tokio::time::timeout_at(due, operation).await {
             Ok(outcome) => outcome,
             Err(_) => Err(CommandError::new(
                 ErrorCode::Timeout,
@@ -598,6 +781,12 @@ mod tests {
 
     fn context() -> CommandContext {
         CommandContext {
+            authority_deadline: None,
+            native_members: None,
+            native_revision: None,
+
+            native_fences: None,
+            native_target: None,
             id: new_id(),
             key: None,
             deadline: Time::new(chrono::Utc::now() + chrono::Duration::minutes(5)),
@@ -629,11 +818,16 @@ mod tests {
     #[cfg(unix)]
     #[async_trait]
     impl crate::events::Publisher for LocalProgramReports {
-        async fn publish(
+        async fn publish_from(
             &self,
+            native_opening_id: Option<orch_types::Id>,
             stream: orch_link_contract::streams::Stream,
             event: orch_link_contract::events::Event,
         ) -> Result<(), orch_link::streams::PublishError> {
+            assert!(
+                native_opening_id.is_none(),
+                "machine facts have no physical session"
+            );
             assert_eq!(stream, orch_link_contract::streams::Stream::Machine);
             let orch_link_contract::events::Event::MachineFacts(facts) = event else {
                 panic!("only local program facts are published")
@@ -684,13 +878,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn program_confirmation() -> orch_agent_programs::confirmation::Confirmation {
+        orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        }
+    }
+
+    #[cfg(unix)]
     fn harness_action(action: &str, kind: &str, path: &std::path::Path) -> Command {
-        Command::MachinePrograms(
-            serde_json::from_value(serde_json::json!({
+        Command::MachinePrograms(orch_link_contract::commands::MachineProgramsRequest {
+            request: serde_json::from_value(serde_json::json!({
                 "action":action,"kind":kind,"path":path.to_string_lossy()
             }))
             .unwrap(),
-        )
+            confirmation: (action == "confirm_harness").then(program_confirmation),
+        })
     }
 
     #[cfg(unix)]
@@ -755,7 +958,12 @@ mod tests {
             .unwrap();
         dispatcher
             .policy
-            .change_harness("claude-code", None, Some("/kept/claude"))
+            .change_harness(
+                "claude-code",
+                None,
+                Some("/kept/claude"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         // Reuse the existing dispatch tests' observation headroom, while the real admission writer stays held.
         let admission = Arc::clone(&dispatcher.turn_admission).write_owned().await;
@@ -805,9 +1013,10 @@ mod tests {
             Duration::from_secs(30),
             dispatcher.handle(
                 context(),
-                Command::MachinePrograms(
-                    orch_api_contract::machine_programs::MachineProgramsCommand::Reload,
-                ),
+                Command::MachinePrograms(orch_link_contract::commands::MachineProgramsRequest {
+                    request: orch_api_contract::machine_programs::MachineProgramsCommand::Reload,
+                    confirmation: None,
+                }),
             ),
         )
         .await
@@ -819,7 +1028,12 @@ mod tests {
         assert_eq!(facts.harnesses[0].version, "0.167.0");
         dispatcher
             .policy
-            .change_harness("codex", replacement.to_str(), Some("codex"))
+            .change_harness(
+                "codex",
+                replacement.to_str(),
+                Some("codex"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         let result = tokio::time::timeout(
             Duration::from_secs(30),
@@ -956,9 +1170,11 @@ mod tests {
 
     fn record() -> Command {
         Command::FsRecord(orch_link_contract::source::FsRecord {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: new_id(),
             snapshot_id: new_id(),
             directory: String::new(),
+            wait_for_indexing: true,
             kind: orch_link_contract::source::RecordKind::Turn,
             record_days: 1,
             max_bytes: 1024,
@@ -1218,12 +1434,12 @@ mod tests {
             "mode": "new", "native_session_ref": null, "archive": null, "history": null,
             "upto_turn_ordinal": null, "workspace_root": "/etc", "instruction_root_marker": false,
             "directory": "/etc", "cwd": "/etc", "mounts": [],
-            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request",
+            "model": "m", "effort": null, "params": {}, "approval_mode": "on_request", "web_action_wait_secs": 120,
             "sandbox_mode": "workspace", "instructions": "", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": new_id() },
             "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         }))
         .unwrap();
         let error = dispatcher
@@ -1232,6 +1448,95 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "policy.root_not_allowed");
         assert_eq!(role.seen.load(Ordering::SeqCst), 0, "the role never saw it");
+    }
+
+    struct QuietFileWork {
+        observed: Mutex<Vec<serde_json::Value>>,
+        joined: AtomicUsize,
+    }
+    #[async_trait]
+    impl RoleHandler for QuietFileWork {
+        fn role(&self) -> Role {
+            Role::Node
+        }
+        fn takes(&self) -> &'static [CommandKind] {
+            &[CommandKind::NodeMountMeasure]
+        }
+        async fn handle(&self, call: Call, _: Command) -> Result<CommandResult, CommandError> {
+            self.observed
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(call.work_deadline).unwrap());
+            call.context.cancel.cancelled().await;
+            self.joined.fetch_add(1, Ordering::SeqCst);
+            Err(CommandError::new(
+                ErrorCode::Conflict,
+                "stopped after cleanup",
+            ))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_filesystem_command_reports_the_same_captured_budget_that_cancels_and_joins_it()
+    {
+        use orch_link_contract::commands::{MountData, NodeMountMeasure, WorkReport};
+        let mut config = ConnectorConfig::default();
+        config.connector.roles = vec!["node".into()];
+        let mut dispatcher = dispatcher(config);
+        let at: chrono::DateTime<chrono::Utc> = "2026-11-15T10:00:00Z".parse().unwrap();
+        let clock = Arc::new(orch_types::ManualClock::new(at));
+        dispatcher.clock(clock.clone());
+        let work = Arc::new(QuietFileWork {
+            observed: Mutex::new(Vec::new()),
+            joined: AtomicUsize::new(0),
+        });
+        let role: Arc<dyn RoleHandler> = work.clone();
+        dispatcher.add(&role).unwrap();
+        let mount = new_id();
+        let error = dispatcher
+            .handle(
+                context(),
+                Command::NodeMountMeasure(NodeMountMeasure {
+                    driver: "test".into(),
+                    mount_id: mount,
+                    data: MountData::Volume {
+                        name: format!("orch-mount-{mount}"),
+                        storage: None,
+                    },
+                    work: Some(WorkReport {
+                        files_total: None,
+                        bytes_total: None,
+                        job_id: new_id(),
+                        phase: "measure".into(),
+                        timeout_secs: 1,
+                        timeout_policy: None,
+                    }),
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert_eq!(
+            work.joined.load(Ordering::SeqCst),
+            1,
+            "the captured deadline still waits for native cleanup"
+        );
+        let captured = work.observed.lock().unwrap()[0].clone();
+        assert_eq!(
+            captured["accepted_at"],
+            serde_json::to_value(Time::new(at)).unwrap()
+        );
+        assert_eq!(
+            captured["at"],
+            serde_json::to_value(Time::new(at + chrono::Duration::seconds(1))).unwrap()
+        );
+        assert_eq!(captured["seconds"], 1);
+        clock.advance(chrono::Duration::hours(1));
+        assert_eq!(
+            work.observed.lock().unwrap()[0],
+            captured,
+            "a later clock or setting cannot rewrite the accepted budget"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1284,5 +1589,56 @@ mod tests {
         assert_eq!(result.applied, ["environment.roots"]);
         assert_eq!(result.refused, ["environment.terminal"]);
         assert_eq!(result.policy.environment_roots, ["/srv"]);
+    }
+
+    struct ServerPreparation {
+        wait: Duration,
+    }
+    #[async_trait]
+    impl RoleHandler for ServerPreparation {
+        fn role(&self) -> Role {
+            Role::Node
+        }
+        fn takes(&self) -> &'static [CommandKind] {
+            &[CommandKind::NodeServerUpdate]
+        }
+        async fn handle(&self, _: Call, command: Command) -> Result<CommandResult, CommandError> {
+            let Command::NodeServerUpdate(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "this fixture prepares only the server updater",
+                ));
+            };
+            tokio::time::sleep(self.wait).await;
+            Ok(CommandResult::NodeServerUpdate(
+                orch_api_contract::admin::ServerUpdateObservation {
+                    stage: orch_api_contract::admin::ServerUpdateStage::Queued,
+                    reason: None,
+                    from_version: None,
+                    to_version: body.release,
+                },
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn a_server_update_uses_its_accepted_allowance_after_the_command_default_has_elapsed() {
+        let nominal = u64::from(CommandKind::NodeServerUpdate.deadline_secs());
+        let mut dispatcher = dispatcher(ConnectorConfig::default());
+        let role: Arc<dyn RoleHandler> = Arc::new(ServerPreparation {
+            wait: Duration::from_secs(nominal + 1),
+        });
+        dispatcher.add(&role).unwrap();
+        let result = dispatcher
+            .handle(
+                context(),
+                Command::NodeServerUpdate(orch_link_contract::commands::NodeServerUpdate {
+                    job_id: new_id(),
+                    release: "1.2.3".into(),
+                    timeout_secs: nominal * 2,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, CommandResult::NodeServerUpdate(_)));
     }
 }

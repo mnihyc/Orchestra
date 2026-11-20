@@ -8,6 +8,7 @@ use orch_link_contract::commands::FsCopy;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileCopyInput {
+    access: orch_link_contract::commands::FsAccess,
     environment: Id,
     generation: i32,
     machine: Id,
@@ -26,6 +27,7 @@ impl FileCopyInput {
         to: String,
     ) -> Self {
         Self {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment: env.id,
             generation: env.generation,
             machine,
@@ -35,6 +37,13 @@ impl FileCopyInput {
             to,
         }
     }
+    /// Only the current native producer supplies the scope captured by this actual operation.
+    #[must_use]
+    pub fn with_access(mut self, access: orch_link_contract::commands::FsAccess) -> Self {
+        self.access = access;
+        self
+    }
+
     /// The actual Environment whose files were copied.
     pub fn environment(&self) -> Id {
         self.environment
@@ -58,6 +67,7 @@ impl FileCopyInput {
     /// The same native copy body, without authority fields.
     pub fn command(&self) -> FsCopy {
         FsCopy {
+            access: self.access,
             environment_id: self.environment,
             from: self.from.clone(),
             to: self.to.clone(),
@@ -123,7 +133,22 @@ impl Source for FileCopySource {
         input: &'a FileCopyInput,
         env: &'a Self::Value,
     ) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(require_write(conn, principal, env, input.thread))
+        Box::pin(async move {
+            require_write(conn, principal, env, input.thread).await?;
+            let now = orch_authz::file_reach::effective(conn, principal, env.id, Policy::default())
+                .await?;
+            let covered =
+                |asked: Option<orch_access_contract::permissions::FileReach>,
+                 held: Option<orch_access_contract::permissions::FileReach>| {
+                    asked.is_none_or(|asked| held.is_some_and(|held| held >= asked))
+                };
+            if !covered(input.access.manage, now.manage)
+                || !covered(input.access.view, now.view.or(now.manage))
+            {
+                return Err(Error::Refused);
+            }
+            Ok(())
+        })
     }
     fn locks<'a>(
         conn: &'a mut Conn,
@@ -294,6 +319,8 @@ impl FileCopyCommand {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
+                native_target: None,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

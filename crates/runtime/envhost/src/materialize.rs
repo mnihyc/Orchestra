@@ -840,6 +840,7 @@ mod tests {
             root.path(),
             &[],
             Gates {
+                files_reach: orch_link_contract::policy::FileReach::Machine,
                 remote_write: false,
                 deliver_files: true,
                 terminal: false,

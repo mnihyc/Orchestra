@@ -23,7 +23,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     if (status === null) cache.setQueryData(queryKey, null);
     else cache.getQueryCache().build(cache, { queryKey }).setState({ status: 'error', data: undefined,
       error: new ApiError({type: 'about:blank', title: 'Private', status, code: status === 403 ? 'authz.denied' : 'not_found', detail: 'Private', request_id:'private-provider'}, null) });
-    const view = show(<QueryClientProvider client={cache}><SettingSummary def={{key, title: 'Embeddings'}} value={{kind: 'model', provider_id: 'private-provider', model_name: 'private-model', dimensions: 256}} /></QueryClientProvider>);
+    const view = show(<QueryClientProvider client={cache}><SettingSummary def={{key, title: 'Embeddings'}} value={key === 'auto.summarizer' ? {kind: 'model', backend: {route: 'summarizer-model.complete', offering: {provider: 'private-provider', offering: 'private-model'}, config: null}} : {kind: 'model', provider_id: 'private-provider', model_name: 'private-model', dimensions: 256}} /></QueryClientProvider>);
     expect(await screen.findByText(i18n.t('settings.compact.managed'))).toHaveClass('text-text-muted');
     expect(view.container).not.toHaveTextContent('private-model');
     expect(view.container).not.toHaveTextContent('256');
@@ -34,9 +34,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
   it.each(['auto.summarizer', 'search.semantic.embeddings'] as const)(`keeps supplied model facts while its provider name is unread for %s (${locale})`, async (key) => {
     await setLocale(locale); const cache = nativeNames();
-    const view = show(<QueryClientProvider client={cache}><SettingSummary def={{key, title: 'Embeddings'}} value={{kind: 'model', provider_id: 'unread-provider', model_name: 'Supplied model', dimensions: 256}} /></QueryClientProvider>);
-    expect(screen.getByText(i18n.t('places.providerDefault.selected'))).toBeVisible();
-    expect(view.container).toHaveTextContent('Supplied model'); expect(view.container).toHaveTextContent('256');
+    const view = show(<QueryClientProvider client={cache}><SettingSummary def={{key, title: 'Embeddings'}} value={key === 'auto.summarizer' ? {kind: 'model', backend: {route: 'summarizer-model.complete', offering: {provider: 'unread-provider', offering: 'Supplied model'}, config: null}} : {kind: 'model', provider_id: 'unread-provider', model_name: 'Supplied model', dimensions: 256}} /></QueryClientProvider>);
+    // The summarizer reads as one sentence (a model, its provider and its model); the embeddings keep their fields.
+    if (key === 'auto.summarizer') expect(view.container).toHaveTextContent(i18n.t('places.providerDefault.selected'));
+    else { expect(screen.getByText(i18n.t('places.providerDefault.selected'))).toBeVisible(); expect(view.container).toHaveTextContent('256'); }
+    expect(view.container).toHaveTextContent('Supplied model');
     expect(view.container).not.toHaveTextContent('unread-provider');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     await act(async () => { await Promise.resolve(); }); expect(calls.read).not.toHaveBeenCalled();
