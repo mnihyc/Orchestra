@@ -2,6 +2,7 @@
 import { linkTo } from '@/lib/links';
 import { copyText } from '@/ui/clipboard';
 import { moveScoped, panelScopeEntries } from '@/features/workbench/panelScope';
+import { LINK_OPENINGS, setOpenLinks, sidebarChoices } from '@/features/navigation/preferences';
 import { useWorkbench } from '@/features/workbench/store';
 import { contentAddress } from './contentAddress';
 import { openContent } from './contentNavigation';
@@ -40,6 +41,9 @@ export function tabEntries(
       onSelect: () => change((current) => setPinned(current, tabId, place.tab.pinned !== true)) },
     ...(path === undefined || path === '' ? [] : [{ type: 'label' as const, id: 'target-path', label: path }]),
     ...panelScopeEntries(place.tab, t),
+    { type: 'sub', id: 'open-links', label: t('workbench.openLinks.label'), entries: [{ type: 'radio', id: 'open-links-choice', label: t('workbench.openLinks.label'),
+      value: sidebarChoices().openLinks ?? 'automatic', onValueChange: (value) => { const choice = LINK_OPENINGS.find((candidate) => candidate === value); if (choice !== undefined) setOpenLinks(choice); },
+      options: LINK_OPENINGS.map((value) => ({ value, name: t(`workbench.openLinks.${value}`) })) }] },
     ...(!shown ? [{
       id: 'show', action: 'show',
       label: t('workbench.tab.show'),
