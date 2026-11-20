@@ -580,7 +580,10 @@ pub fn merge_tables(base: &mut toml::Table, overlay: &toml::Table) {
 #[must_use]
 pub fn effective_config(options: &HomeOptions, profile_config: &Json) -> toml::Table {
     let mut config = base_config(options);
-    if let Some(toml::Value::Table(overlay)) = toml_of(profile_config) {
+    if let Some(toml::Value::Table(mut overlay)) = toml_of(profile_config) {
+        // This is the adapter's evidence deadline, not a setting of the native program.
+        overlay.remove("native_result_wait_ms");
+        overlay.remove("native_result_buffer_bytes");
         merge_tables(&mut config, &overlay);
     }
     if options.managed {
@@ -752,6 +755,16 @@ pub fn app_server_args(config_overrides: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_native_result_wait_is_kept_out_of_the_programs_configuration() {
+        let config = effective_config(
+            &HomeOptions::default(),
+            &json!({"native_result_wait_ms":3000,"native_result_buffer_bytes":16384}),
+        );
+        assert!(!config.contains_key("native_result_wait_ms"));
+        assert!(!config.contains_key("native_result_buffer_bytes"));
+    }
 
     #[test]
     fn forwarded_startup_pins_a_non_vendor_identity_without_a_session_or_a_credential()

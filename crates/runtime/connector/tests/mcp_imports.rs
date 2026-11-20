@@ -63,6 +63,7 @@ async fn rig_with_a_configured_server() -> (EnvRig, std::path::PathBuf) {
 #[cfg(target_os = "linux")]
 fn import_of(rig: &EnvRig, server_id: orch_types::Id, name: &str) -> McpImport {
     McpImport {
+        profile: None,
         expected_fingerprint: None,
         stored: None,
         transfer: None,
@@ -218,8 +219,7 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found_where_the_owner_allows_none()
- {
+async fn import_policy_refuses_copies_without_hiding_the_programs_native_configuration() {
     let (mut rig, workspace) = rig_with_a_configured_server().await;
     rig.attach(&workspace).await;
     let missing = rig
@@ -242,10 +242,11 @@ async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found
     .unwrap();
     closed.succeed(&start).await;
     let facts = closed.attach(&workspace).await;
-    assert_eq!(
-        facts["mcp_found"],
-        json!([]),
-        "none is reported where none may be imported"
+    assert_eq!(facts["mcp_found"].as_array().unwrap().len(), 1);
+    assert_eq!(facts["mcp_found"][0]["name"], "github");
+    assert!(
+        !facts.to_string().contains("command"),
+        "only safe native configuration facts are reported"
     );
     assert_eq!(
         closed.fail(&import_of(&closed, new_id(), "github")).await,
@@ -269,6 +270,7 @@ async fn a_stored_native_duplicate_copies_the_saved_file_and_scrubs_a_nonowners_
     for include_secrets in [true, false] {
         let target = new_id();
         let body = McpImport {
+            profile: None,
             expected_fingerprint: None,
             environment_id: None,
             transfer: None,
@@ -364,6 +366,7 @@ async fn a_saved_mcp_snapshot_crosses_only_to_its_sealed_recipient_and_keeps_one
     for include_secrets in [true, false] {
         let created = new_id();
         let read = McpImport {
+            profile: None,
             expected_fingerprint: None,
             environment_id: None,
             stored: Some(McpStoredCopy {
@@ -409,6 +412,7 @@ async fn a_saved_mcp_snapshot_crosses_only_to_its_sealed_recipient_and_keeps_one
             "a sealed read is not a new source-machine file"
         );
         let receive = McpImport {
+            profile: None,
             transfer: Some(McpSnapshotTransfer::Receive {
                 recipient: target.machine_id,
                 snapshot: issued.snapshot.clone().unwrap(),
@@ -468,4 +472,37 @@ async fn a_saved_mcp_snapshot_crosses_only_to_its_sealed_recipient_and_keeps_one
     source.stop().await;
     target.stop().await;
     other.stop().await;
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn two_native_homes_with_the_same_server_name_import_from_the_profile_that_was_chosen() {
+    let (mut rig, workspace) = rig_with_a_configured_server().await;
+    let other_provider = new_id();
+    let other_agent = new_id();
+    let start: AgentStart = serde_json::from_value(json!({
+        "provider_id":other_provider,"agent_id":other_agent,"harness_kind":"fake",
+        "profile":{"harness_version":null,"config":{"mcp_servers":[{"name":"github","command":["second-native-command"],"env":{},"secrets":{}}]},"env":{}},"home":null
+    })).unwrap();
+    rig.succeed(&start).await;
+    let facts = rig.attach(&workspace).await;
+    let found = facts["mcp_found"].as_array().unwrap();
+    assert_eq!(found.len(), 2);
+    assert!(
+        found
+            .iter()
+            .any(|entry| entry["profile"]["agent_id"] == json!(other_agent))
+    );
+    let server = new_id();
+    let mut request = import_of(&rig, server, "github");
+    request.profile = Some(orch_agent_contract::discovery::McpProfile {
+        provider_id: other_provider,
+        agent_id: other_agent,
+    });
+    rig.succeed(&request).await;
+    let copy = std::fs::read_to_string(rig.data.path().join("mcp").join(format!("{server}.json")))
+        .unwrap();
+    assert!(copy.contains("second-native-command"));
+    assert!(!copy.contains(SECRET));
+    rig.stop().await;
 }

@@ -18,7 +18,11 @@ import { useStatusValues } from './useValues';
 
 function Value({ title, value }: { title: string; value: StatusValue }) {
   const preview = value.subject === undefined ? undefined : resourcePreview(value.subject);
-  return <DetailCard label={title} content={preview?.content ?? (() => <div className="min-w-48 p-3"><h3 className="mb-2 text-sm font-medium">{title}</h3><Facts compact rows={value.details ?? [{ name: title, value: value.text }]} />{value.hint !== undefined && <p className="mt-2 text-sm text-text-muted">{value.hint}</p>}</div>)}
+  return <DetailCard label={title} content={preview?.content ?? (() => <div className="min-w-48 p-3">
+    {(value.details !== undefined || title !== value.text) && <h3 className="mb-2 text-sm font-medium">{title}</h3>}
+    {value.details === undefined ? <p className="wrap-anywhere text-sm">{value.text}</p> : <Facts compact rows={value.details} />}
+    {value.hint !== undefined && <p className="mt-2 text-sm text-text-muted">{value.hint}</p>}
+  </div>)}
     passingContent={value.hint === undefined ? undefined : () => <div className="p-3 text-sm text-text-muted">{value.hint}</div>}
     className={cx('focus-inset px-1 py-0.5 text-sm whitespace-nowrap', value.warning && 'text-warning-text')}>
     {value.subject !== undefined && <ResourceGlyph kind={value.subject.kind} />}
