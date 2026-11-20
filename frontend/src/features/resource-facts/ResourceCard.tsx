@@ -1,4 +1,5 @@
 /** Compact resource detail bodies and their permitted quick actions, mounted only by an open inspection card. */
+import { freeCpuWords, hostFreeCpuMillis } from '@/features/resources/hosts/words';
 import { CardSharing } from '@/features/access/CardSharing';
 import { CopySetupResult } from '@/features/duplicate/CopySetup';
 import { CardHome, cardHome } from '@/features/navigation/CardHome';
@@ -108,8 +109,8 @@ function HostDetails({ host, subject }: { host: Host; subject: Extract<ResourceS
   const { t } = useTranslation();
   const format = useFormatContext();
   const place = subject.place;
-  const declared = place?.declared ?? host.declared;
   const capacity = place?.capacity ?? host.capacity;
+  const measured = place?.used.memory_mb ?? host.usage?.memory_used_mb;
   const manage = holds(host.access, 'host.manage');
   return <>
     <Facts compact rows={[
@@ -119,11 +120,12 @@ function HostDetails({ host, subject }: { host: Host; subject: Extract<ResourceS
       { name: t('resourceFacts.mine'), value: formatNumber(host.mine, format.locale) },
       { name: t('resourceFacts.schedulable'), value: t(host.schedulable ? 'resourceFacts.yes' : 'resourceFacts.no') },
       ...(host.usage?.memory_used_mb === undefined || host.usage.memory_used_mb === null ? [] : [{ name: t('resourceFacts.memoryNow'), value: formatBytes(host.usage.memory_used_mb * MEMORY_BYTES_PER_MB, format.locale) }]),
-      ...(host.usage?.cpu_percent_milli === undefined || host.usage.cpu_percent_milli === null ? [] : [{ name: t('resourceFacts.cpu'), value: formatPercent(host.usage.cpu_percent_milli / 100_000, format.locale) }]),
+      ...(host.usage?.cpu_percent_milli === undefined || host.usage.cpu_percent_milli === null ? [] : [{ name: t('resourceFacts.cpu'), value: freeCpuWords(hostFreeCpuMillis(host), t, format.locale) }]),
       ...(host.usage === null || host.usage === undefined ? [] : [{ name: t('resourceFacts.observed'), value: <RelativeTime at={host.usage.observed_at} /> }]),
       ...(place?.storages ?? host.storages).map((storage) => ({ name: storage.name, value: t('resourceFacts.free', { size: formatBytes(storage.free_gb * DISK_BYTES_PER_GB, format.locale) }) })),
     ]} />
-    {capacity.memory_mb > 0 && <Meter neutral showActual value={declared.memory_mb / capacity.memory_mb * 100} label={t('resourceFacts.declaredMemory', { used: formatBytes(declared.memory_mb * MEMORY_BYTES_PER_MB, format.locale), total: formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, format.locale) })} />}
+    {capacity.memory_mb > 0 && measured !== undefined && measured !== null && <Meter neutral showActual value={measured / capacity.memory_mb * 100}
+      label={t('resourceFacts.memoryFree', { free: formatBytes(Math.max(0, capacity.memory_mb - measured) * MEMORY_BYTES_PER_MB, format.locale), total: formatBytes(capacity.memory_mb * MEMORY_BYTES_PER_MB, format.locale) })} />}
     <div className="flex flex-wrap items-center justify-between gap-2">
       <a href={`/resources/hosts/${host.id}`} className="text-sm text-accent-text hover:underline">{t('resourceFacts.openHost')}</a>
       {manage && <Button size="sm" admin={adminSpec(host, 'host.manage')} onClick={() => openChange({ kind: 'host', id: host.id, name: host.name }, { kind: 'recycle' })}>{t('change.menu.recycle')}</Button>}

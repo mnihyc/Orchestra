@@ -6,27 +6,17 @@
  * say where they are). The label itself is `src/lib/placeLabel.ts`: the name alone, or with where it is when the
  * name is shared ("dep2 · Acme" against "dep2 · Beta").
  */
-import { useQueries, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useCallback, useMemo } from 'react';
 import { useStoreWithEqualityFn } from 'zustand/traditional';
 
-import { fetchTree, orgsQuery } from '@/api/nodes';
+import { orgsQuery } from '@/api/nodes';
 import type { NodeKind, TreeNode } from '@/generated/api-types';
 import { type KnownPlaces, knownPlaces, type Placed, placeLabel, placeLabels } from '@/lib/placeLabel';
 import { type OrgTree, pathTo, useTreeStore } from '@/realtime/stores/tree';
 
 /** The kinds of node that are places: what a person names, finds and is given access to by where it lies. */
 const PLACE_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(['org', 'project', 'topic']);
-
-/**
- * How many of the reader's orgs have their trees read for labels besides the trees the page follows: the orgs the
- * rail shows without scrolling on a laptop's screen. Somebody in more orgs than that is an administrator of many,
- * whose trees together would be a large read at every start; the lists they open still tell their own rows apart.
- */
-const TREES_READ_FOR_LABELS = 20;
-
-/** How long a tree read for labels is kept before it is read again: names seldom change, and an act that changes one asks again at once. */
-const LABEL_TREES_FRESH_MS = 5 * 60_000;
 
 const NO_NAME_TREES: ReadonlyMap<string, OrgTree> = new Map();
 
@@ -91,44 +81,23 @@ export function placedOfRow(tree: OrgTree, node: TreeNode): Placed {
   return { id: node.id, name: node.name, above: pathTo(tree, node.id).slice(0, -1).map((one) => ({ id: one.id, name: one.name })), address: node.address };
 }
 
-/** The rows of each tree read, as one value: a function that stays the same, so that the value stays the same object while no tree changed. */
-const rowsOfTrees = (results: readonly { data?: { nodes: TreeNode[] } | undefined }[]): (TreeNode[] | undefined)[] => results.map((result) => result.data?.nodes);
-
-/** Rows of a tree that was read, as a tree the label can walk. */
-const asTree = (rows: readonly TreeNode[]): OrgTree => ({ nodes: new Map(rows.map((row) => [row.id, row])), lastSeq: 0, loaded: true, error: null });
-
 /**
  * The places the reader can see, as far as the page knows them. `trees: false` asks for the root orgs alone (the
  * rail, the org switcher), whose names the list of orgs tells apart by their addresses.
  */
-export function useKnownPlaces({ trees = true, loadTrees = false }: { trees?: boolean; loadTrees?: boolean } = {}): KnownPlaces {
+export function useKnownPlaces({ trees = true }: { trees?: boolean; loadTrees?: boolean } = {}): KnownPlaces {
   const byOrg = useNameTrees(trees);
   // The orgs as whatever asked for them read them: this asks nothing itself.
   const orgs = useQuery({ ...orgsQuery, enabled: false }).data;
-  const others = useQueries({
-    queries: (trees && loadTrees ? (orgs ?? []) : [])
-      .filter((org) => !byOrg.has(org.id))
-      .slice(0, TREES_READ_FOR_LABELS)
-      .map((org) => ({
-        queryKey: ['tree-places', org.id] as const,
-        queryFn: ({ signal }: { signal: AbortSignal }) => fetchTree(org.id, null, signal),
-        staleTime: LABEL_TREES_FRESH_MS,
-      })),
-    combine: rowsOfTrees,
-  });
-  const read = useMemo(() => others.filter((rows): rows is TreeNode[] => rows !== undefined), [others]);
   return useMemo(() => {
     const places: Placed[] = [];
     for (const org of orgs ?? []) places.push({ id: org.id, name: org.name, above: [], address: org.address });
     if (trees) {
       for (const tree of byOrg.values()) places.push(...placesIn(tree));
-      for (const rows of read) {
-        const tree = asTree(rows);
-        for (const node of rows) if (!node.deleted && PLACE_KINDS.has(node.kind)) places.push(placedOfRow(tree, node));
-      }
+
     }
     return knownPlaces(places);
-  }, [byOrg, orgs, read, trees]);
+  }, [byOrg, orgs, trees]);
 }
 
 /** The labels of the places of a list, told apart from each other and from every place the reader can see. `trees: false` for a list of root orgs. */
