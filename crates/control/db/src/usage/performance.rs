@@ -14,7 +14,9 @@ const PERCENT: i64 = 100;
 const SPEED_SCALE: f64 = orch_api_contract::performance::SPEED_SCALE as f64;
 
 /// The raw daily sums, merged before a percentile is selected.
-#[derive(Debug, Clone, Default, PartialEq, Eq, sqlx::FromRow)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, sqlx::FromRow, serde::Serialize, serde::Deserialize,
+)]
 pub struct Sums {
     /// Requests whose thinking was not streamed.
     pub hidden_requests: i64,
@@ -72,6 +74,37 @@ pub fn percentile(histogram: &Json, percent: i64) -> Option<f64> {
 }
 
 impl Sums {
+    /// Merges stored ranges without empty histogram buckets or masked representation overflow.
+    pub(super) fn merge_checked(&mut self, other: &Self) -> Option<()> {
+        fn change(was: i64, value: i64) -> Option<i64> {
+            let next = was.checked_add(value)?;
+            (next >= 0).then_some(next)
+        }
+        for (a, b) in [
+            (&mut self.hidden_requests, other.hidden_requests),
+            (&mut self.short_requests, other.short_requests),
+            (&mut self.requests, other.requests),
+            (&mut self.speed_tokens, other.speed_tokens),
+            (&mut self.generation_ms_sum, other.generation_ms_sum),
+        ] {
+            *a = change(*a, b)?;
+        }
+        for (a, b) in [
+            (&mut self.errors, &other.errors),
+            (&mut self.speed_buckets, &other.speed_buckets),
+            (&mut self.first_token_buckets, &other.first_token_buckets),
+        ] {
+            let mut all = counts(a);
+            for (key, n) in counts(b) {
+                let entry = all.entry(key).or_default();
+                *entry = change(*entry, n)?;
+            }
+            all.retain(|_, n| *n > 0);
+            *a = serde_json::json!(all);
+        }
+        Some(())
+    }
+
     /// Merges raw counts, so combining medians never means averaging medians.
     pub fn plus(&mut self, other: &Self) {
         self.hidden_requests += other.hidden_requests;

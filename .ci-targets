@@ -1,0 +1,7 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test everything_scale -- a_team_members_first_screen_is_served_in_under_one_hundred_milliseconds --nocapture
+web typecheck
+web lint
+web test -- tests/unit/first-wave.test.ts tests/component/area-navigation.test.tsx tests/component/thread-audience-banner.test.tsx
+web build

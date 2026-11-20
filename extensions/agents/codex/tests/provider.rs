@@ -296,3 +296,77 @@ async fn the_models_the_harness_lists_are_suggestions_with_what_each_offers_and_
     );
     rig.adapter.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_real_native_session_keeps_working_when_its_access_copy_is_replaced_during_output() {
+    use orch_agent_contract::descriptor::ArrangementType;
+    use orch_agent_contract::events::{SessionEvent, TurnOutcome};
+    use orch_agent_contract::session::{ProviderAccess, SessionMode};
+    use orch_testkit::doubles::model::Verdict;
+    let Some(mut rig) = Rig::start("copied-signin").await else {
+        return;
+    };
+    let original = common::fake::copied_chatgpt_token(1);
+    let replacement = common::fake::copied_chatgpt_token(2);
+    rig.mock.set_credential(Some(original.credential.expose()));
+    let base = rig.mock.responses_base_url();
+    // Both native account traffic and model traffic stay on the disposable scripted server.
+    std::fs::write(rig.home_path().join("config.toml"),format!("model_provider = \"copy_test\"\nmodel = \"mock-large\"\nchatgpt_base_url = {base:?}\n[model_providers.copy_test]\nname = \"Scripted native subscription\"\nbase_url = {base:?}\nwire_api = \"responses\"\nrequires_openai_auth = true\nsupports_websockets = false\n")).unwrap();
+    rig.boot_subscription().await;
+    rig.adapter.set_credential(original).await.unwrap();
+    assert!(!rig.home_path().join("auth.json").exists());
+    let thread = orch_types::new_id();
+    let mut spec = rig.spec(thread, SessionMode::New, None);
+    spec.provider = ProviderAccess::Shared {
+        provider_id: rig.provider_id,
+        form: "codex_access_token".into(),
+    };
+    spec.settings.arrangement = ArrangementType::CredentialShared;
+    rig.adapter.open_session(spec).await.unwrap();
+    rig.mock
+        .queue("say Before renewal.\nhold renewing-copy\nsay After renewal.")
+        .unwrap();
+    rig.adapter
+        .start_turn(rig.turn(thread, "Write the scripted response."))
+        .await
+        .unwrap();
+    rig.until(|event| {
+        matches!(
+            event,
+            AdapterEvent::Session {
+                event: SessionEvent::ItemDelta(_),
+                ..
+            }
+        )
+    })
+    .await;
+    rig.mock
+        .set_credential(Some(replacement.credential.expose()));
+    rig.adapter.set_credential(replacement).await.unwrap();
+    rig.mock.release("renewing-copy");
+    let ended = rig.until_turn_ends().await;
+    assert!(ended.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(end) if end.status==TurnOutcome::Completed)));
+    rig.mock.queue("say The new copy works.").unwrap();
+    let next = rig
+        .run_turn(thread, "Write the next scripted response.")
+        .await;
+    assert!(next.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(end) if end.status==TurnOutcome::Completed)));
+    let requests = rig.model_requests();
+    assert!(requests.len() >= 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.credential.verdict == Verdict::Accepted)
+    );
+    assert!(!rig.home_path().join("auth.json").exists());
+    rig.adapter.close_session(thread).await.unwrap();
+    let count = rig.model_requests().len();
+    assert!(
+        rig.adapter
+            .start_turn(rig.turn(thread, "This closed session cannot run."))
+            .await
+            .is_err()
+    );
+    assert_eq!(rig.model_requests().len(), count);
+    rig.adapter.stop().await.unwrap();
+}
