@@ -6,6 +6,14 @@ import { ApiError, createApiClient, done, ok, ReceiptAcknowledged, RENEW_BEFORE_
 import type { AuthResult, Me } from '@/generated/api-types';
 import { NetworkError, retryRead } from '@/lib/requests';
 import { beginOpening, openingId } from '@/lib/opening';
+import { i18n, setLocale } from '@/i18n';
+import { formatSpan } from '@/lib/time';
+import { errorText } from '@/ui/errorText';
+import type { HtmlReads } from '@/api/htmlReads';
+import { createServerClock } from '@/lib/serverClock';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 const BASE = 'http://orch.test/api/v1';
 
@@ -36,8 +44,227 @@ function server(answer: (request: Request, seen: Request[]) => Response | Promis
   return { fetch, seen, paths: () => seen.map((request) => `${request.method} ${new URL(request.url).pathname.replace('/api/v1', '')}`) };
 }
 
-afterEach(() => {
+function htmlStart(fetch: (request: Request) => Promise<Response>, path = '/thread/one'): HtmlReads {
+  const window: { __orchStartupReads?: HtmlReads; fetch: (path: string, options?: RequestInit) => Promise<Response>; location: URL; document: { querySelectorAll: () => never[] }; AbortController: typeof AbortController; Intl: typeof Intl; Date: typeof Date } = {
+    fetch: (path, options) => fetch(new Request(new URL(path, BASE), options)), location: new URL(path, BASE),
+    document: { querySelectorAll: () => [] }, AbortController, Intl, Date,
+  };
+  const script = readFileSync(resolve(process.cwd(), 'src/shell/startup.inline.js'), 'utf8');
+  runInNewContext(`${script}(window,{common:[],pages:[]});`, { window, URL, Request, Response, Headers, AbortController, Promise, Date, Intl });
+  if (window.__orchStartupReads === undefined) throw new Error('The HTML must own its early reads.');
+  return window.__orchStartupReads;
+}
+
+it('adopts the HTML session and bootstrap without another exchange or a false clock sample from script loading', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(0);
+  const earlyGrant = grant('synthetic-html-token');
+  const first = { person: me, state: { fromHtml: true } };
+  const early = server((request) => request.url.endsWith('/auth/session') ? json(200, earlyGrant, { Date: new Date().toUTCString() }) : json(200, first, { Date: new Date().toUTCString() }));
+  const startupReads = htmlStart(early.fetch);
+  await vi.waitFor(() => expect(early.paths()).toEqual(['POST /auth/session', 'GET /me/bootstrap']));
+  const fresh = { person: me, state: { fromExplicitRead: true } };
+  const ordinary = server((request) => request.url.endsWith('/auth/session') ? json(200, grant('synthetic-unexpected-token')) : json(200, fresh));
+  const clock = createServerClock(), observe = vi.spyOn(clock, 'observe');
+  vi.setSystemTime(10_000);
+  const options = { baseUrl: BASE, fetch: ordinary.fetch, clock, startupReads };
+  const client = createApiClient(options);
+  await expect(client.restore()).resolves.toBe(true);
+  expect(client.accessToken()).toBe(earlyGrant.access_token);
+  expect(await ok(client.api.GET('/me/bootstrap'))).toEqual(first);
+  expect(ordinary.paths()).toEqual([]);
+  expect(observe.mock.calls.every(([, sent, received]) => sent < 10_000 && received < 10_000)).toBe(true);
+  // The one-shot handoff cannot serve a stale answer to a later explicit read.
+  expect(await ok(client.api.GET('/me/bootstrap'))).toEqual(fresh);
+  expect(ordinary.paths()).toEqual(['GET /me/bootstrap']);
+});
+
+it('shows the addressed storage totals from one authorized read while the shell answer is still pending', async () => {
+  const admin = { ...grant('synthetic-storage'), user: { ...me, is_system_admin: true } };
+  const totals = { blob_count: 817 };
+  let finishBootstrap!: (response: Response) => void;
+  const early = server((request) => {
+    if (request.url.endsWith('/auth/session')) return json(200, admin);
+    if (request.url.endsWith('/me/bootstrap')) return new Promise<Response>((resolve) => { finishBootstrap = resolve; });
+    return json(200, totals);
+  });
+  const ordinary = server(() => json(200, { blob_count: 900 }));
+  const client = createApiClient({ baseUrl: BASE, fetch: ordinary.fetch, startupReads: htmlStart(early.fetch, '/admin/storage') });
+  await client.restore();
+  await vi.waitFor(() => expect(early.paths()).toContain('GET /admin/storage'));
+  expect(await ok(client.api.GET('/admin/storage'))).toEqual(totals);
+  finishBootstrap(json(200, { initial: true }));
+  expect(await ok(client.api.GET('/me/bootstrap'))).toEqual({ initial: true });
+  expect(ordinary.paths()).toEqual([]);
+  expect(early.seen.find((req) => req.url.endsWith('/admin/storage'))?.headers.get('authorization')).toBe('Bearer synthetic-storage');
+  expect(await ok(client.api.GET('/admin/storage'))).toEqual({ blob_count: 900 });
+  expect(ordinary.paths()).toEqual(['GET /admin/storage']);
+});
+
+it('drops an unclaimed storage opening when the same person changes authority', async () => {
+  const admin = { ...grant('synthetic-storage'), user: { ...me, is_system_admin: true } };
+  const early = server((request) => request.url.endsWith('/auth/session') ? json(200, admin) : json(200, { blob_count: 817 }));
+  const ordinary = server(() => problem(403, 'authz.denied'));
+  const client = createApiClient({ baseUrl: BASE, fetch: ordinary.fetch, startupReads: htmlStart(early.fetch, '/admin/storage/') });
+  await client.restore();
+  await vi.waitFor(() => expect(early.paths()).toContain('GET /admin/storage'));
+  client.session.setState({ readerVersion: (client.session.getState().readerVersion ?? 0) + 1 });
+  await expect(ok(client.api.GET('/admin/storage'))).rejects.toMatchObject({ status: 403 });
+  expect(ordinary.paths()).toEqual(['GET /admin/storage']);
+});
+
+it('leaves the storage read behind when navigating away and still adopts the original shell answer', async () => {
+  const admin = { ...grant('synthetic-storage'), user: { ...me, is_system_admin: true } };
+  const early = server((request) => request.url.endsWith('/auth/session') ? json(200, admin) : json(200, { initial: true }));
+  const ordinary = server(() => json(200, { blob_count: 901 }));
+  const opening = htmlStart(early.fetch, '/admin/storage');
+  const client = createApiClient({ baseUrl: BASE, fetch: ordinary.fetch, startupReads: opening });
+  await client.restore();
+  await vi.waitFor(() => expect(early.paths()).toContain('GET /admin/storage'));
+  opening.visit('/admin/overview');
+  opening.visit('/admin/storage');
+  expect(await ok(client.api.GET('/me/bootstrap'))).toEqual({ initial: true });
+  expect(await ok(client.api.GET('/admin/storage'))).toEqual({ blob_count: 901 });
+  expect(ordinary.paths()).toEqual(['GET /admin/storage']);
+});
+
+it('drops HTML replies when an explicit replacement arrives even for the same person', async () => {
+  vi.useFakeTimers();
+  let finish!: (response: Response) => void;
+  const early = server((request) => request.url.endsWith('/auth/session') ? json(200, grant('synthetic-html-old')) : new Promise((done) => { finish = done; }));
+  const startupReads = htmlStart(early.fetch);
+  await vi.waitFor(() => expect(early.seen).toHaveLength(2));
+  const ordinary = server(() => json(200, { person: me, state: { current: true } }));
+  const options = { baseUrl: BASE, fetch: ordinary.fetch, startupReads };
+  const client = createApiClient(options);
+  client.adopt(grant('synthetic-explicit-replacement'));
+  finish(json(200, { person: me, state: { formerPrivateChoice: true } }));
+  expect(await ok(client.api.GET('/me/bootstrap'))).toEqual({ person: me, state: { current: true } });
+  expect(early.seen[1]?.signal.aborted).toBe(true);
+  expect(ordinary.seen[0]?.headers.get('Authorization')).toBe('Bearer synthetic-explicit-replacement');
+});
+
+it('keeps a refused HTML session factual and sends no bootstrap or automatic replacement request', async () => {
+  vi.useFakeTimers();
+  const early = server(() => problem(503, 'internal'));
+  const startupReads = htmlStart(early.fetch);
+  const ordinary = server(() => json(200, grant('synthetic-retry')));
+  const options = { baseUrl: BASE, fetch: ordinary.fetch, startupReads };
+  const client = createApiClient(options);
+  await expect(client.restore()).rejects.toMatchObject({ status: 503 });
+  expect(early.paths()).toEqual(['POST /auth/session']);
+  expect(ordinary.paths()).toEqual([]);
+  await expect(client.restore()).resolves.toBe(true);
+  expect(ordinary.paths()).toEqual(['POST /auth/session']);
+});
+
+afterEach(async () => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  await setLocale('en');
+});
+
+it('records the actual renewal schedule, attempt and completion without borrowing a later grant’s timing', async () => {
+  vi.useFakeTimers(); const now = Date.now(); let finish!: (reply: Response) => void;
+  const { fetch, seen } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-old', RENEW_BEFORE_END_MS + 5_000));
+  const original = client.session.getState();
+  expect(original).toMatchObject({ renewal: { phase: 'scheduled', scheduled_at: now + 5_000, renewed_at: null } });
+  await vi.advanceTimersByTimeAsync(4_999); expect(seen).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(1); expect(seen).toHaveLength(1);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'in_progress', scheduled_at: null } });
+  finish(json(200, grant('synthetic-fresh'))); await vi.advanceTimersByTimeAsync(0);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'completed', renewed_at: now + 5_000 } });
+  expect(original).toMatchObject({ renewal: { scheduled_at: now + 5_000 } });
+});
+
+it('keeps a temporary renewal failure factual while the held session remains usable', async () => {
+  vi.useFakeTimers(); const next = Date.now() + 15 * 60_000 - RENEW_BEFORE_END_MS;
+  const { fetch, paths } = server(() => { throw new TypeError('Synthetic connection failed'); });
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-held'));
+  await expect(client.renew()).rejects.toBeInstanceOf(NetworkError);
+  expect(client.session.getState()).toMatchObject({ status: 'signed_in', userId: me.id, renewal: { phase: 'failed', scheduled_at: next, renewed_at: null } });
+  expect(paths()).toEqual(['POST /auth/refresh']);
+});
+
+it('keeps a long admitted renewal deadline instead of letting the browser timer overflow renew immediately', async () => {
+  vi.useFakeTimers(); const now = Date.now(), life = 35 * 24 * 60 * 60_000;
+  const { fetch, seen } = server(() => json(200, grant('synthetic-later')));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-long', life));
+  const deadline = now + life - RENEW_BEFORE_END_MS;
+  await vi.advanceTimersByTimeAsync(1); expect(seen).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(2_147_483_647 - 1); expect(seen).toHaveLength(0);
+  expect(client.session.getState()).toMatchObject({ renewal: { phase: 'scheduled', scheduled_at: deadline } });
+  await vi.advanceTimersByTimeAsync(deadline - Date.now()); expect(seen).toHaveLength(1);
+});
+
+it('does not let a former renewal overwrite an explicit fresh grant for the same person', async () => {
+  let finish!: (reply: Response) => void;
+  const { fetch } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-former'));
+  const old = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  client.adopt(grant('synthetic-explicit'));
+  finish(problem(401, 'auth.invalid_token')); await old;
+  expect(client.accessToken()).toBe('synthetic-explicit');
+  expect(client.session.getState()).toMatchObject({ status: 'signed_in', renewal: { phase: 'scheduled', renewed_at: null } });
+});
+
+it.each([false, true])('does not dispatch a former request through an explicit replacement after renewal waits (proactive=%s)', async (proactive) => {
+  let finish!: (reply: Response) => void;
+  const { fetch, paths } = server((request) => new URL(request.url).pathname.endsWith('/auth/refresh')
+    ? new Promise<Response>((resolve) => { finish = resolve; }) : problem(401, 'auth.invalid_token'));
+  const client = createApiClient({ baseUrl: BASE, fetch });
+  client.adopt(grant('synthetic-former', proactive ? RENEW_BEFORE_END_MS - 1 : 15 * 60_000));
+  const request = client.api.GET('/me'); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  client.adopt(grant('synthetic-explicit'));
+  finish(json(200, grant('synthetic-retired'))); await request;
+  expect(paths()).toEqual(proactive ? ['POST /auth/refresh'] : ['GET /me', 'POST /auth/refresh']);
+  expect(client.accessToken()).toBe('synthetic-explicit'); expect(client.session.getState()).toMatchObject({ status: 'signed_in' });
+});
+
+it.each(['expired', 'revoked', 'account_unavailable'] as const)('retains only a proven own %s fact and clears it on replacement', async (cause) => {
+  const at = cause === 'account_unavailable' ? undefined : '2026-11-15T04:00:00Z';
+  const { fetch } = server(() => problem(401, cause === 'account_unavailable' ? 'auth.suspended' : 'auth.invalid_token', {
+    session_end: { cause, at_if_known: at, user_id: 'private-prior-user', diagnostic: 'private session data' },
+  }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-held'));
+  await expect(client.renew()).resolves.toBe(false);
+  expect(client.session.getState()).toMatchObject({ status: 'signed_out', sessionEnded: true, sessionEnd: { cause, at_if_known: at ?? null } });
+  expect(JSON.stringify(client.session.getState())).not.toMatch(/private-prior-user|private session data/);
+  client.adopt({ ...grant('synthetic-next'), user: { ...me, id: 'next-end-reader' } });
+  expect(client.session.getState()).toMatchObject({ status: 'signed_in', sessionEnded: false, sessionEnd: null });
+});
+
+it('keeps an unreported end generic and ignores unexpected end data on a request with no held reader', async () => {
+  const plain = server(() => problem(401, 'auth.invalid_token'));
+  const held = createApiClient({ baseUrl: BASE, fetch: plain.fetch }); held.adopt(grant('synthetic-held'));
+  await held.renew(); expect(held.session.getState()).toMatchObject({ sessionEnded: true, sessionEnd: null });
+  const publicWire = server(() => problem(401, 'auth.invalid_token', { session_end: { cause: 'revoked' } }));
+  const visitor = createApiClient({ baseUrl: BASE, fetch: publicWire.fetch }); await visitor.api.GET('/me');
+  expect(visitor.session.getState()).toMatchObject({ sessionEnded: false, sessionEnd: null }); expect(publicWire.seen).toHaveLength(1);
+});
+
+it('retains a proven bearer end when the later cookie response has no remaining session record', async () => {
+  const at = '2026-11-15T04:00:00Z';
+  const { fetch } = server((request) => new URL(request.url).pathname.endsWith('/auth/refresh') ? problem(401, 'auth.required')
+    : problem(401, 'auth.invalid_token', { session_end: { cause: 'expired', at_if_known: at } }));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-held')); await client.api.GET('/me');
+  expect(client.session.getState()).toMatchObject({ status: 'signed_out', sessionEnd: { cause: 'expired', at_if_known: at } });
+});
+
+it('lets a replacement reader own renewal while the former reader’s renewal still waits', async () => {
+  const replies: ((reply: Response) => void)[] = [];
+  const { fetch } = server(() => new Promise<Response>((resolve) => replies.push(resolve)));
+  const client = createApiClient({ baseUrl: BASE, fetch }); client.adopt(grant('synthetic-former'));
+  const former = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  client.adopt({ ...grant('synthetic-next'), user: { ...me, id: 'next-reader' } });
+  const next = client.renew(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  try {
+    expect(replies).toHaveLength(2);
+    replies[0]?.(problem(401, 'auth.invalid_token')); await former;
+    expect(client.session.getState()).toMatchObject({ userId: 'next-reader', renewal: { phase: 'in_progress' } });
+    replies[1]?.(json(200, { ...grant('synthetic-complete'), user: { ...me, id: 'next-reader' } })); await next;
+    expect(client.session.getState()).toMatchObject({ userId: 'next-reader', renewal: { phase: 'completed' } });
+  } finally { for (const reply of replies) reply(json(200, grant('synthetic-final'))); await Promise.all([former, next]); }
 });
 
 it('shares one logical opening across HTTP reads and uses a fresh one for the next navigation', async () => {
@@ -332,6 +559,51 @@ describe('a slow answer', () => {
   });
 });
 
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names the ${stage} silence stage and the admitted request's own duration in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.useFakeTimers();
+    const limit = stage === 'response' ? 45_000 : 120_000;
+    const { fetch, paths } = server(() => stage === 'response' ? new Promise<Response>(() => undefined)
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch, silenceLimitMs: limit });
+    const pending = ok(client.api.GET('/meta')).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(limit);
+    const error = await pending;
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The admitted request must keep its native network failure');
+    const duration = formatSpan(limit, { locale });
+    const expected = locale === 'en' ? stage === 'response' ? `No response for ${duration}` : `Transfer stalled for ${duration}`
+      : stage === 'response' ? `等待响应已达 ${duration}` : `传输停滞已达 ${duration}`;
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('silent'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+    await setLocale('en');
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const stage of ['response', 'body'] as const) {
+  it(`names a connection failure during ${stage} without changing its read retry in ${locale}`, async () => {
+    await setLocale(locale);
+    vi.stubGlobal('navigator', { onLine: true });
+    const { fetch, paths } = server(() => stage === 'response' ? Promise.reject(new TypeError('private connection diagnostic'))
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.error(new TypeError('private transfer diagnostic')); } }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const error = await ok(client.api.GET('/meta')).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(NetworkError);
+    if (!(error instanceof NetworkError)) throw new Error('The native connection failure must be preserved');
+    const expected = locale === 'en' ? stage === 'response' ? 'Connection failed before a response' : 'Connection failed during transfer'
+      : stage === 'response' ? '响应前连接失败' : '传输期间连接失败';
+    expect(errorText(error, i18n.getFixedT(locale), { locale }).message).toBe(expected);
+    expect(error.failure).toBe('failed'); expect(retryRead(0, error)).toBe(true);
+    expect(paths()).toEqual(['GET /meta']);
+    expect(client.session.getState().status).toBe('unknown');
+  });
+}
+
 describe('a request that creates something', () => {
   it('carries the key of the act, so that a second attempt makes nothing twice', async () => {
     const { fetch, seen } = server(() => new Response(null, { status: 204 }));
@@ -403,4 +675,107 @@ describe('credential creation act observers', () => {
     expect(JSON.stringify(observed)).not.toContain('fresh-secret-proof');
     expect(paths()).toEqual(['POST /me/tokens']);
   });
+});
+
+it.each([{ stalled: false, html: false }, { stalled: true, html: false }, { stalled: false, html: true }])('file-piece silence follows actual upload progress, stalled=$stalled, HTML startup=$html', async ({ stalled, html }) => {
+  vi.useFakeTimers();
+  let opened: () => void = () => undefined;
+  const started = new Promise<void>((resolve) => { opened = resolve; });
+  const held: { headers: Map<string, string>; bytes: string; aborted: boolean }[] = [];
+  class UploadXhr {
+    readonly upload = { onprogress: null as (() => void) | null, onload: null as (() => void) | null };
+    onload: (() => void) | null = null; onerror: (() => void) | null = null; onabort: (() => void) | null = null;
+    status = 200; statusText = 'OK'; responseType = ''; withCredentials = false;
+    response = new TextEncoder().encode('{"received":8}').buffer;
+    readonly entry = { headers: new Map<string, string>(), bytes: '', aborted: false };
+    private progress: ReturnType<typeof setInterval> | undefined;
+    private done: ReturnType<typeof setTimeout> | undefined;
+    constructor() { held.push(this.entry); opened(); }
+    open(method: string, url: string) { expect(method).toBe('PUT'); expect(url).toContain('/uploads/sessions/'); }
+    setRequestHeader(name: string, value: string) { this.entry.headers.set(name.toLowerCase(), value); }
+    getAllResponseHeaders() { return 'Content-Type: application/json\r\n'; }
+    async send(body: Blob) {
+      this.entry.bytes = await body.text();
+      if (!stalled) {
+        this.progress = setInterval(() => this.upload.onprogress?.(), 20);
+        setTimeout(() => this.upload.onload?.(), 100);
+      }
+      this.done = setTimeout(() => { clearInterval(this.progress); this.onload?.(); }, 140);
+    }
+    abort() { this.entry.aborted = true; clearInterval(this.progress); clearTimeout(this.done); this.onabort?.(); }
+  }
+  vi.stubGlobal('XMLHttpRequest', UploadXhr);
+  const startup: HtmlReads = { visit: () => undefined, take: () => null, scriptsReady: Promise.resolve(), painted: () => undefined, cancel: () => undefined };
+  const client = createApiClient({ baseUrl: BASE, silenceLimitMs: 40, ...(html ? { startupReads: startup } : {}) });
+  client.adopt(grant('synthetic-piece'));
+  const sent = vi.fn();
+  const running = (html
+    ? client.putFilePiece('owned', 0, new Blob(['contents']), new AbortController().signal, sent)
+    : ok(client.api.PUT('/uploads/sessions/{upload_id}', {
+    params: { path: { upload_id: 'owned' }, query: { offset: 0 } },
+    body: '', bodySerializer: () => new Blob(['contents']), headers: { 'Content-Type': 'application/octet-stream', ...repeatable('piece-once').headers },
+  }))).catch((error: unknown) => error);
+  await started;
+  await vi.advanceTimersByTimeAsync(160);
+  expect(held).toHaveLength(1);
+  expect(held[0]?.bytes).toBe('contents');
+  expect(held[0]?.headers.get('authorization')).toBe('Bearer synthetic-piece');
+  if (html) expect(sent).toHaveBeenCalledExactlyOnceWith(expect.any(Number));
+  else expect(held[0]?.headers.get('idempotency-key')).toBeTruthy();
+  if (stalled) { expect(await running).toMatchObject({ failure: 'silent' }); expect(held[0]?.aborted).toBe(true); }
+  else { expect(await running).toEqual({ received: 8 }); expect(held[0]?.aborted).toBe(false); }
+});
+
+
+it.each(['expired','revoked','account_unavailable'] as const)('retains only its proven native %s outcome and clears it when another reader signs in',async(cause)=>{
+  const fact={cause,...(cause==='account_unavailable'?{}:{at_if_known:'2026-11-15T04:00:00Z'})};
+  const {fetch}=server(()=>problem(401,cause==='account_unavailable'?'auth.suspended':'auth.invalid_token',{session_end:{...fact,user_id:'not-a-public-fact'}}));
+  const client=createApiClient({baseUrl:BASE,fetch});client.adopt(grant('former'));
+  await expect(client.renew()).resolves.toBe(false);
+  expect(client.session.getState()).toMatchObject({status:'signed_out',sessionEnded:true,sessionEnd:{cause,at_if_known:fact.at_if_known??null}});
+  expect(JSON.stringify(client.session.getState())).not.toContain('not-a-public-fact');
+  client.adopt({...grant('replacement'),user:{...me,id:'replacement'}});
+  expect(client.session.getState()).toMatchObject({status:'signed_in',userId:'replacement',sessionEnded:false,sessionEnd:null});
+});
+
+it('an old account refusal cannot sign out a replacement or retain its former private outcome',async()=>{
+  let finish:(reply:Response)=>void=()=>{throw new Error('The request was not started');};
+  const {fetch}=server(()=>new Promise<Response>((resolve)=>{finish=resolve;}));
+  const client=createApiClient({baseUrl:BASE,fetch});client.adopt(grant('former'));
+  const pending=client.api.GET('/me');await new Promise<void>((resolve)=>setTimeout(resolve,0));
+  client.adopt({...grant('replacement'),user:{...me,id:'replacement'}});
+  finish(problem(401,'auth.suspended',{session_end:{cause:'account_unavailable'}}));await pending;
+  expect(client.accessToken()).toBe('replacement');
+  expect(client.session.getState()).toMatchObject({status:'signed_in',userId:'replacement',sessionEnded:false});
+});
+
+it('a late renewal outcome cannot cross readers and a replacement can own its separate renewal',async()=>{
+  const replies:((reply:Response)=>void)[]=[];
+  const {fetch}=server(()=>new Promise<Response>((resolve)=>replies.push(resolve)));
+  const client=createApiClient({baseUrl:BASE,fetch});client.adopt(grant('former'));
+  const former=client.renew();await new Promise<void>((resolve)=>setTimeout(resolve,0));
+  client.adopt({...grant('replacement'),user:{...me,id:'replacement'}});
+  const next=client.renew();await new Promise<void>((resolve)=>setTimeout(resolve,0));
+  expect(replies).toHaveLength(2);
+  replies[0]?.(problem(401,'auth.invalid_token',{session_end:{cause:'revoked',at_if_known:'2026-11-15T04:00:00Z'}}));
+  await expect(former).resolves.toBe(true);
+  expect(client.session.getState()).toMatchObject({status:'signed_in',userId:'replacement'});
+  replies[1]?.(json(200,{...grant('fresh-replacement'),user:{...me,id:'replacement'}}));await expect(next).resolves.toBe(true);
+  expect(client.accessToken()).toBe('fresh-replacement');
+  expect(client.session.getState()).toHaveProperty('sessionEnd',null);
+});
+
+it('an unreported old refusal remains generic instead of borrowing a current expiry rule',async()=>{
+  const {fetch}=server(()=>problem(401,'auth.invalid_token'));
+  const client=createApiClient({baseUrl:BASE,fetch});client.adopt(grant('former'));
+  await expect(client.renew()).resolves.toBe(false);
+  expect(client.session.getState()).toMatchObject({status:'signed_out',sessionEnded:true,sessionEnd:null});
+});
+
+it('keeps a proven bearer end when the cookie proof is no longer retained',async()=>{
+  const at='2026-11-15T04:00:00Z';
+  const {fetch}=server((request)=>new URL(request.url).pathname.endsWith('/auth/refresh')?problem(401,'auth.required'):problem(401,'auth.invalid_token',{session_end:{cause:'expired',at_if_known:at}}));
+  const client=createApiClient({baseUrl:BASE,fetch});client.adopt(grant('former'));
+  await client.api.GET('/me');
+  expect(client.session.getState()).toMatchObject({status:'signed_out',sessionEnd:{cause:'expired',at_if_known:at}});
 });

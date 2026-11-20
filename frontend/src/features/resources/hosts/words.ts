@@ -2,10 +2,22 @@
  */
 import type { TFunction } from 'i18next';
 
-import type { HostStorage, PlaceHost } from '@/generated/api-types';
+import { formatNumber } from '@/lib/format';
+import type { Host, HostStorage, PlaceHost } from '@/generated/api-types';
 
-/** The host reports memory in MB; people read it in GB. */
-const MB_PER_GB = 1_024;
+/** Measured processor room in cores, rounded to the nearest tenth on both the host and the placement picker. */
+export function freeCpuWords(millis: number | null, t: TFunction, locale: string): string {
+  if (millis === null) return t('placeRoom.cpuUnknown');
+  const cores = Math.round(Math.max(0, millis) / 100) / 10;
+  return t('placeRoom.cpu', { count: cores, n: formatNumber(cores, locale) });
+}
+
+/** A busy core reports 100 percent, or 100,000 thousandths of a percent. */
+export function hostFreeCpuMillis(host: Pick<Host, 'capacity' | 'usage'>): number | null {
+  const used = host.usage?.cpu_percent_milli;
+  if (used === null || used === undefined || host.capacity.cpu_millis <= 0) return null;
+  return Math.max(0, host.capacity.cpu_millis - Math.round(used / 100));
+}
 
 /** How much of a capacity is declared, in percent, or nothing where the host reports no capacity. A declaration reserves nothing: it can pass the whole. */
 export function declaredShare(declared: number, capacity: number): number | null {
@@ -22,10 +34,8 @@ export function usedShare(storage: Pick<HostStorage, 'capacity_gb' | 'free_gb'>)
 /** What is wrong with a host for a new environment, in words: why it cannot be chosen, or what to know before it is. Both dialogs that place work say the same. */
 export function hostNotes(place: PlaceHost, t: TFunction): { off: string | null; warn: string | null } {
   if (place.policy_refusal !== undefined && place.policy_refusal !== null) return { off: place.policy_refusal, warn: null };
-  const declared = Math.round(place.declared.memory_mb / MB_PER_GB);
-  const capacity = Math.round(place.capacity.memory_mb / MB_PER_GB);
   const reason = place.reasons[0];
-  if (reason !== undefined) return { off: t(`change.where.hostReason.${reason}`, { declared, capacity, name: place.host.name }), warn: null };
+  if (reason !== undefined) return { off: t(`change.where.hostReason.${reason}`, { name: place.host.name }), warn: null };
   const warning = place.warnings[0];
-  return { off: null, warn: warning === undefined ? null : t(`change.where.hostWarning.${warning}`, { declared, capacity, name: place.host.name }) };
+  return { off: null, warn: warning === undefined ? null : t(`change.where.hostWarning.${warning}`, { name: place.host.name }) };
 }

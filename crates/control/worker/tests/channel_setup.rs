@@ -8,20 +8,25 @@
 mod support;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use orch_db::audit::{Actor, Origin};
 use orch_db::queries::notifications::channels::owner;
 use orch_notifier_contract::delivery::{Config, DeliverError, Delivery, LinkPoll};
 use orch_notifier_contract::descriptor::{NotifierDescriptor, Owner, Reaches, Target};
 use orch_notifier_contract::notifier::Notifier;
 use orch_notifier_contract::templates::{BodyKind, TemplatePair, TemplateText};
+use orch_notifier_push::{PushNotifier, Vapid};
 use orch_types::{Field, FieldType, Id, Json};
-use orch_worker_core::channel_setup::{Pick, Put, PutError, SystemChannel, find, put, send_sample};
+use orch_worker_core::channel_setup::{
+    Pick, Put, PutError, SystemChannel, ensure_default_push, find, put, send_sample,
+};
 use orch_worker_core::channels::{Notifiers, SaveFault, Toolbox, secret_binding};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use support::fakes::Scripted;
+use support::world::Of;
 use support::world::World;
 
 const SECRET: &str = "s3cr3t-token-value";
@@ -96,6 +101,136 @@ async fn setup() -> Setup {
         hook,
         mail,
     }
+}
+
+async fn push_ready() -> World {
+    let key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1; 32]);
+    let vapid = Vapid::read(&key, "https://orch.example.test").unwrap();
+    let mut notifiers = Notifiers::new();
+    notifiers
+        .register(Arc::new(PushNotifier::new(vapid)))
+        .unwrap();
+    let world = World::new(notifiers).await;
+    sqlx::query("UPDATE users SET is_system_admin = true WHERE id = $1")
+        .bind(world.admin)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    world
+}
+
+#[tokio::test]
+async fn browser_notifications_are_available_without_channel_setup_and_nobody_is_subscribed() {
+    let world = push_ready().await;
+    let channel = ensure_default_push(&world.db(), &world.notifiers, world.now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(channel.enabled && channel.is_the_systems());
+    assert_eq!(channel.kind, "push");
+    assert_eq!(channel.created_by, world.admin);
+    assert_eq!(channel.config, json!({}));
+    assert_eq!(channel.templates, json!({}));
+    for table in [
+        "notification_routes",
+        "push_subscriptions",
+        "outbox",
+        "secrets",
+    ] {
+        assert_eq!(count_of(&world, table).await, 0, "{table}");
+    }
+    assert!(
+        ensure_default_push(&world.db(), &world.notifiers, world.now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(world.channel_now(channel.id).await, channel);
+    let lines: Vec<(String, String, Json)> =
+        sqlx::query_as("SELECT action, actor_kind, details FROM audit_log ORDER BY at, id")
+            .fetch_all(&world.test.pool)
+            .await
+            .unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        (lines[0].0.as_str(), lines[0].1.as_str()),
+        ("channel.created", "system")
+    );
+    assert_eq!(lines[0].2["kind"], "push");
+}
+
+#[tokio::test]
+async fn starting_again_keeps_a_disabled_push_channel_and_every_saved_choice() {
+    let world = push_ready().await;
+    let channel = world
+        .channel(Of::System, "push", json!({ "saved": true }), &[])
+        .await;
+    sqlx::query("UPDATE notification_channels SET name = 'Our browsers', enabled = false, templates = $2, last_error = 'saved failure' WHERE id = $1")
+        .bind(channel.id)
+        .bind(json!({ "en": { "single": { "subject": "Our title", "body": "Our text" } } }))
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    let before = world.channel_now(channel.id).await;
+    assert!(
+        ensure_default_push(&world.db(), &world.notifiers, world.now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(world.channel_now(channel.id).await, before);
+    assert_eq!(count_of(&world, "audit_log").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn simultaneous_starts_make_one_push_channel_and_one_history_line() {
+    let world = push_ready().await;
+    let db = world.db();
+    let (first, second) = tokio::join!(
+        ensure_default_push(&db, &world.notifiers, world.now()),
+        ensure_default_push(&db, &world.notifiers, world.now())
+    );
+    assert_eq!(
+        usize::from(first.unwrap().is_some()) + usize::from(second.unwrap().is_some()),
+        1
+    );
+    assert_eq!(count_of(&world, "notification_channels").await, 1);
+    assert_eq!(count_of(&world, "audit_log").await, 1);
+}
+
+#[tokio::test]
+async fn push_waits_for_a_working_notifier_and_the_first_administrator() {
+    let world = push_ready().await;
+    assert!(
+        ensure_default_push(&world.db(), &Notifiers::new(), world.now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("UPDATE users SET is_system_admin = false WHERE id = $1")
+        .bind(world.admin)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    assert!(
+        ensure_default_push(&world.db(), &world.notifiers, world.now())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(count_of(&world, "notification_channels").await, 0);
+    assert_eq!(count_of(&world, "audit_log").await, 0);
+    sqlx::query("UPDATE users SET is_system_admin = true WHERE id = $1")
+        .bind(world.admin)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
+    assert!(
+        ensure_default_push(&world.db(), &world.notifiers, world.now())
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 async fn put_as(

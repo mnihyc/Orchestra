@@ -21,7 +21,7 @@ pub async fn lock_session_state(
 ) -> Result<Option<(bool, DateTime<Utc>)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT as_admin, expires_at FROM sessions WHERE id=$1 AND user_id=$2
-         AND revoked_at IS NULL FOR SHARE",
+         AND revoked_at IS NULL FOR KEY SHARE",
     )
     .bind(session)
     .bind(user)
@@ -54,6 +54,27 @@ pub async fn current_boundary(
          JOIN users u ON u.id=t.user_id AND u.status='active'
          WHERE t.id=$1 AND t.user_id=$2 AND t.revoked_at IS NULL
            AND (t.expires_at IS NULL OR t.expires_at>$3) FOR SHARE OF t,u",
+    )
+    .bind(token)
+    .bind(user)
+    .bind(now)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Current key restrictions for an effect-free preliminary selection, without holding its
+/// account or key. A writer must still restore through `current_boundary` before its effect.
+pub async fn preview_boundary(
+    conn: &mut Conn,
+    token: Id,
+    user: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<CurrentBoundary>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT t.scopes,t.node_id,t.operation_scope,t.expires_at FROM api_tokens t
+         JOIN users u ON u.id=t.user_id AND u.status='active'
+         WHERE t.id=$1 AND t.user_id=$2 AND t.revoked_at IS NULL
+           AND (t.expires_at IS NULL OR t.expires_at>$3)",
     )
     .bind(token)
     .bind(user)

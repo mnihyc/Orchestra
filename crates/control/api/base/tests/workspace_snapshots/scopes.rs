@@ -475,18 +475,15 @@ async fn historical_snapshot_generation_is_distinct_from_the_current_custodian_g
     }
 }
 
-#[tokio::test]
-async fn accepted_recorded_upload_finishes_its_facts_after_revocation_without_public_readback() {
+async fn accepted_recorded_upload_after_revocation(relay: bool) {
     let (site, id, peer) = recorded().await;
+    site.world
+        .set("storage.relay_transfers", json!(relay))
+        .await;
+    let store = site.app().app.blobs.store();
+    let hash = Hash::of(CONTENT);
     assert!(
-        !site
-            .app()
-            .app
-            .blobs
-            .store()
-            .exists(&Hash::of(CONTENT))
-            .await
-            .unwrap(),
+        !store.exists(&hash).await.unwrap(),
         "native file has not yet been copied"
     );
     let key = keys::scoped(
@@ -529,18 +526,12 @@ async fn accepted_recorded_upload_finishes_its_facts_after_revocation_without_pu
         .unwrap()
         .unwrap();
     assert!(
-        !denied.status.is_success(),
-        "accepted native custody is not public readback authority"
-    );
-    assert!(
-        site.app()
-            .app
-            .blobs
-            .store()
-            .exists(&Hash::of(CONTENT))
-            .await
-            .unwrap(),
-        "accepted exact upload reconciled"
+        matches!(
+            denied.status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ),
+        "revoked reader received {}",
+        denied.status
     );
     let ended = orch_db::queries::link::command(&mut *site.world.conn().await, command)
         .await
@@ -550,12 +541,34 @@ async fn accepted_recorded_upload_finishes_its_facts_after_revocation_without_pu
         ended.state, "succeeded",
         "revocation does not rewrite an accepted native fact"
     );
-    assert_eq!(ended.result.unwrap()["blob"], json!(Hash::of(CONTENT)));
+    assert_eq!(ended.content_transit, relay);
+    assert_eq!(
+        ended.result,
+        Some(json!({"blob": hash, "size": CONTENT.len()}))
+    );
     assert_eq!(
         peer.commands.lock().unwrap().len(),
         1,
         "no replacement read borrows the old Accepted command"
     );
+    if relay {
+        eventually("the completed relay releases the file bytes", || async {
+            !store.exists(&hash).await.unwrap()
+        })
+        .await;
+    } else {
+        assert_eq!(store.size(&hash).await.unwrap(), Some(CONTENT.len() as i64));
+    }
+}
+
+#[tokio::test]
+async fn accepted_recorded_upload_finishes_its_facts_after_revocation_without_public_readback() {
+    accepted_recorded_upload_after_revocation(true).await;
+}
+
+#[tokio::test]
+async fn a_cached_snapshot_file_stays_stored_after_its_reader_is_revoked() {
+    accepted_recorded_upload_after_revocation(false).await;
 }
 
 #[tokio::test]
@@ -672,13 +685,19 @@ struct OpenGate {
 
 #[async_trait::async_trait]
 impl BlobStore for OpenGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         if *hash == self.hash {
@@ -697,8 +716,13 @@ impl BlobStore for OpenGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 
@@ -738,6 +762,7 @@ fn gate_store(site: &mut Site, hash: Hash, recording_recovery: bool) -> Arc<Open
             std::path::Path::new(&old.config.storage.root),
         ),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
@@ -759,9 +784,11 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
         .unwrap();
     let command = orch_engine::ids::derived("fs.record.before-turn", &[id.as_bytes()]);
     let body = serde_json::to_value(FsRecord {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: site.environment,
         snapshot_id: id,
         directory: "web".into(),
+        wait_for_indexing: true,
         kind: RecordKind::Turn,
         record_days: 7,
         max_bytes: CONTENT.len() as i64,
@@ -771,6 +798,7 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     commands::insert_command(
         &mut conn,
         &commands::NewCommand {
+            content_transit: false,
             id: command,
             machine_id: site.machine,
             kind: CommandKind::FsRecord.as_str(),
@@ -783,6 +811,8 @@ async fn unavailable_original(site: &Site, id: Id) -> Hash {
     .await
     .unwrap();
     let result = serde_json::to_value(FsRecordResult {
+        indexing: None,
+
         state: RecordState::Complete,
         tree_ref: Some("original-captured-root".into()),
         repository_head: None,

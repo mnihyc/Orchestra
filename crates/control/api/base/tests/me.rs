@@ -1091,7 +1091,19 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
     let reply = create_token(&world, &signed, named("  ci  ")).await;
     assert_eq!(reply.headers["cache-control"], "no-store");
     let made = reply.ok();
-    assert!(made.token.as_deref().unwrap().starts_with("opat_"));
+    let key = made.token.as_deref().unwrap();
+    let prefix = format!("opat_{}_", made.info.id);
+    let tail = key
+        .strip_prefix(&prefix)
+        .expect("the key carries its public ID");
+    assert_ne!(made.info.id, ada.id);
+    assert_eq!(tail.len(), 43 + 6);
+    use base64::Engine as _;
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&tail[..43])
+        .unwrap();
+    assert_eq!(secret.len(), 32);
+    assert!(tail[43..].bytes().all(|byte| byte.is_ascii_alphanumeric()));
     assert_eq!(
         (made.info.name.as_str(), made.info.scopes.clone()),
         ("ci", vec!["*".to_owned()])
@@ -1117,7 +1129,9 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
         .send()
         .await;
     assert!(!String::from_utf8_lossy(&listed.raw).contains(made.token.as_deref().unwrap()));
-    assert_eq!(listed.ok().len(), 1);
+    let listed = listed.ok();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, made.info.id);
 
     // It acts as its person, and its last use is noted.
     let me = world
@@ -1156,6 +1170,51 @@ async fn an_api_token_is_shown_once_stored_as_a_hash_and_made_only_from_a_browse
             .await
             .contains(&"auth.token_created".to_owned())
     );
+}
+
+#[tokio::test]
+async fn mistyped_and_retired_key_formats_are_refused_without_reading_the_database() {
+    let world = World::new().await;
+    let owner = world.person("reader").await;
+    let signed = world.sign_in(&owner).await;
+    let made = create_token(&world, &signed, named("automation"))
+        .await
+        .ok();
+    let key = made.token.unwrap();
+    let check = |bearer: &str| world.app.call(MeGet, &[]).token(bearer).send();
+    let (valid, reads) = support::Statements::measure(check(&key)).await;
+    assert_eq!(valid.status, 200);
+    assert!(
+        reads > 0,
+        "the counter observes the real authenticated request"
+    );
+
+    let unissued = orch_api_core::middleware::authentication::new_token(
+        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
+    );
+    let (unknown, reads) = support::Statements::measure(check(&unissued)).await;
+    assert_eq!(unknown.problem().code, ErrorCode::AuthInvalidToken);
+    assert!(
+        reads > 0,
+        "a valid checksum still needs a matching stored digest"
+    );
+
+    let mut mistyped = key.clone();
+    let last = mistyped.pop().unwrap();
+    mistyped.push(if last == '0' { '1' } else { '0' });
+    let legacy = format!("opat_{}", "A".repeat(43));
+    // Even a retained hash matching an old bearer cannot admit that wire format.
+    sqlx::query("UPDATE api_tokens SET token_hash=$2 WHERE id=$1")
+        .bind(made.info.id)
+        .bind(hash(&legacy))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for rejected in [&mistyped, &legacy] {
+        let (reply, reads) = support::Statements::measure(check(rejected)).await;
+        assert_eq!(reply.problem().code, ErrorCode::AuthInvalidToken);
+        assert_eq!(reads, 0);
+    }
 }
 
 #[tokio::test]
@@ -1320,6 +1379,10 @@ async fn a_revoked_api_token_stops_working_at_once_and_only_its_person_revokes_i
     .unwrap();
     let before = epoch_of(&world).await;
     assert_eq!(revoke(&signed, made.info.id).await.status, 204);
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_log WHERE details->>'token'=$1 AND action IN ('auth.token_created','auth.token_revoked') ORDER BY action",
+    ).bind(made.info.id.to_string()).fetch_all(&world.db.pool).await.unwrap();
+    assert_eq!(actions, ["auth.token_created", "auth.token_revoked"]);
     assert_eq!(
         epoch_of(&world).await,
         before,

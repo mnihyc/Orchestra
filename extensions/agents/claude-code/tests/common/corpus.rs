@@ -459,6 +459,7 @@ impl Actor {
             handle
                 .ask(|reply| Command::Warm {
                     turn: Box::new(TurnSettings {
+                        program_output: Ok(None),
                         cache_lifetimes: None,
                         page_fetch: None,
                         model: "mock-large".into(),
