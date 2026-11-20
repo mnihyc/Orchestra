@@ -44,6 +44,7 @@ async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_wr
     rig.attach(&directory).await;
     let answer: FsFetchResult = serde_json::from_value(
         rig.succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "result.bin".into(),
@@ -72,6 +73,7 @@ async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_wr
     );
     let empty = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "empty.txt".into(),
@@ -93,6 +95,7 @@ async fn a_workspace_file_above_the_callers_limit_is_refused_in_words_without_a_
     rig.start().await;
     rig.attach(&directory).await;
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.environment,
         mount: None,
         path: "result.txt".into(),
@@ -136,6 +139,7 @@ async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environ
     rig.start().await;
     rig.attach(&directory).await;
     let fetch = FsFetch {
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.environment,
         mount: None,
         path: "result.txt".into(),
@@ -149,11 +153,11 @@ async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environ
         })
         .await;
     assert_eq!(inside["hash"], json!(Hash::of(b"inside the environment")));
-    for path in [
-        "../personal/secret.txt".to_owned(),
-        secret.display().to_string(),
-        "escape.txt".into(),
-        "escape-dir/secret.txt".into(),
+    for (path, refusal) in [
+        ("../personal/secret.txt".to_owned(), "not_found"),
+        (secret.display().to_string(), "files.reach_denied"),
+        ("escape.txt".into(), "not_found"),
+        ("escape-dir/secret.txt".into(), "not_found"),
     ] {
         let (code, detail) = rig
             .failure(&FsFetch {
@@ -161,7 +165,7 @@ async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environ
                 ..fetch.clone()
             })
             .await;
-        assert_eq!(code, "not_found", "{path}: {detail}");
+        assert_eq!(code, refusal, "{path}: {detail}");
         assert!(!detail.is_empty());
         if path.starts_with("escape") {
             assert!(detail.contains("outside the workspace"), "{detail}");
@@ -232,6 +236,7 @@ async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues
     );
     let result = rig
         .succeed(&FsArchiveRead {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             path: "bundle.tar".into(),
             entry: "data.txt".into(),
@@ -245,6 +250,7 @@ async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues
     );
     let stat: orch_link_contract::foreign::FileStat = serde_json::from_value(
         rig.succeed(&FsStat {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "bundle.tar".into(),
@@ -276,6 +282,7 @@ async fn a_changed_file_is_not_overwritten_and_its_captured_stat_survives_the_co
     let sent = rig.stored(b"replacement");
     let error = match rig
         .send(&FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "notes.txt".into(),
@@ -299,6 +306,251 @@ async fn a_changed_file_is_not_overwritten_and_its_captured_stat_survives_the_co
     assert_eq!(
         frame["details"]["current"]["hash"],
         json!(Hash::of(b"second version is newer"))
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_file_relay_retries_lost_pieces_and_acknowledgements_without_using_blob_storage() {
+    use bytes::Bytes;
+    use orch_link::content::{BlobEndpoint, PutRefusal, RelayReply, RelayRequest};
+    use orch_link_contract::commands::{
+        FsRelayCommit, FsRelayDescribe, FsRelayPrepare, FsRelayReceive, FsRelaySend,
+    };
+    use orch_link_contract::content::{BlobProgress, PutQuery};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    };
+    use std::time::Duration;
+    struct Endpoint {
+        blobs: Arc<dyn BlobEndpoint>,
+        incoming: Bytes,
+        received: AtomicI64,
+        sent: Mutex<Vec<u8>>,
+        drop_pull: AtomicBool,
+        drop_push_answer: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl BlobEndpoint for Endpoint {
+        async fn status(
+            &self,
+            command: orch_types::Id,
+            hash: &Hash,
+        ) -> Result<orch_link_contract::content::TransferStatus, PutRefusal> {
+            self.blobs.status(command, hash).await
+        }
+        async fn relay(
+            &self,
+            command: orch_types::Id,
+            _: orch_types::Id,
+            request: RelayRequest,
+            _: Duration,
+        ) -> Result<RelayReply, PutRefusal> {
+            assert!(
+                !command.is_nil(),
+                "transit bytes always belong to an actual open command"
+            );
+            match request {
+                RelayRequest::Stand { received } => {
+                    self.received.store(received, Ordering::SeqCst);
+                    Ok(RelayReply::Progress(received))
+                }
+                RelayRequest::Pull { offset, len } => {
+                    if self.drop_pull.swap(false, Ordering::SeqCst) {
+                        return Err(PutRefusal::Failed("a cut before receiving a piece".into()));
+                    }
+                    Ok(RelayReply::Piece(self.incoming.slice(
+                        usize::try_from(offset).unwrap()..usize::try_from(offset + len).unwrap(),
+                    )))
+                }
+                RelayRequest::Push { offset, bytes } => {
+                    let mut sent = self.sent.lock().unwrap();
+                    if i64::try_from(sent.len()).unwrap() != offset {
+                        return Err(PutRefusal::Offset {
+                            received: i64::try_from(sent.len()).unwrap(),
+                        });
+                    }
+                    sent.extend_from_slice(&bytes);
+                    if self.drop_push_answer.swap(false, Ordering::SeqCst) {
+                        return Err(PutRefusal::Failed(
+                            "the reader took the piece but its answer was lost".into(),
+                        ));
+                    }
+                    Ok(RelayReply::Progress(i64::try_from(sent.len()).unwrap()))
+                }
+            }
+        }
+        async fn head(
+            &self,
+            c: orch_types::Id,
+            h: &Hash,
+        ) -> Result<Option<BlobProgress>, PutRefusal> {
+            self.blobs.head(c, h).await
+        }
+        async fn put(
+            &self,
+            c: orch_types::Id,
+            h: &Hash,
+            q: PutQuery,
+            b: Bytes,
+        ) -> Result<BlobProgress, PutRefusal> {
+            self.blobs.put(c, h, q, b).await
+        }
+        async fn get(
+            &self,
+            c: orch_types::Id,
+            h: &Hash,
+            o: i64,
+            l: i64,
+        ) -> Result<Bytes, PutRefusal> {
+            self.blobs.get(c, h, o, l).await
+        }
+        async fn missing(&self, c: orch_types::Id, h: &[Hash]) -> Result<Vec<Hash>, PutRefusal> {
+            self.blobs.missing(c, h).await
+        }
+    }
+    let mut rig = EnvRig::new();
+    let directory = rig.directory("work");
+    let bytes = Bytes::from(
+        (0..=255)
+            .cycle()
+            .take(usize::try_from(MAX_CHUNK_BYTES).unwrap() + 37)
+            .collect::<Vec<_>>(),
+    );
+    let endpoint = Arc::new(Endpoint {
+        blobs: Arc::new(orch_testkit::doubles::link::ShapedBlobs::new(
+            Arc::clone(&rig.blobs),
+            None,
+            i64::MAX,
+        )),
+        incoming: bytes.clone(),
+        received: AtomicI64::new(0),
+        sent: Mutex::new(Vec::new()),
+        drop_pull: AtomicBool::new(true),
+        drop_push_answer: AtomicBool::new(true),
+    });
+    rig.blob_endpoint = Some(endpoint.clone());
+    rig.start().await;
+    rig.attach(&directory).await;
+    let session = orch_types::new_id();
+    let receive = FsRelayReceive {
+        retention_secs: 24 * 60 * 60,
+        environment_id: rig.environment,
+        path: "uploaded.bin".into(),
+        session_id: session,
+        relay_id: orch_types::new_id(),
+        size: i64::try_from(bytes.len()).unwrap(),
+        end: i64::try_from(bytes.len()).unwrap(),
+        idle_secs: 120,
+        retry_ms: 1,
+        expires_at: orch_types::Time::new(rig.clock.now() + chrono::Duration::hours(24)),
+    };
+    let prefix_request = FsRelayReceive {
+        end: 3,
+        ..receive.clone()
+    };
+    let first = rig.succeed(&prefix_request).await;
+    assert_eq!(first["received"], 3);
+    let duplicate = rig.succeed(&prefix_request).await;
+    assert_eq!(
+        duplicate["received"], 3,
+        "a lost piece response reuses the actual native prefix"
+    );
+    let prefix: orch_link_contract::commands::FsRelayProgress =
+        serde_json::from_value(rig.succeed(&receive).await).unwrap();
+    assert_eq!(prefix.received, i64::try_from(bytes.len()).unwrap());
+    let verified: orch_link_contract::commands::FsRelayVerified = serde_json::from_value(
+        rig.succeed(&orch_link_contract::commands::FsRelayVerify {
+            retention_secs: 24 * 60 * 60,
+            environment_id: rig.environment,
+            receive_path: "uploaded.bin".into(),
+            session_id: session,
+        })
+        .await,
+    )
+    .unwrap();
+    let received = verified.file;
+    assert_eq!(received.hash, Hash::of(&bytes));
+    assert_eq!(endpoint.received.load(Ordering::SeqCst), received.size);
+    assert!(
+        !directory.join("uploaded.bin").exists(),
+        "receiving does not publish a destination"
+    );
+    rig.succeed(&FsRelayPrepare {
+        work: None,
+        environment_id: rig.environment,
+        receive_path: "uploaded.bin".into(),
+        path: "later/kept.bin".into(),
+        session_id: session,
+    })
+    .await;
+    rig.succeed(&FsRelayCommit {
+        work: None,
+        environment_id: rig.environment,
+        receive_path: "uploaded.bin".into(),
+        path: "later/kept.bin".into(),
+        session_id: session,
+        hash: received.hash,
+        size: received.size,
+        mode: None,
+        expected_hash: Some(ExpectedHash::Absent),
+    })
+    .await;
+    assert_eq!(
+        std::fs::read(directory.join("later/kept.bin")).unwrap(),
+        bytes.as_ref()
+    );
+    let described = rig
+        .succeed(&FsRelayDescribe {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.environment,
+            path: "later/kept.bin".into(),
+            mount: None,
+        })
+        .await;
+    assert_eq!(described["hash"], json!(received.hash));
+    rig.succeed(&FsRelaySend {
+        access: orch_link_contract::commands::FsAccess::roots(),
+        environment_id: rig.environment,
+        path: "later/kept.bin".into(),
+        mount: None,
+        hash: received.hash,
+        offset: 13,
+        len: 1024 * 1024 + 47,
+        relay_id: orch_types::new_id(),
+        idle_secs: 120,
+        retry_ms: 1,
+    })
+    .await;
+    assert_eq!(
+        endpoint.sent.lock().unwrap().as_slice(),
+        &bytes[13..13 + 1024 * 1024 + 47]
+    );
+    assert!(
+        rig.blobs.content(&received.hash).is_none(),
+        "the source and destination use only the command-bound relay"
+    );
+    endpoint.sent.lock().unwrap().clear();
+    std::fs::write(directory.join("bundle.tar"), archive_of(b"archive bytes")).unwrap();
+    let entry = rig
+        .succeed(&orch_link_contract::commands::FsRelayArchiveRead {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            environment_id: rig.environment,
+            path: "bundle.tar".into(),
+            entry: "data.txt".into(),
+            relay_id: orch_types::new_id(),
+            idle_secs: 120,
+            retry_ms: 1,
+            max_bytes: 256,
+        })
+        .await;
+    assert_eq!(entry["blob"]["hash"], json!(Hash::of(b"archive bytes")));
+    assert_eq!(endpoint.sent.lock().unwrap().as_slice(), b"archive bytes");
+    assert!(
+        rig.blobs.content(&Hash::of(b"archive bytes")).is_none(),
+        "archive content uses only the memory endpoint"
     );
     rig.stop().await;
 }
