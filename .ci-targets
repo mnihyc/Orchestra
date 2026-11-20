@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-agent-contract -p orch-api-contract -p orch-settings-contract -p orch-link-contract -p orch-config -p orch-link -p orch-connector-core -p orch-envhost -p orch-types -p orch-provider-contract -p orch-access-contract -p orch-human-check-contract -p orch-human-check --lib
+test -p orch-link-contract -p orch-link -p orch-connector-core -p orch-envhost --test largest_messages --test large_messages --test handshake --test streams --test spool --test refusals_are_told --test raw_spool_restart --test commands --test provider_role --test agent_role --test direct_machine_programs --test harness_tools --test real_harnesses --test environment
+test -p orch-gateway-core --test large_messages --test sessions
+test -p orch-api --bin orch-api -- composition::tests::
+test -p orch-api-core --test workspace_connector -- --skip a_roots_file_grant_cannot_open_or_write_an_outside_path_or_follow_an_outside_link --skip file_reach::an_explicit_machine_file_grant_reaches_the_native_target_and_narrowing_refuses_the_next_act --nocapture --skip a_file_larger_than_one_piece_goes_both_ways --skip a_file_written_over_http_is_on_the_machines_disk_and_one_changed_there_is_read_back
+test -p orch-authz --lib --test environments --test giving --test kept_holders --test resources --test use_where
+test -p orch-api-core --test access --test access_everything --test call_recovery --test hierarchy_native_scopes --test history_native_scopes --test holder_search_native_scopes --test provider_model_operation_scopes --test resource_groups --test thread_access --test thread_creator_discovery_scopes
