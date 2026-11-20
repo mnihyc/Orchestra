@@ -1,0 +1,1 @@
+test -p orch-api-core --test thread_move -- publishing_thread_activity_keeps_an_unchanged_move_review_valid

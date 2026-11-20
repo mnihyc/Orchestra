@@ -43,6 +43,7 @@ async fn native_scene_with_input_keys(keyed: bool) -> Proof<(Scene, Id, Arc<Atom
         .handler
         .on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: true,
                 harness_version: "1.0.0".into(),
                 descriptor: descriptor.clone(),
@@ -61,6 +62,7 @@ async fn native_scene_with_input_keys(keyed: bool) -> Proof<(Scene, Id, Arc<Atom
                 ));
             };
             Ok(CommandResult::SessionOpenFenced(SessionOpenResult {
+                mcp: None,
                 native_session_ref: format!("native-{}", open.session.segment_id),
                 resumed: false,
                 import_report: None,

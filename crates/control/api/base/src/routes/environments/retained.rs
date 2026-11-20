@@ -59,6 +59,7 @@ impl PreparedRead {
                 .as_ref()
                 .ok_or_else(|| ApiError::internal("the kept data has no removal metadata"))?;
             shown.inspection = Some(DeletedInspection {
+                cleanup_hold: None,
                 deleted_at: Time::new(deleted),
                 deleted_by: removal.deleted_by.clone(),
                 purge_at: removal
