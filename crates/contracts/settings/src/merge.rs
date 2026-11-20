@@ -387,6 +387,19 @@ fn number_cmp(one: &Json, other: &Json) -> Option<std::cmp::Ordering> {
     one.as_f64()?.partial_cmp(&other.as_f64()?)
 }
 
+/// Whether a schema-valid value would loosen an explicit numeric ceiling.
+/// Use the same exact decimal ordering and unbounded spellings as resolution.
+#[must_use]
+pub fn exceeds_ceiling(def: &SettingDef, proposed: &Json, ceiling: &Json) -> bool {
+    if def.merge != Merge::Min || ceiling.is_null() || def.zero_means_no_limit() && is_zero(ceiling)
+    {
+        return false;
+    }
+    proposed.is_null()
+        || def.zero_means_no_limit() && is_zero(proposed)
+        || number_cmp(proposed, ceiling).is_some_and(|order| order.is_gt())
+}
+
 fn bound<'r, 'a, N>(
     def: &SettingDef,
     default: Option<Json>,

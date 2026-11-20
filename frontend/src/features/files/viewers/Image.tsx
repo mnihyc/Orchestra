@@ -4,6 +4,7 @@
  * chequered ground, fitted to the room it has; it can be shown at its size, zoomed and moved by the
  * scrollbars. An SVG is drawn as an image, which runs nothing in it; its source is one switch away.
  */
+import { PreviewRefusal } from '../FileFacts';
 import { Expand, Minus, Plus } from 'lucide-react';
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -74,7 +75,7 @@ export default function ImageViewer(props: ViewerProps) {
   const [failed, setFailed] = useState<string | null>(null);
   const displayed = staticImage ? preview.data?.image ?? null : url;
 
-  if (tooBig) return <FileState state="too_large" />;
+  if (tooBig) return <PreviewRefusal allowance={preview.data?.allowance ?? preview.data?.viewer_allowance} />;
   if (head.brought.state === 'unavailable') return <FileState state={head.brought.reason === 'not_found' ? 'gone' : 'unavailable'} />;
   if (preview.isError) return <FileState state={fileFailure(preview.error)} />;
   if (preview.data !== undefined && !safe) return <FileState state="unavailable" />;

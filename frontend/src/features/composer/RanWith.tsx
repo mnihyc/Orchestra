@@ -9,7 +9,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
-import { agentQuery } from '@/api/resources';
 import { parametersQuery } from '@/api/threads';
 import { kindOf, type ParamDef, readDef } from '@/features/composer/modelState';
 import { formatContext } from '@/features/models/context';
@@ -17,7 +16,6 @@ import { accessProgramDisplayName } from '@/features/models/names';
 import type { ModelOption, Turn } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { useThreadPart } from '@/realtime/stores/thread';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -72,12 +70,10 @@ export function effectiveTurnModelName(turn: Pick<Turn,'model'|'model_display'> 
 export function RanWith({ threadId, turn }: { threadId: string; turn: Pick<Turn, 'model' | 'params'> & Partial<Pick<Turn,'usage_detail'>> }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const agent = useThreadPart(threadId, (view) => view.thread?.binding?.agent.id ?? null);
   const parameters = useQuery(parametersQuery(threadId));
   // The agent's own declaration says which parameters it has whatever model the thread is on now; a reader who may not read the
   // profile is told by the parameters the thread has now.
-  const profile = useQuery({ ...agentQuery(agent ?? ''), enabled: agent !== null, retry: false });
-  const defs = [...declared(profile.data?.descriptor), ...(parameters.data?.parameters ?? []).flatMap((view) => {
+  const defs = [...declared({ parameters: parameters.data?.agent?.parameters }), ...(parameters.data?.parameters ?? []).flatMap((view) => {
     const read = readDef(view.def);
     return read === null ? [] : [read];
   })];

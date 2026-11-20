@@ -15,8 +15,8 @@ import { formatDateTime } from '@/lib/time';
 import { show } from './support';
 
 const calls=vi.hoisted(()=>({keep:vi.fn<() => Promise<unknown>>(),export:vi.fn<typeof EnvironmentsApi.exportEnvironmentFiles>(),download:vi.fn<() => Promise<Blob>>(),save:vi.fn(),help:vi.fn()}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>calls.help}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>calls.help}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn()}));
 vi.mock('@/api/environments',async(original)=>({...await original<object>(),keepEnvironment:calls.keep,exportEnvironmentFiles:calls.export,downloadEnvironmentExport:calls.download}));
 vi.mock('@/features/export/save',()=>({saveFile:calls.save}));
 

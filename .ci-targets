@@ -1,0 +1,9 @@
+test -p orch-api-core --lib
+test -p orch-engine --lib
+test -p orch-api-core --test settings --test personal --test admin_system --test skills --test error_words --test threads_read --test threads_settings
+test -p orch-engine --test skills --test turns --test background_wake --test ingest --test forks --test orch_tools
+web typecheck
+web lint
+web test -- tests/component/settings-collection.test.tsx --maxWorkers=1
+web test -- tests/component/document-comment-device.test.tsx tests/component/catchup-default.test.tsx tests/component/thread-catchup.test.tsx tests/component/system-configuration.test.tsx tests/component/session-skills.test.tsx tests/component/settings-policy-narrowing.test.tsx tests/component/settings-unavailable-choice.test.tsx tests/component/composer-approval-mode.test.tsx tests/component/configuration-application.test.tsx tests/component/sandbox-readiness.test.tsx tests/component/native-history-facts.test.tsx tests/component/setting-inherit.test.tsx tests/component/acts.test.tsx tests/component/defaults-opening-owner.test.tsx tests/component/settings-drafts.test.tsx tests/component/settings-frame-layout.test.tsx tests/component/everything.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/resource-environment-settings.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts tests/unit/acts.test.ts tests/unit/setting-text.test.ts tests/unit/overflow-tooltips.test.ts tests/unit/overflow-previews.test.ts tests/component/overflow-values.test.tsx tests/component/overflow-disclosures.test.tsx
+web build

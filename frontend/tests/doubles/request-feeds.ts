@@ -87,9 +87,12 @@ export class RequestFeeds implements Part {
 
   private async publish(watch: Watch): Promise<void> {
     try {
-      const answer = await this.read(watch.person, watch.path);
+      const rowOnly = watch.feed.startsWith('provider-row:');
+      const answer = rowOnly
+        ? { status: 200, body: this.world.resources.providerForThread(watch.person, watch.feed.slice('provider-row:'.length)) ?? null }
+        : await this.read(watch.person, watch.path);
       if (!this.watches.includes(watch)) return;
-      const data = watch.feed.startsWith('resource:')
+      const data = rowOnly ? { what: 'changed', provider: answer.body } : watch.feed.startsWith('resource:')
         ? { what: 'changed', row: { kind: watch.feed.split(':')[1], value: answer.body } }
         : watch.member === undefined ? answer.body : { [watch.member]: answer.body };
       const measured=record(data)?{...data}:data;
@@ -130,6 +133,7 @@ export class RequestFeeds implements Part {
     else if ((found = /^topic:([^:]+)$/.exec(feed))) path = `/topics/${found[1] ?? ''}/sync`;
     else if ((found = /^job:([^:]+)$/.exec(feed))) { path = `/jobs/${found[1] ?? ''}`; member = 'job'; }
     else if ((found = /^fork:([^:]+)$/.exec(feed))) { path = `/forks/${found[1] ?? ''}`; member = 'batch'; }
+    else if ((found = /^provider-row:([^:]+)$/.exec(feed))) { path = `/providers/${found[1] ?? ''}`; }
     else if ((found = /^resource:([^:]+):([^:]+)$/.exec(feed))) {
       const collection = RESOURCE_PATHS[found[1] ?? ''];
       if (collection === undefined) return false;
