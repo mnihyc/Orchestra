@@ -1,36 +1,27 @@
-/** Live thread cards tagged and grouped by environment, announcements, environments and jobs.
+/** A topic at a glance, with its starter and a searched window of live threads.
  *
- * The topic at a glance: its threads as cards, how each stands, and beside them what the topic is: its
- * description, who owns it, when it was made and where its environments stand. Live: a thread that starts,
- * waits for an approval or ends changes its card as the org's tree says so. The announcements and the
- * running jobs of a topic come with the thread data this screen does not read yet.
+ * Overview and Threads share their table and its work, approval and activity facts from the org's tree.
+ * Usage, the place's owner and dates, environments, schedules and outside openings retain their sections.
  */
 import { TopicSchedules } from '@/features/schedules/HumanSchedules';
 import { OutsideOpenings } from '@/features/ports/Outside';
-import { MessagesSquare } from 'lucide-react';
-import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { PlaceChain, placesAbove } from '@/features/navigation/PlaceChain';
 import type { PlaceRef } from '@/features/navigation/places';
 import { canQuickStart, QuickStart } from '@/features/start/QuickStart';
-import { NewThreadButton, threadsOfTopic } from '@/features/topic/Threads';
-import { ThreadCard } from '@/features/topic/ThreadCard';
+import { TopicThreads } from '@/features/topic/Threads';
 import { UsageSection } from '@/features/usage/Board';
 import type { Topic } from '@/generated/api-types';
 import { canCreateIn } from '@/lib/permissions';
-import { useOrgTree } from '@/realtime/stores/tree';
 import { boxClasses, Section } from '@/shell/Page';
 import { EmptyState } from '@/ui/EmptyState';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 
-export function TopicOverview({ topic, place }: { topic: Topic; place: PlaceRef }) {
+export function TopicOverview({ topic, place, q, onQuery }: { topic: Topic; place: PlaceRef; q?: string | undefined; onQuery?: ((query: string) => void) | undefined }) {
   const { t } = useTranslation();
-  const tree = useOrgTree(topic.org_id);
-  const threads = useMemo(() => threadsOfTopic(tree.nodes, topic.id), [tree.nodes, topic.id]);
   const allowed = canCreateIn('topic', topic.access);
   // The project a topic lies in is the one it lies in directly, a folder or not, and the folders on the way are its place too.
   const places = placesAbove(topic.path);
@@ -38,24 +29,8 @@ export function TopicOverview({ topic, place }: { topic: Topic; place: PlaceRef 
   return (
     <div className="flex flex-col gap-6">
       <QuickStart node={topic} />
-      <Section id="topic-threads" title={t('places.topic.threads')} action={canQuickStart(topic) ? undefined : <NewThreadButton topic={place} allowed={allowed && !topic.archived} owner={topic.owner} />}>
-        {!tree.loaded && tree.error === null ? (
-          <SkeletonRows read={tree} rows={2} />
-        ) : threads.length === 0 ? (
-          <EmptyState
-            className={boxClasses}
-            icon={<MessagesSquare aria-hidden />}
-            title={t('places.topic.noThreads')}
-            description={t('places.topic.noThreadsAbout')}
-          />
-        ) : (
-          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {threads.map((thread) => (
-              <ThreadCard key={thread.id} thread={thread} />
-            ))}
-          </ul>
-        )}
-      </Section>
+      <TopicThreads orgId={topic.org_id} topicId={topic.id} topic={place} allowed={allowed && !topic.archived} owner={topic.owner} q={q} onQuery={onQuery} creation={!canQuickStart(topic)}
+        frame={(controls, rows) => <Section id="topic-threads" title={t('places.topic.threads')} action={controls}>{rows}</Section>} />
 
       <UsageSection nodeId={topic.id} name={topic.name} />
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">

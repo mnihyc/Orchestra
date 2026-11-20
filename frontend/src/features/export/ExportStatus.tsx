@@ -9,16 +9,20 @@ import { useTranslation } from 'react-i18next';
 
 import { ActionIcon, actionName } from '@/ui/actions';
 import { StatusPart } from '@/ui/StatusBar';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 
 import { dismissFinished, useWatched } from './jobs';
 
 export function ExportStatus() {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const navigate = useNavigate();
   const items = useWatched((state) => state.items);
   if (items.length === 0) return null;
   const running = items.filter((one) => one.state === 'running');
   const ready = items.filter((one) => one.state === 'ready');
+  const partial = ready.filter((one) => one.omitted !== null && one.omitted > 0);
   const failed = items.filter((one) => one.state === 'failed');
   const open = () => {
     dismissFinished();
@@ -38,7 +42,9 @@ export function ExportStatus() {
       )}
       {ready.length > 0 && (
         <StatusPart icon={<Download size={16} aria-hidden />} hint={t('export.status.readyHint')}>
-          {ready.length === 1 && ready[0] !== undefined ? t('export.status.ready', { place: ready[0].place }) : t('export.status.readyMany', { count: ready.length })}
+          {ready.length === 1 && ready[0] !== undefined
+            ? ready[0].omitted === null ? t('export.status.readyUnknown', { place: ready[0].place }) : ready[0].omitted > 0 ? t('export.status.partial', { place: ready[0].place, number: formatNumber(ready[0].omitted, locale) }) : t('export.status.ready', { place: ready[0].place })
+            : partial.length > 0 ? t('export.status.readyWithPartial', { number: formatNumber(ready.length, locale) }) : ready.some((one) => one.omitted === null) ? t('export.status.readyWithUnknown', { number: formatNumber(ready.length, locale) }) : t('export.status.readyMany', { count: ready.length })}
         </StatusPart>
       )}
       {failed.length > 0 && (

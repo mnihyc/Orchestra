@@ -17,8 +17,8 @@ interface ReadOptions {
 }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options: ReadOptions) => Promise<{ data: SettingReach; response: Response }>>() }));
 vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: calls.read } }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const def: KeyDef = { key: 'agent.web_search', title: 'Web search', description: 'Let the agent search the web.',
   group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', schema: { type: 'boolean' },
@@ -51,7 +51,7 @@ it.each(['en', 'zh-CN'] as const)('loads from the row itself and gives native ap
   expect(calls.read).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: i18n.t('settings.reach.openFor', { name: def.title }) }));
   const region = await screen.findByRole('region', { name: i18n.t('settings.reach.openFor', { name: def.title }) });
-  expect(within(region).getByText(locale === 'en' ? 'Applies to 1 project, 1 topic, and 7 threads' : '适用于1 个项目、1 个主题和7 个线程')).toBeVisible();
+  expect(within(region).getByText(locale === 'en' ? 'Applies to 1 project, 1 topic, and 7 threads' : '适用于1 个项目、1 个话题和7 个会话')).toBeVisible();
   expect(within(region).getByRole('link', { name: 'login' })).toHaveAttribute('href', '/topic/override-one?tab=settings&section=defaults&setting=agent.web_search');
   expect(calls.read).toHaveBeenCalledOnce();
   expectRead(0, '/nodes/{id}/settings/{key}/reach', {

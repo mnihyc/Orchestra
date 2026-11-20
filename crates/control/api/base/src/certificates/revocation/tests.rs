@@ -31,6 +31,7 @@ async fn machine(world: &World, owner: Id) -> (Id, Id) {
     link::insert_command(
         &mut conn,
         &NewCommand {
+            content_transit: false,
             id: command,
             machine_id: machine,
             kind: "machine.probe",
