@@ -11,7 +11,7 @@ export function scheduleRun(more: Partial<InputScheduleRun> = {}): InputSchedule
 }
 export function inputSchedule(more: Partial<InputSchedule> = {}): InputSchedule {
   return { id: SCHEDULE, kind: 'agent', agent: { thread_id: SCHEDULE_THREAD, agent_id: 'research-agent', source_turn_id: 'source-turn', until: '2030-01-02T21:30:00Z', max_runs: 20, runs: 0 },
-    topic: { id: SCHEDULE_TOPIC, kind: 'topic', name: 'Release', redacted: false }, author: ADA, name: 'Check the CI run',
+    topic: { id: SCHEDULE_TOPIC, kind: 'topic', name: 'Release', redacted: false }, author: ADA, name: 'Check the CI run', plan: false, delivery: 'queue',
     destination: { thread: { id: SCHEDULE_THREAD, kind: 'thread', name: 'Review', redacted: false }, new_thread: false }, definition: null,
     timing: { kind: 'once', at: '2030-01-01T21:30:00Z', zone: 'UTC' }, state: 'active', next_run_at: '2030-01-01T21:30:00Z', revision: 1,
     last_run: null, created_at: '2030-01-01T20:30:00Z', updated_at: '2030-01-01T20:30:00Z', topic_seq: 2, ...more };

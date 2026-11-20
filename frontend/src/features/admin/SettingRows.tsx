@@ -55,7 +55,7 @@ export function useSettingChange(key: string) {
   };
 }
 
-function acceptSystemSetting(cache: QueryClient, accepted: ResolvedSetting) {
+export function acceptSystemSetting(cache: QueryClient, accepted: ResolvedSetting) {
   for (const key of [settingsKey, targetSettingsKey({ kind: 'system' })]) cache.setQueryData<ResolvedSetting[]>(key, (held) => held?.map((one) => one.key === accepted.key ? accepted : one));
 }
 

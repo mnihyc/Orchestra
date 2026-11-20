@@ -12,6 +12,10 @@ import tailwindcss from '@tailwindcss/vite';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { firstWavePlugin } from './build/first-wave';
+import { staticChunkGroup } from './build/frame-chunks';
+import { assetFileName, inlineAsset } from './build/fonts';
+import { vocabularyPlugin } from './build/vocabulary';
 import { helpContentPlugin } from './build/help-content';
 import { releaseNoticesPlugin } from './build/release-notices';
 import { servingProxyConfig } from './build/serving-proxy';
@@ -20,8 +24,11 @@ const upstreams = servingProxyConfig(process.env);
 
 export default defineConfig({
   plugins: [
+    vocabularyPlugin(),
     helpContentPlugin(),
     releaseNoticesPlugin(),
+    // The frame is known before the verified reader selects the first vocabulary.
+    firstWavePlugin(),
     // The route tree is generated from the files under `src/routes`; every route is its own chunk.
     tanstackRouter({
       target: 'react',
@@ -79,20 +86,29 @@ export default defineConfig({
   build: {
     // Everything but the first page is named by its content, under `/assets/`, and kept by the browser.
     assetsDir: 'assets',
+    assetsInlineLimit: inlineAsset,
     sourcemap: false,
     rolldownOptions: {
+      preserveEntrySignatures: false,
       output: {
+        assetFileNames: assetFileName,
+        format: 'es',
+        strictExecutionOrder: true,
         codeSplitting: {
+          // Shared factories register once, preserving stores and export identities while each screen
+          // carries the code it actually reaches. Styles remain files so Vite emits each sheet once.
+          experimentalInlineCommonChunks: { maxSize: Infinity, exclude: /\.(css|scss|sass|less|styl|stylus|pcss|postcss|sss)(\?|$)/ },
           groups: [
             // What the first screen needs is fetched as one file, not in hundreds: every module the entry reaches by static
             // imports joins one group (left alone, the many lazily loaded screens cut it into hundreds of shared pieces,
             // most under a kilobyte, each a request). It is not cut into parts: parts of one group import each other, and
             // a part that ran before the one it imports from broke the page. (The page's own entry is then an empty file,
             // which Vite leaves out: the page loads the group directly.)
-            { name: 'initial', tags: ['$initial'] },
-            // The workbench's frame, which every signed-in screen stands in, likewise comes as one file with what it needs beyond
-            // the first (its parts would otherwise come in a hundred small files). The screens before sign-in share none of it.
-            { name: 'shell', test: /[\\/]src[\\/]shell[\\/]Shell\.tsx$/ },
+            { name: 'initial', tags: ['$initial'], priority: 3 },
+            staticChunkGroup('application', fileURLToPath(new URL('./src/application.tsx', import.meta.url)), 2),
+            // Match every static frame dependency directly, even one also used by another lazy entry.
+            // The earlier phase owns shared modules once; optional viewers remain outside this closure.
+            staticChunkGroup('frame', fileURLToPath(new URL('./src/shell/Shell.tsx', import.meta.url)), 1),
           ],
         },
       },
