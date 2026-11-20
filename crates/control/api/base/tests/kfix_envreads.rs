@@ -252,10 +252,10 @@ async fn library_read(scene: &Scene, token: &str) -> orch_api_core::testing::Raw
 }
 
 async fn scoped_token(scene: &Scene, scope: &str, node: Option<Id>) -> (Id, String) {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     create_api_token(
         &mut *scene.world.conn().await,
         &NewApiToken {
