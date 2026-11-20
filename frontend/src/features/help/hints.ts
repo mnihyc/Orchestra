@@ -29,7 +29,7 @@ const MORE: Record<string, { article: string; heading: string } | undefined> = {
   'loss-notify': { article: 'recover-lost-work', heading: 'tell-the-affected-people' },
   'loss-native': { article: 'recover-lost-work', heading: 'servers-and-mounts' },
   'loss-mounts': { article: 'recover-lost-work', heading: 'servers-and-mounts' },
-  'loss-providers': { article: 'recover-lost-work', heading: 'provider-runtimes' },
+  'loss-providers': { article: 'recover-lost-work', heading: 'managed-providers' },
   'loss-delete-host': { article: 'recover-lost-work', heading: 'remove-a-host' },
   'navigation-arrangements': { article: 'navigation', heading: 'tree-and-recent' },
   'resource-library': { article: 'resource-library', heading: 'choose-a-view' },

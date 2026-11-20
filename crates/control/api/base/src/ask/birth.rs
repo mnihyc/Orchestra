@@ -34,6 +34,7 @@ fn validate(body: &CreateThread) -> ApiResult<()> {
         (body.directory.is_some(), "directory"),
         (body.worktree.is_some(), "worktree"),
         (body.prepare_source.is_some(), "prepare_source"),
+        (!body.workspace_edits.is_empty(), "workspace_edits"),
         (body.cwd.is_some(), "cwd"),
         (body.model.is_some(), "model"),
         (body.effort.is_some(), "effort"),
@@ -198,14 +199,14 @@ async fn files(
             )
             .with("limit", limit));
         }
-        let taken = crate::attachments::Taken {
-            meta: orch_blob_contract::range::BlobMeta {
+        let taken = crate::attachments::Taken::protected(
+            orch_blob_contract::range::BlobMeta {
                 hash: blob,
                 size: meta.size,
             },
-            name: crate::uploads::clean_name("first_input.content.name", &name)?,
-            supplied_bytes: false,
-        };
+            crate::uploads::clean_name("first_input.content.name", &name)?,
+            false,
+        );
         // Retain through the original native source witness before inspecting any stored bytes.
         crate::attachments::retain(ctx, conn, principal, &taken).await?;
         let described = crate::attachments::describe(ctx, &taken.meta, &taken.name).await?;

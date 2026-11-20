@@ -49,7 +49,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(view.container.querySelector('svg.lucide-loader-circle')).not.toBeNull();
     const stopped = display('failed', { blocked_reason: 'error', recovery: recoveryDisplay({ stop_reason: 'repeat_limit', count: 4, window_secs: 300 }) });
     view.rerender(<ThreadStateIcon display={stopped} />);
-    const reason = locale === 'en' ? 'Provider busy · 4 times in 5 min' : i18n.t('calls.repeatStopped', { kind: i18n.t('calls.kinds.provider_busy'), count: 4, occurrences: '4', window: formatSpan(300_000, { locale }, 'short') });
+    const reason = locale === 'en' ? 'Stopped · Provider busy · 4 times in 5 min' : `已停止 · 提供方繁忙 · ${formatSpan(300_000, { locale }, 'short')} 内 4 次`;
     expect(screen.getByRole('img', { name: reason })).toBeVisible();
     expect(view.container.querySelector('svg.lucide-octagon-alert')).not.toBeNull();
     expect(view.container.querySelector('[class~="motion-safe:animate-spin"]')).toBeNull();

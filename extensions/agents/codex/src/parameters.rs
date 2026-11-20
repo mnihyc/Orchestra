@@ -337,13 +337,9 @@ impl TurnSettings {
                 .filter(|value| allowed.is_none_or(|allowed| allowed.contains(value)))
                 .map(str::to_owned)
         };
-        // A program is offered by the account's own model list and switched on by a manager of the provider, so a
-        // newer one of the vendor's family is sent as it is named; the vendor refuses one the account does not have.
-        let program = params
-            .get(CYBER_ACCESS_PROGRAM)
-            .and_then(Json::as_str)
-            .filter(|value| *value == "standard" || is_daybreak(value))
-            .map(str::to_owned);
+        // Model and provider constraints have already validated this choice. Send its actual name;
+        // an unsupported program must receive the vendor's refusal instead of silently becoming ordinary.
+        let program = text(CYBER_ACCESS_PROGRAM, None);
         Self {
             service_tier: text(SERVICE_TIER, None),
             summary: text(
@@ -824,9 +820,22 @@ mod tests {
     #[test]
     fn a_value_the_harness_does_not_take_is_not_sent() {
         let settings = TurnSettings::from_params(&json!({
-            "reasoning_summary": "verbose", "approvals_reviewer": 3, "cyber_access_program": "root", "service_tier": ""
+            "reasoning_summary": "verbose", "approvals_reviewer": 3, "cyber_access_program": 3, "service_tier": ""
         }));
         assert_eq!(settings, TurnSettings::default());
+    }
+
+    #[test]
+    fn a_model_listed_access_program_reaches_the_turn_without_a_prefix_gate() {
+        let offered = offered_for(&json!({
+            "availableAccessPrograms": { "cyber": ["standard", "previewSecurity"] }
+        }))
+        .unwrap();
+        let program = &offered.access_programs.as_ref().unwrap()[0];
+        let mut params = Map::new();
+        TurnSettings::from_params(&json!({ "cyber_access_program": program }))
+            .put_into(&mut params, None);
+        assert_eq!(params.get("cyberAccessProgram"), Some(&json!(program)));
     }
 
     #[test]
@@ -837,6 +846,14 @@ mod tests {
             settings.cyber_access_program.as_deref(),
             Some("daybreakGreen")
         );
+    }
+
+    #[test]
+    fn a_provider_enabled_program_is_sent_without_a_name_prefix_assumption() {
+        let mut sent = Map::new();
+        TurnSettings::from_params(&json!({ "cyber_access_program": "researchPreview" }))
+            .put_into(&mut sent, None);
+        assert_eq!(sent["cyberAccessProgram"], "researchPreview");
     }
 
     #[test]
