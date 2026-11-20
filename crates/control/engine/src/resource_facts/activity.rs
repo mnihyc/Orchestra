@@ -30,7 +30,7 @@ pub async fn accepts_context(
     agent: Option<Id>,
     environment: Option<Id>,
 ) -> Result<bool, EngineError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status IN ('ready','exhausted') AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status IN ('ready','exhausted') AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)) AND NOT EXISTS(SELECT 1 FROM runtime_withdrawals w WHERE w.provider_id=p.id OR w.environment_id=p.held_by_environment_id OR w.environment_id=$4))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
 }
 
 /// A durable stop belongs to the accepted id and survives making its resource available again.
@@ -71,22 +71,45 @@ pub async fn accepts_command(
 
 /// Existing accepted calls and completion commands share one live reader, without a new use producer.
 pub async fn requests(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Id>, EngineError> {
+    requests_at(conn, target, None).await
+}
+
+/// A live observer can supply its actual application clock; no database wall clock replaces it.
+pub async fn requests_at(
+    conn: &mut Conn,
+    target: &FactTarget,
+    now: Option<Time>,
+) -> Result<Vec<Id>, EngineError> {
     Ok(sqlx::query_scalar(include_str!("requests.sql"))
         .bind(target.object.kind.as_str())
         .bind(target.object.id)
         .bind(target.model_id)
+        .bind(now.map(Time::get))
         .fetch_all(conn)
         .await
         .map_err(DbError::from)?)
 }
 
 /// The resource transaction freezes the first stop reason before any native cancellation is sent.
-pub async fn stop_requests(conn: &mut Conn, ids: &[Id], reason: &str) -> Result<(), EngineError> {
+pub async fn stop_requests(
+    conn: &mut Conn,
+    ids: &[Id],
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(), EngineError> {
     sqlx::query(
         "UPDATE summary_calls SET cancel_reason=COALESCE(cancel_reason,$2) WHERE id=ANY($1)",
     )
     .bind(ids)
     .bind(reason)
+    .execute(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    sqlx::query(
+        "UPDATE provider_relay_calls SET finished_at=COALESCE(finished_at,$2) WHERE id=ANY($1)",
+    )
+    .bind(ids)
+    .bind(now)
     .execute(conn)
     .await
     .map_err(DbError::from)?;

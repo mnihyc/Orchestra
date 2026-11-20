@@ -12,7 +12,7 @@ use http::StatusCode;
 use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permissions::ResourceKind};
 use orch_api_contract::resources::HostUpdateNow;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::{RawReply, advance_component_updates, authorize_machine},
     thread_access::AuthzAccess,
 };
@@ -39,7 +39,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>, seconds: i64) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -488,8 +488,8 @@ async fn minimum_recovery_uses_its_manual_request_and_never_borrows_automatic_au
 }
 
 #[tokio::test]
-async fn host_update_keeps_local_policy_refusal_and_rechecks_expiry_after_the_native_physical_lock()
-{
+async fn manual_host_update_keeps_automatic_updates_off_and_rechecks_expiry_after_the_native_physical_lock()
+ {
     let world = World::new().await;
     let company = resources::company(&world).await;
     let (host, machine) = host(&world, company.boss.id(), company.acme, false, false).await;
@@ -500,15 +500,19 @@ async fn host_update_keeps_local_policy_refusal_and_rechecks_expiry_after_the_na
         3600,
     )
     .await;
-    let refused = body(call(&world, &actor.secret, host).await);
-    assert_eq!(refused["status"], "refused");
-    assert!(
-        refused["detail"]
-            .as_str()
+    let requested = body(call(&world, &actor.secret, host).await);
+    assert_eq!(requested["status"], "queued");
+    assert_eq!(requested["automatic"], false);
+    assert_eq!(record(&world, machine).await.state, "queued");
+    assert_eq!(
+        rows::machine(&mut *world.conn().await, machine)
+            .await
             .unwrap()
-            .contains("update.auto is off")
+            .unwrap()
+            .facts["policy"]["update.auto"],
+        false,
+        "an explicit update never enables the operator's automatic-update policy"
     );
-    assert_eq!(record(&world, machine).await.state, "refused");
     let mut blocker = world.db.pool.begin().await.unwrap();
     sqlx::query("SELECT id FROM machines WHERE id=$1 FOR UPDATE")
         .bind(machine)
@@ -526,7 +530,7 @@ async fn host_update_keeps_local_policy_refusal_and_rechecks_expiry_after_the_na
     });
     tokio::time::timeout(WAIT,async {loop {
         assert!(!request.is_finished(),"the native physical program lock must be reached");
-        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT id FROM machines%FOR SHARE%')")
+        let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%SELECT id FROM machines%FOR KEY SHARE%')")
             .bind(pid).fetch_one(&world.db.pool).await.unwrap();if blocked {break;}tokio::task::yield_now().await;
     }}).await.expect("the actual machine source lock is waiting");
     let before = record(&world, machine).await;

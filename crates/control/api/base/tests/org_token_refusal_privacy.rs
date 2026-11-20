@@ -13,7 +13,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_access_contract::permissions::{Permission, PermissionName};
 use orch_api_contract::auth::OrgTokenRefuse;
 use orch_api_contract::common::ErrorCode;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Act, Caller, Policy, Principal};
 use orch_db::queries::{access, identity};
@@ -37,11 +37,12 @@ async fn key(world: &World, account: Id, org: Id, read: Option<&str>) -> String 
     }
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: account,
             name: "Refusal error projection control",
             token_hash: &token_hash(&secret),
@@ -95,10 +96,12 @@ async fn refusal_manage_without_own_read_keeps_the_ordinary_denial_but_not_its_u
         .base
         .id;
     places::join(&world, org, org, &viewer, "viewer", &owner).await;
+    let target_key_id = new_id();
     let target = identity::testing::insert_api_token(
         &mut *world.conn().await,
+        target_key_id,
         owner.id(),
-        &token_hash(&new_token(API_TOKEN_PREFIX)),
+        &token_hash(&new_api_token(target_key_id)),
     )
     .await
     .unwrap();

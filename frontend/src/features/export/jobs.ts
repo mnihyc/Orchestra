@@ -34,6 +34,8 @@ export interface Watched {
   /** The archive, once the job has made it. */
   exportId: string | null;
   error: JobError | null;
+  /** The completed archive's actual omissions; null until reported. */
+  omitted: number | null;
 }
 
 interface WatchStore {
@@ -67,7 +69,7 @@ export function watchExport(job: Job, place: string): void {
   useWatched.setState((state) => ({
     items: [
       ...state.items.filter((one) => one.job !== job.id),
-      { job: job.id, place, state: 'running', percent: job.progress.percent, phase: job.progress.phase, exportId: null, error: null },
+      { job: job.id, place, state: 'running', percent: job.progress.percent, phase: job.progress.phase, exportId: null, error: null, omitted: null },
     ],
   }));
   remember();
@@ -98,6 +100,12 @@ export function exportOf(job: Job): string | null {
   return typeof made === 'string' ? made : null;
 }
 
+/** A ready archive is not necessarily complete; unknown metadata never means zero omissions. */
+function omissionsOf(job: Job): number | null {
+  const count = (job.result as { omitted_items?: unknown } | null)?.omitted_items;
+  return typeof count === 'number' && Number.isInteger(count) && count >= 0 ? count : null;
+}
+
 /** Takes what the server says of a job: how far it is, or how it ended, and tells the person if it ended. */
 function settle(job: Job, t: TFunction): void {
   const held = useWatched.getState().items.find((one) => one.job === job.id);
@@ -118,11 +126,12 @@ function settle(job: Job, t: TFunction): void {
     toast({ tone: 'danger', title: t('export.job.failed', { place: held.place }), description: failureWords(job.error, t) });
   } else {
     const exportId = exportOf(job);
-    change(job.id, (one) => ({ ...one, state: 'ready', percent: 100, exportId }));
+    const omitted = omissionsOf(job);
+    change(job.id, (one) => ({ ...one, state: 'ready', percent: 100, exportId, omitted }));
     toast({
       tone: 'success',
-      title: t('export.job.ready', { place: held.place }),
-      ...(exportId === null ? {} : { action: { label: t('export.downloadButton'), run: () => void fetchArchive(exportId) } }),
+      title: t(omitted === null ? 'export.job.readyUnknown' : omitted > 0 ? 'export.job.partial' : 'export.job.ready', { place: held.place }),
+      ...(exportId === null ? {} : { action: { label: t(omitted !== null && omitted > 0 ? 'export.downloadPartialButton' : 'export.downloadButton'), run: () => void fetchArchive(exportId) } }),
     });
   }
   remember();
@@ -142,7 +151,7 @@ export function useExportWatch(): void {
         const job = one.job;
         const place = one.place;
         if (useWatched.getState().items.some((held) => held.job === job)) continue;
-        useWatched.setState((state) => ({ items: [...state.items, { job, place, state: 'running', percent: 0, phase: '', exportId: null, error: null }] }));
+        useWatched.setState((state) => ({ items: [...state.items, { job, place, state: 'running', percent: 0, phase: '', exportId: null, error: null, omitted: null }] }));
       }
     } catch {
       // Nothing kept, or nothing that can be read: nothing to follow.

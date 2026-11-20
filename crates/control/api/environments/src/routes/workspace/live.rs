@@ -39,7 +39,132 @@ use orch_link::commands::CommandFailure;
 
 use orch_types::Id;
 
-pub use orch_api_base::routes::workspace::live::run;
+use orch_engine::commands::Outgoing;
+use orch_link_contract::commands::{CommandBody, SerialKey};
+
+/// Bind every immediate human file command to its original HTTP identity and current native scope.
+pub async fn issue(ctx: &Ctx, mut command: Outgoing) -> Result<crate::dispatch::Issued, Failure> {
+    if matches!(
+        ctx.user().map(|user| &user.via),
+        Ok(crate::middleware::authentication::Via::OwnerRead { .. })
+    ) {
+        if !orch_engine::operation_scope::file_commands::FileCommand::root_service(
+            command.kind.as_str(),
+            &command.body,
+        )
+        .map_err(|error| Failure::Other(error.to_string()))?
+        {
+            return Err(Failure::Current(Box::new(ApiError::new(
+                ErrorCode::FileReachDenied,
+                "this reader is confined to the environment roots",
+            ))));
+        }
+        return ctx
+            .app
+            .link
+            .dispatcher()
+            .issue_stored(crate::dispatch::StoredCommand {
+                native_target: command.native_target,
+                id: Some(command.id),
+                machine: command.machine,
+                kind: command.kind.as_str().to_owned(),
+                key: command.key.wire(),
+                deadline: command.deadline,
+                content_transit: command.content_transit,
+                body: command.body,
+                authority: None,
+            })
+            .await
+            .map_err(|error| command_failure(RunError::Dispatch(error)));
+    }
+    async {
+        let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
+        let source = orch_engine::operation_scope::file_commands::FileCommand::capture(
+            &mut tx,
+            guard.principal().caller(),
+            ctx.route,
+            &command,
+        )
+        .await
+        .map_err(ApiError::engine)?;
+        let raw = crate::key_operations::native::http_origin::capture_operation(
+            ctx,
+            &mut tx,
+            source.origin(),
+        )
+        .await?;
+        command.deadline.get_or_insert_with(|| {
+            orch_types::Time::new(
+                ctx.app.clock.now()
+                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
+            )
+        });
+        let authority = crate::key_operations::native::http_origin::bind_source(
+            &raw,
+            &command,
+            orch_engine::operation_scope::http_command_source::CommandEvidence::FilePath(Box::new(
+                source,
+            )),
+        )?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        guard.check_deadline(ctx)?;
+        ctx.app
+            .link
+            .dispatcher()
+            .issue_stored_before(
+                crate::dispatch::StoredCommand {
+                    native_target: command.native_target,
+                    id: Some(command.id),
+                    machine: command.machine,
+                    kind: command.kind.as_str().to_owned(),
+                    key: command.key.wire(),
+                    deadline: command.deadline,
+                    content_transit: command.content_transit,
+                    body: command.body,
+                    authority: Some(authority),
+                },
+                Box::new(move || {
+                    guard.before_effect(ctx).map_err(|error| {
+                        Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                    })
+                }),
+            )
+            .await
+            .map_err(|error| match error {
+                DispatchError::BeforeEffect(error) => ApiError::internal(error),
+                other => command_failure(RunError::Dispatch(other)).problem(Doing::Reading),
+            })
+    }
+    .await
+    .map_err(|error| Failure::Current(Box::new(error)))
+}
+
+/// Internal work keeps its existing root producer; human file commands retain their current actor.
+pub async fn run<B: CommandBody>(
+    ctx: &Ctx,
+    machine: Id,
+    key: SerialKey,
+    body: &B,
+) -> Result<B::Result, Failure> {
+    if !orch_engine::operation_scope::file_commands::FileCommand::applicable(B::KIND.as_str())
+        || matches!(
+            ctx.user().map(|user| &user.via),
+            Ok(crate::middleware::authentication::Via::OwnerRead { .. })
+        )
+    {
+        return orch_api_base::routes::workspace::live::run(ctx, machine, key, body).await;
+    }
+    let command = Outgoing::new(orch_types::new_id(), machine, key, body)
+        .map_err(|error| Failure::Other(error.to_string()))?;
+    let id = command.id;
+    issue(ctx, command).await?;
+    ctx.app
+        .link
+        .dispatcher()
+        .wait_for::<B>(id)
+        .await
+        .map_err(command_failure)
+}
 /// The machine that answers for the environment now, if there is one: the environment stands attached
 /// in the session its machine has (a directory on a person's machine says so in its row; a unit made
 /// from a template, by running), the machine's row says it is active, and it has a session.

@@ -67,19 +67,19 @@ use crate::tunnels::TunnelServer;
 
 /// The kinds of command the environment role takes: every kind the catalogue addresses to it.
 fn directory_mount_id(name: &str, labels: &BTreeMap<String, String>) -> Result<Id, CommandError> {
-    let id: Id = name
-        .strip_prefix("orch-mount-")
+    let id: Id = labels
+        .get("orch.mount_id")
         .and_then(|id| id.parse().ok())
         .ok_or_else(|| {
             CommandError::new(
                 ErrorCode::Conflict,
-                "owned mount data must name its mount identifier",
+                "the owned-data labels do not identify this mount",
             )
         })?;
-    if labels.get("orch.mount_id") != Some(&id.to_string()) {
+    if !orch_link_contract::commands::is_mount_volume(id, name) {
         return Err(CommandError::new(
             ErrorCode::Conflict,
-            "the owned-data labels do not identify this mount",
+            "owned mount data must name its mount identifier",
         ));
     }
     Ok(id)
@@ -88,6 +88,10 @@ fn directory_mount_id(name: &str, labels: &BTreeMap<String, String>) -> Result<I
 const TAKES: &[CommandKind] = &[
     CommandKind::NodeVolumeEnsure,
     CommandKind::NodeVolumeRemove,
+    CommandKind::NodeMountMeasure,
+    CommandKind::NodeMountExport,
+    CommandKind::NodeMountImport,
+    CommandKind::NodeVolumeCarryCheck,
     CommandKind::UnitAfterUp,
     CommandKind::DisplayOpen,
     CommandKind::DisplayAdopt,
@@ -113,6 +117,14 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsUnwatch,
     CommandKind::FsStat,
     CommandKind::FsFetch,
+    CommandKind::FsRelayDescribe,
+    CommandKind::FsRelaySend,
+    CommandKind::FsRelayArchiveRead,
+    CommandKind::FsRelayReceive,
+    CommandKind::FsRelayVerify,
+    CommandKind::FsRelayPrepare,
+    CommandKind::FsRelayCommit,
+    CommandKind::FsRelayAbort,
     CommandKind::FsWrite,
     CommandKind::FsMkdir,
     CommandKind::FsRename,
@@ -135,6 +147,7 @@ const TAKES: &[CommandKind] = &[
     CommandKind::FsRestore,
     CommandKind::WorkspaceObserve,
     CommandKind::FsMaterialize,
+    CommandKind::FsMaterializeIfAbsent,
     CommandKind::GitStatus,
     CommandKind::GitPrepare,
     CommandKind::GitPrepareCleanup,
@@ -211,7 +224,8 @@ pub struct EnvironmentRole {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     desired: crate::reconciliation::environments::Desired,
     generation: i64,
-    lifecycle: tokio::sync::Mutex<()>,
+    lifecycle: tokio::sync::RwLock<()>,
+    environment_lifecycle: crate::storage_locks::StorageLocks,
     after_up: crate::after_up::Runner,
     hooks: crate::lifecycle::Hooks,
 }
@@ -244,18 +258,19 @@ fn internal(what: impl std::fmt::Display) -> CommandError {
 /// The limits the host is given from the policy of the machine.
 fn gates_of(policy: &LocalPolicy) -> Gates {
     Gates {
+        files_reach: policy.environment_files_reach,
         remote_write: policy.environment_remote_write,
         deliver_files: policy.environment_deliver_files,
-        terminal: policy.environment_terminal,
-        browser: policy.environment_browser,
+        terminal: policy.environment_terminal && !cfg!(windows),
+        browser: policy.environment_browser && !cfg!(windows),
         vnc: policy.environment_vnc,
     }
 }
 
 fn mcp_gates_of(policy: &LocalPolicy) -> McpGates {
     McpGates {
-        import: policy.mcp_import,
-        add: policy.mcp_add,
+        import: policy.mcp_import && !cfg!(windows),
+        add: policy.mcp_add && !cfg!(windows),
     }
 }
 
@@ -264,7 +279,9 @@ fn roots_of(policy: &LocalPolicy, data_dir: &std::path::Path) -> Vec<PathBuf> {
         .environment_roots
         .iter()
         .map(PathBuf::from)
-        .chain(std::iter::once(data_dir.join("environment-data")))
+        .chain(std::iter::once(
+            data_dir.join(crate::storages::PRIVATE_DIRECTORY),
+        ))
         .collect()
 }
 
@@ -321,6 +338,7 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     };
     settings.process_controls = services.process_controls;
     if let Some(policy) = services.policy.policy() {
+        settings.platform_review = services.policy.platform_review();
         settings.local_programs = local_programs_of(&policy, &services.local_harnesses);
     }
     // The builds the system put in a runtime it made are the tools the environment was made with.
@@ -335,8 +353,6 @@ fn settings_of(services: &Services, parts: &EnvironmentParts) -> HostSettings {
     let tunables = &services.config.envhost;
     settings.limits.rescan = Duration::from_secs(tunables.rescan_secs);
     settings.limits.manifest_interval = Duration::from_secs(tunables.manifest_interval_secs);
-    settings.limits.index_max_entries = tunables.index_max_entries;
-    settings.limits.index_scan_max = std::time::Duration::from_secs(tunables.index_scan_max_secs);
     settings.mcp_restarts = tunables.mcp_restarts;
     settings.mcp_restart_window = Duration::from_secs(tunables.mcp_restart_window_secs);
     if let Some(scope) = parts.process_scope {
@@ -358,18 +374,21 @@ struct JobProgressSink {
     queue: Option<watch::Sender<Option<HostJobProgress>>>,
     latest: Arc<Mutex<(Option<HostJobProgress>, std::time::Instant)>>,
     started: std::time::Instant,
+    deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
 }
 
 impl JobProgressSink {
     fn new(
         queue: Option<watch::Sender<Option<HostJobProgress>>>,
         clock: Arc<dyn orch_types::Clock>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> Self {
         Self {
             queue,
             clock,
             latest: Arc::new(Mutex::new((None, std::time::Instant::now()))),
             started: std::time::Instant::now(),
+            deadline,
         }
     }
 }
@@ -392,6 +411,7 @@ impl Progress for JobProgressSink {
             eta_seconds: None,
             message: None,
             activity: Some(orch_api_contract::workspace::JobActivity {
+                captured_deadline: None,
                 waiting_for: None,
                 updated_at: self.clock.time(),
                 stall_after_seconds: 0,
@@ -402,6 +422,20 @@ impl Progress for JobProgressSink {
     }
     fn report(&self, progress: &HostJobProgress) {
         let mut progress = progress.clone();
+        if let Some(deadline) = &self.deadline {
+            let activity =
+                progress
+                    .activity
+                    .get_or_insert(orch_api_contract::workspace::JobActivity {
+                        captured_deadline: None,
+                        waiting_for: None,
+                        updated_at: deadline.accepted_at,
+                        stall_after_seconds: 0,
+                        directories_done: None,
+                        stopping: false,
+                    });
+            activity.captured_deadline = Some(deadline.clone());
+        }
         let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(before) = &latest.0
             && before.phase == progress.phase
@@ -507,7 +541,8 @@ impl EnvironmentRole {
             tasks: Mutex::new(Vec::new()),
             desired: crate::reconciliation::environments::Desired::new(services),
             generation,
-            lifecycle: tokio::sync::Mutex::new(()),
+            lifecycle: tokio::sync::RwLock::new(()),
+            environment_lifecycle: Default::default(),
             after_up: crate::after_up::Runner::new(services),
             hooks: crate::lifecycle::Hooks::for_machine(Arc::clone(&services.policy)),
         });
@@ -636,6 +671,60 @@ impl EnvironmentRole {
     }
 
     async fn attach(&self, command: Id, body: &EnvAttach) -> Result<CommandResult, CommandError> {
+        // Check the live physical decision before allocating data, opening local ports or running hooks.
+        if !orch_envhost::RUNTIME_VERIFIED {
+            if !self
+                .services
+                .policy
+                .policy()
+                .as_ref()
+                .is_some_and(crate::installation::runtime_reviewed)
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "the machine manager must review this native system first",
+                ));
+            }
+            if body
+                .mounts
+                .as_ref()
+                .is_some_and(|mounts| !mounts.is_empty())
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "native mount enforcement is unavailable on this system",
+                ));
+            }
+            if cfg!(windows)
+                && self.services.policy.policy().is_some_and(|policy| {
+                    policy.hooks.pre_up.is_some()
+                        || policy.hooks.post_up.is_some()
+                        || policy.hooks.pre_down.is_some()
+                        || policy.hooks.post_down.is_some()
+                })
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "this Windows directory runtime cannot own lifecycle hook processes",
+                ));
+            }
+        }
+        let mut owned_mounts = std::collections::BTreeSet::new();
+        for mount in body.mounts.iter().flatten() {
+            if let Some(volume) = &mount.volume {
+                if !orch_link_contract::commands::is_mount_volume(mount.mount_id, &volume.name) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "a mount's owned data reference does not match its identifier",
+                    ));
+                }
+                owned_mounts.insert(volume.name.clone());
+            }
+        }
+        let mut _mount_names = Vec::with_capacity(owned_mounts.len());
+        for name in owned_mounts {
+            _mount_names.push(self.hold_mount_name(&name).await?);
+        }
         let secrets = self.unseal(command, &body.secrets)?;
         let previous = self.host.environment(body.environment_id).is_ok();
         if !previous {
@@ -709,17 +798,22 @@ impl EnvironmentRole {
         }
         if let Some(policy) = self.services.policy.policy() {
             for mount in private.mounts.iter_mut().flatten() {
-                mount.source = if let Some(volume) = &mount.volume {
+                mount.source = if let Some(volume) = &mut mount.volume {
                     if volume.directory.is_some()
-                        || volume.name != format!("orch-mount-{}", mount.mount_id)
+                        || !orch_link_contract::commands::is_mount_volume(
+                            mount.mount_id,
+                            &volume.name,
+                        )
                     {
                         return Err(CommandError::new(
                             ErrorCode::Conflict,
                             "a mount's owned data reference does not match its identifier",
                         ));
                     }
-                    crate::storages::recorded_directory(&self.services.data_dir,&policy,mount.mount_id,"mount")?
-                        .ok_or_else(||CommandError::new(ErrorCode::NotFound,"the mount's owned data is absent; its location must be made before attaching it"))?.to_string_lossy().into_owned()
+                    let binding = crate::storages::recorded_mount_binding(&self.services.data_dir,&policy,mount.mount_id,&volume.name,volume.storage.as_deref())?
+                        .ok_or_else(||CommandError::new(ErrorCode::NotFound,"the mount's owned data is absent; its location must be made before attaching it"))?;
+                    volume.directory = Some(binding.clone());
+                    binding.path
                 } else {
                     crate::policy::inspect_environment_path(
                         &policy,
@@ -883,11 +977,20 @@ impl EnvironmentRole {
             .host
             .environment(body.environment_id)
             .map_err(|_| display_error(orch_envhost::displays::DisplayError::NotFound))?;
-        environment
-            .displays()
-            .adopt(body.display_id, &body.endpoint, password)
-            .await
-            .map_err(display_error)
+        use orch_link_contract::display::DisplayTarget;
+        let displays = environment.displays();
+        match &body.target {
+            DisplayTarget::Endpoint(endpoint) => {
+                displays.adopt(body.display_id, endpoint, password).await
+            }
+            DisplayTarget::Desktop if password.is_none() => {
+                displays.share_desktop(body.display_id).await
+            }
+            DisplayTarget::Desktop => {
+                return Err(internal("desktop sharing takes no server credential"));
+            }
+        }
+        .map_err(display_error)
     }
 
     /// Progress that goes out on the environment's stream for a job, and the task that puts it there.
@@ -896,10 +999,21 @@ impl EnvironmentRole {
         command: Id,
         environment_id: Id,
         job: Option<Id>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
+    ) -> (JobProgressSink, JoinHandle<()>) {
+        self.progress_on(command, Stream::Env { environment_id }, job, deadline)
+    }
+
+    fn progress_on(
+        &self,
+        command: Id,
+        stream: Stream,
+        job: Option<Id>,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     ) -> (JobProgressSink, JoinHandle<()>) {
         let Some(job_id) = job else {
             return (
-                JobProgressSink::new(None, Arc::clone(&self.services.clock)),
+                JobProgressSink::new(None, Arc::clone(&self.services.clock), None),
                 tokio::spawn(async {}),
             );
         };
@@ -916,28 +1030,134 @@ impl EnvironmentRole {
                     progress,
                     log: None,
                 });
-                if let Err(error) = services
-                    .publisher
-                    .publish(Stream::Env { environment_id }, event)
-                    .await
-                {
+                if let Err(error) = services.publisher.publish(stream, event).await {
                     tracing::warn!(%error, "the progress of a job could not be put in the spool");
                 }
             }
         });
-        (
-            JobProgressSink::new(Some(queue), Arc::clone(&self.services.clock)),
-            task,
-        )
+        let progress = JobProgressSink::new(
+            Some(queue),
+            Arc::clone(&self.services.clock),
+            deadline.clone(),
+        );
+        if let Some(deadline) = deadline {
+            progress.report(&HostJobProgress {
+                phase: deadline.phase,
+                phases: Vec::new(),
+                percent: 0,
+                files_done: 0,
+                files_total: None,
+                bytes_done: 0,
+                bytes_total: None,
+                rate_bps: None,
+                eta_seconds: None,
+                message: None,
+                activity: None,
+            });
+        }
+        (progress, task)
     }
 }
 
 impl EnvironmentRole {
+    async fn hold_mount_name(
+        &self,
+        name: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, CommandError> {
+        let locks = self.host.storage_locks();
+        let holding = locks.hold(Some("directory"), name);
+        if let Some(cancel) = orch_envhost::error::cancellation() {
+            tokio::select! { held = holding => Ok(held), () = cancel.cancelled() => Err(CommandError::new(ErrorCode::Conflict, "the command was cancelled")) }
+        } else {
+            Ok(holding.await)
+        }
+    }
+
+    async fn hold_directory(
+        &self,
+        binding: &orch_driver_contract::runtime::DirectoryBinding,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, CommandError> {
+        let (device, inode) = binding.device.zip(binding.inode).ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::Unsupported,
+                "the mount directory has no native identity",
+            )
+        })?;
+        let locks = self.host.storage_locks();
+        let holding = locks.hold_directory(device, inode);
+        if let Some(cancel) = orch_envhost::error::cancellation() {
+            tokio::select! { held = holding => Ok(held), () = cancel.cancelled() => Err(CommandError::new(ErrorCode::Conflict, "the command was cancelled")) }
+        } else {
+            Ok(holding.await)
+        }
+    }
+
+    fn mount_binding(
+        &self,
+        mount: Id,
+        data: &orch_link_contract::commands::MountData,
+    ) -> Result<orch_driver_contract::runtime::DirectoryBinding, CommandError> {
+        let policy = self.services.policy.policy().ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                "this machine has no environment.roots policy",
+            )
+        })?;
+        match data {
+            orch_link_contract::commands::MountData::Path { path } => {
+                crate::policy::inspect_environment_directory(&policy, std::path::Path::new(path))
+            }
+            orch_link_contract::commands::MountData::Volume { name, storage } => {
+                crate::storages::recorded_mount_binding(
+                    &self.services.data_dir,
+                    &policy,
+                    mount,
+                    name,
+                    storage.as_deref(),
+                )?
+                .ok_or_else(|| {
+                    CommandError::new(ErrorCode::NotFound, "the mount's owned data is absent")
+                })
+            }
+        }
+    }
+
+    /// File operations use native held-directory handles. Keep process-owning operations separate.
+    #[cfg(windows)]
+    fn require_windows_part(&self, command: &Command) -> Result<(), CommandError> {
+        use CommandKind::*;
+        match command.kind() {
+            EnvAttach | EnvDetach | EnvDataRemove | FsList | FsUnwatch | FsStat | FsFetch
+            | FsWrite | FsMkdir | FsRename | FsRemove | FsCopy | FsArchiveList | FsArchiveRead
+            | FsSearch | FsManifest | FsSnapshot | FsMeasure | FsRecord | FsRecordRead
+            | FsRecordPrune | FsRecordVerify | FsDataMeasure | FsDataExport | FsDataImport
+            | FsRestorePlan | FsRestore | WorkspaceObserve | FsMaterialize | WatchSet
+            | DisplayClose | ScreenLook => Ok(()),
+            DisplayAdopt if matches!(command, Command::DisplayAdopt(body) if matches!(&body.target, orch_link_contract::display::DisplayTarget::Endpoint(_))) => {
+                Ok(())
+            }
+            _ => Err(CommandError::new(
+                ErrorCode::Unsupported,
+                format!(
+                    "{} requires native process, mount or listener ownership unavailable on this Windows directory runtime",
+                    command.kind()
+                ),
+            )),
+        }
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one arm for each command of the role is the clearest form of the table"
     )]
-    async fn carry_out(&self, id: Id, command: Command) -> Result<CommandResult, CommandError> {
+    async fn carry_out(
+        &self,
+        id: Id,
+        command: Command,
+        deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
+    ) -> Result<CommandResult, CommandError> {
+        #[cfg(windows)]
+        self.require_windows_part(&command)?;
         if let Command::UnitAfterUp(body) = &command {
             if body.provider_id.is_some() || body.agent_id.is_some() {
                 return Err(CommandError::new(
@@ -963,49 +1183,191 @@ impl EnvironmentRole {
         self.desired.remember(id, &command, self.generation)?;
         let blobs = self.services.content.blobs_for(id);
         Ok(match command {
-            Command::NodeVolumeEnsure(body) => {
-                let mount = directory_mount_id(&body.name, &body.labels)?;
-                let policy = self.services.policy.policy().ok_or_else(|| {
+            Command::NodeVolumeCarryCheck(_) => {
+                let available = orch_envhost::RUNTIME_VERIFIED
+                    && self.services.policy.policy().is_some_and(|policy| {
+                        !crate::storages::facts(
+                            &self.services.data_dir,
+                            &self.services.config,
+                            &policy,
+                        )
+                        .is_empty()
+                    });
+                CommandResult::NodeVolumeCarryCheck(orch_link_contract::commands::NodeVolumeCarryCheckResult {
+                    available, reason: (!available).then(|| "this machine has no verified native directory storage for whole mount data".into()),
+                })
+            }
+            Command::NodeMountMeasure(body) => {
+                let _name = match &body.data {
+                    orch_link_contract::commands::MountData::Volume { name, .. } => {
+                        Some(self.hold_mount_name(name).await?)
+                    }
+                    _ => None,
+                };
+                let binding = self.mount_binding(body.mount_id, &body.data)?;
+                let _directory = self.hold_directory(&binding).await?;
+                let (progress, task) = self.progress_on(
+                    id,
+                    Stream::Machine,
+                    body.work.as_ref().map(|work| work.job_id),
+                    deadline.clone(),
+                );
+                let outcome =
+                    orch_envhost::mount_transfer::measure(binding, Arc::new(progress.clone()))
+                        .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::NodeMountMeasure(outcome?)
+            }
+            Command::NodeMountExport(body) => {
+                let _name = match &body.data {
+                    orch_link_contract::commands::MountData::Volume { name, .. } => {
+                        Some(self.hold_mount_name(name).await?)
+                    }
+                    _ => None,
+                };
+                let binding = self.mount_binding(body.mount_id, &body.data)?;
+                let _directory = self.hold_directory(&binding).await?;
+                let (progress, task) =
+                    self.progress_on(id, Stream::Machine, Some(body.job_id), deadline.clone());
+                let reporter = Arc::new(progress.clone());
+                let outcome = orch_envhost::snapshot::with_transfer_progress(
+                    reporter.clone(),
+                    orch_envhost::mount_transfer::export(
+                        binding,
+                        body.part_bytes,
+                        &blobs,
+                        reporter,
+                    ),
+                )
+                .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::NodeMountExport(outcome?)
+            }
+            Command::NodeMountImport(body) => {
+                if !orch_link_contract::commands::is_mount_volume(body.mount_id, &body.name) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the volume is not one Orch made for this mount",
+                    ));
+                }
+                let _name = self.hold_mount_name(&body.name).await?;
+                let binding = self.mount_binding(
+                    body.mount_id,
+                    &orch_link_contract::commands::MountData::Volume {
+                        name: body.name,
+                        storage: body.storage,
+                    },
+                )?;
+                let _directory = self.hold_directory(&binding).await?;
+                let (device, inode) = binding.device.zip(binding.inode).ok_or_else(|| {
                     CommandError::new(
-                        ErrorCode::PolicyRootNotAllowed,
-                        "this machine has no environment.roots policy",
+                        ErrorCode::Unsupported,
+                        "the mount directory has no native identity",
                     )
                 })?;
-                crate::storages::directory(
-                    &self.services.data_dir,
-                    &self.services.config,
-                    &policy,
-                    mount,
-                    "mount",
-                    body.storage.as_deref(),
-                )?;
-                CommandResult::NodeVolumeEnsure(Empty {})
-            }
-            Command::NodeVolumeRemove(body) => {
-                let mount = directory_mount_id(&body.name, &body.labels)?;
-                if self.host.environments().iter().any(|environment| {
-                    environment
-                        .facts()
-                        .mounts
-                        .iter()
-                        .any(|attached| attached.mount_id == mount)
-                }) {
+                if self.host.mount_directory_in_use(device, inode) {
                     return Err(CommandError::new(
                         ErrorCode::Conflict,
                         "this owned directory is still attached to an environment",
                     ));
                 }
+                let (progress, task) =
+                    self.progress_on(id, Stream::Machine, Some(body.job_id), deadline.clone());
+                let reporter = Arc::new(progress.clone());
+                let outcome = orch_envhost::snapshot::with_transfer_progress(
+                    reporter.clone(),
+                    orch_envhost::mount_transfer::import(binding, body.archive, &blobs, reporter),
+                )
+                .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::NodeMountImport({
+                    outcome?;
+                    Empty {}
+                })
+            }
+            Command::NodeVolumeEnsure(body) => {
+                let mount = directory_mount_id(&body.name, &body.labels)?;
+                let _name = self.hold_mount_name(&body.name).await?;
                 let policy = self.services.policy.policy().ok_or_else(|| {
                     CommandError::new(
                         ErrorCode::PolicyRootNotAllowed,
                         "this machine has no environment.roots policy",
                     )
                 })?;
-                crate::storages::remove_directory(
+                crate::storages::mount_directory(
+                    &self.services.data_dir,
+                    &self.services.config,
+                    &policy,
+                    mount,
+                    &body.name,
+                    body.storage.as_deref(),
+                    &body.labels,
+                )?;
+                CommandResult::NodeVolumeEnsure(Empty {})
+            }
+            Command::NodeVolumeRemove(body) => {
+                let mount = directory_mount_id(&body.name, &body.labels)?;
+                let _name = self.hold_mount_name(&body.name).await?;
+                let policy = self.services.policy.policy().ok_or_else(|| {
+                    CommandError::new(
+                        ErrorCode::PolicyRootNotAllowed,
+                        "this machine has no environment.roots policy",
+                    )
+                })?;
+                let identity = crate::storages::recorded_mount_identity(
+                    &self.services.data_dir,
+                    mount,
+                    &body.name,
+                    body.storage.as_deref(),
+                )?;
+                if identity
+                    .is_some_and(|(device, inode)| self.host.mount_directory_in_use(device, inode))
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "this owned directory is still attached to an environment",
+                    ));
+                }
+                let binding = crate::storages::mount_removal_binding(
                     &self.services.data_dir,
                     &policy,
                     mount,
-                    "mount",
+                    &body.name,
+                    body.storage.as_deref(),
+                    &body.labels,
+                )?;
+                let _directory = match &binding {
+                    Some(binding) => Some(self.hold_directory(binding).await?),
+                    None => None,
+                };
+                if identity
+                    .is_some_and(|(device, inode)| self.host.mount_directory_in_use(device, inode))
+                {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "this owned directory is still attached to an environment",
+                    ));
+                }
+                if let Some(binding) = binding {
+                    let (progress, task) =
+                        self.progress_on(id, Stream::Machine, None, deadline.clone());
+                    let outcome =
+                        orch_envhost::mount_transfer::remove(binding, Arc::new(progress.clone()))
+                            .await;
+                    drop(progress);
+                    let _ = task.await;
+                    outcome?;
+                }
+                crate::storages::remove_mount_directory(
+                    &self.services.data_dir,
+                    &policy,
+                    mount,
+                    &body.name,
+                    body.storage.as_deref(),
+                    &body.labels,
                 )?;
                 CommandResult::NodeVolumeRemove(Empty {})
             }
@@ -1121,10 +1483,61 @@ impl EnvironmentRole {
             Command::FsFetch(body) => {
                 CommandResult::FsFetch(self.host.fs_fetch(&body, &blobs).await?)
             }
+            Command::FsRelayDescribe(body) => {
+                CommandResult::FsRelayDescribe(self.host.fs_relay_describe(&body).await?)
+            }
+            Command::FsRelaySend(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                self.host.fs_relay_send(&body, &relay).await?;
+                CommandResult::FsRelaySend(Empty {})
+            }
+            Command::FsRelayArchiveRead(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayArchiveRead(
+                    self.host.fs_relay_archive_read(&body, &relay).await?,
+                )
+            }
+            Command::FsRelayReceive(body) => {
+                let relay = self.services.content.relay_for(
+                    id,
+                    body.relay_id,
+                    body.idle_secs,
+                    body.retry_ms,
+                );
+                CommandResult::FsRelayReceive(self.host.fs_relay_receive(&body, &relay).await?)
+            }
+            Command::FsRelayVerify(body) => {
+                CommandResult::FsRelayVerify(self.host.fs_relay_verify(&body).await?)
+            }
+            Command::FsRelayPrepare(body) => {
+                self.host.fs_relay_prepare(&body).await?;
+                CommandResult::FsRelayPrepare(Empty {})
+            }
+            Command::FsRelayCommit(body) => {
+                CommandResult::FsRelayCommit(self.host.fs_relay_commit(&body).await?)
+            }
+            Command::FsRelayAbort(body) => {
+                self.host.fs_relay_abort(&body).await?;
+                CommandResult::FsRelayAbort(Empty {})
+            }
             Command::FsWrite(body) => {
                 if let Some(work) = &body.work {
-                    let (progress, task) =
-                        self.job_progress(id, body.environment_id, Some(work.job_id));
+                    let (progress, task) = self.job_progress(
+                        id,
+                        body.environment_id,
+                        Some(work.job_id),
+                        deadline.clone(),
+                    );
                     let mut reported = HostJobProgress {
                         phase: work.phase.clone(),
                         phases: vec![orch_api_contract::workspace::JobPhase {
@@ -1195,7 +1608,7 @@ impl EnvironmentRole {
             }
             Command::FsRestore(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_restore(&body, &blobs),
@@ -1216,6 +1629,7 @@ impl EnvironmentRole {
                     id,
                     body.environment_id,
                     body.work.as_ref().map(|work| work.job_id),
+                    deadline.clone(),
                 );
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
@@ -1228,7 +1642,7 @@ impl EnvironmentRole {
             }
             Command::FsDataExport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_export(&body, &blobs, &progress),
@@ -1240,7 +1654,7 @@ impl EnvironmentRole {
             }
             Command::FsDataImport(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_data_import(&body, &blobs, &progress),
@@ -1252,7 +1666,7 @@ impl EnvironmentRole {
             }
             Command::FsSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_snapshot(&body, &blobs, &progress),
@@ -1262,8 +1676,21 @@ impl EnvironmentRole {
                 let _ = task.await;
                 CommandResult::FsSnapshot(outcome?)
             }
+            Command::FsMaterializeIfAbsent(body) => {
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
+                let outcome = orch_envhost::snapshot::with_transfer_progress(
+                    Arc::new(progress.clone()),
+                    self.host.fs_materialize_if_absent(&body, &blobs),
+                )
+                .await;
+                drop(progress);
+                let _ = task.await;
+                CommandResult::FsMaterializeIfAbsent(outcome?)
+            }
             Command::FsMaterialize(body) => {
-                let (progress, task) = self.job_progress(id, body.environment_id, body.job_id);
+                let (progress, task) =
+                    self.job_progress(id, body.environment_id, body.job_id, deadline.clone());
                 let outcome = orch_envhost::snapshot::with_transfer_progress(
                     Arc::new(progress.clone()),
                     self.host.fs_materialize(&body, &blobs, &progress),
@@ -1312,7 +1739,7 @@ impl EnvironmentRole {
             }
             Command::GitWorktreeSnapshot(body) => {
                 let (progress, task) =
-                    self.job_progress(id, body.environment_id, Some(body.job_id));
+                    self.job_progress(id, body.environment_id, Some(body.job_id), deadline.clone());
                 let result = self
                     .host
                     .git_worktree_snapshot(&body, &blobs, &progress)
@@ -1424,12 +1851,15 @@ impl RoleHandler for EnvironmentRole {
                 "the recording deadline is invalid",
             )));
         };
+        // The command's own deadline is how long the files may take to be ready; the time it spent
+        // in the line of the environment is not counted in it.
         let captured = self
             .host
             .fs_record_capture(
                 &body,
                 call.context.id,
                 orch_types::Time::new(until),
+                call.context.deadline,
                 call.context.cancel,
             )
             .await;
@@ -1474,31 +1904,100 @@ impl RoleHandler for EnvironmentRole {
         if let Command::NodeVolumeRemove(body) = command {
             return body.driver == storage_driver.name;
         }
+        if let Command::NodeMountMeasure(body) = command {
+            return body.driver == storage_driver.name;
+        }
+        if let Command::NodeMountExport(body) = command {
+            return body.driver == storage_driver.name;
+        }
+        if let Command::NodeMountImport(body) = command {
+            return body.driver == storage_driver.name;
+        }
+        if let Command::NodeVolumeCarryCheck(body) = command {
+            return body.driver == storage_driver.name;
+        }
         !matches!(command, Command::UnitAfterUp(body) if body.environment_id.is_none() || body.provider_id.is_some())
     }
 
     async fn handle(&self, call: Call, command: Command) -> Result<CommandResult, CommandError> {
-        orch_envhost::error::with_cancellation(call.context.cancel.clone(), async {
+        let relayed = matches!(
+            &command,
+            Command::FsRelayReceive(_) | Command::FsRelaySend(_) | Command::FsRelayArchiveRead(_)
+        );
+        let cancel = call.context.cancel.clone();
+        let allowance =
+            u64::try_from((call.context.deadline.get() - self.services.clock.now()).num_seconds())
+                .unwrap_or(1);
+        let operation = orch_envhost::error::with_cancellation(cancel.clone(), async {
             if crate::reconciliation::environments::Desired::retains(&command) {
-                let _action = self.lifecycle.lock().await;
-                let command = self.services.policy.gate(command)?.command;
-                self.carry_out(call.context.id, command).await
+                if let Some(environment) = crate::reconciliation::environments::target(&command) {
+                    let _collection = tokio::select! {
+                        held = self.lifecycle.read() => held,
+                        () = cancel.cancelled() => return Err(CommandError::new(ErrorCode::Conflict, "the command was cancelled")),
+                    };
+                    let name = environment.to_string();
+                    let _environment = tokio::select! {
+                        held = self.environment_lifecycle.hold(Some("environment"), &name) => held,
+                        () = cancel.cancelled() => return Err(CommandError::new(ErrorCode::Conflict, "the command was cancelled")),
+                    };
+                    let command = self.services.policy.gate(command)?.command;
+                    self.carry_out(call.context.id, command, call.work_deadline.clone())
+                        .await
+                } else {
+                    // These existing acts update every environment's retained intent.
+                    let _collection = tokio::select! {
+                        held = self.lifecycle.write() => held,
+                        () = cancel.cancelled() => return Err(CommandError::new(ErrorCode::Conflict, "the command was cancelled")),
+                    };
+                    let command = self.services.policy.gate(command)?.command;
+                    self.carry_out(call.context.id, command, call.work_deadline.clone())
+                        .await
+                }
             } else {
-                self.carry_out(call.context.id, command).await
+                self.carry_out(call.context.id, command, call.work_deadline.clone())
+                    .await
             }
-        })
-        .await
+        });
+        if relayed {
+            crate::content::stoppable(&cancel, allowance, operation).await
+        } else {
+            operation.await
+        }
+    }
+
+    async fn review_system(&self) -> Result<(), CommandError> {
+        if orch_envhost::RUNTIME_VERIFIED {
+            return Ok(());
+        }
+        let _lifecycle = self.lifecycle.write().await;
+        self.host
+            .review_system(|| self.services.policy.platform_review())
+            .await
+            .map_err(Into::into)
     }
 
     fn contribute(&self, facts: &mut FactsDraft) {
         if let Some(policy) = self.services.policy.policy() {
             if facts.build_fetch.is_none() {
-                facts.build_fetch=Some(orch_driver_contract::descriptor::OperationSupport {supported:false,reason:Some("this machine uses installed harnesses; downloading requested builds is not available".into())});
+                facts.build_fetch = Some(orch_driver_contract::descriptor::OperationSupport {
+                    supported: self.services.build_cache.is_some(),
+                    reason: self
+                        .services
+                        .build_cache
+                        .is_none()
+                        .then(|| "this connector cannot fetch named harness builds".into()),
+                });
+            }
+            let storages =
+                crate::storages::facts(&self.services.data_dir, &self.services.config, &policy);
+            let can_make = orch_envhost::RUNTIME_VERIFIED && !storages.is_empty();
+            if facts.storages.is_empty() {
+                facts.storages = storages;
             }
             facts.environment_data_storage = Some(orch_driver_contract::descriptor::EnvironmentDataStorage {
-                made_by_orch: (orch_envhost::RUNTIME_VERIFIED && !crate::storages::facts(&self.services.config,&policy).is_empty()).then_some(orch_driver_contract::descriptor::MadeDataKind::Directory),
-                existing_directory: orch_envhost::RUNTIME_VERIFIED,
-                reason: (!orch_envhost::RUNTIME_VERIFIED).then(|| "the local environment runtime has not verified directory access on this platform".into()),
+                made_by_orch: can_make.then_some(orch_driver_contract::descriptor::MadeDataKind::Directory),
+                existing_directory: crate::installation::runtime_reviewed(&policy),
+                reason: (!crate::installation::runtime_reviewed(&policy)).then(|| "the machine manager must review this native system before using a shared directory".into()),
             });
         }
     }
@@ -1512,7 +2011,12 @@ impl RoleHandler for EnvironmentRole {
             }
         };
         for saved in records {
-            let _action = self.lifecycle.lock().await;
+            let _collection = self.lifecycle.read().await;
+            let name = saved.environment.to_string();
+            let _environment = self
+                .environment_lifecycle
+                .hold(Some("environment"), &name)
+                .await;
             // A detach may have arrived since the startup snapshot. Its tombstone wins.
             let saved = match self.desired.current(saved.environment) {
                 Ok(Some(saved)) => saved,
@@ -1527,7 +2031,7 @@ impl RoleHandler for EnvironmentRole {
             }
             if self.host.environment(saved.environment).is_err() {
                 let attached = match self.services.policy.gate(saved.attach.command.clone()) {
-                    Ok(gated) => self.carry_out(saved.attach.id, gated.command).await,
+                    Ok(gated) => self.carry_out(saved.attach.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 if attached.is_err() {
@@ -1546,7 +2050,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1561,7 +2065,7 @@ impl RoleHandler for EnvironmentRole {
                     continue;
                 }
                 let result = match self.services.policy.gate(kept.command) {
-                    Ok(gated) => self.carry_out(kept.id, gated.command).await,
+                    Ok(gated) => self.carry_out(kept.id, gated.command, None).await,
                     Err(error) => Err(error),
                 };
                 failed |= result.is_err();
@@ -1625,7 +2129,9 @@ async fn publish_reports(
             HostReport::BrowserState(state) => Some(Event::BrowserState(state)),
             HostReport::DisplayState(state) => Some(Event::DisplayState(state)),
             HostReport::Facts(facts) => Some(Event::EnvFacts(*facts)),
-            HostReport::Manifest(manifest) => Some(Event::EnvManifest(manifest)),
+            HostReport::Manifest(manifest) | HostReport::ManifestTransfer(manifest) => {
+                Some(Event::EnvManifest(manifest))
+            }
             HostReport::PtyExited(ended) => Some(Event::PtyExited(ended)),
             HostReport::FsChanged(changed) => {
                 link.report(&stream, at, &LinkReport::FsChanged(changed));
@@ -1712,6 +2218,9 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
             return;
         };
         if let Some(policy) = role.services.policy.policy() {
+            if let Err(error) = role.review_system().await {
+                tracing::warn!(%error, "the original native directory attachments could not finish withdrawing");
+            }
             role.host.set_policy(
                 gates_of(&policy),
                 Some(roots_of(&policy, &role.services.data_dir)),
@@ -1740,6 +2249,7 @@ async fn follow_policy(role: Weak<EnvironmentRole>, stop: CancellationToken) {
 /// Looks again, every so often, at the tool servers the harnesses here have configured, for each
 /// environment that is attached.
 async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationToken) {
+    let changes = role.upgrade().and_then(|role| role.imports.changes());
     let mut ticker = tokio::time::interval(DISCOVERY_EVERY);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -1747,6 +2257,10 @@ async fn look_for_tool_servers(role: Weak<EnvironmentRole>, stop: CancellationTo
         tokio::select! {
             () = stop.cancelled() => return,
             _ = ticker.tick() => {}
+            () = async {
+                if let Some(changes) = &changes { changes.notified().await; }
+                else { std::future::pending::<()>().await; }
+            } => {}
         }
         let Some(role) = role.upgrade() else {
             return;
@@ -1831,7 +2345,7 @@ mod progress_tests {
     #[tokio::test]
     async fn a_million_updates_keep_one_pending_sample_and_flush_the_last_on_close() {
         let (queue, mut reports) = watch::channel(None);
-        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock));
+        let progress = JobProgressSink::new(Some(queue), Arc::new(orch_types::SystemClock), None);
         for done in 1..=1_000_000 {
             progress.counting(done, done * 4096, done / 10);
         }

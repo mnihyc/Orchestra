@@ -4,7 +4,6 @@ on:
   push:
     # A branch under ci-t/ runs only its targeted checks (ci-targeted.yml).
     branches: ['**', '!ci-t/**']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -227,7 +226,7 @@ jobs:
           fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}' --plan)
           printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
       - name: Install the native fixtures' C compiler
-        if: ${{ !cancelled() && (fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector) }}
+        if: ${{ !cancelled() && fromJSON(steps.native-fixtures.outputs.plan).musl_tools }}
         # The distribution mirror's name at times does not resolve, for minutes or for hours: each attempt
         # first puts the mirrors that answer at the head of the list, and a failed installation is tried
         # again, up to four more times, after growing waits.
