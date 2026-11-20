@@ -37,6 +37,7 @@ import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { NodeContextMenu, NodeMakeButton, NodeMenuButton, useIsPending } from '@/features/navigation/NodeMenu';
 import { destinationsFor } from '@/features/org/Move';
 import { kindWord, PlaceLink, type PlaceRef, placeOfRow, placePath } from '@/features/navigation/places';
+import { loadMoreTree } from '@/realtime/live';
 import { loadMoreDocs, retryDocs } from '@/features/navigation/treeDocs';
 import { buildRows, type ChatMark, type NavItem, nameOf, newLayoutMemory, type TreeView, visibleNodeSiblings } from '@/features/navigation/treeRows';
 import type { AdminAccess, TreeNode } from '@/generated/api-types';
@@ -549,6 +550,7 @@ function bring(id: string): void {
 }
 
 export interface NodeTreeProps {
+  orgId?:string;
   tree: OrgTree;
   /** The place the tree begins at: the root org, or the place its reader narrowed it to. */
   rootId: string;
@@ -574,7 +576,8 @@ export interface NodeTreeProps {
   onArrange?: (parentId: string, siblings: readonly string[], moved: string, before: string | null) => void;
 }
 
-export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+export function NodeTree({ tree, rootId, orgId, view, expanded, onExpandedChange, currentId, currentRow = null, locale, me, orgSlug = null, onShowThere, nothing, onArrange }: NodeTreeProps) {
+  const orgRoot=orgId??[...tree.nodes.values()].find((node)=>node.parent_id===null)?.id??rootId;
   const { t } = useTranslation();
   // What the last laying out was made from is kept: a row whose item did not change is not drawn again, and nodes that
   // did not move are not sorted again.
@@ -605,6 +608,8 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return <NodeRow item={item} />;
         case 'doc':
           return <DocRow doc={item.doc} me={me} />;
+        case 'children':
+          return <button type="button" disabled={item.state==='loading'||item.state==='loadingMore'} className="focus-inset text-sm text-text-muted underline" onClick={()=>loadMoreTree(orgRoot,item.nodeId)}>{t(item.state==='failed'?'common.tryAgain':item.state==='more'?'ui.pagination.more':'common.loading')}</button>;
         case 'docs':
           return <DocsRow nodeId={item.nodeId} state={item.state} />;
         case 'chat':
@@ -642,7 +647,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return null;
       }
     },
-    [me, t, groupPath, onShow],
+    [me, t, groupPath, onShow,orgRoot],
   );
   // The whole row answers a right click, not only what it holds.
   const wrapRow = useCallback(
@@ -675,6 +680,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
               {element}
             </GroupContextMenu>
           );
+        case 'children': return item.state==='more'||item.state==='failed'?pressed(()=>loadMoreTree(orgRoot,item.nodeId)):element;
         case 'docs':
           return item.state === 'more' ? pressed(() => loadMoreDocs(item.nodeId)) : item.state === 'failed' ? pressed(() => retryDocs(item.nodeId)) : element;
         case 'outside':
@@ -684,7 +690,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           return element;
       }
     },
-    [t, groupPath, onShow],
+    [t, groupPath, onShow,orgRoot],
   );
   // The row of the screen in view is the document's own where it stands in the tree, and its place's where it does not.
   const current = useMemo(() => (currentRow !== null && rows.some((row) => row.id === currentRow) ? currentRow : currentId), [currentRow, currentId, rows]);
