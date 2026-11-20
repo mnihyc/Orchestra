@@ -79,7 +79,7 @@ test('a place that keeps sharing to its owners shows the field off for everybody
   await steer('/holders-share', { place: ACME.web, allowed: false });
   await shareAs(page, PEOPLE.dora, web, 'Web');
   await expect(field(page)).toBeDisabled();
-  await expect(dialog(page)).toContainText('Sharing in Web is with a thing’s owners: Ada Lovelace.');
+  await expect(dialog(page)).toContainText('Sharing in Web , only the owners of each item can share it: Ada Lovelace.');
   await dialog(page).getByRole('button', { name: 'Request access' }).click();
   const ask = page.getByRole('dialog', { name: 'Ask to share “Web”' });
   await ask.getByRole('textbox', { name: /Why do you need it/ }).fill('I lead the web work');
@@ -197,7 +197,7 @@ test('a copy past the limit says so with its size against the limit, and the lim
   await expect(form).toContainText('This copy is over the limit');
   await expect(form.getByRole('button', { name: /Give a copy to/ })).toBeDisabled();
   await expect(form).toContainText('15 MiB of 1 MiB');
-  await expect(form).toContainText('Share less, share it so that it stays shared, or raise the limit.');
+  await expect(form).toContainText('Share less, or ask whoever manages the settings to raise the limit.');
 
   await form.getByRole('button', { name: /Raise the limit for/ }).click();
   await form.getByRole('button', { name: /Give a copy to/ }).click();
@@ -279,7 +279,7 @@ test('where direct chats are off, or the person is not in the org, nobody is tol
   await stage(page, 'Zoe Outsider', 'zoe');
   const tell = dialog(page).getByRole('checkbox', { name: /^Send Zoe Outsider(?: · .+)? a message with the link$/ });
   await expect(tell).toBeDisabled();
-  await expect(dialog(page)).toContainText('Zoe Outsider · @zoe is not in this org, so there is no chat to tell them in. Copy the link and send it yourself.');
+  await expect(dialog(page)).toContainText('Zoe Outsider · @zoe : not in this organization, so there is no chat to tell them in. Copy the link and send it yourself.');
   await expect(dialog(page).getByRole('button', { name: 'Copy link' }).first()).toBeVisible();
 });
 
@@ -375,7 +375,7 @@ test('somebody named on one thread from elsewhere is let into its environment in
     await shareThread(page);
     await stage(page, 'Zoe Outsider', 'zoe');
     await choose(page, choice);
-    const tick = dialog(page).getByRole('checkbox', { name: 'Let them into the environment', exact: true });
+    const tick = dialog(page).getByRole('checkbox', { name: 'Viewers can open the environment', exact: true });
     await expect(tick).toBeChecked();
     await add(page);
     await expect(line(page, choice)).toContainText('Zoe Outsider');
@@ -395,7 +395,7 @@ test('somebody named on one thread from elsewhere is let into its environment in
   await page.goto(`/thread/${ACME.mainThread}`);
   await shareThread(page);
   await stage(page, 'Zoe Outsider', 'zoe');
-  await dialog(page).getByRole('checkbox', { name: 'Let them into the environment', exact: true }).click();
+  await dialog(page).getByRole('checkbox', { name: 'Viewers can open the environment', exact: true }).click();
   await add(page);
   await expect(line(page, 'Can view')).toContainText('Zoe Outsider');
   // Nothing arrives for the environment: a moment is given for it to, were it going to.
@@ -440,7 +440,7 @@ test('an environment’s door is given alone to somebody who does not manage it,
   // Use is now explicit and distinct from View; each Manage cell still explains its reach.
   await expect(grid.getByRole('columnheader', { name: 'Use', exact: true })).toBeVisible();
   await expect(grid).toContainText('They change the files here');
-  await expect(grid).toContainText('A shell here is everything here: every file, every process, the secrets given to it');
+  await expect(grid).toContainText('A terminal here is everything here: every file, every process, the secrets given to it');
   await expect(grid).toContainText('They drive its browsers, and act at every site as whoever signed in to it there');
   await expect(grid).toContainText('They work in whatever its displays show');
 

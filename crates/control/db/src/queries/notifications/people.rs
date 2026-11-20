@@ -501,12 +501,11 @@ async fn lock_untold_receivers(
     receivers: &[Id],
     key: &str,
 ) -> Result<Vec<Id>, DbError> {
-    // Inbox sequence/absence needs a non-key writer lock. Keep it compatible with the
-    // authenticated sender's KEY SHARE when that same person is also a receiver.
+    // Sequence and absence share the Inbox row, independently of the person's credentials.
     Ok(sqlx::query_scalar(
-        "SELECT u.id FROM users u WHERE u.id=ANY($1)
-         AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.user_id=u.id AND n.dedupe_key=$2)
-         ORDER BY u.id FOR NO KEY UPDATE OF u",
+        "SELECT i.user_id FROM user_inboxes i WHERE i.user_id=ANY($1)
+         AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.user_id=i.user_id AND n.dedupe_key=$2)
+         ORDER BY i.user_id FOR NO KEY UPDATE OF i",
     )
     .bind(receivers)
     .bind(key)
@@ -544,7 +543,7 @@ pub async fn outward_kinds(
 }
 
 /// The same announce producer, with an opaque check after receiver and absence reads.
-/// A deduplicated row consumes no first-effect check. The existing user lock pins absence.
+/// A deduplicated row consumes no first-effect check. The Inbox lock pins absence.
 pub async fn announce_with<E, F>(
     conn: &mut Conn,
     new: &NewNotification<'_>,
@@ -577,8 +576,8 @@ async fn announce_effect(
     new: &NewNotification<'_>,
 ) -> Result<Option<Announced>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
       RETURNING inbox_seq",
     )
     .bind(new.user_id)

@@ -1083,17 +1083,34 @@ pub async fn waiting(
     Ok(query.build_query_as().fetch_all(conn).await?)
 }
 
-/// The threads blocked for want of room in a cap, the one that has waited longest first: the order in which
-/// they are looked at again when room is made, so that a cap behaves as a queue.
-pub async fn blocked_for_room(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
-          WHERE t.state = 'blocked' AND t.blocked_reason = 'quota_exceeded'
+/// The position of a waiting thread in the cap queue. Threads with no pending input come last.
+#[derive(Debug, sqlx::FromRow)]
+pub struct RoomWaiter {
+    /// The thread to reconsider.
+    pub thread: Id,
+    /// The oldest pending input as observed when this page was read.
+    pub oldest: Option<DateTime<Utc>>,
+}
+
+/// Reads the next page of cap waiters in admission order, even if the preceding rows have since started.
+pub async fn blocked_for_room_page(
+    conn: &mut Conn,
+    after: Option<&RoomWaiter>,
+    limit: i64,
+) -> Result<Vec<RoomWaiter>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT t.node_id AS thread, q.oldest
+           FROM threads t JOIN nodes n ON n.id=t.node_id
+           CROSS JOIN LATERAL (SELECT min(i.created_at) AS oldest FROM thread_inputs i
+                               WHERE i.thread_id=t.node_id AND i.state='pending') q
+          WHERE t.state='blocked' AND t.blocked_reason='quota_exceeded'
             AND n.deleted_at IS NULL AND n.archived_at IS NULL
-          ORDER BY (SELECT min(i.created_at) FROM thread_inputs i WHERE i.thread_id = t.node_id AND i.state = 'pending')
-                   NULLS LAST, t.node_id
-          LIMIT $1",
+            AND ($1::uuid IS NULL OR (COALESCE(q.oldest,'infinity'::timestamptz),t.node_id)
+                                     > (COALESCE($2::timestamptz,'infinity'::timestamptz),$1))
+          ORDER BY q.oldest NULLS LAST, t.node_id LIMIT $3",
     )
+    .bind(after.map(|waiter| waiter.thread))
+    .bind(after.and_then(|waiter| waiter.oldest))
     .bind(limit)
     .fetch_all(conn)
     .await?)
