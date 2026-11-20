@@ -8,6 +8,8 @@ summary: Review unused caches, retained data and releases before freeing storage
 
 # Storage cleanup
 
+This page shows how to free storage on a host or a machine, what Orch keeps and why, and how to uninstall the node or the connector. Review what is kept before you remove it.
+
 ## Unused caches
 
 Open a host's **Settings** and find **Clean unused caches**. The system starts
@@ -15,7 +17,7 @@ with seven days. A host manager can choose another value unless the system
 administrator locked it. **Reset to inherited** follows the system again.
 
 Zero shows **Off** and switches automatic cache cleanup off. Focus the field
-to edit its numeric value. A cache that a unit or a retained environment still
+to edit its numeric value. A cache that a container or a retained environment still
 needs stays. Unknown use is kept until Orch can establish what needs it.
 
 Orch checks caches when the node joins and with its regular storage report.
@@ -25,7 +27,7 @@ not counted as cleaned.
 ## Kept data
 
 Files kept for restore follow their own recovery dates. Changing cache cleanup
-does not shorten those dates. A stopped unit still keeps its volumes in use.
+does not shorten those dates. A stopped container still keeps its volumes in use.
 Zero for **Removed files** makes future removals eligible for immediate purge;
 it does not change a retention window that was already promised.
 
@@ -81,7 +83,7 @@ Choose **Clean up…** in a resource menu, or select records in Storage and choo
 
 Each row shows its size, why it is kept, and its recovery date. Open **Kept by** to follow its dependents. Hidden names stay a count. A blocked row stays in the plan with its reason.
 
-Choose **Keep**, **Remove**, **Stop and remove**, or **Purge now** where offered. Stopping a unit keeps its volumes unless those volumes are selected too. **Purge now** erases kept data and asks you to type the plan's name. A manager cannot shorten an environment's recovery window without administration of its current home.
+Choose **Keep**, **Remove**, **Stop and remove**, or **Purge now** where offered. Stopping a container keeps its volumes unless those volumes are selected too. **Purge now** erases kept data and asks you to type the plan's name. A manager cannot shorten an environment's recovery window without administration of its current home.
 
 The job keeps running after you close the dialog. **Cancel remaining** waits for the active removal to finish, then stops before the next item. The result lists what was removed, kept, blocked or failed. Removed items stay removed after cancellation.
 

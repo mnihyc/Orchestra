@@ -159,6 +159,7 @@ fn replay(
         let Some(sources) = sources else {
             return Ok(receipt);
         };
+        let sources = orch_types::storable::decode_exact(sources).map_err(DbError::from)?;
         let sources = serde_json::from_value(sources).map_err(ApiError::internal)?;
         drop(conn);
         match reply::render_completed_replay::<Shown>(
