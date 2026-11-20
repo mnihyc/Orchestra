@@ -1,0 +1,2 @@
+test -p orch-api-core --test human_check --test forwarded_edge --test kfix_deploy --test blob_housekeeping
+test -p orch-api-core --test workspace_files -- --nocapture

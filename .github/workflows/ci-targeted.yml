@@ -18,6 +18,8 @@ jobs:
     name: Targeted Rust (${{ github.ref_name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    outputs:
+      first_start_inputs: ${{ steps.upload-inputs.outputs.artifact-id }}
     services:
       # The database the deployment runs, by the same digest, as in the whole CI.
       postgres:
@@ -58,15 +60,68 @@ jobs:
       - name: Plan the assigned native fixtures
         id: native-fixtures
         run: |
+          python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_fixtures.py'
+          python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_targeted.py'
           fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --targets .ci-targets --plan)
           printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
+      - name: Install the deployment database search extensions
+        if: fromJSON(steps.native-fixtures.outputs.plan).search_extensions
+        env:
+          ORCH_CI_POSTGRES: ${{ job.services.postgres.id }}
+        # Match the full CI's pinned deployment libraries before any fixture template is migrated.
+        run: |
+          set -euo pipefail
+          docker build --tag orch-ci-database ./deploy/postgres
+          docker run --rm --entrypoint tar orch-ci-database -C /usr/local -cf - lib/postgresql/vector.so lib/postgresql/pg_bigm.so share/postgresql/extension |
+            docker exec -i "$ORCH_CI_POSTGRES" tar -C /usr/local -xf -
+          docker exec "$ORCH_CI_POSTGRES" psql -U orch -d postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_bigm;'
       - name: Install the native fixtures' C compiler
         if: ${{ fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector }}
         run: |
           bash .github/scripts/ci_apt_mirror.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - name: Run the Rust checks .ci-targets names
-        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust
+        id: checks
+        run: |
+          python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust --prepare-first-start
+          if [ -d .tmp/first-start-inputs ]; then
+            tar -C .tmp/first-start-inputs -cf .tmp/first-start-inputs.tar cli native
+            echo 'first_start=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Keep the executable native inputs for first start
+        id: upload-inputs
+        if: steps.checks.outputs.first_start == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-start-inputs
+          path: .tmp/first-start-inputs.tar
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+
+  first-start:
+    name: Packaged installation
+    needs: targeted
+    if: needs.targeted.outputs.first_start_inputs != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: first-start-inputs
+          path: .tmp
+      - name: Package the server and run first start with this commit's native programs
+        run: |
+          mkdir -p .tmp/first-start-inputs
+          tar -C .tmp/first-start-inputs -xf .tmp/first-start-inputs.tar
+          python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group install
 
   targeted-web:
     name: Targeted web (${{ github.ref_name }})

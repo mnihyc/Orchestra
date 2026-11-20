@@ -14,7 +14,7 @@ use http::{Method, StatusCode};
 use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permissions::ResourceKind};
 use orch_api_contract::resources::{TemplateImport, TemplateImportBody, UnitKind};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::{RawReply, TestApp},
 };
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -61,7 +61,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -483,13 +483,19 @@ struct Gate {
 }
 #[async_trait::async_trait]
 impl BlobStore for Gate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         let read = self.inner.get(hash, range).await;
@@ -533,8 +539,13 @@ impl BlobStore for Gate {
         }
         Ok(value)
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 fn gate(s: &mut Scene, at: GateAt) -> Arc<Barrier> {
@@ -558,6 +569,7 @@ fn gate(s: &mut Scene, at: GateAt) -> Arc<Barrier> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(store.clone(), store.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

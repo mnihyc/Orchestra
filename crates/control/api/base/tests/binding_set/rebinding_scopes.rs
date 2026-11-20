@@ -311,6 +311,7 @@ async fn rebind_native_start_keeps_exact_original_operation_and_rechecks_after_r
             .ok_or("actual native start missing")?;
         assert!(row.body.get("origin").is_none() && row.body.get("authority").is_none());
         let proposal = orch_db::queries::link::NewCommand {
+            content_transit: false,
             id,
             machine_id: row.machine,
             kind: &row.kind,
