@@ -80,7 +80,7 @@ it.each(['environment','provider'] as const)('shows the declared resource settin
   const key=pool==='environment'?'env.resources':'runtime.resources';
   server.rows=[setting(key,{memory_mb:64})];
   draw({pool,lifecycle:'attach',placement:'connected',resourceSupport:{cpu:'enforced',memory:'reported',pids:'none',disk:'reported'}});
-  const values=await screen.findByRole('list',{name:'Unit configuration'});
+  const values=await screen.findByRole('list',{name:'Container configuration'});
   const declared=visibleSetting(values,key);
   expect(declared).toHaveTextContent('64');
   expect(within(declared).getByText('Next attachment')).toBeVisible();
@@ -96,7 +96,7 @@ it('shows each applicable value with its actual ancestor and when it takes effec
     setting('env.storage', { workspace: 'fast' }), setting('env.after_up', {}), setting('runtime.renew_days', 7),
     ...['idle', 'active', 'recent', 'refused'].map((kind) => setting(`providers.facts_${kind}_minutes`, 5))];
   draw();
-  const values = await screen.findByRole('list', { name: 'Unit configuration' });
+  const values = await screen.findByRole('list', { name: 'Container configuration' });
   const variables = visibleSetting(values,'env.variables');
   expect(variables).toHaveTextContent('literal');
   expect(variables).toHaveTextContent('Acme');
@@ -143,7 +143,7 @@ it('requires provider ownership even when the setting is served writable to a ma
   draw({ pool: 'provider' });
   const commands = await screen.findByRole('region', { name: 'Commands after start' });
   expect(within(commands).getByText(i18n.t('unitConfiguration.credentialWarning'),{exact:true})).toBeVisible();
-  expect(within(commands).getByText("Only this provider's owners can change these commands.")).toBeInTheDocument();
+  expect(within(commands).getByText("Only this provider's owners can change these commands. Ask one of them to make the change.")).toBeInTheDocument();
   expect(within(commands).getByText('warm')).toBeInTheDocument();
   expect(within(commands).queryByRole('textbox')).not.toBeInTheDocument();
   expect(within(commands).queryByRole('button', { name: 'Save commands' })).not.toBeInTheDocument();
@@ -154,7 +154,7 @@ it('requires provider ownership even when the setting is served writable to a ma
 it.each(['managed','connected'] as const)('offers provider variables, sealed-secret names and commands by attach facts for %s display placement',async (placement)=>{
   server.rows=[setting('runtime.variables',{}),setting('runtime.secret_names',[]),setting('runtime.after_up',{}),setting('runtime.template_id',null),setting('runtime.host_id',null)];
   draw({pool:'provider',placement,lifecycle:'attach',owns:true,commands:{supported:true,reason:null},afterUp:false});
-  const values=await screen.findByRole('list',{name:'Unit configuration'});
+  const values=await screen.findByRole('list',{name:'Container configuration'});
   const variables=visibleSetting(values,'runtime.variables');
   const secrets=visibleSetting(values,'runtime.secret_names');
   for(const key of ['runtime.template_id','runtime.host_id'])expect(values.querySelector(`[data-setting="${key}"]`)).toBeNull();
@@ -212,7 +212,7 @@ it('offers common environment values and commands on a directory without offerin
   server.rows = [setting('env.after_up',{}),setting('env.template_id','template'),setting('env.host_id','host'),setting('env.resources',{memory_mb:64}),
     setting('network.allowed_hosts',[]),setting('env.variables',{}),setting('env.secret_names',[]),setting('workspace.index','full')];
   draw({ placement: 'connected',lifecycle:'attach',commands:{supported:true,reason:null},afterUp:false });
-  const values = await screen.findByRole('list', { name: 'Unit configuration' });
+  const values = await screen.findByRole('list', { name: 'Container configuration' });
   for(const key of ['env.variables','env.secret_names','workspace.index','env.resources'])visibleSetting(values,key);
   for (const key of ['env.template_id', 'env.host_id', 'network.allowed_hosts']) expect(values.querySelector(`[data-setting="${key}"]`)).toBeNull();
   expect(screen.getByRole('region', { name: 'Commands after start' })).toBeInTheDocument();
@@ -224,23 +224,25 @@ it('reads common provider settings for a directory runtime without inventing a u
   draw({ pool: 'provider', placement: 'connected',lifecycle:'attach' });
   const storage=await screen.findByRole('region',{name:'Storage'});
   await waitFor(()=>expect(storage).toHaveTextContent('fast'));
-  const values=screen.getByRole('list',{name:'Unit configuration'});
+  const values=screen.getByRole('list',{name:'Container configuration'});
   expect(values.querySelector('[data-setting="runtime.template_id"]')).toBeNull();
   expect(storage.querySelectorAll('[data-setting]')).toHaveLength(1);
   expect(screen.queryByRole('button', { name: 'Add command' })).not.toBeInTheDocument();
   expect(server.read).toHaveBeenCalled();
 });
 
-it('shows the stopped start failure with bounded first lines and a link to the setting', async () => {
+it.each(['en','zh-CN'] as const)('labels bounded command output as a preview beside the stopped start failure in %s', async (locale) => {
+  await setLocale(locale);
   const detail = `after-start command cache exited with 7: first\n${Array.from({ length: 12 }, (_, index) => `output-${index + 1}`).join('\n')}`;
   const user=userEvent.setup();
   show(<UnitCommandFailure detail={detail} href="/resources/environments/unit?tab=settings#unit-after-up" />);
   expect(screen.getByText(i18n.t('ui.error.afterStart'),{exact:true})).toBeVisible();
+  expect(screen.getByText(locale==='en'?'Command output preview':'命令输出预览',{selector:'summary'})).toBeVisible();
   expect(screen.queryByText(/output-1/)).not.toBeInTheDocument();
   await user.click(screen.getByText(i18n.t('unitConfiguration.commandOutput'),{selector:'summary'}));
   expect(await screen.findByText(/output-9/)).toBeVisible();
   expect(screen.queryByText(/output-10/)).not.toBeInTheDocument();
-  expect(screen.getByRole('link', { name: 'Change commands after start' })).toHaveAttribute('href', '/resources/environments/unit?tab=settings#unit-after-up');
+  expect(screen.getByRole('link', { name: i18n.t('unitConfiguration.changeCommands') })).toHaveAttribute('href', '/resources/environments/unit?tab=settings#unit-after-up');
   await user.click(screen.getByRole('button',{name:i18n.t('ui.preview.showAll')}));
   expect(screen.getByText(/output-12/)).toBeVisible();
   await user.click(screen.getByRole('button',{name:i18n.t('ui.preview.showLess')}));
