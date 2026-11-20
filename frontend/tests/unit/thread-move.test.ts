@@ -1,26 +1,21 @@
-/** The move chooser presents folders and topics of this tree without offering a conversation or a hidden branch. */
-import { describe, expect, it } from 'vitest';
-import { topicTree, type MovePlace } from '@/features/thread-move/tree';
+/** The move picker only offers live topics connected to the root that supplied them. */
+import { expect, it } from 'vitest';
+import type { TreeNode } from '@/generated/api-types';
+import { placesOfTree } from '@/features/settings/PlacePicker';
 
-const place = (id: string, kind: MovePlace['kind'], parent_id: string | null, more: Partial<MovePlace> = {}): MovePlace => ({ id, kind, parent_id, name: id, color: null, archived: false, deleted: false, ...more });
-const nodes = new Map([
-  place('root', 'org', null), place('web', 'project', 'root'), place('payments', 'project', 'web'),
-  place('refunds', 'topic', 'payments'), place('conversation', 'thread', 'refunds'),
-  place('old', 'project', 'root', { archived: true }), place('old-topic', 'topic', 'old'),
-  place('deleted', 'topic', 'web', { deleted: true }), place('another-root', 'org', null), place('elsewhere', 'topic', 'another-root'),
-].map((entry) => [entry.id, entry]));
+const node = (id: string, kind: TreeNode['kind'], parent_id: string | null, archived = false): TreeNode =>
+  ({ id, name: id, kind, parent_id, archived, deleted: false, color: null }) as TreeNode;
 
-describe('choosing a topic to move to', () => {
-  it('shows the folder ancestry and topic leaves of this root alone', () => {
-    const rows = topicTree(nodes, 'root', new Set(['root', 'web', 'payments']));
-    expect(rows.map((row) => [row.id, row.depth])).toEqual([['root', 0], ['web', 1], ['payments', 2], ['refunds', 3]]);
-    expect(rows.at(-1)).toMatchObject({ expandable: false, expanded: false });
-  });
-  it('keeps a closed folder visible without listing its descendants until it opens', () => {
-    expect(topicTree(nodes, 'root', new Set(['root', 'web'])).map((row) => row.id)).toEqual(['root', 'web', 'payments']);
-    expect(topicTree(nodes, 'root', new Set()).map((row) => row.id)).toEqual(['root']);
-  });
-  it('does not invent a root or expose disconnected rows while the tree is unavailable', () => {
-    expect(topicTree(nodes, 'unreadable', new Set(['web']))).toEqual([]);
-  });
+it('selects topics by their supplying organization and preserves folder ancestry', () => {
+  const nodes = [node('first', 'org', null), node('second', 'org', null), node('team', 'project', 'second'),
+    node('folder', 'project', 'team'), node('target', 'topic', 'folder'), node('local', 'topic', 'first')];
+  const topics = (root: string) => placesOfTree(nodes, ' / ', false, root).filter((row) => row.kind === 'topic').map((row) => row.path);
+  expect(topics('first')).toEqual(['first / local']);
+  expect(topics('second')).toEqual(['second / team / folder / target']);
+});
+
+it('keeps archived branches, deleted topics and disconnected places out of a move', () => {
+  const nodes = [node('root', 'org', null), node('archive', 'project', 'root', true), node('hidden', 'topic', 'archive'),
+    node('detached', 'topic', 'absent'), { ...node('gone', 'topic', 'root'), deleted: true }, node('live', 'topic', 'root')];
+  expect(placesOfTree(nodes, ' / ', false, 'root').map((row) => row.id).sort()).toEqual(['live', 'root']);
 });
