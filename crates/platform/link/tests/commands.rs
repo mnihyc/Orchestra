@@ -11,8 +11,8 @@ use orch_link::commands::{CommandIssuer, Progress};
 use orch_link::machine::{MachineConfig, MachineLink};
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
-    Cmd, CommandError, CommandKind, ErrorCode, Reference, SerialKey, SessionClose,
-    resolve_references,
+    Cmd, Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderDiscoverModels,
+    ProviderDiscoverModelsResult, Reference, SerialKey, SessionClose, resolve_references,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
 use orch_link_contract::version::Limits;
@@ -25,6 +25,9 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+#[path = "commands/opening_order.rs"]
+mod opening_order;
 
 struct Rig {
     clock: ManualClock,
@@ -92,6 +95,59 @@ async fn a_command_that_is_sent_again_after_a_reconnect_runs_once_and_gets_one_r
     rig.machine.handler.release();
     let ended = within(30, rig.controller.wait_command(id)).await;
     assert!(matches!(ended, Progress::Succeeded(_)), "{ended:?}");
+    assert_eq!(rig.machine.handler.runs_of(id), 1);
+}
+
+#[tokio::test]
+async fn a_large_model_catalogue_and_its_request_cross_the_default_link_without_configuration() {
+    let rig = rig();
+    rig.machine.link.connected().await;
+    let text = "Model details 模型资料 ".repeat(40_000);
+    let mut request = ProviderDiscoverModels {
+        max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default().whole_bytes,
+        provider_id: new_id(),
+        models: Some(Default::default()),
+    };
+    request
+        .models
+        .as_mut()
+        .unwrap()
+        .config
+        .insert("description".into(), json!(text));
+    let expected = ProviderDiscoverModelsResult {
+        source: None,
+        suggestions: (0..96)
+            .map(|index| {
+                orch_link_contract::foreign::ModelSuggestion::named(
+                    &format!("model-{index}"),
+                    Some(&format!("Model {index} {}", "details 资料 ".repeat(700))),
+                )
+            })
+            .collect(),
+    };
+    let sent_request = request.clone();
+    let sent_result = expected.clone();
+    rig.machine
+        .handler
+        .on(CommandKind::ProviderDiscoverModels, move |command| {
+            let Command::ProviderDiscoverModels(received) = command else {
+                panic!("the native model request arrives");
+            };
+            assert_eq!(
+                received, &sent_request,
+                "the whole request arrives unchanged"
+            );
+            Ok(CommandResult::ProviderDiscoverModels(sent_result.clone()))
+        });
+    let id = rig
+        .controller
+        .issue(&SerialKey::None, deadline(&rig.clock, 300), &request);
+    let ended = within(15, rig.controller.wait_command(id)).await;
+    let Progress::Succeeded(result) = ended else {
+        panic!("the model catalogue should arrive: {ended:?}");
+    };
+    let received: ProviderDiscoverModelsResult = serde_json::from_value(result).unwrap();
+    assert_eq!(received, expected);
     assert_eq!(rig.machine.handler.runs_of(id), 1);
 }
 
@@ -222,7 +278,7 @@ async fn commands_with_one_key_run_one_at_a_time_in_the_order_they_came_and_othe
 }
 
 #[tokio::test]
-async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
+async fn a_short_command_that_waited_in_line_behind_a_long_one_still_runs_when_its_turn_comes() {
     let rig = rig();
     rig.machine.link.connected().await;
     rig.machine.handler.hold(CommandKind::SessionClose);
@@ -232,21 +288,23 @@ async fn a_command_whose_deadline_passed_before_its_turn_is_not_started() {
         deadline(&rig.clock, 600),
         &SessionClose { thread_id: thread },
     );
-    let late = rig.controller.issue(
+    // Thirty seconds of work, asked while the line is held by a long one.
+    let short = rig.controller.issue(
         &SerialKey::Thread(thread),
         deadline(&rig.clock, 30),
         &SessionClose { thread_id: thread },
     );
     within(10, rig.machine.handler.started(blocker)).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
+    // The line stays held for far longer than the short command's thirty seconds.
     rig.clock.advance(chrono::Duration::seconds(60));
     rig.machine.handler.release();
-    let ended = within(10, rig.controller.wait_command(late)).await;
-    let Progress::Failed(error) = ended else {
-        panic!("{ended:?}")
-    };
-    assert_eq!(error.code, ErrorCode::Timeout.as_str());
-    assert_eq!(rig.machine.handler.runs_of(late), 0);
+    let ended = within(10, rig.controller.wait_command(short)).await;
+    assert!(
+        matches!(ended, Progress::Succeeded(_)),
+        "the time spent waiting is not the command's own: {ended:?}"
+    );
+    assert_eq!(rig.machine.handler.runs_of(short), 1);
 }
 
 #[tokio::test]
@@ -307,15 +365,19 @@ async fn a_command_that_reaches_a_machine_before_it_has_said_what_carries_comman
     );
     // The machine has written it down and said so; the next moments are its chance to fail it.
     within(10, async {
-        while !matches!(controller.progress(command), Some(Progress::Accepted)) {
+        while !controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some())
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(
-        controller.progress(command),
-        Some(Progress::Accepted),
+    assert!(
+        controller
+            .progress(command)
+            .is_some_and(|progress| progress.key_phase().is_some()),
         "it is in hand and waits"
     );
     let handler = Arc::new(ScriptedHandler::default());
@@ -408,7 +470,7 @@ fn command(clock: &ManualClock, lasts: i64) -> Cmd {
     Cmd::new(
         new_id(),
         &SerialKey::Machine,
-        deadline(clock, lasts),
+        Cmd::work_budget(clock.time(), deadline(clock, lasts)),
         &SessionClose {
             thread_id: new_id(),
         },
@@ -424,12 +486,14 @@ async fn a_machine_that_does_not_acknowledge_a_command_is_asked_once_more_and_th
     let handle = issuer.issue(command(&clock, 3_600));
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
     assert_eq!(handle.progress(), Progress::Sent);
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     assert!(
         matches!(frames.recv().await, Some(DownFrame::Cmd(_))),
         "sent once more"
     );
+    issuer.on_cmd_seen(&orch_link_contract::commands::CmdSeen { id: handle.id() });
     tokio::time::advance(Duration::from_secs(31)).await;
     issuer.tick(tokio::time::Instant::now());
     let Progress::Failed(error) = handle.progress() else {
@@ -440,9 +504,9 @@ async fn a_machine_that_does_not_acknowledge_a_command_is_asked_once_more_and_th
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_command_no_machine_took_expires_at_its_deadline_and_one_a_machine_took_does_not() {
+async fn commands_keep_their_work_allowance_while_waiting_offline_or_in_a_native_queue() {
     let (issuer, mut frames, clock) = issuer();
-    // Nobody is connected: it waits, and its time runs out.
+    // Nobody is connected: its work has not started.
     let waiting = issuer.issue(command(&clock, 60));
     assert_eq!(waiting.progress(), Progress::Queued);
     // Another is taken by a machine that writes it down.
@@ -453,16 +517,123 @@ async fn a_command_no_machine_took_expires_at_its_deadline_and_one_a_machine_too
         "the one that waited is sent first"
     );
     assert!(matches!(frames.recv().await, Some(DownFrame::Cmd(_))));
-    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck { id: taken.id() });
+    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck {
+        id: taken.id(),
+        key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+    });
     issuer.session_down();
     clock.advance(chrono::Duration::seconds(90));
     issuer.tick(tokio::time::Instant::now());
-    assert_eq!(waiting.progress(), Progress::Expired);
+    assert_eq!(waiting.progress(), Progress::Queued);
     assert_eq!(
         taken.progress(),
         Progress::Accepted,
         "a machine has it, so it is not expired"
     );
+}
+
+#[tokio::test]
+async fn a_reconnecting_machine_receives_only_tool_answers_still_due_for_delivery() {
+    let (issuer, mut frames, clock) = issuer();
+    let issue_answer = || {
+        let thread = new_id();
+        issuer
+            .issue_typed(
+                new_id(),
+                &SerialKey::Thread(thread),
+                deadline(&clock, 30),
+                &orch_link_contract::commands::OrchToolResult {
+                    thread_id: thread,
+                    call_ref: new_id().to_string(),
+                    attempt: None,
+                    result: Some(json!({})),
+                    error: None,
+                },
+            )
+            .unwrap()
+    };
+    let missed = issue_answer();
+    clock.advance(chrono::Duration::seconds(31));
+    let taken = issue_answer();
+    issuer.session_ready();
+    assert_eq!(missed.progress(), Progress::Expired);
+    assert!(
+        matches!(frames.recv().await, Some(DownFrame::Cmd(cmd)) if cmd.id == taken.id() && cmd.deliver_by == Some(deadline(&clock, 30)))
+    );
+    assert!(frames.try_recv().is_err());
+    issuer.on_cmd_ack(&orch_link_contract::commands::CmdAck {
+        id: taken.id(),
+        key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+    });
+    clock.advance(chrono::Duration::seconds(31));
+    issuer.tick(tokio::time::Instant::now());
+    assert_eq!(taken.progress(), Progress::Accepted);
+}
+
+#[tokio::test]
+async fn a_tool_answer_that_arrived_on_time_can_wait_for_its_handler() {
+    use orch_link::commands::{CommandServer, ServerOptions};
+    use orch_link::journal::{Journal, Step};
+    use orch_link_contract::commands::{Empty, OrchToolResult};
+
+    let clock = Arc::new(ManualClock::new(orch_testkit::clock::start()));
+    let directory = tempfile::tempdir().unwrap();
+    let journal = Journal::open(directory.path(), Duration::from_secs(3600), clock.time()).unwrap();
+    let server = CommandServer::new(
+        journal,
+        clock.clone(),
+        ServerOptions {
+            roles: vec![Role::Agent],
+            connected: true,
+        },
+    );
+    let thread = new_id();
+    let delivery = deadline(&clock, 30);
+    let answer = |id| {
+        let mut cmd = Cmd::new(
+            id,
+            &SerialKey::Thread(thread),
+            Duration::from_secs(30),
+            &OrchToolResult {
+                thread_id: thread,
+                call_ref: id.to_string(),
+                attempt: None,
+                result: Some(json!({})),
+                error: None,
+            },
+        )
+        .unwrap();
+        cmd.deliver_by = Some(delivery);
+        cmd
+    };
+    let on_time = new_id();
+    let late = new_id();
+    server.on_cmd(answer(on_time)).await;
+    clock.advance(chrono::Duration::seconds(30));
+    server.on_cmd(answer(late)).await;
+    let outcome = async |id| {
+        within(10, async {
+            loop {
+                if let Some(Step::Done { result }) = server.entry(id).map(|entry| entry.step) {
+                    break result.outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+    };
+    assert_eq!(
+        outcome(late).await.unwrap_err().code,
+        ErrorCode::Timeout.as_str()
+    );
+    let handler = Arc::new(ScriptedHandler::default());
+    handler.on(CommandKind::OrchToolResult, |_| {
+        Ok(CommandResult::OrchToolResult(Empty {}))
+    });
+    server.serve(handler.clone());
+    assert!(outcome(on_time).await.is_ok());
+    assert_eq!(handler.runs_of(on_time), 1);
+    assert_eq!(handler.runs_of(late), 0);
 }
 
 #[test]
@@ -525,10 +696,12 @@ async fn cancellation_received_before_command_admission_prevents_any_handler_wor
     server.serve(handler.clone());
     let id = new_id();
     let command = Cmd {
+        after: None,
+        deliver_by: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
-        deadline: Time::new(clock.now() + chrono::Duration::minutes(1)),
+        work: std::time::Duration::from_millis(60_000),
         body: json!({"thread_id":new_id()}),
     };
     server.on_cancel(CmdCancel { id }).await;
@@ -583,10 +756,12 @@ async fn a_stop_after_restart_waits_for_interrupted_external_work_to_be_cleaned_
     let directory = tempfile::tempdir().unwrap();
     let id = new_id();
     let command = Cmd {
+        after: None,
+        deliver_by: None,
         id,
         kind: CommandKind::SessionClose.as_str().into(),
         key: None,
-        deadline: Time::new(clock.now() + chrono::Duration::minutes(1)),
+        work: std::time::Duration::from_millis(60_000),
         body: json!({"thread_id":new_id()}),
     };
     let mut journal =
@@ -685,7 +860,10 @@ async fn a_native_ack_before_local_refusal_wins_but_unacknowledged_first_send_st
         let (issuer, _frames, clock) = issuer();
         let original = command(&clock, 60);
         let handle = issuer.issue(original.clone());
-        let ack = orch_link_contract::commands::CmdAck { id: original.id };
+        let ack = orch_link_contract::commands::CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        };
         let error = CommandError::new(ErrorCode::Conflict, "current authority was revoked");
         if ack_first {
             issuer.on_cmd_ack(&ack);
@@ -716,7 +894,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         let handle = issuer.issue(original.clone());
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         assert_eq!(handle.progress(), Progress::Accepted);
         // Normal reconnection retries the acknowledged identity to recover its result.
         issuer.session_ready();
@@ -739,7 +920,10 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         // can deliver its actual result. Retiring one local timer is not cancellation.
         issuer.session_ready();
         assert_eq!(frames.recv().await, Some(DownFrame::Cmd(original.clone())));
-        issuer.on_cmd_ack(&CmdAck { id: original.id });
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase: orch_link_contract::commands::CommandKeyPhase::Queued,
+        });
         let result = json!({"native":"completed after suppression"});
         issuer.on_cmd_res(&CmdRes {
             id: original.id,
@@ -748,4 +932,71 @@ async fn a_locally_suppressed_acknowledged_resend_retires_its_ack_timer() {
         assert_eq!(handle.progress(), Progress::Succeeded(result));
         assert!(issuer.answered(original.id));
     }
+}
+
+#[tokio::test]
+async fn a_replayed_acknowledgement_cannot_reacquire_a_released_key() {
+    use orch_link_contract::commands::{CmdAck, CommandKeyPhase};
+    let (issuer, _frames, clock) = issuer();
+    let original = command(&clock, 60);
+    let handle = issuer.issue(original.clone());
+    for key_phase in [
+        CommandKeyPhase::Queued,
+        CommandKeyPhase::Running,
+        CommandKeyPhase::Released,
+    ] {
+        issuer.on_cmd_ack(&CmdAck {
+            id: original.id,
+            key_phase,
+        });
+        assert_eq!(handle.progress().key_phase(), Some(key_phase));
+    }
+    issuer.on_cmd_ack(&CmdAck {
+        id: original.id,
+        key_phase: CommandKeyPhase::Queued,
+    });
+    assert_eq!(handle.progress(), Progress::Released);
+    assert!(
+        !handle.progress().is_final(),
+        "the upload still owns its result"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_reaches_the_machine_while_the_threads_ordinary_command_is_still_running() {
+    use orch_link_contract::commands::{KeyKind, TurnInterrupt};
+    let rig = rig();
+    rig.machine.link.connected().await;
+    rig.machine.handler.hold(CommandKind::SessionClose);
+    let thread = new_id();
+    let slow = rig.controller.issue(
+        &SerialKey::Thread(thread),
+        deadline(&rig.clock, 600),
+        &SessionClose { thread_id: thread },
+    );
+    within(10, rig.machine.handler.started(slow)).await;
+    assert_eq!(
+        CommandKind::TurnInterrupt.key(),
+        KeyKind::None,
+        "Stop has no ordinary command queue"
+    );
+    let stop = rig.controller.issue(
+        &SerialKey::None,
+        deadline(&rig.clock, 30),
+        &TurnInterrupt {
+            thread_id: thread,
+            turn_id: new_id(),
+        },
+    );
+    within(10, rig.machine.handler.started(stop)).await;
+    assert!(matches!(
+        within(10, rig.controller.wait_command(stop)).await,
+        Progress::Succeeded(_)
+    ));
+    assert!(!matches!(
+        rig.controller.progress(slow),
+        Some(Progress::Succeeded(_))
+    ));
+    rig.machine.handler.release();
+    within(10, rig.controller.wait_command(slow)).await;
 }

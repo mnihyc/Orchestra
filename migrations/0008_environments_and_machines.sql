@@ -92,12 +92,19 @@ CREATE INDEX browser_sessions_open_idx ON browser_sessions USING btree (environm
 CREATE UNIQUE INDEX browser_sessions_profile_key ON browser_sessions USING btree (environment_id, lower(profile)) WHERE ((state <> 'closed'::text) AND (profile IS NOT NULL));
 
 CREATE TABLE commands (
+    session_offer jsonb,
     id uuid NOT NULL,
     machine_id uuid NOT NULL,
     kind text NOT NULL,
     body jsonb NOT NULL,
     serial_key text,
+    content_transit boolean DEFAULT false NOT NULL,
+    after_command_id uuid,
+    start_adoption_until timestamp with time zone,
+    session_open_capture jsonb,
     state text DEFAULT 'queued'::text NOT NULL,
+    key_phase smallint DEFAULT 0 NOT NULL CHECK (key_phase IN (0, 1, 2)),
+    work_started_at timestamp with time zone,
     result jsonb,
     error jsonb,
     attempts integer DEFAULT 0 NOT NULL,
@@ -106,6 +113,7 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    actual_mcp jsonb,
     login_authority jsonb,
     authority_required boolean DEFAULT false NOT NULL,
     mcp_import_completion jsonb,
@@ -116,6 +124,17 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+CREATE INDEX commands_tool_answer_deadline_idx ON commands (deadline_at)
+    WHERE kind='orch.tool_result' AND state IN ('queued','sent');
+CREATE INDEX commands_prerequisite_wait_idx ON commands (after_command_id)
+    WHERE after_command_id IS NOT NULL AND state IN ('queued','sent','accepted');
+
+CREATE TABLE command_storage_gaps (
+    command_id uuid PRIMARY KEY REFERENCES commands(id) ON DELETE CASCADE,
+    sqlstate text NOT NULL,
+    recorded_at timestamp with time zone NOT NULL,
+    applied boolean NOT NULL DEFAULT false
+);
 CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
     WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 
@@ -209,10 +228,13 @@ CREATE TABLE environments (
     facts jsonb DEFAULT '{}'::jsonb NOT NULL,
     manifest_blob bytea,
     manifest_at timestamp with time zone,
+    manifest_source_facts jsonb,
     env_seq bigint DEFAULT 0 NOT NULL,
     unused_since timestamp with time zone,
     remove_at timestamp with time zone,
     attached_session timestamp with time zone,
+    attach_retry_at timestamp with time zone,
+    environment_preparation jsonb,
     revision bigint DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -250,6 +272,8 @@ CREATE INDEX environment_config_facts_idx ON environments USING gin (config json
 CREATE INDEX environment_mcp_membership_idx ON environments USING gin (((facts -> 'mcp_servers'::text)) jsonb_path_ops);
 
 CREATE INDEX environments_connected_idx ON environments USING btree (machine_id) WHERE ((placement = 'connected'::text) AND (deleted_at IS NULL));
+
+CREATE INDEX environments_attach_retry_idx ON environments USING btree (attach_retry_at, id) WHERE (placement = 'connected' AND status = 'failed' AND deleted_at IS NULL);
 
 CREATE INDEX environments_home_idx ON environments USING btree (home_node_id) WHERE (deleted_at IS NULL);
 
@@ -303,6 +327,7 @@ CREATE TABLE hosts (
     drivers jsonb DEFAULT '{}'::jsonb NOT NULL,
     kept_images jsonb DEFAULT '{"epoch": 0, "images": []}'::jsonb NOT NULL,
     capacity jsonb DEFAULT '{}'::jsonb NOT NULL,
+    capacity_at timestamp with time zone,
     load jsonb DEFAULT '{}'::jsonb NOT NULL,
     load_at timestamp with time zone,
     storages jsonb DEFAULT '[]'::jsonb NOT NULL,
@@ -387,7 +412,49 @@ CREATE TABLE machines (
     CONSTRAINT machines_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
 
-CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
+CREATE FUNCTION orch_machine_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  measurements constant text[] := ARRAY['hostname','os_version','cpus','memory_bytes','rates','clock_offset_ms','data_directory'];
+  old_source_facts jsonb;
+  new_source_facts jsonb;
+BEGIN
+  -- An accepted role replacement may claim its revision before the native acknowledgement.
+  IF NEW.revision > OLD.revision
+     OR ROW(NEW.name,NEW.owner_id,NEW.home_id,NEW.home_overridden_at,NEW.org_id,
+            NEW.placement,NEW.host_id,NEW.status,NEW.deleted_at,NEW.lost_at,NEW.lost_by,
+            NULLIF(NEW.facts->'policy','null'::jsonb))
+        IS DISTINCT FROM
+        ROW(OLD.name,OLD.owner_id,OLD.home_id,OLD.home_overridden_at,OLD.org_id,
+            OLD.placement,OLD.host_id,OLD.status,OLD.deleted_at,OLD.lost_at,OLD.lost_by,
+            NULLIF(OLD.facts->'policy','null'::jsonb))
+     OR NOT (NEW.roles @> OLD.roles AND OLD.roles @> NEW.roles) THEN
+    NEW.revision := OLD.revision + 1;
+  ELSE
+    NEW.revision := OLD.revision;
+  END IF;
+  old_source_facts := CASE WHEN jsonb_typeof(OLD.facts)='object' THEN OLD.facts-measurements ELSE OLD.facts END;
+  new_source_facts := CASE WHEN jsonb_typeof(NEW.facts)='object' THEN NEW.facts-measurements ELSE NEW.facts END;
+  -- Gateway choice remains pinned; verified latency samples are observations of that choice.
+  IF jsonb_typeof(old_source_facts->'gateway')='object' THEN
+    old_source_facts := jsonb_set(old_source_facts,'{gateway}',
+      (old_source_facts->'gateway')-ARRAY['measured_at','measurements']);
+  END IF;
+  IF jsonb_typeof(new_source_facts->'gateway')='object' THEN
+    new_source_facts := jsonb_set(new_source_facts,'{gateway}',
+      (new_source_facts->'gateway')-ARRAY['measured_at','measurements']);
+  END IF;
+  -- Native commands pin the key while their short transaction decides and accepts its effect.
+  -- Identity, capabilities and policy upgrade against those pins. Inventory, probes and
+  -- heartbeats with an established attachment marker can still be reported.
+  IF (to_jsonb(NEW)-ARRAY['facts','updated_at','rate_up_bps','rate_down_bps','last_seen_at'])
+       IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['facts','updated_at','rate_up_bps','rate_down_bps','last_seen_at'])
+     OR old_source_facts IS DISTINCT FROM new_source_facts
+     OR (OLD.session_started_at IS NULL AND NEW.last_seen_at IS DISTINCT FROM OLD.last_seen_at) THEN
+    PERFORM id FROM machines WHERE id=OLD.id FOR UPDATE;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_machine_revision();
 
 CREATE TRIGGER agent_program_reports_write AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines FOR EACH ROW EXECUTE FUNCTION orch_project_program_reports();
 
@@ -608,6 +675,8 @@ CREATE UNIQUE INDEX port_open_requests_thread_idx ON port_open_requests USING bt
 
 CREATE UNIQUE INDEX port_open_requests_user_idx ON port_open_requests USING btree (environment_id, user_id, client_id) WHERE (user_id IS NOT NULL);
 
+CREATE INDEX port_open_requests_opening_idx ON port_open_requests USING btree (opening_id, refused_until);
+
 CREATE TRIGGER port_open_requests_live AFTER INSERT OR DELETE OR UPDATE ON port_open_requests FOR EACH ROW EXECUTE FUNCTION machine_views_notify();
 
 CREATE TABLE port_openings (
@@ -728,11 +797,26 @@ CREATE TABLE runtimes (
 
 CREATE INDEX runtimes_custody_waiting_idx ON runtimes USING btree (host_id) INCLUDE (state, remove_at) WHERE ((lost_at IS NULL) AND (state <> 'removed'::text));
 
+-- Applied resource inputs outlive transient command and job history, while their unit is retained.
+CREATE TABLE runtime_resource_inputs (
+    runtime_id uuid PRIMARY KEY REFERENCES runtimes(id) ON DELETE CASCADE,
+    template_fingerprint text,
+    mount_fingerprints jsonb,
+    mount_command_at timestamp with time zone NOT NULL,
+    mount_command_id uuid NOT NULL,
+    recorded_at timestamp with time zone NOT NULL
+);
+
+CREATE INDEX runtime_resource_inputs_mounts_idx ON runtime_resource_inputs USING gin (mount_fingerprints);
+
 CREATE UNIQUE INDEX runtimes_env_key ON runtimes USING btree (environment_id) WHERE ((kind = 'environment'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
 
 CREATE INDEX runtimes_mount_host_idx ON runtimes USING btree (host_id, environment_id, machine_id) WHERE ((environment_id IS NOT NULL) AND (successor_of IS NULL) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])));
 
 CREATE UNIQUE INDEX runtimes_provider_key ON runtimes USING btree (provider_id) WHERE ((kind = 'provider'::text) AND (state <> ALL (ARRAY['retired'::text, 'removed'::text])) AND (successor_of IS NULL));
+
+ALTER TABLE providers ADD CONSTRAINT providers_connection_environment_fk FOREIGN KEY (connection_environment_id) REFERENCES environments(id);
+CREATE INDEX providers_connection_environment_idx ON providers(connection_environment_id) WHERE connection_environment_id IS NOT NULL AND deleted_at IS NULL;
 
 CREATE INDEX runtimes_resource_facts_idx ON runtimes USING gin (resources_used jsonb_path_ops);
 
@@ -778,7 +862,7 @@ CREATE TABLE resource_tags (
     resource_id uuid NOT NULL,
     tag_id uuid NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
     PRIMARY KEY (resource_kind,resource_id,tag_id),
-    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill'))
+    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool'))
 );
 CREATE INDEX resource_tags_tag_idx ON resource_tags(tag_id,resource_kind,resource_id);
 
@@ -797,3 +881,22 @@ CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates
 CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
 CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
 CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');
+
+CREATE INDEX browser_sessions_live_page_idx ON browser_sessions (environment_id,id DESC) WHERE state<>'closed';
+CREATE INDEX browser_sessions_closed_page_idx ON browser_sessions (environment_id,id DESC) WHERE state='closed';
+CREATE INDEX display_sessions_live_page_idx ON display_sessions (environment_id,id DESC) WHERE state<>'closed';
+CREATE INDEX display_sessions_closed_page_idx ON display_sessions (environment_id,id DESC) WHERE state='closed';
+-- One native source transfer per current environment, independent of browser upload sessions.
+CREATE TABLE environment_file_transfers (
+    environment_id uuid PRIMARY KEY REFERENCES environments(id) ON DELETE CASCADE,
+    machine_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    hash bytea NOT NULL,
+    state text NOT NULL CHECK (state IN ('transferring', 'interrupted', 'expired')),
+    observed_at timestamp with time zone NOT NULL,
+    last_piece_at timestamp with time zone,
+    expires_at timestamp with time zone,
+    idle_retention_secs bigint,
+    retention_default boolean
+);
+CREATE INDEX environment_file_transfers_content_idx ON environment_file_transfers(machine_id,hash);

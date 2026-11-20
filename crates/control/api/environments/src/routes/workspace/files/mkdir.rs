@@ -150,7 +150,8 @@ impl effects::Effect for Mkdir {
             door.may_write()?;
             let machine = live::require_live(ctx, conn, &door.env).await?;
             let path = paths::clean("path", &body.path, false)?;
-            let input = FileMkdirInput::new(&door.env, machine, query.thread, path);
+            let input = FileMkdirInput::new(&door.env, machine, query.thread, path)
+                .with_access(door.access);
             Ok((
                 Prepared {
                     env: door.env,
@@ -211,6 +212,7 @@ impl effects::ApplyOwned for Mkdir {
             dispatcher
                 .issue_stored_before(
                     crate::dispatch::StoredCommand {
+                        content_transit: false,
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().into(),

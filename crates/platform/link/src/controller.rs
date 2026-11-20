@@ -282,6 +282,10 @@ impl ControllerLink {
                     self.shared.issuer.on_cmd_ack(&ack);
                     None
                 }
+                UpFrame::CmdSeen(seen) => {
+                    self.shared.issuer.on_cmd_seen(&seen);
+                    None
+                }
                 UpFrame::CmdRes(result) => {
                     self.shared.issuer.on_cmd_res(&result);
                     None
@@ -347,7 +351,7 @@ fn into_down(frame: orch_link_contract::frames::Frame) -> Result<DownFrame, ()> 
 mod observer_tests {
     use super::*;
     use orch_link_contract::commands::{Cmd, CmdCancel};
-    use orch_types::{Clock, ManualClock, Time, new_id};
+    use orch_types::{ManualClock, new_id};
 
     #[tokio::test]
     async fn actual_controller_and_command_issuer_share_their_exact_queue_observations() {
@@ -363,10 +367,12 @@ mod observer_tests {
             .processed();
         let id = new_id();
         let _ = controller.commands().issue(Cmd {
+            after: None,
+            deliver_by: None,
             id,
             kind: "machine.probe".into(),
             key: None,
-            deadline: Time::new(clock.now() + chrono::Duration::seconds(30)),
+            work: std::time::Duration::from_millis(30_000),
             body: serde_json::json!({}),
         });
         let first = out.down.recv().await.unwrap();

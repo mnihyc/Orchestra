@@ -14,9 +14,11 @@
 
 pub mod background;
 mod paid_commands;
+pub mod program_node;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::StreamExt as _;
 use orch_access_contract::decisions::MissingAccess;
 use orch_access_contract::pages as contract_pages;
 use orch_agent_contract::descriptor::ArrangementType;
@@ -251,6 +253,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,21 +429,26 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
     at: DateTime<Utc>,
+    work_started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
 }
 
 /// The API's end of a machine's commands: each is kept from the moment it is issued, a command asked for
 /// twice under one identifier is made once, and when the API "restarts" the ones that did not end are
 /// handed to the new link, as the API's rows would be.
 pub struct ScriptedCommands {
+    hub: Hub,
     db: Db,
     primary: Id,
     link: Mutex<ControllerLink>,
     others: Mutex<HashMap<Id, ControllerLink>>,
     issued: Mutex<HashMap<Id, Issued>>,
+    lost_waits: Mutex<HashSet<String>>,
     clock: Arc<dyn Clock>,
     process: AtomicU64,
     /// Whether the link says that it holds events of a machine not taken in yet ([`World::hearing_behind`]).
@@ -451,13 +459,15 @@ pub struct ScriptedCommands {
 }
 
 impl ScriptedCommands {
-    fn new(db: Db, primary: Id, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
+    fn new(db: Db, primary: Id, hub: Hub, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
         Self {
+            hub,
             db,
             primary,
             link: Mutex::new(link),
             others: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashMap::new()),
+            lost_waits: Mutex::new(HashSet::new()),
             clock,
             process: AtomicU64::new(1),
             behind: AtomicBool::new(false),
@@ -558,6 +568,11 @@ impl ScriptedCommands {
             .values()
             .filter(|entry| entry.cmd.kind == kind)
             .count()
+    }
+
+    /// Loses a live waiter's result after the machine answered; the retained status still has it.
+    pub fn lose_waits_of(&self, kind: CommandKind) {
+        lock(&self.lost_waits).insert(kind.as_str().to_owned());
     }
 
     /// The commands of a kind as they were issued (a secret still the reference to it, a ticket still the
@@ -669,7 +684,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -686,10 +701,22 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 
 #[async_trait]
 impl Commands for Process {
+    fn machine_connected(&self, machine: Id) -> bool {
+        self.commands.hub.session_of(machine).is_some()
+    }
+
     async fn retained_body(&self, id: Id) -> Result<Option<Json>, CommandsError> {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -697,6 +724,7 @@ impl Commands for Process {
     ) -> Result<Option<orch_engine::commands::RetainedCommand>, CommandsError> {
         Ok(lock(&self.commands.issued).get(&id).map(|issued| {
             orch_engine::commands::RetainedCommand {
+                after: issued.cmd.after,
                 machine: issued.machine,
                 kind: issued.cmd.kind.clone(),
                 key: issued.cmd.key.clone(),
@@ -707,13 +735,12 @@ impl Commands for Process {
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.alive()?;
         let cmd = Cmd {
+            after: command.after,
+            deliver_by: None,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline: Time::new(
-                self.commands.clock.now()
-                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
-            ),
+            work: std::time::Duration::from_secs(u64::from(command.kind.deadline_secs())),
             body: command.body,
         };
         let handle = self.commands.link_of(command.machine).commands().issue(cmd);
@@ -726,6 +753,104 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let first_start = matches!(
+            command.kind,
+            CommandKind::TurnStart | CommandKind::TurnStartFenced
+        ) && !lock(&self.commands.issued).contains_key(&command.id);
+        let before = if command.input_facts.is_some() || first_start {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            if let Some(facts) = command.input_facts.as_deref() {
+                orch_engine::commands::retain_input_facts(
+                    &mut tx,
+                    facts,
+                    command.id,
+                    &command.body,
+                )
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            }
+            if first_start
+                && let Some(row) = link_queries::lock_command(&mut tx, command.id)
+                    .await
+                    .map_err(|error| CommandsError::Body(error.to_string()))?
+            {
+                if row.machine_id != command.machine
+                    || row.kind != command.kind.as_str()
+                    || row.serial_key() != command.key.wire().as_deref()
+                    || row.body != command.body
+                {
+                    return Err(CommandsError::AuthorityMismatch);
+                }
+                // The engine persisted this exact start. The first wire transaction records
+                // its native model admission before the scripted machine can observe it.
+                Box::pin(orch_engine::inputs::native_delivery::mark_model_admitted(
+                    &mut tx,
+                    &row,
+                    self.commands.clock.time(),
+                ))
+                .await
+                .map_err(|error| CommandsError::BeforeEffect(Box::new(error)))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
+        {
+            let issued = lock(&self.commands.issued);
+            if issued.contains_key(&command.id) {
+                if let Some(check) = before {
+                    check().map_err(CommandsError::BeforeEffect)?;
+                }
+                return Ok(());
+            }
+        }
+        // Durable admission can precede adoption by this scripted issuer. The
+        // production dispatcher derives the work grant from that original row,
+        // rather than spending it while a command waits to be put on the wire.
+        let retained = if command.kind == CommandKind::OrchToolResult {
+            // Tool answers are retained by this link fixture, including a refusal after the pool closes.
+            None
+        } else {
+            let mut conn = self
+                .commands
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            if matches!(
+                command.kind,
+                CommandKind::TurnStart | CommandKind::TurnStartFenced
+            ) {
+                let mut tx = sqlx::Acquire::begin(&mut *conn)
+                    .await
+                    .map_err(|error| CommandsError::Other(error.to_string()))?;
+                let adopted =
+                    link_queries::adopt_start(&mut tx, command.id, self.commands.clock.as_ref())
+                        .await
+                        .map_err(|error| CommandsError::Other(error.to_string()))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| CommandsError::Other(error.to_string()))?;
+                if !adopted {
+                    return Ok(());
+                }
+            }
+            link_queries::command(&mut conn, command.id)
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?
+        };
+        self.alive()?;
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -733,15 +858,22 @@ impl Commands for Process {
             }
             return Ok(());
         }
-        let now = self.commands.clock.now();
-        let deadline = command.deadline.unwrap_or_else(|| {
-            Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
-        });
+        let at = retained
+            .as_ref()
+            .map_or_else(|| self.commands.clock.now(), |row| row.created_at);
+        let deadline = command
+            .deadline
+            .or_else(|| retained.as_ref().map(|row| Time::new(row.deadline_at)))
+            .unwrap_or_else(|| {
+                Time::new(at + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
+            });
         let cmd = Cmd {
+            after: command.after,
+            deliver_by: Cmd::delivery_deadline(command.kind.as_str(), deadline),
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline,
+            work: Cmd::work_budget(Time::new(at), deadline),
             body: command.body,
         };
         if let Some(check) = before {
@@ -755,10 +887,13 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
-                at: now,
+                at,
+                work_started_at: None,
+                completed_at: None,
             },
         );
         Ok(())
@@ -766,11 +901,34 @@ impl Commands for Process {
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
         self.alive()?;
-        Ok(lock(&self.commands.issued).get(&id).map(|entry| {
+        Ok(lock(&self.commands.issued).get_mut(&id).map(|entry| {
             let progress = entry.handle.progress();
+            if entry.work_started_at.is_none()
+                && matches!(
+                    progress,
+                    Progress::Running
+                        | Progress::Released
+                        | Progress::Succeeded(_)
+                        | Progress::Failed(_)
+                )
+            {
+                entry.work_started_at = Some(self.commands.clock.now());
+            }
+            if progress.is_final() && entry.completed_at.is_none() {
+                entry.completed_at = Some(self.commands.clock.now());
+            }
             Info {
-                stage: stage_of(&progress),
+                stage: if (entry.cmd.after.is_some()
+                    || matches!(entry.cmd.kind.as_str(), "turn.start" | "turn.start.fenced"))
+                    && progress == Progress::Accepted
+                {
+                    Stage::Sent
+                } else {
+                    stage_of(&progress)
+                },
                 issued_at: entry.at,
+                work_started_at: entry.work_started_at.or(entry.completed_at),
+                completed_at: entry.completed_at,
                 outcome: outcome_of(&progress),
             }
         }))
@@ -782,6 +940,19 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        if let Some(entry) = lock(&self.commands.issued).get_mut(&id)
+            && entry.completed_at.is_none()
+        {
+            entry.completed_at = Some(self.commands.clock.now());
+        }
+        let loses_wait = lock(&self.commands.issued).get(&id).is_some_and(|issued| {
+            lock(&self.commands.lost_waits).contains(issued.cmd.kind.as_str())
+        });
+        if loses_wait {
+            return Err(CommandsError::Other(
+                "the live waiter lost its reply after the command ended".to_owned(),
+            ));
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 
@@ -1067,7 +1238,7 @@ pub struct World {
     applier_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     machines: Mutex<Vec<Weak<ScriptedMachine>>>,
     config: Mutex<EngineConfig>,
-    gate: Arc<tokio::sync::Mutex<()>>,
+    gate: Arc<tokio::sync::RwLock<()>>,
     appliers: Arc<AtomicU64>,
     /// How many words about a machine's presence (a session up, a session down) the appliers have written
     /// to the database and told the engine of, by machine.
@@ -1193,6 +1364,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1361,6 +1533,7 @@ impl World {
         let commands = Arc::new(ScriptedCommands::new(
             pool.clone(),
             machine_id,
+            hub.clone(),
             link.clone(),
             Arc::clone(&clock),
         ));
@@ -1393,7 +1566,7 @@ impl World {
             applier_tasks: Mutex::new(Vec::new()),
             machines: Mutex::new(Vec::new()),
             config: Mutex::new(waits),
-            gate: Arc::new(tokio::sync::Mutex::new(())),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
             appliers: Arc::new(AtomicU64::new(0)),
             presence_words: Arc::new(Mutex::new(HashMap::new())),
             ada,
@@ -1531,6 +1704,18 @@ impl World {
         change(&mut lock(&self.config));
     }
 
+    /// An independent worker shares durable rows and the real command supplier, with its own engine state.
+    pub fn recovery_worker(&self) -> Engine {
+        build_engine(
+            &self.pool,
+            &self.clock,
+            &lock(&self.config),
+            &self.commands,
+            &self.access,
+            &self.live,
+        )
+    }
+
     /// The API restarts: the engine is built anew on the same database, the machine's link is made anew
     /// from the cursors the database holds, and the commands that did not end are handed to it.
     pub async fn restart_api(&self) {
@@ -1543,11 +1728,20 @@ impl World {
         &self,
         wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
     ) {
+        self.restart_api_configured(wrap, |_| {}).await;
+    }
+
+    /// Restore the deployment's installed services before the new supervisor can pick up work.
+    pub async fn restart_api_configured(
+        &self,
+        wrap: impl FnOnce(Arc<dyn Commands>) -> Arc<dyn Commands>,
+        configure: impl FnOnce(&Engine),
+    ) {
         let before = self.hub.session_of(self.machine_id);
         self.engine().stop();
         // What is being applied right now is committed first; what comes later reaches nobody until the
         // new link stands.
-        let quiet = self.gate.lock().await;
+        let quiet = self.gate.write().await;
         // Nothing the process that is gone still had in hand commits from now on.
         self.appliers.fetch_add(1, Ordering::SeqCst);
         let cursors = {
@@ -1578,6 +1772,7 @@ impl World {
         engine.attach_capability_services(Arc::new(
             orch_provider_contract::builtins::BuiltinSources::default(),
         ));
+        configure(&engine);
         engine.start();
         *lock(&self.engine) = Some(engine);
         self.spawn_applier(link, notices);
@@ -1611,18 +1806,40 @@ impl World {
         let gate = Arc::clone(&self.gate);
         let words = Arc::clone(&self.presence_words);
         let task = tokio::spawn(async move {
-            while let Some(notice) = notices.recv().await {
-                let gone = current.load(Ordering::SeqCst) != mine;
-                match notice {
-                    Notice::Deliver(delivery) => {
-                        if gone {
-                            link.abandoned(&delivery);
-                            continue;
-                        }
-                        let held = gate.lock().await;
+            // Match the API's shipped eight-delivery share of its 32-connection
+            // pool. The receiver releases a stream's next frame only after its
+            // previous frame commits; other streams need no common write lock.
+            const DELIVERIES_AT_ONCE: usize = 8;
+            let mut applying =
+                futures::stream::FuturesUnordered::<futures::future::BoxFuture<'static, ()>>::new();
+            loop {
+                let notice = tokio::select! {
+                    completed = applying.next(), if !applying.is_empty() => {
+                        let _ = completed;
+                        continue;
+                    }
+                    notice = notices.recv(), if applying.len() < DELIVERIES_AT_ONCE => notice,
+                };
+                let Some(notice) = notice else {
+                    while applying.next().await.is_some() {}
+                    return;
+                };
+                if let Notice::Deliver(delivery) = notice {
+                    let (pool, engine, clock, current, gate, link) = (
+                        pool.clone(),
+                        engine.clone(),
+                        Arc::clone(&clock),
+                        Arc::clone(&current),
+                        Arc::clone(&gate),
+                        link.clone(),
+                    );
+                    applying.push(Box::pin(async move {
+                        // Restart takes the write side, draining old transactions
+                        // before changing generation or loading durable cursors.
+                        let _held = gate.read().await;
                         if current.load(Ordering::SeqCst) != mine {
                             link.abandoned(&delivery);
-                            continue;
+                            return;
                         }
                         let applied = async {
                             let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -1671,8 +1888,15 @@ impl World {
                                 link.abandoned(&delivery);
                             }
                         }
-                        drop(held);
-                    }
+                    }));
+                    continue;
+                }
+                // Presence keeps its position after preceding deliveries, while
+                // restart still excludes every old-generation database effect.
+                while applying.next().await.is_some() {}
+                let _held = gate.read().await;
+                let gone = current.load(Ordering::SeqCst) != mine;
+                match notice {
                     Notice::Online { .. } if !gone => {
                         set_online(&pool, machine, true).await;
                         let _ = engine.machine_online(machine).await;
@@ -1733,11 +1957,13 @@ impl World {
                     Command::ProviderStop(_) => CommandResult::ProviderStop(Empty {}),
                     Command::AgentStop(_) => CommandResult::AgentStop(Empty {}),
                     Command::AgentStart(_) => CommandResult::AgentStart(AgentStartResult {
+                        home: None,
                         reused: false,
                         harness_version: "1.0.0".to_owned(),
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1972,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt
@@ -1914,6 +2147,10 @@ impl World {
     }
 
     pub async fn thread_by(&self, person: Id, name: &str) -> Id {
+        self.thread_on_provider(person, self.provider, name).await
+    }
+
+    pub async fn thread_on_provider(&self, person: Id, provider: Id, name: &str) -> Id {
         let created = self
             .engine()
             .create_thread(
@@ -1922,7 +2159,7 @@ impl World {
                     topic: self.topic,
                     name: name.to_owned(),
                     agent: self.agent,
-                    provider: self.provider,
+                    provider,
                     environment: self.environment,
                     directory: "web".to_owned(),
                     arrangement: None,
@@ -1933,6 +2170,46 @@ impl World {
             .await
             .expect("a thread is created");
         created.thread
+    }
+
+    /// Another ordinary API provider with the same scripted model and native machine.
+    pub async fn api_provider(&self, name: &str) -> Id {
+        let mut conn = self.pool.acquire().await.unwrap();
+        let provider = new_id();
+        let now = self.clock.now();
+        insert_api_provider(
+            &mut conn,
+            provider,
+            self.ada,
+            self.root,
+            self.machine_id,
+            "scripted-scale-key-not-a-model-credential",
+            now,
+        )
+        .await;
+        sqlx::query("UPDATE providers SET name=$2 WHERE id=$1")
+            .bind(provider)
+            .bind(name)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_models (id,provider_id,model_name,display_name,parameters,enabled,source,created_by)
+            VALUES($1,$2,$3,'Fake One',$4,true,'manual',$5)")
+            .bind(new_id()).bind(provider).bind(MODEL)
+            .bind(json!({"efforts":["low","high"],"default_effort":"low","input_images":true}))
+            .bind(self.ada).execute(&mut *conn).await.unwrap();
+        access_testing::add_entry(
+            &mut conn,
+            &PageKey::new("provider", provider, "live"),
+            "any",
+            "access.own",
+            ("user", Some(self.ada), None),
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+        provider
     }
 
     /// A person who is a member of the root org and holds nothing else.
@@ -2069,6 +2346,20 @@ impl World {
             .fetch_one(self.pool.pool())
             .await
             .unwrap_or_else(|error| panic!("{sql}: {error}"))
+    }
+
+    /// The persisted decision when a summary retry did not reach its expected executor.
+    pub async fn summary_recovery_decision(&self, node: Id) -> Json {
+        self.scalar(
+            "SELECT jsonb_build_object(
+                'summary_reason', (SELECT reason_code FROM node_summary_state WHERE node_id=$1),
+                'recovery', (SELECT jsonb_build_object('state',state,'detail',context->>'detail','skipped',context->>'skipped')
+                    FROM model_call_recovery WHERE node_id=$1 AND purpose='summary' ORDER BY updated_at DESC LIMIT 1),
+                'choice', (SELECT jsonb_build_object('state',state,'reason',reason)
+                    FROM pool_choices WHERE source->>'node'=$1::uuid::text AND source->>'purpose'='summary'
+                    ORDER BY created_at DESC LIMIT 1))",
+            node,
+        ).await
     }
 
     /// Counts rows, with one identifier bound to `$1`.
@@ -2439,7 +2730,10 @@ impl World {
                             'recovery_cuts',(SELECT count(*) FROM thread_history_cuts WHERE owner_thread_id=$1),
                             'current_turn',(SELECT jsonb_build_object('ordinal',ordinal,'state',state,
                                 'segment_ordinal',(SELECT ordinal FROM segments WHERE id=turns.segment_id))
-                                FROM turns WHERE id=(SELECT current_turn_id FROM threads WHERE node_id=$1)))",
+                                FROM turns WHERE id=(SELECT current_turn_id FROM threads WHERE node_id=$1)),
+                            'latest_turn',(SELECT jsonb_build_object('ordinal',ordinal,'state',state,
+                                'code',error->>'code') FROM turns WHERE thread_id=$1
+                                ORDER BY created_at DESC,id DESC LIMIT 1))",
                     )
                     .bind(thread)
                     .fetch_one(self.pool.pool()),
@@ -2548,6 +2842,34 @@ impl World {
                 .await
                 .unwrap()
         else {
+            // A pipelined input can run before the API has recorded its opening's
+            // result. Reports used as fixture setup must join that actual work,
+            // without opening a second native conversation to supply its metadata.
+            // A running turn can report completion after an outage clears hints;
+            // those reports no longer belong to its finished preparation phase.
+            eventually("the actual session preparation is recorded", || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT NOT EXISTS(
+                        SELECT 1 FROM segments s JOIN threads t ON t.node_id=s.thread_id
+                        JOIN turns v ON v.id=t.current_turn_id
+                        JOIN commands i ON COALESCE(i.body->>'turn_id',i.body#>>'{turn,turn_id}')=v.id::text
+                        JOIN commands c ON c.id=i.after_command_id
+                        WHERE s.id=$2 AND s.thread_id=$1 AND t.current_segment_id=s.id
+                          AND v.state='starting' AND v.interrupted_by IS NULL
+                          AND i.kind IN ('turn.start','turn.start.fenced')
+                          AND c.body->>'segment_id'=s.id::text
+                          AND c.kind='session.open' AND c.session_open_capture IS NOT NULL
+                          AND c.state NOT IN ('failed','cancelled','expired')
+                          AND (s.native_session_ref IS NULL OR s.session_hints IS NULL
+                            OR s.session_configuration IS NULL))",
+                )
+                .bind(thread)
+                .bind(segment)
+                .fetch_one(self.pool.pool())
+                .await
+                .unwrap()
+            })
+            .await;
             return;
         };
         let command = Outgoing::new(

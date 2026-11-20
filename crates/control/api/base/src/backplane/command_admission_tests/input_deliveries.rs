@@ -33,6 +33,13 @@ const INPUT_KINDS: &[CommandKind] = &[
     CommandKind::TurnStartFenced,
     CommandKind::TurnSteer,
 ];
+// The selected input and its real opening must reach the same native journal.
+const INPUT_ROUTE: &[CommandKind] = &[
+    CommandKind::SessionOpen,
+    CommandKind::TurnStart,
+    CommandKind::TurnStartFenced,
+    CommandKind::TurnSteer,
+];
 
 struct Issuing {
     reached: oneshot::Sender<Id>,
@@ -188,7 +195,7 @@ impl Rig {
         let machine = world.machine_id;
         world
             .restart_api_using(move |original| {
-                Arc::new(Split::selected(original, machine, dispatch, INPUT_KINDS))
+                Arc::new(Split::selected(original, machine, dispatch, INPUT_ROUTE))
             })
             .await;
         let (peer, ready) = peer(link.clone(), machine, server.clone(), native.clone(), false);
@@ -617,6 +624,7 @@ pub(super) async fn collide(
             )
         });
         let old = StoredCommand {
+            content_transit: false,
             id: Some(command.id),
             machine: command.machine,
             kind: command.kind.as_str().into(),
@@ -629,6 +637,7 @@ pub(super) async fn collide(
             rows::insert_command(
                 &mut *collision.link.inner.db.acquire().await?,
                 &rows::NewCommand {
+                    content_transit: false,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),

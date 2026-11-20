@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-engine --test orch_tools --test tool_catalogue --test orch_capabilities --test mcp_resolution --test topic_announcement_trust
+test -p orch-engine --test turns --test turn_environment --test call_recovery --test failures --test temporary_environments
+test -p orch-link-contract -p orch-settings-contract --lib
+test -p orch-link --lib --test commands --test large_messages
+test -p orch-db --lib --test commands_in_line --test database_watch --test released_migrations
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --lib --test ask --test resource_summaries --features test-observers

@@ -70,6 +70,8 @@ impl Commands for HeldCommand {
         }
         let ended = self.cleanup.ended.load(Ordering::SeqCst);
         Ok(Some(Info {
+            work_started_at: None,
+            completed_at: None,
             stage: if ended { Stage::Over } else { Stage::Accepted },
             issued_at: self.cleanup.at.get(),
             outcome: ended.then(|| self.outcome()),

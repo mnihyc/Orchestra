@@ -11,7 +11,8 @@ mod support;
 
 use chrono::Duration;
 use orch_api_contract::resources::{
-    ProviderGet, ProviderRefresh, ProviderRefreshBody, ProviderStatus,
+    ProviderGet, ProviderRefresh, ProviderRefreshBody, ProviderStatus, ProviderTrialGet,
+    ProviderTrialState,
 };
 use orch_api_contract::threads::Delivery;
 use orch_link_contract::commands::{
@@ -35,6 +36,7 @@ fn vendor_read(s: &Scene, supported: bool, verified: bool) -> Arc<AtomicUsize> {
     };
     s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".into(),
             descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
@@ -109,6 +111,94 @@ async fn rejected(s: &Scene) -> (Id, Id, Id) {
         .id;
     s.rig.wait_state(thread, "blocked").await;
     (thread, first, second)
+}
+
+async fn trial_read_key(s: &Scene, person: Id) -> String {
+    use orch_access_contract::key_scope::KeyScope;
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
+    use orch_db::queries::identity;
+
+    let scope: KeyScope = serde_json::from_value(json!({"rules":[{
+        "target":{"kind":"provider","id":s.on.provider,"reach":"self"},"resources":["provider"],
+        "allow":[{"operation":"ProviderTrialGet","actions":["read"]}]
+    }]}))
+    .unwrap();
+    assert!(scope.validate().is_empty());
+    let id = orch_types::new_id();
+    let token = new_api_token(id);
+    identity::create_api_token_scoped(
+        &mut s.rig.db.acquire().await.unwrap(),
+        &identity::NewApiToken {
+            id,
+            user_id: person,
+            name: "Trial facts only",
+            token_hash: &token_hash(&token),
+            scopes: &[],
+            node_id: None,
+            at: s.rig.world.now(),
+            expires_at: Some(s.rig.world.now() + Duration::hours(1)),
+        },
+        Some(&json!(scope)),
+    )
+    .await
+    .unwrap();
+    token
+}
+
+#[tokio::test]
+async fn a_trial_read_key_keeps_current_manager_authority_and_cannot_check_sign_in() {
+    let s = Scene::new().await;
+    let reads = vendor_read(&s, true, true);
+    s.rig
+        .lets_use(
+            "provider",
+            s.on.provider,
+            "provider.view",
+            &s.cai,
+            json!({}),
+        )
+        .await;
+    let viewer_key = trial_read_key(&s, s.cai.id()).await;
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&viewer_key)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        denied.code,
+        orch_api_contract::common::ErrorCode::AuthzDenied
+    );
+
+    let manager_key = trial_read_key(&s, s.ada.id()).await;
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ProviderRefresh, &[&s.on.provider])
+        .body(&ProviderRefreshBody { retry: Some(true) })
+        .token(&manager_key)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        denied.code,
+        orch_api_contract::common::ErrorCode::AuthzDenied
+    );
+    let trial = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&manager_key)
+        .send()
+        .await
+        .ok();
+    assert!(trial.is_none(), "no captured trial stays unreported");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -278,7 +368,8 @@ async fn without_a_vendor_read_one_oldest_input_trials_once_and_acceptance_recov
         let s = Scene::new().await;
         vendor_read(&s, false, false);
         let (thread, first, second) = rejected(&s).await;
-        s.rig
+        let reserved = s
+            .rig
             .world
             .app
             .call(ProviderRefresh, &[&s.on.provider])
@@ -287,6 +378,11 @@ async fn without_a_vendor_read_one_oldest_input_trials_once_and_acceptance_recov
             .send()
             .await
             .ok();
+        let reserved = serde_json::to_value(&reserved).unwrap();
+        assert_eq!(reserved["trial"]["state"], "reserved");
+        assert_eq!(reserved["trial"]["input_ref"], json!(first));
+        assert_eq!(reserved["trial"]["reserved_for"]["id"], json!(s.ada.id()));
+        assert!(reserved["trial"]["at"].is_string());
         let trial = s.rig.turn_start(thread, 1).await;
         let input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id = $1")
             .bind(trial.turn_id)
@@ -294,7 +390,8 @@ async fn without_a_vendor_read_one_oldest_input_trials_once_and_acceptance_recov
             .await
             .unwrap();
         assert_eq!(input, first);
-        s.rig
+        let same_trial = s
+            .rig
             .world
             .app
             .call(ProviderRefresh, &[&s.on.provider])
@@ -303,6 +400,13 @@ async fn without_a_vendor_read_one_oldest_input_trials_once_and_acceptance_recov
             .send()
             .await
             .ok();
+        let same_trial = serde_json::to_value(&same_trial).unwrap();
+        assert_eq!(
+            same_trial["trial"]["input_ref"],
+            json!(first),
+            "a repeated Check sign-in observes the same single reservation"
+        );
+        assert_ne!(same_trial["trial"]["input_ref"], json!(second));
         assert_eq!(
             s.rig.turn_starts(thread).len(),
             2,
@@ -366,5 +470,100 @@ async fn without_a_vendor_read_one_oldest_input_trials_once_and_acceptance_recov
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             assert_eq!(s.rig.turn_starts(thread).len(), 2);
         }
+        let recorded = s
+            .rig
+            .world
+            .app
+            .call(ProviderTrialGet, &[&s.on.provider])
+            .token(&s.ada.token)
+            .send()
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(recorded.state, ProviderTrialState::Consumed);
+        assert_eq!(recorded.input_ref, Some(first));
     }
+}
+
+#[tokio::test]
+async fn trial_details_are_an_authorized_read_and_a_provider_only_key_never_names_the_waiting_input()
+ {
+    let s = Scene::new().await;
+    let empty = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        empty.is_none(),
+        "a source with no captured trial is unreported"
+    );
+    vendor_read(&s, false, false);
+    let (thread, first, _) = rejected(&s).await;
+    s.rig
+        .world
+        .app
+        .call(ProviderRefresh, &[&s.on.provider])
+        .body(&ProviderRefreshBody { retry: Some(true) })
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    let token = trial_read_key(&s, s.ada.id()).await;
+    let limited = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&token)
+        .send()
+        .await
+        .ok()
+        .unwrap();
+    assert!(matches!(
+        limited.state,
+        ProviderTrialState::Reserved | ProviderTrialState::Running
+    ));
+    assert!(limited.at.is_some());
+    assert!(limited.input_ref.is_none());
+    assert!(limited.thread_ref.is_none());
+    assert!(limited.reserved_for.is_none());
+    let value = serde_json::to_value(limited).unwrap().to_string();
+    assert!(!value.contains(&first.to_string()));
+    assert!(!value.contains(&thread.to_string()));
+    let starts = s.rig.turn_starts(thread).len();
+    let visible = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok()
+        .unwrap();
+    assert_eq!(visible.input_ref, Some(first));
+    assert_eq!(visible.reserved_for.unwrap().id, s.ada.id());
+    assert_eq!(
+        s.rig.turn_starts(thread).len(),
+        starts,
+        "opening details never starts another trial"
+    );
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(ProviderTrialGet, &[&s.on.provider])
+        .token(&s.cai.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        denied.code,
+        orch_api_contract::common::ErrorCode::AuthzDenied
+    );
 }
