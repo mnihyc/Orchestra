@@ -269,13 +269,14 @@ async fn a_home_and_private_view_fork_measures_then_carries_whole_volumes_before
     );
     let until = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let remaining: i64 =
+        // Nothing else holds the archive, so the end of the carry removes it from the server.
+        let remaining: Option<i64> =
             sqlx::query_scalar("SELECT pin_count::bigint FROM blobs WHERE hash=$1")
                 .bind(hash.as_bytes().as_slice())
-                .fetch_one(world.pool.pool())
+                .fetch_optional(world.pool.pool())
                 .await
                 .unwrap();
-        if remaining == 0 {
+        if remaining.is_none() {
             break;
         }
         assert!(

@@ -89,7 +89,9 @@ fn refusal(error: ApiError) -> Refusal {
         ErrorCode::RequestTooLarge => Code::TooLarge,
         ErrorCode::PortsNotAllowed | ErrorCode::AuthSuspended => Code::Disabled,
         ErrorCode::PortsUnavailable => Code::NotReachable,
-        ErrorCode::ConflictStaleRevision | ErrorCode::PortsProgramConflict => Code::Changed,
+        ErrorCode::ConflictStaleRevision
+        | ErrorCode::ConflictConcurrentChange
+        | ErrorCode::PortsProgramConflict => Code::Changed,
         ErrorCode::Internal => Code::Unsupported,
         _ => Code::Invalid,
     };
@@ -113,16 +115,9 @@ fn arguments_only(arguments: &Json) -> ApiResult<Json> {
         .as_object_mut()
         .ok_or_else(|| ApiError::invalid("arguments", "give an object"))?;
     if let Some(bytes) = object.remove("max_bytes")
-        && !bytes.as_i64().is_some_and(|bytes| {
-            (orch_engine::tools::definitions::READ_BYTES_MIN
-                ..=orch_engine::tools::definitions::READ_BYTES_MAX)
-                .contains(&bytes)
-        })
+        && !bytes.as_i64().is_some_and(|bytes| bytes > 0)
     {
-        return Err(ApiError::invalid(
-            "max_bytes",
-            "use an integer from 1000 to 40000",
-        ));
+        return Err(ApiError::invalid("max_bytes", "use a positive integer"));
     }
     if let Some(ids) = object.remove("ids")
         && !ids.is_boolean()
