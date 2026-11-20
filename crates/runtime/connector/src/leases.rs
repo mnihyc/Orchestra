@@ -585,6 +585,11 @@ impl Leases {
         self.table.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// A public HTTP call that might have reached the upstream is never issued again after a crash.
+    pub(crate) fn knows(&self, lease: Id) -> bool {
+        self.table().by_id.contains_key(&lease)
+    }
+
     /// Opens the lease a `lease.open` asks for. A lease that is open already is the same lease: asking
     /// again changes nothing.
     pub fn open(&self, body: &LeaseOpen, now: Time) -> Result<Arc<Lease>, LeaseError> {

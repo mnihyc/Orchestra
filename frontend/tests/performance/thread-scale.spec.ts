@@ -224,7 +224,7 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   // Warm: the first thread loads the page's code; the second is then opened by the router.
   await page.goto(`/thread/${MAIN}`);
   await expect(conversation(page).getByText(/Question 8\d\d:/).first()).toBeVisible({ timeout: WAIT_MS * slow });
-  await page.getByRole('tree', { name: 'Orgs, projects, topics and threads' }).getByRole('treeitem', { name: /Upgrade deps/ }).click();
+  await page.getByRole('tree', { name: 'Organizations, projects, topics and threads' }).getByRole('treeitem', { name: /Upgrade deps/ }).click();
   const threads = mainArea(page).getByRole('link', { name: 'Main thread' });
   await expect(threads.first()).toBeVisible();
   await page.evaluate(() => {

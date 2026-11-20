@@ -20,8 +20,8 @@ use orch_api_contract::thread_move::{
     ThreadMove, ThreadMoveBody, ThreadMovePlan, ThreadMovePreview, ThreadMovePreviewBody,
 };
 use orch_api_contract::threads::{
-    Delivery, ItemPayload, MarkerPayload, Thread, ThreadInterrupt, ThreadInterruptBody, ThreadSync,
-    ThreadSyncGet, ThreadSyncGetQuery,
+    Delivery, ItemPayload, MarkerPayload, QueueEligibility, Thread, ThreadInterrupt,
+    ThreadInterruptBody, ThreadQueue, ThreadSync, ThreadSyncGet, ThreadSyncGetQuery,
 };
 use orch_link_contract::events::TurnOutcome;
 use orch_settings::Target;
@@ -121,7 +121,7 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
         .call(ThreadInterrupt, &[&id])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: active.turn_id,
+            turn_id: Some(active.turn_id),
         })
         .send()
         .await
@@ -129,10 +129,22 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
     s.rig
         .say(id, turn_ended(active.turn_id, TurnOutcome::Interrupted))
         .await;
-    s.rig.wait_turn(active.turn_id, "interrupted").await;
+    s.rig
+        .wait_for_terminal_facts(active.turn_id, "interrupted")
+        .await;
     s.rig.wait_state(id, "idle").await;
     let before = sync(&s, id).await;
     assert!(before.thread.queue.held);
+    assert_eq!(
+        before
+            .turns
+            .iter()
+            .find(|turn| turn.id == active.turn_id)
+            .and_then(|turn| turn.notice_decision.as_ref())
+            .and_then(|decision| decision.reason),
+        Some(orch_api_contract::notifications::NoticeSuppressionReason::Interrupted),
+        "the move preserves the completed interruption decision"
+    );
     let side = retained_side(&s, id).await;
     let to = destination(&s).await;
     let home: Id = sqlx::query_scalar("SELECT home_node_id FROM environments WHERE id=$1")
@@ -173,7 +185,23 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
     assert_eq!(moved.environment, before.thread.environment);
     assert_eq!(moved.directory, before.thread.directory);
     assert_eq!(moved.binding, before.thread.binding);
-    assert_eq!(moved.queue, before.thread.queue);
+    // The queue survives. Its admission observation depends on the path of the destination.
+    assert!(
+        match &moved.queue.eligibility {
+            Some(QueueEligibility::Unreported) => true,
+            Some(QueueEligibility::None { queue_revision, .. }) =>
+                *queue_revision == moved.queue.revision,
+            _ => false,
+        },
+        "a held queue can report only a current no-selection decision or an unreported one"
+    );
+    assert_eq!(
+        moved.queue,
+        ThreadQueue {
+            eligibility: moved.queue.eligibility.clone(),
+            ..before.thread.queue.clone()
+        }
+    );
     let after = sync(&s, id).await;
     assert_eq!(
         after.inputs, before.inputs,
@@ -226,6 +254,41 @@ async fn a_move_keeps_the_same_history_workspace_and_stop_held_inputs_and_moves_
             "one move is one act in each topic's Activity"
         );
     }
+}
+
+#[tokio::test]
+async fn publishing_thread_activity_keeps_an_unchanged_move_review_valid() {
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    let to = destination(&s).await;
+    let plan = preview(&s, id, to).await;
+    let reviewed = plan.movement.node.thread_display.as_ref().unwrap();
+
+    // Publish a native thread sequence between review and confirmation, as queue observations do.
+    let mut tx = s.rig.db.pool().begin().await.unwrap();
+    let mut unit = orch_engine::unit::Unit::new(&mut tx, s.rig.world.now());
+    let seq = unit.stamp(id).await.unwrap();
+    unit.finish().await.unwrap();
+    tx.commit().await.unwrap();
+
+    let current = sync(&s, id).await.thread;
+    assert!(seq > reviewed.seq);
+    assert!(current.display.seq >= seq);
+    assert_eq!(current.base.revision, plan.expected_revision);
+    assert_eq!(current.topic_id, plan.movement.from.id);
+    let moved = s
+        .rig
+        .world
+        .app
+        .call(ThreadMove, &[&id])
+        .token(&s.ada.token)
+        .body(&confirmation(&plan))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the original review still confirms the move");
+    assert_eq!(moved.topic_id, to);
 }
 
 #[tokio::test]

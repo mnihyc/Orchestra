@@ -208,6 +208,10 @@ async fn fingerprint(conn: &mut Conn, plan: &ThreadMovePlan) -> ApiResult<String
     let mut movement = serde_json::to_value(&plan.movement).map_err(ApiError::internal)?;
     if let Some(fields) = movement.as_object_mut() {
         fields.remove("stamp");
+        // The live thread icon follows execution and the reader's position independently of a move.
+        if let Some(node) = fields.get_mut("node").and_then(Json::as_object_mut) {
+            node.remove("thread_display");
+        }
     }
     let value = json!({"epoch":epoch,"source":source,"destination":destination,"revisions":revisions,"movement":movement,"unchanged":plan.unchanged});
     Ok(Hash::of(&serde_json::to_vec(&value).map_err(ApiError::internal)?).to_string())
