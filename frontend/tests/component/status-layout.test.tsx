@@ -3,11 +3,22 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
+import { StatusStrip } from '@/features/status-items/StatusStrip';
 import { useWorkbench } from '@/features/workbench/store';
 import { defaultStatus, moveStatus } from '@/features/status-items/arrangement';
 import { show } from './support';
 
 afterEach(() => useWorkbench.setState({ statusItems: defaultStatus() }));
+
+it('updates status values without measuring the same slots again during render', () => {
+  const view = show(<StatusStrip items={[{ id: 'progress', content: 'Starting', text: 'Starting' }]} />);
+  const strip = view.container.querySelector<HTMLElement>('[data-status-strip]');
+  if (strip === null) throw new Error('Missing status strip');
+  const bounds = vi.spyOn(strip, 'getBoundingClientRect');
+  view.rerender(<StatusStrip items={[{ id: 'progress', content: 'Running', text: 'Running' }]} />);
+  expect(screen.getByText('Running')).toBeVisible();
+  expect(bounds).not.toHaveBeenCalled();
+});
 it('opens Status items from Layout and edits the same saved places', async () => {
   const user = userEvent.setup();
   useWorkbench.setState({ statusItems: moveStatus(defaultStatus(), 'speed', 'header') });
