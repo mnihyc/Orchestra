@@ -698,7 +698,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // The menu of an item begins the picking with that item; every item then has a box, and the bar stands in place of the one the message is written in.
   const first = conversation(page).locator('[data-item="u1"]');
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   const bar = page.getByRole('toolbar', { name: 'Selected items' });
   await expect(bar.getByText('1 selected')).toBeVisible();
@@ -721,7 +721,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // Cancel leaves everything as it was. The box took the keyboard, and the screen it shares with the conversation went down to it: the first item is brought back.
   await scrollConversationToTop(page);
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await page.getByRole('toolbar', { name: 'Selected items' }).getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByRole('toolbar', { name: 'Selected items' })).toHaveCount(0);

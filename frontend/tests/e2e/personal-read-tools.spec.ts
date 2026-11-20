@@ -62,7 +62,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
       applied++;await route.continue();
     });
     await page.goto(`/thread/${ACME.mainThread}`);
-    await page.locator('[data-thread-header]').getByRole('button',{name:words.thread.header.shareThread,exact:true}).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words.thread.header.shareThread, exact: true }).click();
     const sharing=page.getByRole('dialog').filter({has:page.getByRole('combobox',{name:words.access.add.label,exact:true})});
     await sharing.getByRole('combobox',{name:words.access.add.label,exact:true}).fill('gra');
     await page.getByRole('option',{name:/Grace Hopper/}).click();
@@ -70,7 +71,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     const confirmation=page.getByRole('alertdialog',{name:words.access.ownerReads.title,exact:true});
     if(results===0) {await expect.poll(()=>applied).toBe(1);await expect(confirmation).toHaveCount(0);}
     else {
-      await expect(confirmation).toContainText(words.access.ownerReads.notice.replace('{{count}}',String(results)));
+      await expect(confirmation).toContainText((results===1?words.access.ownerReads.notice_one:words.access.ownerReads.notice_other).replace('{{count}}',String(results)));
       expect(applied).toBe(0);
       await confirmation.getByRole('button',{name:words.common.cancel,exact:true}).click();
       expect(applied).toBe(0);

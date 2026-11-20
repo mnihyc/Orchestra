@@ -54,8 +54,8 @@ An unfinished draft or tool artifact without a saved reference or receiving path
 
 ## Files for an agent
 
-Attach files in the composer and send the message. An image reaches the model directly when the model and harness support it
-and the image fits the configured native-image allowance. It is also written into the thread's directory.
+Attach files in the composer and send the message. An image reaches the model directly when the model and the agent program support it
+and the image fits the size set for images sent directly. It is also written into the thread's directory.
 Other files reach the agent by their checked workspace path, kind and size.
 
 **This model receives the image as a file** means the image will reach the agent by path. You can send it or choose another model.
@@ -68,7 +68,7 @@ Forwarding and the files selected in a fork, switch, move or export carry origin
 
 - A skeleton means the preview is loading. Previews are requested when they become visible.
 - **Preview unavailable** means this kind or file could not produce a preview. Download is still available.
-  HEIC, HEIF, AVIF and TIFF currently use this fallback. PDF and video cards use their kind icon.
+  HEIC, HEIF, AVIF and TIFF use this fallback. PDF and video cards use their kind icon.
 - **File no longer exists** means the original is gone. Open and Download are unavailable.
 - **Private reference** hides the name and card when you may not read the file.
 - **Too large to preview** offers Download. The preview limits leave the original unchanged.

@@ -140,7 +140,7 @@ impl Source for Proposal {
                 .fetch_optional(&mut *conn)
                 .await
                 .map_err(DbError::from)?;
-            let machine = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            let machine = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(input.machine)
                 .fetch_optional(conn)
                 .await
@@ -255,7 +255,7 @@ impl HostPortsProbe {
             .fetch_optional(&mut *conn)
             .await
             .map_err(DbError::from)?;
-        let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.physical.machine)
             .fetch_optional(&mut *conn)
             .await
@@ -341,6 +341,7 @@ impl HostPortsProbe {
         self.current_issue_callers(
             conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

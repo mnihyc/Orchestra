@@ -121,6 +121,7 @@ async fn retained_preparation(conn: &mut Conn, thread: Id) -> Result<Option<JobR
 pub fn job_ref(row: &JobRow) -> JobRef {
     let (progress, _) = read_progress(row);
     JobRef {
+        clone: None,
         id: row.id,
         kind: row.kind.clone(),
         state: match row.state.as_str() {
