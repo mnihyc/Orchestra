@@ -18,7 +18,7 @@ export function wantedResourceFeeds(cache: QueryClient): Set<string> {
     if (head === 'thread-parameters' && record(data) && record(data.provider)) {
       const provider = data.provider;
       if (typeof provider.id === 'string' && record(provider.access) && Array.isArray(provider.access.permissions)
-        && provider.access.permissions.includes('provider.view')) wanted.add(`provider:${provider.id}`);
+        && provider.access.permissions.includes('provider.view')) wanted.add(`provider-row:${provider.id}`);
     }
     if (head === ENROLLMENT_PROGRESS && record(data)) {
       for (const kind of ['machine', 'host'] as const) {

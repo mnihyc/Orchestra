@@ -196,3 +196,35 @@ fn endpoint_native_options_follow_the_interface_the_existing_arrangement_selecte
     );
     assert!(translated.option_schema("native").is_none());
 }
+
+#[test]
+fn common_features_keep_the_actual_outgoing_endpoints_group_and_model_constraints() {
+    use orch_provider_contract::models::composed_model_parameters;
+    let layers = json!({"endpoints":{
+        "one":{"common":{"properties":{"cache":{"properties":{"retention":{"enum":["5m","1h"]}}}}}},
+        "two":{"common":{"properties":{"cache":false}}}
+    },"groups":{"shared":{"request_options":{"common":{"properties":{"cache":{"properties":{"retention":{"enum":["5m"]}}}}}}}}});
+    let one =
+        composed_model_parameters(&json!({}), &["shared".into()], &layers, Some("one")).unwrap();
+    let two =
+        composed_model_parameters(&json!({}), &["shared".into()], &layers, Some("two")).unwrap();
+    schema::validate(
+        one.option_schema("common").unwrap(),
+        &json!({"cache":{"retention":"5m"}}),
+    )
+    .unwrap();
+    assert!(
+        schema::validate(
+            one.option_schema("common").unwrap(),
+            &json!({"cache":{"retention":"1h"}})
+        )
+        .is_err()
+    );
+    assert!(
+        schema::validate(
+            two.option_schema("common").unwrap(),
+            &json!({"cache":{"retention":"5m"}})
+        )
+        .is_err()
+    );
+}
