@@ -14,7 +14,7 @@ pub mod native;
 /// The normal largest history decode batch, including explicit full operations.
 pub const PAGE: i64 = thread_history::PAGE;
 
-/// A cut is metadata owned by exactly one retained job or side thread.
+/// A cut is metadata owned by exactly one retained job, thread or request.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Cut {
     pub id: Id,
@@ -23,6 +23,7 @@ pub struct Cut {
     pub job_id: Option<Id>,
     pub owner_thread_id: Option<Id>,
     pub source_segment_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::OptionalText")]
     pub source_native_ref: Option<String>,
     pub execution_revision: i64,
     pub first_turn: i32,
@@ -30,6 +31,7 @@ pub struct Cut {
     pub captured_seq: Seq,
     pub captured_at: chrono::DateTime<chrono::Utc>,
     pub head: Json,
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub artifacts: Json,
 }
 
@@ -183,6 +185,39 @@ pub struct Capture {
 /// Freeze membership and small metadata atomically; large payloads remain shared
 /// until their first subsequent write. All pages decode at most PAGE bodies.
 pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
+    capture_owned(conn, asked, None).await
+}
+
+/// Freeze a request-owned source before releasing its thread lock. The live
+/// request's ordinary creation lease protects this owner through publication.
+pub async fn capture_for_request(
+    conn: &mut Conn,
+    asked: &Capture,
+    user: Id,
+    key: &str,
+) -> Result<Cut, DbError> {
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM idempotency_keys
+      WHERE user_id=$1 AND key=$2 AND response->>'owner'=$3::uuid::text
+        AND response->>'native_kind'='history_capture')",
+    )
+    .bind(user)
+    .bind(key)
+    .bind(asked.id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !owned {
+        return Err(thread_history::damaged());
+    }
+    capture_owned(conn, asked, Some((user, key))).await
+}
+
+async fn capture_owned(
+    conn: &mut Conn,
+    asked: &Capture,
+    request: Option<(Id, &str)>,
+) -> Result<Cut, DbError> {
+    let started = std::time::Instant::now();
     let (first, last) = asked.range.unwrap_or((1, 0));
     if unconfirmed_inputs(conn, asked.thread, asked.view, Some((first, last))).await? {
         return Err(DbError::Rule {
@@ -223,6 +258,17 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
         .checked_add(prefix_turns)
         .ok_or_else(thread_history::damaged)?;
     if let Some(old) = cut(conn, asked.id).await? {
+        let retained: (Option<Id>, Option<String>) = sqlx::query_as(
+            "SELECT request_user_id,request_key FROM thread_history_cuts WHERE id=$1",
+        )
+        .bind(asked.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        if retained.0 != request.map(|(user, _)| user)
+            || retained.1.as_deref() != request.map(|(_, key)| key)
+        {
+            return Err(thread_history::damaged());
+        }
         if (
             old.thread_id,
             old.continuation_id,
@@ -246,9 +292,9 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
         }
         return Ok(old);
     }
-    let changed=sqlx::query("INSERT INTO thread_history_cuts(id,thread_id,continuation_id,job_id,owner_thread_id,
+    let changed=sqlx::query("INSERT INTO thread_history_cuts(id,thread_id,continuation_id,job_id,owner_thread_id,request_user_id,request_key,
         source_segment_id,source_native_ref,execution_revision,first_turn,last_turn,captured_seq,captured_at,head)
-      SELECT $3,t.node_id,c.id,$4,$5,s.id,s.native_session_ref,$6,$7,$8,t.next_seq-1+$11,$9,
+      SELECT $3,t.node_id,c.id,$4,$5,$12,$13,s.id,s.native_session_ref,$6,$7,$8,t.next_seq-1+$11,$9,
         jsonb_build_object('name',n.name,'state',t.state,'agent_id',t.agent_id,
           'agent_name',a.name,'environment_id',t.environment_id)
       FROM threads t JOIN nodes n ON n.id=t.node_id
@@ -258,6 +304,7 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
       WHERE t.node_id=$1 AND ($10::uuid IS NULL OR s.id IS NOT NULL)")
         .bind(asked.thread).bind(asked.view).bind(asked.id).bind(asked.job).bind(asked.owner_thread)
         .bind(asked.execution_revision).bind(logical_first).bind(logical_last).bind(asked.at).bind(asked.segment).bind(prefix_seq)
+        .bind(request.map(|(user, _)| user)).bind(request.map(|(_, key)| key))
         .execute(&mut *conn).await?.rows_affected();
     if changed != 1 {
         return Err(thread_history::damaged());
@@ -293,6 +340,7 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
         let Some(next) = next else { break };
         after = next;
     }
+    tracing::debug!(phase = "turns", elapsed = ?started.elapsed(), "Captured history phase");
     if last > 0
         && !sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM thread_history_cut_rows
@@ -334,59 +382,47 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
         .execute(&mut *conn)
         .await?;
     // A missing inherited revision is damage, never permission to read a newer body.
-    if sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM thread_history_cut_members($1) m JOIN items i ON i.id=m.item_id
-           JOIN thread_history_cut_spans s ON s.cut_id=$1 AND s.thread_id=i.thread_id
-             AND s.owner_continuation_id=i.continuation_id
-          WHERE m.body IS NULL AND m.revision_seq IS NULL AND i.seq_updated>s.frozen_at)",
-    )
-    .bind(asked.id)
-    .fetch_one(&mut *conn)
-    .await?
+    if sqlx::query_scalar::<_, bool>(missing_revision_sql())
+        .bind(asked.id)
+        .fetch_one(&mut *conn)
+        .await?
     {
         return Err(thread_history::damaged());
     }
+    tracing::debug!(phase = "spans", elapsed = ?started.elapsed(), "Captured history phase");
     if let Some(parent) = parent {
         if first == 1 {
-            // The prefix is held as the prefix cut holds it: its spans, and the copies it keeps, pinned for this cut too.
+            // The prefix keeps its original spans and its existing immutable body owner.
             sqlx::query("INSERT INTO thread_history_cut_spans(cut_id,thread_id,owner_continuation_id,first_seq,last_seq,
                 frozen_at,seq_offset,loose_before_orch,loose_low,loose_high)
                 SELECT $1,thread_id,owner_continuation_id,first_seq,last_seq,frozen_at,seq_offset,loose_before_orch,
                   loose_low,loose_high FROM thread_history_cut_spans WHERE cut_id=$2")
                 .bind(asked.id).bind(parent.id).execute(&mut *conn).await?;
-            sqlx::query("INSERT INTO thread_history_cut_items(cut_id,item_id,seq_created,turn_id,stream,kind,revision_seq,native_alias,body)
-                SELECT $1,item_id,seq_created,turn_id,stream,kind,revision_seq,native_alias,body
-                FROM thread_history_cut_items WHERE cut_id=$2")
-                .bind(asked.id).bind(parent.id).execute(&mut *conn).await?;
-            sqlx::query("INSERT INTO thread_history_cut_blobs(cut_id,blob)
-                SELECT $1,b.hash FROM thread_history_cut_items x CROSS JOIN LATERAL thread_payload_blobs(x.body->'payload') p
-                  JOIN blobs b ON b.hash=p.blob WHERE x.cut_id=$1 AND x.body IS NOT NULL ON CONFLICT DO NOTHING")
-                .bind(asked.id).execute(&mut *conn).await?;
+            // The source side owns an immutable prefix already. Keep that owner
+            // rather than duplicate its retained bodies/pins. A source edit can
+            // freeze into it atomically even while this capture is unpublished.
+            sqlx::query(
+                "INSERT INTO thread_history_cut_prefixes(cut_id,prefix_cut_id) VALUES($1,$2)",
+            )
+            .bind(asked.id)
+            .bind(parent.id)
+            .execute(&mut *conn)
+            .await?;
             sqlx::query("UPDATE thread_history_cuts SET artifacts=jsonb_set(artifacts,'{side_prefix}',
                 jsonb_build_object('cut_id',$2::uuid,'through',$3::int,'seq_offset',$4::bigint)) WHERE id=$1")
                 .bind(asked.id).bind(parent.id).bind(prefix_turns).bind(prefix_seq).execute(&mut *conn).await?;
         }
         // A range starting after the first side turn excludes its inherited prefix.
         // Private ordering is offset; original row identities/native IDs remain in body.
-        sqlx::query(
-            "UPDATE thread_history_cut_rows SET ordinal=ordinal+$2 WHERE cut_id=$1 AND kind='turn'",
-        )
-        .bind(asked.id)
-        .bind(prefix_turns)
-        .execute(&mut *conn)
-        .await?;
+        shift_metadata(conn, asked.id, "turn", prefix_turns).await?;
         if first == 1 {
-            sqlx::query("INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
-                SELECT $1,kind,row_id,ordinal,body FROM thread_history_cut_rows WHERE cut_id=$2 AND kind='turn'")
-                .bind(asked.id).bind(parent.id).execute(&mut *conn).await?;
+            inherit_metadata(conn, asked.id, parent.id, &["turn"], false).await?;
         }
     }
-    sqlx::query("INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
-      SELECT $1,'segment',s.id,s.ordinal,to_jsonb(s)||jsonb_build_object('captured_agent_name',a.name)
-      FROM segments s LEFT JOIN agents a ON a.id=s.agent_id WHERE s.thread_id=$2 AND
-        (s.id=$3 OR s.id IN(SELECT (body->>'segment_id')::uuid FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='turn')
-          OR s.id IN(SELECT i.segment_id FROM thread_history_cut_members($1) c JOIN items i ON i.id=c.item_id))")
-        .bind(asked.id).bind(asked.thread).bind(asked.segment).execute(&mut *conn).await?;
+    capture_source_metadata(conn, asked, true).await?;
+    tracing::debug!(phase = "segments", elapsed = ?started.elapsed(), "Captured history phase");
+    capture_item_metadata(conn, asked.id, asked.thread, true).await?;
+    tracing::debug!(phase = "item-segments", elapsed = ?started.elapsed(), "Captured history phase");
     if let Some(parent) = side_of.filter(|_| first == 1) {
         let parent_cut = cut(conn, asked.thread)
             .await?
@@ -394,55 +430,315 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
             .ok_or_else(thread_history::damaged)?;
         let max_segment:i32=sqlx::query_scalar("SELECT COALESCE(max(ordinal),0) FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='segment'")
             .bind(parent_cut.id).fetch_one(&mut *conn).await?;
-        sqlx::query("UPDATE thread_history_cut_rows SET ordinal=ordinal+$2 WHERE cut_id=$1 AND kind='segment'")
-            .bind(asked.id).bind(max_segment).execute(&mut *conn).await?;
-        sqlx::query("INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
-            SELECT $1,kind,row_id,ordinal,body FROM thread_history_cut_rows WHERE cut_id=$2 AND kind IN ('segment','input','approval')
-            ON CONFLICT DO NOTHING").bind(asked.id).bind(parent_cut.id).execute(&mut *conn).await?;
+        shift_metadata(conn, asked.id, "segment", max_segment).await?;
+        inherit_metadata(
+            conn,
+            asked.id,
+            parent_cut.id,
+            &["segment", "input", "approval"],
+            true,
+        )
+        .await?;
     }
-    sqlx::query("INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
-      SELECT $1,'input',i.id,to_jsonb(i)||jsonb_build_object('captured_blobs',COALESCE((
-        SELECT jsonb_agg(encode(r.blob,'hex')) FROM thread_input_blob_refs r WHERE r.input_id=i.id),'[]'::jsonb))
-      FROM thread_inputs i WHERE i.thread_id=$2 AND
-        (i.turn_id IN(SELECT row_id FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='turn')
-          OR i.id IN(SELECT (body->>'input_id')::uuid FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='turn'))")
-        .bind(asked.id).bind(asked.thread).execute(&mut *conn).await?;
-    let sql=format!("{BODIES} INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
-      SELECT $1,'input',i.id,to_jsonb(i)||jsonb_build_object('captured_blobs',COALESCE((
-        SELECT jsonb_agg(encode(r.blob,'hex')) FROM thread_input_blob_refs r WHERE r.input_id=i.id),'[]'::jsonb))
-      FROM thread_inputs i WHERE i.thread_id=$2 AND i.state='delivered' AND i.id::text IN(
-        SELECT body#>>'{{payload,input_id}}' FROM bodies WHERE body->>'kind'='user_message') ON CONFLICT DO NOTHING");
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(asked.id)
-        .bind(asked.thread)
-        .execute(&mut *conn)
-        .await?;
-    let sql=format!("{BODIES} INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
-      SELECT $1,'approval',a.id,to_jsonb(a)||jsonb_build_object('captured_decided_by',u.display_name||' (@'||u.username||')')
-      FROM approvals a LEFT JOIN users u ON u.id=a.decided_by WHERE a.id::text IN
-        (SELECT body#>>'{{payload,approval_id}}' FROM bodies WHERE body->>'kind'='approval') ON CONFLICT DO NOTHING");
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(asked.id)
-        .execute(&mut *conn)
-        .await?;
-    let sql = "INSERT INTO thread_history_cut_blobs(cut_id,blob)
-      SELECT $1,b.hash FROM thread_history_cut_rows i
-        CROSS JOIN LATERAL jsonb_array_elements_text(i.body->'captured_blobs') r(blob)
-        JOIN blobs b ON b.hash=decode(r.blob,'hex')
-        WHERE i.cut_id=$1 AND i.kind='input' ON CONFLICT DO NOTHING"
-        .to_owned();
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(asked.id)
-        .execute(&mut *conn)
-        .await?;
-    // One metadata pass at capture; all later plan readers use these same frozen totals.
-    sqlx::query("SELECT thread_history_keep_cut_counts($1)")
-        .bind(asked.id)
-        .execute(&mut *conn)
-        .await?;
+    capture_source_metadata(conn, asked, false).await?;
+    tracing::debug!(phase = "inputs", elapsed = ?started.elapsed(), "Captured history phase");
+    capture_item_metadata(conn, asked.id, asked.thread, false).await?;
+    tracing::debug!(phase = "item-inputs", elapsed = ?started.elapsed(), "Captured history phase");
+    let mut after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar("WITH page AS MATERIALIZED (
+          SELECT row_id,body FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='input'
+            AND row_id>=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid) AND ($2::uuid IS NULL OR row_id>$2) ORDER BY row_id LIMIT $3
+        ),pinned AS (INSERT INTO thread_history_cut_blobs(cut_id,blob)
+          SELECT $1,b.hash FROM page i CROSS JOIN LATERAL jsonb_array_elements_text(i.body->'captured_blobs') r(blob)
+          JOIN blobs b ON b.hash=decode(r.blob,'hex') ON CONFLICT DO NOTHING)
+          SELECT row_id FROM page ORDER BY row_id DESC LIMIT 1")
+            .bind(asked.id).bind(after).bind(PAGE).fetch_optional(&mut *conn).await?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
+    tracing::debug!(phase = "pins", elapsed = ?started.elapsed(), "Captured history phase");
+    // Item totals are accumulated with their payload pages. Metadata totals use
+    // the compact ordering index and retain no bodies while counting.
+    sqlx::query(
+        "INSERT INTO thread_history_cut_row_counts(cut_id,kind,row_count,max_ordinal)
+      SELECT $1,kind,count(*)::bigint,max(ordinal) FROM thread_history_cut_rows WHERE cut_id=$1
+      GROUP BY kind ON CONFLICT DO NOTHING",
+    )
+    .bind(asked.id)
+    .execute(&mut *conn)
+    .await?;
+    tracing::debug!(phase = "counts", elapsed = ?started.elapsed(), "Captured history phase");
     cut(conn, asked.id)
         .await?
         .ok_or_else(thread_history::damaged)
+}
+
+const INPUT_METADATA_BODY: &str = "to_jsonb(i)||jsonb_build_object('captured_blobs',COALESCE((
+    SELECT jsonb_agg(encode(r.blob,'hex')) FROM thread_input_blob_refs r WHERE r.input_id=i.id),'[]'::jsonb))";
+
+/// Source candidates come from one page of already selected turn references.
+/// Direct input identities and reverse turn links retain both ways a delivered
+/// input belongs to a turn, including many inputs associated with one turn.
+async fn capture_source_metadata(
+    conn: &mut Conn,
+    asked: &Capture,
+    segments: bool,
+) -> Result<(), DbError> {
+    let segment_sql = "INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
+      SELECT $1,'segment',s.id,s.ordinal,to_jsonb(s)||jsonb_build_object('captured_agent_name',a.name)
+      FROM segments s LEFT JOIN agents a ON a.id=s.agent_id
+      WHERE s.thread_id=$2 AND s.id=ANY($3) ON CONFLICT DO NOTHING";
+    if segments && let Some(segment) = asked.segment {
+        sqlx::query(segment_sql)
+            .bind(asked.id)
+            .bind(asked.thread)
+            .bind(vec![segment])
+            .execute(&mut *conn)
+            .await?;
+    }
+    let direct_inputs = format!(
+        "INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
+      SELECT $1,'input',i.id,{INPUT_METADATA_BODY} FROM thread_inputs i
+      WHERE i.thread_id=$2 AND i.id=ANY($3) ON CONFLICT DO NOTHING"
+    );
+    let by_turn = input_turn_metadata_sql();
+    let field = if segments { "segment_id" } else { "input_id" };
+    let selected = format!(
+        "SELECT row_id,COALESCE(body->'{field}','null'::jsonb) AS body_ref
+      FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='turn'
+        AND row_id>=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)
+        AND ($2::uuid IS NULL OR row_id>$2) ORDER BY row_id LIMIT $3"
+    );
+    let mut after: Option<Id> = None;
+    loop {
+        let page: Vec<(Id, Json)> = sqlx::query_as(sqlx::AssertSqlSafe(selected.clone()))
+            .bind(asked.id)
+            .bind(after)
+            .bind(PAGE)
+            .fetch_all(&mut *conn)
+            .await?;
+        let Some((last, _)) = page.last() else { break };
+        after = Some(*last);
+        let mut ids = Vec::with_capacity(page.len());
+        let mut turns = Vec::with_capacity(page.len());
+        for (turn, body) in page {
+            let id = body
+                .as_str()
+                .and_then(|id| id.parse::<Id>().ok())
+                .ok_or_else(thread_history::damaged)?;
+            ids.push(id);
+            turns.push(turn);
+        }
+        if segments {
+            sqlx::query(segment_sql)
+                .bind(asked.id)
+                .bind(asked.thread)
+                .bind(&ids)
+                .execute(&mut *conn)
+                .await?;
+        } else {
+            sqlx::query(sqlx::AssertSqlSafe(direct_inputs.clone()))
+                .bind(asked.id)
+                .bind(asked.thread)
+                .bind(&ids)
+                .execute(&mut *conn)
+                .await?;
+            let mut input_after: Option<(Id, Id)> = None;
+            loop {
+                let next: Option<(Id, Id)> = sqlx::query_as(sqlx::AssertSqlSafe(by_turn.clone()))
+                    .bind(asked.id)
+                    .bind(asked.thread)
+                    .bind(&turns)
+                    .bind(input_after.map(|(turn, _)| turn))
+                    .bind(input_after.map(|(_, input)| input))
+                    .bind(PAGE)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+                let Some(next) = next else { break };
+                input_after = Some(next);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The source index follows exact selected turn identities and the input cursor,
+/// rather than testing every input of the thread against a small selected cut.
+fn input_turn_metadata_sql() -> String {
+    format!(
+        "WITH source_page AS MATERIALIZED (
+      SELECT * FROM thread_inputs WHERE thread_id=$2 AND turn_id=ANY($3) AND turn_id IS NOT NULL
+        AND (turn_id,id)>=(COALESCE($4::uuid,'00000000-0000-0000-0000-000000000000'::uuid),
+          COALESCE($5::uuid,'00000000-0000-0000-0000-000000000000'::uuid))
+        AND ($4::uuid IS NULL OR (turn_id,id)>($4,$5)) ORDER BY turn_id,id LIMIT $6
+    ),captured AS (INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
+      SELECT $1,'input',i.id,{INPUT_METADATA_BODY} FROM source_page i ON CONFLICT DO NOTHING)
+    SELECT turn_id,id FROM source_page ORDER BY turn_id DESC,id DESC LIMIT 1"
+    )
+}
+
+/// Captured metadata is immutable after publication, so its primary-key pages
+/// give a stable inherited snapshot without a single large INSERT.
+async fn inherit_metadata(
+    conn: &mut Conn,
+    target: Id,
+    source: Id,
+    kinds: &[&str],
+    keep_existing: bool,
+) -> Result<(), DbError> {
+    let conflict = if keep_existing {
+        "ON CONFLICT DO NOTHING"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "WITH page AS MATERIALIZED (
+      SELECT * FROM thread_history_cut_rows WHERE cut_id=$2 AND kind=ANY($3)
+        AND (kind,row_id)>=(COALESCE($4::text,''),COALESCE($5::uuid,'00000000-0000-0000-0000-000000000000'::uuid))
+        AND ($4::text IS NULL OR (kind,row_id)>($4,$5::uuid)) ORDER BY kind,row_id LIMIT $6
+    ),copied AS (INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body,item_high)
+      SELECT $1,kind,row_id,ordinal,body,item_high FROM page {conflict})
+    SELECT kind,row_id FROM page ORDER BY kind DESC,row_id DESC LIMIT 1"
+    );
+    let mut after: Option<(String, Id)> = None;
+    loop {
+        let next: Option<(String, Id)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target)
+            .bind(source)
+            .bind(kinds)
+            .bind(after.as_ref().map(|(kind, _)| kind.as_str()))
+            .bind(after.as_ref().map(|(_, row)| *row))
+            .bind(PAGE)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
+    Ok(())
+}
+
+/// A row-id cursor is unchanged by an ordinal shift, so no shifted row can be
+/// visited twice while a large inherited prefix is put before the local turns.
+async fn shift_metadata(conn: &mut Conn, id: Id, kind: &str, offset: i32) -> Result<(), DbError> {
+    if offset == 0 {
+        return Ok(());
+    }
+    let mut after: Option<Id> = None;
+    loop {
+        let next: Option<Id> = sqlx::query_scalar(
+            "WITH page AS MATERIALIZED (
+          SELECT row_id FROM thread_history_cut_rows WHERE cut_id=$1 AND kind=$2
+            AND row_id>=COALESCE($4::uuid,'00000000-0000-0000-0000-000000000000'::uuid) AND ($4::uuid IS NULL OR row_id>$4) ORDER BY row_id LIMIT $5
+        ),shifted AS (UPDATE thread_history_cut_rows r SET ordinal=r.ordinal+$3 FROM page p
+          WHERE r.cut_id=$1 AND r.kind=$2 AND r.row_id=p.row_id)
+        SELECT row_id FROM page ORDER BY row_id DESC LIMIT 1",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(offset)
+        .bind(after)
+        .bind(PAGE)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
+    Ok(())
+}
+
+/// Loose/adopted items can name metadata not present in any turn. Keep those
+/// frozen references, and their exact totals, on the same bounded body pages.
+async fn capture_item_metadata(
+    conn: &mut Conn,
+    id: Id,
+    thread: Id,
+    segments: bool,
+) -> Result<(), DbError> {
+    let operation = if segments {
+        "captured_segments AS (INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
+          SELECT $1,'segment',s.id,s.ordinal,to_jsonb(s)||jsonb_build_object('captured_agent_name',a.name)
+          FROM segments s LEFT JOIN agents a ON a.id=s.agent_id
+          WHERE NOT (SELECT damaged FROM checked) AND s.thread_id=$6
+            AND s.id::text IN(SELECT body->>'segment_id' FROM bodies) ON CONFLICT DO NOTHING)"
+    } else {
+        "captured_inputs AS (INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
+          SELECT $1,'input',i.id,to_jsonb(i)||jsonb_build_object('captured_blobs',COALESCE((
+            SELECT jsonb_agg(encode(r.blob,'hex')) FROM thread_input_blob_refs r WHERE r.input_id=i.id),'[]'::jsonb))
+          FROM thread_inputs i WHERE NOT (SELECT damaged FROM checked) AND i.thread_id=$6 AND i.state='delivered'
+            AND i.id::text IN(SELECT body#>>'{payload,input_id}' FROM bodies WHERE body->>'kind'='user_message')
+          ON CONFLICT DO NOTHING),
+        captured_approvals AS (INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,body)
+          SELECT $1,'approval',a.id,to_jsonb(a)||jsonb_build_object('captured_decided_by',u.display_name||' (@'||u.username||')')
+          FROM approvals a LEFT JOIN users u ON u.id=a.decided_by WHERE NOT (SELECT damaged FROM checked)
+            AND a.id::text IN(SELECT body#>>'{payload,approval_id}' FROM bodies WHERE body->>'kind'='approval')
+          ON CONFLICT DO NOTHING),
+        turn_edges AS (UPDATE thread_history_cut_rows r SET item_high=GREATEST(r.item_high,e.high)
+          FROM (SELECT turn_id,max(seq_created) AS high FROM bodies
+            WHERE NOT (SELECT damaged FROM checked) AND turn_id IS NOT NULL AND stream='main'
+            GROUP BY turn_id) e
+          WHERE r.cut_id=$1 AND r.kind='turn' AND r.row_id=e.turn_id),
+        counted AS (INSERT INTO thread_history_cut_counts(cut_id,stream,kind,content,item_count,payload_bytes)
+          SELECT $1,b.stream,b.kind,b.turn_id IS NOT NULL OR COALESCE((b.body->>'before_orch')::boolean,false),
+            count(*)::bigint,sum(COALESCE((b.body->>'payload_bytes')::bigint,octet_length((b.body->'payload')::text)))::bigint
+          FROM bodies b WHERE NOT (SELECT damaged FROM checked) GROUP BY b.stream,b.kind,4
+          ON CONFLICT(cut_id,stream,kind,content) DO UPDATE SET
+            item_count=thread_history_cut_counts.item_count+EXCLUDED.item_count,
+            payload_bytes=thread_history_cut_counts.payload_bytes+EXCLUDED.payload_bytes),
+        turn_sizes AS (INSERT INTO thread_history_cut_turn_bytes(cut_id,turn_id,payload_bytes,first_seq,last_seq)
+          SELECT $1,b.turn_id,sum(COALESCE((b.body->>'payload_bytes')::bigint,octet_length((b.body->'payload')::text)))::bigint,min(b.seq_created),max(b.seq_created)
+          FROM bodies b WHERE NOT (SELECT damaged FROM checked) AND b.turn_id IS NOT NULL GROUP BY b.turn_id
+          ON CONFLICT(cut_id,turn_id) DO UPDATE SET
+            payload_bytes=thread_history_cut_turn_bytes.payload_bytes+EXCLUDED.payload_bytes,
+            first_seq=LEAST(thread_history_cut_turn_bytes.first_seq,EXCLUDED.first_seq),
+            last_seq=GREATEST(thread_history_cut_turn_bytes.last_seq,EXCLUDED.last_seq))"
+    };
+    let sql = format!(
+        "WITH {},{PAGE_BODIES},checked AS MATERIALIZED (
+      SELECT max(seq_created) AS last,COALESCE(bool_or(body IS NULL),false) AS damaged FROM bodies
+    ),{operation} SELECT last,damaged FROM checked",
+        members_page(false)
+    );
+    let mut after: Seq = -1;
+    loop {
+        let (next, damaged): (Option<Seq>, bool) = sqlx::query_as(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(id)
+            .bind(after)
+            .bind(i64::MAX)
+            .bind(None::<&str>)
+            .bind(PAGE)
+            .bind(thread)
+            .fetch_one(&mut *conn)
+            .await?;
+        if damaged {
+            return Err(thread_history::damaged());
+        }
+        let Some(next) = next else { break };
+        after = next;
+    }
+    Ok(())
+}
+
+/// Only items updated after a span froze can lack its required revision.
+/// Probe that update-index range before checking membership; expanding every
+/// member and joining it back to items makes a fresh long cut do whole-history
+/// work even though none of its items changed. The lateral limit preserves an
+/// indexed existence check for each actual span under generic prepared plans.
+fn missing_revision_sql() -> &'static str {
+    "SELECT EXISTS(SELECT 1 FROM thread_history_cut_spans s CROSS JOIN LATERAL (
+      SELECT 1 FROM items i
+      WHERE i.thread_id=s.thread_id AND i.continuation_id=s.owner_continuation_id
+        AND i.seq_updated>s.frozen_at AND i.seq_created BETWEEN s.first_seq AND s.last_seq
+        AND NOT EXISTS(SELECT 1 FROM thread_history_cut_items x
+          WHERE x.cut_id=s.cut_id AND x.item_id=i.id AND x.body IS NOT NULL)
+        AND ((i.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
+          WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id))
+          OR (i.turn_id IS NULL AND ((s.loose_before_orch AND i.before_orch)
+            OR i.seq_created BETWEEN s.loose_low AND s.loose_high)))
+        AND NOT EXISTS(SELECT 1 FROM thread_item_revisions r
+          WHERE r.item_id=i.id AND r.seq_updated<=s.frozen_at)
+      ORDER BY i.seq_updated LIMIT 1
+    ) missing WHERE s.cut_id=$1)"
 }
 
 const BODIES:&str="WITH bodies AS (
@@ -452,20 +748,26 @@ const BODIES:&str="WITH bodies AS (
   FROM thread_history_cut_members($1) c LEFT JOIN items i ON i.id=c.item_id
     LEFT JOIN thread_item_revisions r ON r.item_id=c.item_id AND r.seq_updated=c.revision_seq)";
 
-/// The bodies of a page of a cut's members that a CTE named `page` has already chosen: the same body as [`BODIES`]
-/// gives, found for those rows alone. The page is chosen first ([`MEMBERS_PAGE`]) and materialized, so that the joins
-/// and the body are made for a page and never for the whole cut.
+/// Frozen bodies for the members a CTE named `page` has already selected.
+/// Materializing the indexed membership page first keeps joins and JSON body
+/// construction bounded, including capture metadata and maintained totals.
 const PAGE_BODIES: &str = "bodies AS (
-  SELECT c.item_id,c.seq_created,c.turn_id,c.stream,
-    (CASE WHEN c.body IS NOT NULL THEN c.body WHEN c.revision_seq IS NOT NULL THEN r.body ELSE to_jsonb(i) END)
+  SELECT c.item_id,c.seq_created,c.turn_id,c.stream,c.kind,
+    (CASE WHEN c.body IS NOT NULL THEN c.body WHEN c.revision_seq IS NOT NULL THEN r.body ELSE i.body END)
       ||jsonb_build_object('seq_created',c.seq_created,'history_native_alias',c.native_alias) AS body
-  FROM page c LEFT JOIN items i ON i.id=c.item_id
-    LEFT JOIN thread_item_revisions r ON r.item_id=c.item_id AND r.seq_updated=c.revision_seq)";
+  FROM page c LEFT JOIN LATERAL (
+    SELECT to_jsonb(i) AS body FROM items i WHERE i.id=c.item_id
+      AND c.body IS NULL AND c.revision_seq IS NULL LIMIT 1
+  ) i ON true LEFT JOIN LATERAL (
+    SELECT r.body FROM thread_item_revisions r
+      WHERE r.item_id=c.item_id AND r.seq_updated=c.revision_seq AND c.body IS NULL LIMIT 1
+  ) r ON true)";
 
 /// A page of the members of the cut `$1`, as [`thread_history_cut_members`] gives them, at positions after `$2` and
 /// through `$3`, of the stream `$4` where one is given, at most `$5`: oldest first, or newest first with `descending`.
 /// Each span reads its own page from the index of the items, and the kept copies theirs from the cut's own rows, so a
-/// page costs a page however long the cut is.
+/// page costs a page however long the cut is. Live candidates are limited before
+/// excluding retained bodies; the saved-body pages supply those same positions.
 fn members_page(descending: bool) -> String {
     member_page_sql(descending, false)
 }
@@ -479,32 +781,45 @@ fn member_page_sql(descending: bool, copying: bool) -> String {
     let live_kind = if copying { "AND i.kind<>'marker'" } else { "" };
     let frozen_kind = if copying { "AND x.kind<>'marker'" } else { "" };
     format!(
-        "page AS MATERIALIZED (SELECT * FROM (
+        "prefix AS MATERIALIZED (SELECT prefix_cut_id FROM thread_history_cut_prefixes WHERE cut_id=$1),
+    page AS MATERIALIZED (SELECT * FROM (
     SELECT m.* FROM thread_history_cut_spans s CROSS JOIN LATERAL (
       SELECT s.cut_id,k.item_id,k.seq_created+s.seq_offset AS seq_created,k.turn_id,k.stream,k.kind,
         NULL::uuid AS parent_cut_id,
         CASE WHEN k.seq_updated>s.frozen_at THEN (SELECT r.seq_updated FROM thread_item_revisions r
           WHERE r.item_id=k.item_id AND r.seq_updated<=s.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS revision_seq,
-        COALESCE(x.native_alias,a.native_ref) AS native_alias,NULL::jsonb AS body
+        COALESCE(x.native_alias,p.native_alias,a.native_ref) AS native_alias,NULL::jsonb AS body
       FROM (
         SELECT i.id AS item_id,i.seq_created,i.seq_updated,i.turn_id,i.stream,i.kind FROM items i
         WHERE i.thread_id=s.thread_id AND i.continuation_id=s.owner_continuation_id
           AND i.seq_created BETWEEN GREATEST(s.first_seq,$2-s.seq_offset+1) AND LEAST(s.last_seq,$3-s.seq_offset)
           AND ($4::text IS NULL OR i.stream=$4) {live_kind}
-          AND COALESCE((SELECT x.body IS NULL FROM thread_history_cut_items x
-            WHERE x.cut_id=s.cut_id AND x.item_id=i.id),true)
-          AND ((i.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
-                  WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id))
+          AND ((i.turn_id IS NOT NULL AND COALESCE((SELECT true FROM thread_history_cut_rows t
+                  WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id LIMIT 1),false))
             OR (i.turn_id IS NULL AND ((s.loose_before_orch AND i.before_orch)
                   OR i.seq_created BETWEEN s.loose_low AND s.loose_high)))
         ORDER BY i.seq_created {order} LIMIT $5
       ) k
-        LEFT JOIN thread_history_cut_items x ON x.cut_id=s.cut_id AND x.item_id=k.item_id
-        LEFT JOIN thread_native_item_aliases a ON a.item_id=k.item_id
+        LEFT JOIN LATERAL (SELECT x.native_alias,x.body FROM thread_history_cut_items x
+          WHERE x.cut_id=s.cut_id AND x.item_id=k.item_id LIMIT 1) x ON true
+        LEFT JOIN LATERAL (SELECT p.native_alias,p.body FROM thread_history_cut_items p
+          WHERE p.cut_id=(SELECT prefix_cut_id FROM prefix) AND p.item_id=k.item_id LIMIT 1) p ON true
+        LEFT JOIN LATERAL (SELECT a.native_ref FROM thread_native_item_aliases a
+          WHERE a.item_id=k.item_id LIMIT 1) a ON true
+      WHERE x.body IS NULL AND p.body IS NULL
     ) m WHERE s.cut_id=$1
     UNION ALL
     (SELECT x.cut_id,x.item_id,x.seq_created,x.turn_id,x.stream,x.kind,x.parent_cut_id,x.revision_seq,x.native_alias,x.body
       FROM thread_history_cut_items x WHERE x.cut_id=$1 AND x.body IS NOT NULL {frozen_kind}
+        AND x.seq_created>$2 AND x.seq_created<=$3 AND ($4::text IS NULL OR x.stream=$4)
+      ORDER BY x.seq_created {order} LIMIT $5)
+    UNION ALL
+    (SELECT $1::uuid,x.item_id,x.seq_created,x.turn_id,x.stream,x.kind,NULL::uuid,
+        x.revision_seq,COALESCE(own.native_alias,x.native_alias),x.body
+      FROM thread_history_cut_items x
+        LEFT JOIN LATERAL (SELECT own.native_alias,own.body FROM thread_history_cut_items own
+          WHERE own.cut_id=$1 AND own.item_id=x.item_id LIMIT 1) own ON true
+      WHERE x.cut_id=(SELECT prefix_cut_id FROM prefix) AND x.body IS NOT NULL AND own.body IS NULL {frozen_kind}
         AND x.seq_created>$2 AND x.seq_created<=$3 AND ($4::text IS NULL OR x.stream=$4)
       ORDER BY x.seq_created {order} LIMIT $5)
   ) held ORDER BY seq_created {order} LIMIT $5)"
@@ -582,6 +897,32 @@ pub async fn items_page_bounded(
         .bind(thread_history::PAGE_BYTES)
         .fetch_all(conn)
         .await?)
+}
+
+/// One bounded metadata row for handoff selection; sizes and sequence bounds were captured together.
+#[derive(sqlx::FromRow)]
+pub struct SummaryTurn {
+    #[sqlx(flatten)]
+    pub turn: TurnRow,
+    pub payload_bytes: i64,
+    pub first_seq: Option<Seq>,
+    pub last_seq: Option<Seq>,
+}
+
+/// Only this newest metadata page is inspected before any eligible body page is decoded.
+pub async fn summary_turns_before(
+    conn: &mut Conn,
+    cut: Id,
+    before: i64,
+    low: i64,
+    limit: i64,
+) -> Result<Vec<SummaryTurn>, DbError> {
+    Ok(sqlx::query_as("SELECT p.*,COALESCE(s.payload_bytes,0)::bigint AS payload_bytes,s.first_seq,s.last_seq FROM (
+        SELECT r.body,r.ordinal,r.row_id FROM thread_history_cut_rows r WHERE r.cut_id=$1 AND r.kind='turn'
+        AND r.ordinal<$2 AND r.ordinal>=$3 ORDER BY r.ordinal DESC LIMIT $4) page
+        CROSS JOIN LATERAL jsonb_populate_record(NULL::turns,page.body||jsonb_build_object('ordinal',page.ordinal)) p
+        LEFT JOIN thread_history_cut_turn_bytes s ON s.cut_id=$1 AND s.turn_id=page.row_id ORDER BY page.ordinal DESC")
+        .bind(cut).bind(before).bind(low).bind(limit).fetch_all(conn).await?)
 }
 
 /// What a cut holds, counted in SQL: the number of its turns, and its main-stream items by kind (those made in a turn,
@@ -778,8 +1119,8 @@ pub async fn copy_turns_page(
       'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
       'segment_id',md5($1::text||(r.body->>'segment_id'))::uuid,'input_id',md5($1::text||(r.body->>'input_id'))::uuid,
       'lease_id',NULL,'native_turn_ref','fork-copy:'||r.row_id::text,'native_end_confirmed',true,
-      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'files_end_manifest',NULL,'end_work',NULL,
-      'files_work_pending',false,'files_end_due',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,'phase_attempt',NULL,
+      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'end_work',NULL,
+      'files_work_pending',false,'files_end_due',false,'files_end_sealed',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,'phase_attempt',NULL,
       'waiting_since',NULL,'seq_updated',$4::bigint,'completed_seq',$4::bigint)) p
           RETURNING id
         )
@@ -872,8 +1213,11 @@ pub async fn item_count(conn: &mut Conn, id: Id) -> Result<i64, DbError> {
 }
 
 pub async fn native_aliases(conn: &mut Conn, id: Id) -> Result<Vec<(Id, String)>, DbError> {
-    Ok(sqlx::query_as("SELECT item_id,native_alias FROM thread_history_cut_members($1) WHERE native_alias IS NOT NULL")
-        .bind(id).fetch_all(conn).await?)
+    let rows: Vec<(Id,String)> = sqlx::query_as("SELECT item_id,native_alias FROM thread_history_cut_members($1) WHERE native_alias IS NOT NULL")
+        .bind(id).fetch_all(conn).await?;
+    rows.into_iter()
+        .map(|(item, reference)| Ok((item, orch_types::storable::decode_key(&reference)?)))
+        .collect()
 }
 
 /// Publish only identities actually matched in the native record. Existing
@@ -885,7 +1229,7 @@ pub async fn keep_native_aliases(conn: &mut Conn, id: Id, aliases: &Json) -> Res
         WHERE m.native_alias IS NULL OR m.native_alias=a.value
         ON CONFLICT (cut_id,item_id) DO UPDATE SET native_alias=EXCLUDED.native_alias
           WHERE c.native_alias IS NULL OR c.native_alias=EXCLUDED.native_alias")
-        .bind(id).bind(aliases).execute(conn).await?.rows_affected();
+        .bind(id).bind(orch_types::storable::encode_exact(aliases)).execute(conn).await?.rows_affected();
     if changed
         != aliases
             .as_object()
@@ -946,15 +1290,35 @@ pub async fn items_of_turn(conn: &mut Conn, id: Id, turn: Id) -> Result<Vec<Item
 }
 
 pub async fn turn_high(conn: &mut Conn, id: Id, ordinal: i64) -> Result<Option<Seq>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT max(i.seq_created) FROM thread_history_cut_members($1) i
-      JOIN thread_history_cut_rows t ON t.cut_id=$1 AND t.kind='turn' AND t.row_id=i.turn_id
-      WHERE t.ordinal::bigint<=$2 AND i.stream='main'",
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(turn_high_sql()))
+        .bind(id)
+        .bind(ordinal)
+        .fetch_one(conn)
+        .await?)
+}
+
+/// Captured maxima are accumulated while each body page is already visited;
+/// a later bounded read never has to expand the preceding frozen membership.
+fn turn_high_sql() -> String {
+    let bounds = format!(
+        "r.cut_id=c.id AND r.kind='turn' AND r.item_high IS NOT NULL
+          AND r.ordinal<=GREATEST({minimum}::bigint,LEAST({maximum}::bigint,$2))::integer
+          AND r.item_high<=c.captured_seq",
+        minimum = i32::MIN,
+        maximum = i32::MAX
+    );
+    format!(
+        "SELECT max(edge.item_high) FROM thread_history_cuts c
+      CROSS JOIN LATERAL (
+        SELECT r.item_high FROM thread_history_cut_rows r WHERE {bounds}
+          ORDER BY r.item_high <-> c.captured_seq LIMIT 1
+      ) nearest
+      CROSS JOIN LATERAL (
+        SELECT r.item_high FROM thread_history_cut_rows r WHERE {bounds}
+          AND r.item_high>=nearest.item_high
+          ORDER BY r.item_high DESC LIMIT 1
+      ) edge WHERE c.id=$1"
     )
-    .bind(id)
-    .bind(ordinal)
-    .fetch_one(conn)
-    .await?)
 }
 
 /// First publisher wins; retries must use the persisted artifact, not render again.
@@ -971,7 +1335,7 @@ pub async fn keep_artifact(
     )
     .bind(id)
     .bind(name)
-    .bind(value)
+    .bind(orch_types::storable::encode_exact(value))
     .execute(&mut *conn)
     .await?
     .rows_affected()
@@ -1016,6 +1380,170 @@ pub async fn settle_command(conn: &mut Conn, cut: Id, command: Id) -> Result<(),
     .bind(command)
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// Stop retaining later source changes in one header update. Body writers take
+/// a shared header lock before freezing and recheck this predicate after waiting,
+/// so cleanup never races a new frozen body or holds a source thread's row.
+pub async fn retire_request(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE thread_history_cuts
+      SET artifacts=jsonb_set(artifacts,'{request_released}','true'::jsonb)
+      WHERE id=$1 AND request_user_id IS NOT NULL",
+    )
+    .bind(id)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Abandoned request captures retire before cleanup starts on another transaction.
+/// A live claim or publisher retains its exact owner; cleanup locks only retired
+/// metadata and releases bodies/pins in primary-key pages, without an age threshold.
+pub async fn purge_requests(db: &crate::Db) -> Result<u64, DbError> {
+    let mut removed = 0;
+    loop {
+        let mut tx = db.begin().await?;
+        let Some(id) = crate::idempotency::abandoned_history_capture(&mut tx).await? else {
+            tx.commit().await?;
+            return Ok(removed);
+        };
+        retire_request(&mut tx, id).await?;
+        tx.commit().await?;
+        let mut tx = db.begin().await?;
+        let owner: Option<(Id,String)> = sqlx::query_as(
+            "SELECT request_user_id,request_key FROM thread_history_cuts WHERE id=$1 AND request_user_id IS NOT NULL",
+        ).bind(id).fetch_optional(&mut *tx).await?;
+        if let Some((user, key)) = owner {
+            sqlx::query(
+                "SELECT user_id FROM idempotency_keys WHERE user_id=$1 AND key=$2 FOR UPDATE",
+            )
+            .bind(user)
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+            release_request(&mut tx, id).await?;
+            removed += sqlx::query("DELETE FROM idempotency_keys WHERE user_id=$1 AND key=$2 AND response->>'owner'=$3::uuid::text")
+                .bind(user).bind(&key).bind(id).execute(&mut *tx).await?.rows_affected();
+        }
+        tx.commit().await?;
+    }
+}
+
+/// Retire a request capture in keyset pages, including bodies and blob pins.
+/// Its caller owns the internal request row; no native consumer can own this cut.
+pub async fn release_request(conn: &mut Conn, id: Id) -> Result<(), DbError> {
+    let request: Option<bool> = sqlx::query_scalar(
+        "SELECT request_user_id IS NOT NULL AND artifacts ? 'request_released'
+          FROM thread_history_cuts WHERE id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match request {
+        None => return Ok(()),
+        Some(false) => return Err(thread_history::damaged()),
+        Some(true) => {}
+    }
+    for (table, keys) in [
+        (
+            "thread_history_cut_items",
+            vec![("item_id", "uuid", "'00000000-0000-0000-0000-000000000000'")],
+        ),
+        (
+            "thread_history_cut_rows",
+            vec![
+                ("kind", "text", "''"),
+                ("row_id", "uuid", "'00000000-0000-0000-0000-000000000000'"),
+            ],
+        ),
+        ("thread_history_cut_blobs", vec![("blob", "bytea", "''")]),
+        (
+            "thread_history_cut_spans",
+            vec![
+                (
+                    "thread_id",
+                    "uuid",
+                    "'00000000-0000-0000-0000-000000000000'",
+                ),
+                (
+                    "owner_continuation_id",
+                    "uuid",
+                    "'00000000-0000-0000-0000-000000000000'",
+                ),
+            ],
+        ),
+        (
+            "thread_history_cut_counts",
+            vec![
+                ("stream", "text", "''"),
+                ("kind", "text", "''"),
+                ("content", "boolean", "false"),
+            ],
+        ),
+        (
+            "thread_history_cut_row_counts",
+            vec![("kind", "text", "''")],
+        ),
+    ] {
+        release_request_pages(conn, id, table, &keys).await?;
+    }
+    sqlx::query("DELETE FROM thread_history_cuts WHERE id=$1 AND request_user_id IS NOT NULL")
+        .bind(id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Only fixed schema identifiers above form these fragments. Typed lower bounds
+/// keep a prepared plan on the primary-key seek, including zero-valued keys.
+async fn release_request_pages(
+    conn: &mut Conn,
+    id: Id,
+    table: &str,
+    keys: &[(&str, &str, &str)],
+) -> Result<(), DbError> {
+    let columns = keys
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<Vec<_>>()
+        .join(",");
+    let lower = keys
+        .iter()
+        .enumerate()
+        .map(|(index, (_, ty, min))| format!("COALESCE(($2::jsonb->>{index})::{ty},{min}::{ty})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let matching = keys
+        .iter()
+        .map(|(name, _, _)| format!("r.{name}=p.{name}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let descending = keys
+        .iter()
+        .map(|(name, _, _)| format!("{name} DESC"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "WITH page AS MATERIALIZED (
+      SELECT {columns},jsonb_build_array({columns}) AS cursor FROM {table}
+      WHERE cut_id=$1 AND ({columns})>=({lower})
+        AND ($2::jsonb IS NULL OR ({columns})>({lower})) ORDER BY {columns} LIMIT $3
+    ),removed AS (DELETE FROM {table} r USING page p WHERE r.cut_id=$1 AND {matching})
+    SELECT cursor FROM page ORDER BY {descending} LIMIT 1"
+    );
+    let mut after: Option<Json> = None;
+    loop {
+        let next: Option<Json> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(id)
+            .bind(&after)
+            .bind(PAGE)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(next) = next else { break };
+        after = Some(next);
+    }
     Ok(())
 }
 

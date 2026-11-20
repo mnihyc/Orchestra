@@ -278,6 +278,21 @@ impl Engine {
         attempt: u32,
         choices: &LeaseChoices,
     ) -> Result<Outcome, EngineError> {
+        let command = self
+            .lease_open_command(lease, provider, protocol, attempt, choices)
+            .await?;
+        Ok(crate::commands::run(self.inner.commands.as_ref(), command).await?)
+    }
+
+    /// Build one immutable lease request independently of its keeper's startup reply.
+    pub(crate) async fn lease_open_command(
+        &self,
+        lease: &LeaseRow,
+        provider: &ProviderRow,
+        protocol: Option<String>,
+        attempt: u32,
+        choices: &LeaseChoices,
+    ) -> Result<Outgoing, EngineError> {
         let machine = machine_of(provider).ok_or_else(|| {
             EngineError::unreadable("the provider has no machine to keep a lease on")
         })?;
@@ -322,8 +337,12 @@ impl Engine {
         } else {
             SerialKey::Provider(lease.provider_id)
         };
-        let command = Outgoing::new(ids::lease_open(lease.id, attempt), machine, key, &body)?;
-        Ok(crate::commands::run(self.inner.commands.as_ref(), command).await?)
+        Ok(Outgoing::new(
+            ids::lease_open(lease.id, attempt),
+            machine,
+            key,
+            &body,
+        )?)
     }
 
     /// Closes the leases that no turn holds: open, with a turn that is over

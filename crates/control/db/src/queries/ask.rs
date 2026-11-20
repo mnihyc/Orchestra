@@ -336,8 +336,19 @@ pub async fn retain_call(
     request: &Json,
     at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    sqlx::query("INSERT INTO ask_calls (id,thread_id,turn_id,item_id,root_org_id,person_id,provider_id,machine_id,request,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING")
-        .bind(id).bind(thread).bind(turn).bind(item).bind(root).bind(person).bind(provider).bind(machine).bind(request).bind(at).execute(conn).await?;
+    let recorded = sqlx::query("INSERT INTO ask_calls (id,thread_id,turn_id,item_id,root_org_id,person_id,provider_id,machine_id,request,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (id) DO NOTHING")
+        .bind(id).bind(thread).bind(turn).bind(item).bind(root).bind(person).bind(provider).bind(machine).bind(request).bind(at).execute(&mut *conn).await?;
+    if recorded.rows_affected() > 0
+        && let Some(model) = request.get("model_name").and_then(Json::as_str)
+    {
+        super::identity::note_model_choice(conn, person, provider, model, at).await?;
+        crate::sequences::notify_user_event(
+            conn,
+            &[person],
+            &serde_json::json!({"what":"model_recents"}),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -370,11 +381,13 @@ pub async fn delta(
     text: &str,
 ) -> Result<Option<(Id, Id)>, DbError> {
     let len = i64::try_from(text.chars().count()).unwrap_or(i64::MAX);
+    let mut text = text.to_owned();
+    let replacements = orch_types::storable::normalize_text(&mut text);
     let found:Option<(Id,Id)>=sqlx::query_as("UPDATE ask_calls c SET text_offset=text_offset+$4 FROM threads t WHERE c.id=$2 AND c.provider_id=$1 AND c.text_offset=$3 AND NOT c.settled AND t.node_id=c.thread_id AND t.current_turn_id=c.turn_id AND t.ask_state='running' RETURNING c.thread_id,c.item_id")
         .bind(provider).bind(command).bind(offset).bind(len).fetch_optional(&mut *conn).await?;
     if let Some((_, item)) = found {
-        sqlx::query("UPDATE items SET payload=jsonb_set(jsonb_set(payload,'{text}',to_jsonb(COALESCE(payload->>'text','')||$2::text)),'{text_len}',to_jsonb($3::bigint+$4::bigint)) WHERE id=$1")
-            .bind(item).bind(text).bind(offset).bind(len).execute(conn).await?;
+        sqlx::query("UPDATE items SET payload=jsonb_set(jsonb_set(payload,'{text}',to_jsonb(COALESCE(payload->>'text','')||$2::text)),'{text_len}',to_jsonb($3::bigint+$4::bigint)),text_replacements=text_replacements+$5 WHERE id=$1")
+            .bind(item).bind(text).bind(offset).bind(len).bind(i64::try_from(replacements).unwrap_or(i64::MAX)).execute(conn).await?;
     }
     Ok(found)
 }
@@ -412,14 +425,27 @@ pub async fn bind_kept(
     Ok(())
 }
 
-/// The original Ask remains a kept history link, with no further inputs admitted.
-pub async fn kept(conn: &mut Conn, source: Id, target: Id) -> Result<(), DbError> {
-    sqlx::query("UPDATE threads SET ask_state='kept',ask_kept_thread_id=$2 WHERE node_id=$1")
-        .bind(source)
-        .bind(target)
-        .execute(conn)
-        .await?;
-    Ok(())
+/// A source that received later words keeps its current conversation and work.
+pub async fn kept_if_unchanged(
+    conn: &mut Conn,
+    source: Id,
+    target: Id,
+    view: Id,
+    through: Seq,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE threads SET ask_state='kept',ask_kept_thread_id=$2
+        WHERE node_id=$1 AND ask_state='ready' AND active_continuation_id=$3
+          AND NOT EXISTS(SELECT 1 FROM items i WHERE i.thread_id=$1 AND i.continuation_id=$3 AND i.seq_updated>$4)",
+    )
+    .bind(source)
+    .bind(target)
+    .bind(view)
+    .bind(through)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Stop cancels only this turn's exact retained commands.
