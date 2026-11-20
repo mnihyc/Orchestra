@@ -625,6 +625,7 @@ async fn a_live_content_check_can_stop_either_read_and_a_replan_never_restarts_i
         orch_db::queries::link::insert_command(
             &mut conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command,
                 machine_id: reading.machine,
                 kind: "node.mount.fingerprint",

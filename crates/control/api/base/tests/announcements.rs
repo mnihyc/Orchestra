@@ -146,6 +146,7 @@ async fn a_person_chooses_wake_and_is_refused_where_it_is_unavailable() {
         )
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
@@ -192,6 +193,7 @@ async fn a_person_chooses_wake_and_is_refused_where_it_is_unavailable() {
         )
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
