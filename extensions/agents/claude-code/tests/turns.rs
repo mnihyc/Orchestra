@@ -755,3 +755,40 @@ async fn an_image_of_the_turn_goes_to_the_model_beside_its_text() {
     assert!(request.contains("What is in this picture?"));
     rig.adapter.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_acting_side_runs_its_command_in_the_shared_directory_while_the_main_approval_waits() {
+    let Some(mut rig) = Rig::new().await else {
+        return;
+    };
+    rig.start_quick().await;
+    let parent = rig.lane();
+    let main = rig.open().await;
+    let turn = rig.turn(WRITE_A_FILE);
+    rig.adapter.start_turn(turn).await.unwrap();
+    let events = rig
+        .until(|e| matches!(e, SessionEvent::ApprovalRequested(_)), 90)
+        .await;
+    let Some(SessionEvent::ApprovalRequested(approval)) = events.last() else {
+        panic!("the main command needs approval")
+    };
+
+    rig.new_lane();
+    let side = rig.open().await;
+    assert_ne!(side.native_session_ref, main.native_session_ref);
+    let (_, events) = rig.run_deciding(WRITE_A_FILE, common::allow).await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert_eq!(
+        std::fs::read_to_string(rig.work.path().join("out/hello.txt")).unwrap(),
+        "hello\n"
+    );
+
+    rig.set_lane(&parent);
+    rig.adapter
+        .resolve_approval(rig.thread, &approval.request_ref, common::deny(approval))
+        .await
+        .unwrap();
+    let events = rig.until_the_turn_ends().await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    rig.adapter.stop().await.unwrap();
+}

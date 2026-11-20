@@ -1,0 +1,8 @@
+contracts
+test -p orch-engine --lib --test turns --test source --test approvals --test forks --test preflight --test summary_targets --test model_parameters --test call_recovery --test provider_rejection --test search_projections --test source_uniform --test environments --test ingest --test history_scale --test orch_tools --test caps --test approval_review --test initial_files --test resource_summaries --test skills --test volume_carry
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/workbench-grid.spec.ts --config=playwright.profile.config.ts --project=chromium --grep "streams a running turn without a task over 50 ms|anchors the control label|sizes a kept draft"
+web-e2e tests/e2e/workbench-grid.spec.ts --config=playwright.profile.config.ts --project=chromium --grep "streams a running turn without a task over 50 ms" --trace off

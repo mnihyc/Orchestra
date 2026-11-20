@@ -61,6 +61,7 @@ async fn set(s: &Scene, node: Id, key: &str, value: Json, locked: bool) {
         .call(NodeSettingSet, &[&node, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,
@@ -551,6 +552,7 @@ async fn graph_pairs_keep_duplicate_mentions_live_history_and_private_boundaries
         .call(ThreadSideCreate, &[&side_parent])
         .token(&s.ada.token)
         .body(&ThreadSideCreateBody {
+            acting: false,
             content: vec![ContentPart::Text {
                 text: format!("Side [Hub](/documents/{hub})"),
             }],

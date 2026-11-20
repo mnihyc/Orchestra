@@ -396,7 +396,10 @@ async fn a_profile_is_joined_and_the_endpoint_is_only_shown_to_a_browser_manager
         .app
         .call(EnvironmentBrowserList, &[&floor.environment])
         .token(&floor.scene.cai.token)
-        .query(&EnvironmentBrowserListQuery { look: None })
+        .query(&EnvironmentBrowserListQuery {
+            look: None,
+            ..Default::default()
+        })
         .send()
         .await
         .ok();
@@ -1083,4 +1086,79 @@ async fn everything_a_view_only_socket_sends_is_dropped_and_never_reaches_the_pa
             assert!(!kept, "page material was kept in {table}");
         }
     }
+}
+
+#[tokio::test]
+async fn retained_closed_browsers_are_paged_on_intent_even_after_the_environment_is_offline() {
+    let s = rig::Scene::new().await;
+    s.rig.engine.stop();
+    s.rig.world.set("browser.enabled", json!(true)).await;
+    let now = s.rig.world.now();
+    let first = orch_types::new_id();
+    let second = orch_types::new_id();
+    let mut conn = s.rig.db.acquire().await.unwrap();
+    sqlx::query("UPDATE environments SET browser=true,status='offline' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for id in [first, second] {
+        sqlx::query("INSERT INTO browser_sessions(id,environment_id,env_generation,profile,origin,endpoint,state,close_reason,opened_at,last_used_at,closed_at) SELECT $1,id,generation,'Old closed profile','announced','', 'closed','environment_stopped',$3,$3,$3 FROM environments WHERE id=$2")
+            .bind(id).bind(s.on.environment).bind(now-chrono::Duration::days(2)).execute(&mut *conn).await.unwrap();
+    }
+    drop(conn);
+    let discoveries = s.rig.commands.issued_of("browser.look");
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"limit":1})).unwrap();
+    let page = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.browsers.len(), 1);
+    assert_eq!(page.browsers[0].id, first.max(second));
+    let receipt = serde_json::to_value(&page.browsers[0]).unwrap();
+    assert_eq!(
+        receipt["lifecycle"]["closed_entry_expires_at"]["state"], "unreported",
+        "the old list cutoff never erased this retained record"
+    );
+    let cursor = serde_json::to_value(&page).unwrap()["next_cursor"].clone();
+    assert!(!cursor.is_null());
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"limit":1,"cursor":cursor})).unwrap();
+    let next = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(next.browsers.len(), 1);
+    assert_eq!(next.browsers[0].id, first.min(second));
+    let query: EnvironmentBrowserListQuery =
+        serde_json::from_value(json!({"closed":true,"query":"absent"})).unwrap();
+    let empty = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentBrowserList, &[&s.on.environment])
+        .token(&s.ada.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert!(empty.browsers.is_empty());
+    assert_eq!(
+        s.rig.commands.issued_of("browser.look"),
+        discoveries,
+        "opening retained facts never asks the native machine to rediscover programs"
+    );
 }
