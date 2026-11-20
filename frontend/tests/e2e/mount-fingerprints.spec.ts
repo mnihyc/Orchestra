@@ -140,7 +140,7 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
     await expect(row.locator('[data-fingerprint-check]')).toHaveCSS('flex-wrap', 'wrap');
     if (kind === 'fork') {
       await dialog.getByRole('combobox', { name: 'Environment', exact: true }).click();
-      await page.getByRole('option', { name: 'Copy to new', exact: true }).click();
+      await page.getByRole('option', { name: 'Copy to a new environment', exact: true }).click();
     } else {
       await dialog.getByRole('combobox', { name: 'Place', exact: true }).click();
       await page.getByRole('option', { name: 'build-host', exact: true }).click();

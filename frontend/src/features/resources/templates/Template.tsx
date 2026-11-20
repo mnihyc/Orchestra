@@ -45,6 +45,7 @@ import { SettingChanges } from '@/ui/SettingChanges';
 import { ValueSummary } from '@/ui/ValueSummary';
 import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 import { TEMPLATE_TABS, type TemplateTab } from '@/features/resources/tabs';
 
@@ -70,6 +71,7 @@ function Skeletons(props: SkeletonReads) {
 
 function Overview({ template }: { template: Template }) {
   const { t } = useTranslation();
+  const application=useApplicationImpact({object:{kind:'template',id:template.id},model_id:null},true);
   const drivers = useQuery(driversQuery);
   const confinementWords = useConfinementWords();
   const words = useAmountWords();
@@ -102,7 +104,7 @@ function Overview({ template }: { template: Template }) {
             ...(runtimeName === null ? [] : [{ name: t('isolation.runtime'), value: runtime === undefined ? runtimeName : <RuntimeValue driverTitle={driverTitle ?? template.driver} runtimeTitle={runtime.title} boundary={runtime.boundary} /> }]),
             ...(runtime === undefined ? [] : [{ name: t('isolation.limitsHere'), value: <LimitLines limits={limits} unavailable={unavailable} boundary={runtime.boundary} /> }]),
             { name: t('templates.overview.home'), value: template.home?.name ?? t('templates.list.system') },
-            { name: t('templates.overview.units'), value: t('templates.overview.unitCount', { count: template.units }) },
+            { name: t('templates.overview.units'), value: <div className="flex min-w-0 flex-col gap-1"><span>{t('templates.overview.unitCount', { count: template.units })}</span><ApplicationPreview read={application.read}/></div> },
             ...(template.description === '' ? [] : [{ name: t('templates.overview.description'), value: template.description }]),
             { name: t('templates.overview.imageFrom'), value: source.kind === 'none' ? t('templates.source.none') : t(`templates.sourceChoices.${source.kind}.name`) },
             ...(source.kind === 'image' ? [{ name: t('templates.overview.reference'), value: <span className="wrap-anywhere">{source.reference}</span> }] : []),
@@ -181,6 +183,7 @@ function SpecForm({ template, manage }: { template: Template; manage: boolean })
   const descriptionEdited = description.trim() !== base.description;
   const specEdited = JSON.stringify(parsed) !== JSON.stringify(base.spec);
   const changed = nameEdited || descriptionEdited || specEdited || !validDraft;
+  const application=useApplicationImpact({object:{kind:'template',id:template.id},model_id:null},manage&&specEdited);
   if (observed !== template.revision) {
     setObserved(template.revision);
     if (!changed) {
@@ -222,6 +225,7 @@ function SpecForm({ template, manage }: { template: Template; manage: boolean })
   const faults = save.error instanceof ApiError ? save.error.faults() : [];
 
   const submit = () => {
+    if(!application.ready)return;
     if (parsed === null) {
       setFault(t('templates.spec.invalid'));
       return;
@@ -251,9 +255,10 @@ function SpecForm({ template, manage }: { template: Template; manage: boolean })
               savedProblems={faults.filter((fault) => fault.path.startsWith('spec')).map((fault) => ({ pointer: fault.path.slice(4), message: fault.message }))}
               onChange={(next) => { setSpec(next); if (!stale) save.reset(); }} onValidityChange={setValidDraft} disabled={save.isPending} readOnly={!manage} />}
         {fault && <p role="status" className="text-sm text-danger-text">{fault}</p>}
+        {manage&&specEdited&&<ApplicationPreview read={application.read}/>}
         {manage && (
           <div className="flex flex-wrap items-center gap-3">
-            <Button variant="primary" pending={save.isPending} blocked={!changed || !validDraft || stale} onClick={submit}>
+            <Button variant="primary" pending={save.isPending} blocked={!changed || !validDraft || stale||!application.ready} onClick={submit}>
               {t('templates.spec.save')}
             </Button>
             <Button
