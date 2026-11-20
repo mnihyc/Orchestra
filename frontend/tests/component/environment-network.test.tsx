@@ -1,5 +1,5 @@
 /** The environment's network says what is verified and offers recovery only to its managers. */
-import { screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 
@@ -16,6 +16,14 @@ function network(): NetworkState {
 }
 
 describe('the environment network', () => {
+  it('opens allowed-host settings inside the current application document',()=>{
+    show(<EnvironmentNetwork environment={{id:'environment',name:'Build',job:null,network:network(),access:{permissions:['environment.manage']}}} manage/>);
+    const link=screen.getByRole('link',{name:'Manage allowed hosts'});
+    expect(link).toHaveAttribute('href','/resources/environments/environment?tab=settings');
+    const event=new MouseEvent('click',{bubbles:true,cancelable:true,button:0});
+    fireEvent(link,event);
+    expect(event.defaultPrevented).toBe(true);
+  });
   it('names the outbound publication path exactly where egress is open', () => {
     const { rerender } = show(<OpenEgressNotice network={{ mode: 'open' }} />);
     expect(screen.getByText(/publish itself through its own outbound tunnel/)).toBeVisible();

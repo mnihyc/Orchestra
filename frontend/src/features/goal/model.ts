@@ -7,14 +7,14 @@ import { holds } from '@/lib/permissions';
 import { formatSpan } from '@/lib/time';
 import { formatCredits } from '@/features/usage/figures';
 
-/** The five states a person reads on the goal line. */
-export type GoalChip = 'working' | 'waiting' | 'paused' | 'met' | 'stopped';
+/** The states a person reads on the goal line. */
+export type GoalChip = 'working' | 'waiting' | 'paused' | 'unchecked' | 'met' | 'stopped';
 
 /** The chip of a goal: an active goal that waits for a person says so, a goal the agent is blocked on too. */
 export function chipOf(goal: ThreadGoal): GoalChip {
   switch (goal.status) {
     case 'active': return goal.waiting === null ? 'working' : 'waiting';
-    case 'paused': return goal.reason === 'blocked' ? 'waiting' : 'paused';
+    case 'paused': return goal.reason === 'unchecked' ? 'unchecked' : goal.reason === 'blocked' ? 'waiting' : 'paused';
     case 'met': return 'met';
     default: return 'stopped';
   }

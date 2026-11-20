@@ -572,9 +572,23 @@ async fn an_actual_connected_move_delivers_original_bytes_before_ending_the_revi
         old.0.is_some() || old.1.is_some(),
         "the original Delete was accepted in the successful copy commit"
     );
-    let actions:Vec<String>=sqlx::query_scalar("SELECT action FROM audit_log WHERE object_id=$1 AND action IN ('content.copied_out','environment.deleted','environment.removal_scheduled') ORDER BY action").bind(s.prepared.source).fetch_all(&mut *conn).await.unwrap();
-    assert_eq!(actions.len(), 2);
-    assert!(actions.iter().any(|action| action == "content.copied_out"));
+    // The move commits its copy and the managed source's removal schedule together. The
+    // removal worker can already have recorded the physical deletion by the time we read.
+    let (copied, scheduled, deleted): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE action='content.copied_out'),
+                count(*) FILTER (WHERE action='environment.removal_scheduled'),
+                count(*) FILTER (WHERE action='environment.deleted')
+         FROM audit_log WHERE object_kind='environment' AND object_id=$1",
+    )
+    .bind(s.prepared.source)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!((copied, scheduled), (1, 1));
+    assert!(
+        deleted <= 1,
+        "the removal worker recorded {deleted} deletions"
+    );
     assert_eq!(s.world.commands.issued_of("node.runtime.create"), 0);
     s.world.engine().stop();
 }

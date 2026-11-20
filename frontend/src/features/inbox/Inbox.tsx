@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 
 import { fetchNotifications } from '@/api/notifications';
 import { NotificationRow } from '@/features/inbox/NotificationRow';
+import { InboxRetention } from './Retention';
 import { Hint } from '@/features/help/Hint';
 import { useNotificationLabels } from '@/features/inbox/presentation';
 import { PlaceInbox } from './away/Grouped';
@@ -172,6 +173,7 @@ export function Inbox({ filter, onFilter }: { filter: InboxFilter; onFilter: (ne
           <Pagination hasMore={hasMore} loading={loadingMore} error={moreError} onMore={more} />
         </div>
       )}
+      {loaded && <div className="flex min-w-0 justify-end"><InboxRetention/></div>}
       {loaded && error !== null && <ErrorState compact error={error} onRetry={reloadUserFeed} />}
     </Page>
   );
