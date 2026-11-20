@@ -4,4 +4,7 @@ After an update, `update.sh rollback` puts the previous release and the database
 was left. The scenario writes a person under the new release and shows that: a rollback asks, and does not
 guess when nobody can be asked; it says what is lost; afterwards the previous release runs and the person is
 gone; and a second rollback goes forward to the newer release with the person back, from the dump of the
-database as it stood when the first rollback began.
+database as it stood when the first rollback began. The files follow: the update brought the later release's
+`nginx.conf` and an updater of its own; a file edited since the update stays when the update is rolled back, and
+the command says so; the files nobody edited are the earlier release's again; the updater stays the newer one,
+which performed the rollback; and the second rollback brings the files forward too.

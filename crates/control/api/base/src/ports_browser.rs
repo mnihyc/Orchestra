@@ -320,6 +320,7 @@ async fn link_entry(
 
 /// What one admitted request carries: the environment, the caller, the program's options.
 struct Admission {
+    machine_reach: bool,
     env: EnvironmentFull,
     caller: PortCaller,
     revision: i64,
@@ -331,6 +332,7 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
     let mut tx = app.db.begin().await?;
     let env = environment(&mut tx, entry.environment).await?;
     let mut credential_deadline = None;
+    let mut machine_reach = false;
     let (caller, revision) = match entry.person {
         Some(person) => {
             let origin = entry.origin.as_ref().ok_or_else(|| {
@@ -386,6 +388,11 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
                     "the original browser entry credential expired",
                 ));
             }
+            machine_reach = entry.opening.is_none()
+                && orch_engine::ports::named_listeners(&mut tx, &principal, &env)
+                    .await
+                    .map_err(ApiError::internal)?
+                    .contains(&entry.port);
             credential_deadline = Some((principal.caller().clone(), deadline));
             (PortCaller::Person { user }, revision)
         }
@@ -407,6 +414,7 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
         .cache
         .ports()
         .snapshot(env.id, i64::from(env.generation))
+        && !machine_reach
         && snapshot.discovery == PortDiscovery::Native
         && !snapshot.listeners.iter().any(|listener| {
             listener.port == entry.port
@@ -434,6 +442,7 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
         ));
     }
     Ok(Admission {
+        machine_reach,
         env,
         caller,
         revision,
@@ -517,6 +526,7 @@ async fn carry(
             entry.opening,
             admission.caller.clone(),
             entry.origin.clone(),
+            admission.machine_reach,
             admission.revision,
             outside,
             connection,

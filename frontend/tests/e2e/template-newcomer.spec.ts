@@ -17,8 +17,8 @@ test('explains template purposes with one guide for the screen',async({page})=>{
   const dialog=page.getByRole('dialog',{name:'Add template'});
   await expect(dialog.getByRole('radio',{name:'Environment',exact:true})).toBeChecked();
   const provider=dialog.getByRole('radio',{name:'Provider',exact:true});
-  await expect(provider).toHaveAccessibleDescription("Keep a provider's credential and run its harness.");
-  await expect(dialog.getByText("Keep a provider's credential and run its harness.",{exact:true})).toHaveCount(1);
+  await expect(provider).toHaveAccessibleDescription("Keep a provider's credential and run its agent program.");
+  await expect(dialog.getByText("Keep a provider's credential and run its agent program.",{exact:true})).toHaveCount(1);
   await expect(dialog.locator('[data-help-article="write-an-environment-template"]')).toHaveCount(1);
   await expect(dialog.getByRole('button',{name:'About Provider',exact:true})).toHaveCount(0);
   await dialog.getByRole('button',{name:'Write an environment template',exact:true}).click();

@@ -24,16 +24,19 @@ pub(crate) const SELECTED_OWNERS:&str="WITH owners AS (
       FROM threads t JOIN thread_continuation_spans s ON s.continuation_id=t.active_continuation_id
       WHERE t.node_id=ANY($1))";
 
-/// Structural identity and stream are immutable once referenced. Pin/quote metadata stays shared. The record is
-/// made once for each row: `(f(...)).*` would make it again for every column of an item, two dozen times a row.
-pub(crate) const DECODE: &str = "SELECT d.* FROM candidates c JOIN items i ON i.id=c.id
-    CROSS JOIN LATERAL jsonb_populate_record(NULL::items,
-    CASE WHEN c.frozen_at IS NULL OR i.seq_updated<=c.frozen_at THEN to_jsonb(i)
-      ELSE (SELECT r.body FROM thread_item_revisions r WHERE r.item_id=i.id
-        AND r.seq_updated<=c.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END
-    || jsonb_build_object('pinned_at',i.pinned_at,'pinned_by',i.pinned_by,'chat_refs',i.chat_refs,
-        'seq_updated',i.seq_updated,'updated_at',i.updated_at)) d
-    ORDER BY i.seq_created";
+/// Current items already have their final columns. Only an item changed after the
+/// frozen cut needs its historical body with the live pin, quote and update metadata.
+pub(crate) const DECODE: &str = "SELECT decoded.* FROM candidates c JOIN items i ON i.id=c.id
+    CROSS JOIN LATERAL (
+      SELECT i.* WHERE c.frozen_at IS NULL OR i.seq_updated<=c.frozen_at
+      UNION ALL
+      SELECT d.* FROM jsonb_populate_record(NULL::items,
+        (SELECT r.body FROM thread_item_revisions r WHERE r.item_id=i.id
+           AND r.seq_updated<=c.frozen_at ORDER BY r.seq_updated DESC LIMIT 1)
+        || jsonb_build_object('pinned_at',i.pinned_at,'pinned_by',i.pinned_by,'chat_refs',i.chat_refs,
+           'seq_updated',i.seq_updated,'updated_at',i.updated_at)) d
+      WHERE c.frozen_at IS NOT NULL AND i.seq_updated>c.frozen_at
+    ) decoded ORDER BY i.seq_created";
 
 /// before/after use permanent sequence positions; sparse global order is not renumbered.
 ///

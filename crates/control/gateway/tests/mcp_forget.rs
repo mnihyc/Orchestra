@@ -132,6 +132,8 @@ impl Fixture {
         ));
         host.env_attach(
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
@@ -212,6 +214,7 @@ impl Fixture {
         let answer = tokio::time::timeout(
             PATIENCE,
             self.machine.link.import_mcp(McpImportAsk {
+                profile: None,
                 request_id: server,
                 environment_id: self.environment,
                 source: source.into(),
