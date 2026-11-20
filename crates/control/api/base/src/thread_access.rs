@@ -190,8 +190,35 @@ impl ResourceAccess for AuthzAccess {
         conn: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
-        let principal = self.principal(conn, ask.person).await?;
-        let policies = Self::policies(conn, ask.provider).await?;
+        if ask.purpose != orch_access_contract::permissions::UsagePurpose::Turn
+            || ask.pool.is_some() && ask.model.is_none()
+        {
+            return self.background_provider_use(conn, ask).await;
+        }
+        let principal = if let Some(pool) = ask.pool {
+            if pool.caller().user() != ask.person
+                || pool.purpose() != ask.purpose
+                || !pool.matches_request(ask.provider, ask.model)
+            {
+                return Ok(Answer::Refused(Vec::new()));
+            }
+            Principal::load(conn, pool.caller().clone(), self.clock.time())
+                .await
+                .map_err(fault)?
+        } else {
+            self.principal(conn, ask.person).await?
+        };
+        let policies = if let Some(pool) = ask.pool {
+            orch_engine::access::resource_policies_for_choice(
+                conn,
+                &[ask.provider],
+                pool.selection().path,
+            )
+            .await
+            .map_err(fault)?
+        } else {
+            Self::policies(conn, ask.provider).await?
+        };
         let place = Self::place(conn, ask.runs_in).await?;
         let kind = hierarchy::with_ancestors(conn, &[ask.node])
             .await
@@ -219,15 +246,27 @@ impl ResourceAccess for AuthzAccess {
                     arrangement: None,
                     models_allowed: None,
                 };
-                match usable::check_turn_at(
-                    conn,
-                    Author::Person(&principal),
-                    &turn,
-                    &policies,
-                    place.as_ref(),
-                )
-                .await
-                {
+                let decision = if let Some(pool) = ask.pool {
+                    usable::check_turn_at_pool(
+                        conn,
+                        Author::Person(&principal),
+                        &turn,
+                        &policies,
+                        place.as_ref(),
+                        pool.selection(),
+                    )
+                    .await
+                } else {
+                    usable::check_turn_at(
+                        conn,
+                        Author::Person(&principal),
+                        &turn,
+                        &policies,
+                        place.as_ref(),
+                    )
+                    .await
+                };
+                match decision {
                     Ok(TurnDecision::Allowed(grant)) => Ok(Answer::Allowed {
                         arrangements: arrangements(&grant.arrangements),
                     }),
@@ -254,15 +293,21 @@ impl ResourceAccess for AuthzAccess {
                     environment: None,
                     models_allowed: None,
                 };
-                match usable::check_binding_at(
-                    conn,
-                    &principal,
-                    &binding,
-                    &policies,
-                    place.as_ref(),
-                )
-                .await
-                {
+                let decision = if let Some(pool) = ask.pool {
+                    usable::check_binding_at_pool(
+                        conn,
+                        &principal,
+                        &binding,
+                        &policies,
+                        place.as_ref(),
+                        pool.selection(),
+                    )
+                    .await
+                } else {
+                    usable::check_binding_at(conn, &principal, &binding, &policies, place.as_ref())
+                        .await
+                };
+                match decision {
                     Ok(BindingDecision::Allowed(grant)) => Ok(Answer::Allowed {
                         arrangements: grant
                             .provider
@@ -334,8 +379,68 @@ impl ResourceAccess for AuthzAccess {
         conn: &mut Conn,
         ask: &ProviderUse<'_>,
     ) -> Result<Answer, AccessFault> {
-        let principal = self.principal(conn, ask.person).await?;
-        let policies = Self::policies(conn, ask.provider).await?;
+        let principal = if let Some(pool) = ask.pool {
+            if pool.caller().user() != ask.person
+                || pool.purpose() != ask.purpose
+                || !pool.matches_request(ask.provider, ask.model)
+            {
+                return Ok(Answer::Refused(Vec::new()));
+            }
+            Principal::load(conn, pool.caller().clone(), self.clock.time())
+                .await
+                .map_err(fault)?
+        } else {
+            self.principal(conn, ask.person).await?
+        };
+        let policies = if let Some(pool) = ask.pool {
+            orch_engine::access::resource_policies_for_choice(
+                conn,
+                &[ask.provider],
+                pool.selection().path,
+            )
+            .await
+            .map_err(fault)?
+        } else {
+            Self::policies(conn, ask.provider).await?
+        };
+        if let Some(pool) = ask.pool {
+            let place = Self::place(conn, ask.runs_in).await?;
+            let model = if let Some(name) = ask.model {
+                rows::provider_model(conn, ask.provider, name)
+                    .await
+                    .map_err(fault)?
+            } else {
+                None
+            };
+            let groups = model
+                .as_ref()
+                .map_or(&[][..], |model| model.groups.as_slice());
+            let wanted = orch_authz::options::Wanted {
+                purpose: ask.purpose,
+                model: ask.model.map(|name| (name, groups)),
+                effort: ask.effort,
+                at: place.as_ref(),
+                ..Default::default()
+            };
+            let allowed = orch_authz::pools::provider_choice(
+                conn,
+                &principal,
+                pool.selection().path,
+                pool.selection().leaf,
+                Some(ask.node),
+                &wanted,
+                ask.purpose.grant(),
+                &policies,
+            )
+            .await
+            .map_err(fault)?
+            .is_some();
+            return Ok(if allowed {
+                Answer::allowed()
+            } else {
+                Answer::Refused(Vec::new())
+            });
+        }
         match usable::usable(conn, &principal, ask.provider, Some(ask.node), &policies)
             .await
             .map_err(fault)?
@@ -352,13 +457,14 @@ impl ResourceAccess for AuthzAccess {
                     None => Vec::new(),
                 };
                 let wanted = orch_authz::options::Wanted {
+                    purpose: ask.purpose,
                     model: ask.model.map(|name| (name, groups.as_slice())),
                     effort: ask.effort,
                     at: place.as_ref(),
                     ..orch_authz::options::Wanted::default()
                 };
                 // One entry has to allow the model, the effort and the place together.
-                let allowing = granted.allowing(&wanted);
+                let allowing = granted.allowing_for(&wanted, ask.purpose.grant());
                 if allowing.is_empty() {
                     return Ok(Answer::Refused(Vec::new()));
                 }
