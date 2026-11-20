@@ -1,0 +1,3 @@
+test -p orch-engine --lib -- jobs::continuation::tests::
+test -p orch-engine --test forks -- confirmed_source::review::a_nonempty_confirmation_with_a_missing_cut_refuses_without_losing_the_original_authored_queue --exact
+test -p orch-node --test uploads -- --nocapture

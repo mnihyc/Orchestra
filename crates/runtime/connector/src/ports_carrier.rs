@@ -131,19 +131,13 @@ impl PortCarrier {
             .upgrade()?
             .track(id, claims, environment, inside, tunnel.closer())
     }
-    fn local(&self, audience: Option<orch_api_contract::ports::PortOpeningKind>) -> bool {
-        self.policy
-            .policy()
-            .is_none_or(|p| p.permits_port(audience))
-    }
     fn current(
         &self,
         environment: &Arc<Environment>,
-        generation: i64,
-        audience: Option<orch_api_contract::ports::PortOpeningKind>,
+        claims: &orch_link_contract::ports::PortTicketClaims,
     ) -> bool {
-        self.local(audience)
-            && environment.generation() == generation
+        self.policy.permits_port_ticket(claims)
+            && environment.generation() == claims.generation
             && self
                 .host
                 .environment(environment.id())
@@ -183,7 +177,7 @@ impl TunnelServer for PortCarrier {
             );
             return;
         }
-        if !self.local(claims.audience) {
+        if !self.policy.permits_port_ticket(&claims) {
             incoming.refuse(
                 OpenErrorCode::Refused,
                 "ports (environment role): this audience is off in the machine operator's policy",
@@ -194,7 +188,7 @@ impl TunnelServer for PortCarrier {
             incoming.refuse(OpenErrorCode::Refused, "the environment is not attached");
             return;
         };
-        if !self.current(&environment, claims.generation, claims.audience) {
+        if !self.current(&environment, &claims) {
             incoming.refuse(
                 OpenErrorCode::Refused,
                 "the environment generation or current attachment changed",
@@ -222,9 +216,13 @@ impl TunnelServer for PortCarrier {
                     Duration::from_secs(u64::from(OPEN_TIMEOUT_SECS)),
                     async {
                         let permit = capacity.tcp.clone().acquire_owned().await.map_err(|_| ())?;
-                        let socket = ports_sockets::tcp(environment.ports(), claims.port)
-                            .await
-                            .map_err(|_| ())?;
+                        let socket = ports_sockets::tcp_with_reach(
+                            environment.ports(),
+                            claims.port,
+                            claims.machine_reach,
+                        )
+                        .await
+                        .map_err(|_| ())?;
                         Ok::<_, ()>((permit, socket))
                     },
                 )
@@ -236,7 +234,7 @@ impl TunnelServer for PortCarrier {
                     );
                     return;
                 };
-                if !self.current(&environment, claims.generation, claims.audience) {
+                if !self.current(&environment, &claims) {
                     incoming.refuse(
                         OpenErrorCode::Refused,
                         "the current attachment changed while connecting",
@@ -308,7 +306,7 @@ impl TunnelServer for PortCarrier {
                 tokio::pin!(copy);
                 loop {
                     tokio::select! {
-                        _=tick.tick()=>if !self.current(&environment,claims.generation,claims.audience) {break;},
+                        _=tick.tick()=>if !self.current(&environment,&claims) {break;},
                         _=&mut copy=>break,
                     }
                 }
@@ -334,7 +332,7 @@ impl TunnelServer for PortCarrier {
                     );
                     return;
                 };
-                if !self.current(&environment, claims.generation, claims.audience) {
+                if !self.current(&environment, &claims) {
                     incoming.refuse(
                         OpenErrorCode::Refused,
                         "the current attachment changed while connecting",
@@ -368,15 +366,8 @@ impl TunnelServer for PortCarrier {
                 }
                 self.activity(&environment);
                 let idle = Duration::from_secs(u64::from(limits.udp_idle_secs));
-                self.udp(
-                    &environment,
-                    claims.generation,
-                    claims.audience,
-                    &socket,
-                    &tunnel,
-                    idle,
-                )
-                .await;
+                self.udp(&environment, &claims, &socket, &tunnel, idle)
+                    .await;
             }
         }
     }
@@ -385,8 +376,7 @@ impl PortCarrier {
     async fn udp(
         &self,
         environment: &Arc<Environment>,
-        generation: i64,
-        audience: Option<orch_api_contract::ports::PortOpeningKind>,
+        claims: &orch_link_contract::ports::PortTicketClaims,
         socket: &ports_sockets::PortUdp,
         tunnel: &Tunnel,
         idle: Duration,
@@ -403,7 +393,7 @@ impl PortCarrier {
                 loop {
                     tokio::select! {
                         _=tokio::time::sleep_until(last+idle)=>return,
-                        _=tick.tick()=>if !self.current(environment,generation,audience) || tunnel.is_closed() {return;},
+                        _=tick.tick()=>if !self.current(environment,claims) || tunnel.is_closed() {return;},
                         packet=tunnel.recv_datagram()=>{
                             let Ok(packet)=packet else {return;};
                             last=Instant::now();

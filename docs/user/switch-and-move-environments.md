@@ -7,7 +7,7 @@ summary: Distinguish changing a thread’s environment, moving an environment an
 
 # Switch a thread or move an environment
 
-**Move to another environment…** changes where one thread runs. **Move to another machine…** relocates a supported environment. **Move to topic…** changes a thread's place in the organization. Read the named action and plan to choose the change you intend.
+**Move to another environment…** changes where one thread runs. **Move to another machine…** relocates a supported environment. **Move to…** selects the thread’s destination topic. Across organizations, its owner reviews the conversation copy and source deletion together. Read the named action and plan to choose the change you intend.
 
 ## Where
 
@@ -21,6 +21,6 @@ Move a build thread from a laptop environment to a larger environment. Choose wh
 
 ## What to expect
 
-The plan states which session closes, what remains on the old side, and whether any old unit is removed. Progress and the resulting timeline name the actual environments and machines. Copying does not transfer an imported MCP server's machine-local secrets.
+The plan states which session closes, what remains on the old side, and whether any old container is removed. Progress and the resulting timeline name the actual environments and machines. Copying does not transfer an imported MCP server's machine-local secrets.
 
-A template-made environment can use its supported machine-move path. A move involving a person's machine is a switch with a copy where the plan says so. Current permissions, machine availability and sandbox readiness still apply. Review unavailable choices and attention notices rather than treating a listed destination as ready. See [MCP import](mcp-import-and-use.md) and [running thread views](running-thread-views.md).
+A template-made environment can use its supported machine-move path. A move involving a person's machine is a switch with a copy where the plan says so. Current permissions, machine availability and tool access readiness still apply. Review unavailable choices and attention notices rather than treating a listed destination as ready. See [MCP import](mcp-import-and-use.md) and [running thread views](running-thread-views.md).
