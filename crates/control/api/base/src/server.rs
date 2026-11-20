@@ -467,9 +467,11 @@ async fn backplane(
         return LinkFault::forbidden("only a gateway holds the backplane").into_response();
     }
     let link = app.link.clone();
+    // A machine's largest message crosses whole, with the wrapper that names the machine.
+    let ceiling = link.backplane_bytes();
     upgrade
-        .max_message_size(crate::backplane::MAX_BACKPLANE_FRAME_BYTES)
-        .max_frame_size(crate::backplane::MAX_BACKPLANE_FRAME_BYTES)
+        .max_message_size(ceiling)
+        .max_frame_size(ceiling)
         .on_upgrade(move |socket| async move { link.serve_gateway(socket).await })
 }
 

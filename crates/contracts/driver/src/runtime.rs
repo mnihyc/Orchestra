@@ -877,3 +877,26 @@ mod tests {
         assert!(Resources::default().within(&most));
     }
 }
+
+/// Home evidence captured by the connector for the process it actually started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HarnessHome {
+    /// The path actually passed to the adapter; absent when the native program selects its own home.
+    pub path: Option<String>,
+    /// The choice that supplied the home for this start.
+    pub source: HarnessHomeSource,
+}
+
+/// The captured source of a harness's home; later configuration edits do not change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessHomeSource {
+    /// The provider runtime supplied an explicit choice.
+    Runtime,
+    /// The agent profile supplied its choice.
+    Profile,
+    /// The connector made or bound an owned home for its managed runtime.
+    Managed,
+    /// The existing native program selects its own home, left undisturbed.
+    Native,
+}

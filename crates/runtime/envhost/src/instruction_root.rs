@@ -39,6 +39,7 @@ pub fn prepare(workspace: &Workspace, gates: &GateState) -> Result<FileStat> {
         return Err(conflict());
     }
     Ok(FileStat {
+        facts: None,
         entry: DirEntry {
             name: INSTRUCTION_ROOT_MARKER.to_owned(),
             path: INSTRUCTION_ROOT_MARKER.to_owned(),

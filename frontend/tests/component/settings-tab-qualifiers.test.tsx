@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor, type RenderResult } from '@testi
 import { QueryClientProvider } from '@tanstack/react-query';
 import { AppWindow } from 'lucide-react';
 import { useEffect } from 'react';
+import { create } from 'zustand';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Nodes from '@/api/nodes';
 import type * as Live from '@/realtime/live';
@@ -43,7 +44,7 @@ vi.mock('@/api/nodes', async (load) => {
   };
 });
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: reads.thread, useDocumentFeed: reads.document }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 // Keep actual producers and their frame props, without creating/editing settings or mounting form readers.
 vi.mock('@/features/settings/Frame', () => ({ SettingsFrame: ({ title, current }: SettingsFrameProps) => <section><h1>{title}</h1><output data-testid="body-section">{current}</output></section> }));
 
@@ -55,7 +56,8 @@ function nativeScene() {
   return { person, root: world.places.org(person, root), department: world.places.org(person, department), project: world.places.project(person, project), topic: world.places.topic(person, topic), secondProject: world.places.project(person, shop), tree: [...tree.nodes.values()] };
 }
 let scene: ReturnType<typeof nativeScene>;
-const state = () => useWorkbench.getState(), owners = new Set<string>(), mounted: string[] = [], views: RenderResult[] = [], refused = new Set<string>();
+const state = () => useWorkbench.getState(), owners = new Set<string>(), mounted: string[] = [], views: RenderResult[] = [];
+const useRefusal = create<string | null>(() => null);
 const session = client.session.getState(), defaults = queryClient.getDefaultOptions();
 let locale = currentLocale(), themeBefore = document.documentElement.dataset.theme, unregister: (() => void) | undefined;
 function TopicCaption() {
@@ -66,7 +68,8 @@ function Refusal() { useRouteHeading({ title: 'Current unavailable view', tabTit
 function SettingsBody({ tab }: ViewProps) {
   const page = parsePageAddress(tab.of?.href ?? '');
   useEffect(() => { mounted.push(tab.id); }, [tab.id]);
-  if (refused.has(tab.id)) return <Refusal />;
+  const refused = useRefusal((id) => id === tab.id);
+  if (refused) return <Refusal />;
   if (page?.route === '/org/$slug/settings/$section/') return <OrgSettings slug={page.params.slug ?? ''} section={page.params.section ?? 'general'} />;
   if (page?.route === '/project/$projectId/settings/') {
     const navigation = settingsNavigation(page.pathname, page.search);
@@ -100,7 +103,7 @@ function putNative() {
 }
 function forgetHeads() { clearViewOpenings(); focusScreenHeading(null); clearScreenHeading(); for (const id of owners) forgetScreenHeading(id); }
 beforeEach(async () => {
-  locale = currentLocale(); themeBefore = document.documentElement.dataset.theme; await setLocale('en'); state().leave(); localStorage.clear(); queryClient.clear(); treeWriter.clear(); forgetHeads(); mounted.length = 0; refused.clear();
+  locale = currentLocale(); themeBefore = document.documentElement.dataset.theme; await setLocale('en'); state().leave(); localStorage.clear(); queryClient.clear(); treeWriter.clear(); forgetHeads(); mounted.length = 0; useRefusal.setState(null, true);
   scene = nativeScene(); client.session.setState({ status: 'signed_in', userId: scene.person.me.id });
   queryClient.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false, staleTime: Infinity } });
   reads.org.mockReset().mockRejectedValue(new Error('No unrequested org read')); reads.node.mockReset().mockRejectedValue(new Error('No unrequested node read'));
@@ -109,7 +112,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   for (const view of views.splice(0)) view.unmount(); cleanup(); unregister?.(); unregister = undefined;
-  state().leave(); localStorage.clear(); await queryClient.cancelQueries(); queryClient.clear(); queryClient.setDefaultOptions(defaults); treeWriter.clear(); forgetHeads(); owners.clear(); refused.clear();
+  state().leave(); localStorage.clear(); await queryClient.cancelQueries(); queryClient.clear(); queryClient.setDefaultOptions(defaults); treeWriter.clear(); forgetHeads(); owners.clear();
   client.session.setState(session); vi.unstubAllGlobals();
   if (themeBefore === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = themeBefore; await setLocale(locale);
 });
@@ -148,7 +151,7 @@ it('retains a qualified cached name during a genuine cold settings read and focu
   await waitFor(() => expect(state().named.get(first.id)?.title).toBe('General · Acme'));
   act(() => state().focus(next.id)); await waitFor(() => expect(state().named.get(next.id)?.title).toBe('General · Web'));
   act(() => state().focus(first.id)); await waitFor(() => expect(state().named.get(first.id)?.source).toBe('view'));
-  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id, 'page').kept;
+  await act(() => window.dispatchEvent(new Event('pagehide'))); const saved = loadWorkspace(scene.person.me.id).kept;
   expect(saved?.titles?.[first.id]?.title).toBe('General · Acme');
   const before = allTabs(state().layout).map((one) => ({ id: one.id, href: pageAddress(one) }));
   for (const view of views.splice(0)) view.unmount(); state().leave(); forgetHeads(); queryClient.clear(); mounted.length = 0;
@@ -190,9 +193,10 @@ it('replaces a former qualified title and path after an actual query refusal eve
 });
 
 it('lets a current explicit refusal heading win over restored names and tree metadata', async () => {
-  putNative(); const own = tab(`/org/${scene.root.address}/settings/general`); seed([own]); const view = draw();
+  putNative(); const own = tab(`/org/${scene.root.address}/settings/general`); seed([own]); draw();
   await waitFor(() => expect(state().named.get(own.id)?.title).toBe('General · Acme'));
-  refused.add(own.id); view.rerender(<QueryClientProvider client={queryClient}><TooltipProvider><Frame /></TooltipProvider></QueryClientProvider>);
+  act(() => useRefusal.setState(own.id, true));
+  expect(await screen.findByText('Current refusal')).toBeVisible();
   await waitFor(() => expect(state().named.get(own.id)?.title).toBe('Current unavailable view'));
   act(() => treeWriter.reset(scene.root.id, scene.tree, 2));
   expect(state().named.get(own.id)?.title).toBe('Current unavailable view'); expect(state().named.get(own.id)?.path).toBeUndefined();

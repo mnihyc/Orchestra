@@ -363,6 +363,7 @@ impl Rig {
             });
         self.on_open(|open| {
             Ok(SessionOpenResult {
+                mcp: None,
                 native_session_ref: if matches!(open.mode, SessionMode::Resume | SessionMode::Adopt)
                 {
                     open.native_session_ref.clone().ok_or_else(|| {

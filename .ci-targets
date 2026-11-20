@@ -1,0 +1,4 @@
+test -p orch-api-core --test harness_checks
+web typecheck
+web lint
+web test

@@ -145,7 +145,7 @@ struct Parsed {
     replay: Option<StoredReplay>,
     title: String,
     blocks: Vec<NewBlock>,
-    files: Vec<rows::HeldFile>,
+    files: super::super::convert::HeldFiles,
     warnings: Vec<String>,
     people: Vec<(String, Option<Id>)>,
 }
@@ -658,7 +658,7 @@ impl effects::CommonInitial for Imports {
                         }),
                         title: String::new(),
                         blocks: Vec::new(),
-                        files: Vec::new(),
+                        files: Default::default(),
                         warnings: Vec::new(),
                         people: Vec::new(),
                     })));
@@ -709,7 +709,7 @@ impl effects::CommonInitial for Imports {
                             }),
                             title: String::new(),
                             blocks: Vec::new(),
-                            files: Vec::new(),
+                            files: Default::default(),
                             warnings: Vec::new(),
                             people: Vec::new(),
                         }));
