@@ -6,8 +6,12 @@ Each non-empty line that is not a comment is one check:
   contracts                     regenerate the generated contract files (`cargo xtask contracts`) and list what differed
   web <npm script>              e.g. `web lint`, `web typecheck`, `web test`, `web build`; `npm ci` runs once first
   web-e2e                       the end-to-end suites against the tests' fake API
+  release-checks                release helper tests, workflow lint and updater script fixtures
+  release-first-start           install the release of this checkout with the packaged first-start scenario
 
-The workflow uses --group rust and --group web on independent runners. With no group, run all checks.
+The workflow runs Rust and web independently. --defer-first-start sends a requested installation to
+the packaging runners. The inputs group builds the native programs and the install group uses those
+programs to package and install the same checkout. With no group, run all checks locally.
 """
 
 import argparse
@@ -17,6 +21,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.getcwd()
 FRONTEND = os.path.join(ROOT, "frontend")
@@ -49,20 +54,30 @@ def prepare_native_fixtures(path):
     return passed, environment
 
 
-def main(path, group="all"):
+def main(path, group="all", *, prepare_first_start=False, defer_first_start=False):
     with open(path, encoding="utf-8") as targets:
         lines = [line.strip() for line in targets]
     checks = [line for line in lines if line and not line.startswith("#")]
     if not checks:
         print(f"{path} names no check", file=sys.stderr)
         return 2
-    known = {"test", "clippy", "doc", "fmt", "contracts", "web", "web-e2e"}
+    known = {"release-checks", "release-first-start", "test", "clippy", "doc", "fmt", "contracts", "web", "web-e2e"}
     unknown = [check for check in checks if check.partition(" ")[0] not in known]
     if unknown:
         for check in unknown:
             print(f"unknown check: {check}", file=sys.stderr)
         return 2
-    if group != "all":
+    if defer_first_start and "release-first-start" in checks:
+        output = os.environ.get("GITHUB_OUTPUT")
+        if not output or group != "rust":
+            print("Deferring first start requires the Rust job's GITHUB_OUTPUT.", file=sys.stderr)
+            return 2
+        with open(output, "a", encoding="utf-8") as step_output:
+            print("first_start=true", file=step_output)
+        checks = [check for check in checks if check != "release-first-start"]
+    if group in ("install", "inputs"):
+        checks = [check for check in checks if check == "release-first-start"]
+    elif group != "all":
         checks = [check for check in checks
                   if (check.partition(" ")[0] in {"web", "web-e2e"}) == (group == "web")]
     if not checks:
@@ -73,6 +88,7 @@ def main(path, group="all"):
     if any(check.startswith("test ") for check in checks):
         passed, fixture_environment = prepare_native_fixtures(path)
         results.append(("prepare native Docker fixtures", passed))
+    first_start_inputs = Path(ROOT) / ".tmp" / "first-start-inputs"
     connector = False
     npm = False
     for check in checks:
@@ -86,6 +102,34 @@ def main(path, group="all"):
                 ))
             results.append((check, run(check, ["cargo", "test", "--locked", "--no-fail-fast", *shlex.split(rest)],
                                        env=fixture_environment)))
+        elif check == "release-checks":
+            for label, command in [
+                ("release helpers", [sys.executable, "-I", "-B", "-m", "unittest", "discover",
+                                     "-s", ".github/scripts", "-p", "test_release_*.py"]),
+                ("workflow lint", [sys.executable, ".github/scripts/workflow_lint.py"]),
+                ("updater doctor", ["bash", "scripts/smoke/update-doctor/run.sh"]),
+                ("deployment file updates", ["bash", "scripts/smoke/update-files/run.sh"]),
+            ]:
+                results.append((label, run(label, command)))
+        elif check == "release-first-start" and (group == "inputs" or prepare_first_start):
+            for label, directory, arguments in [
+                ("build the installation CLI", "cli", ["--cli-only"]),
+                ("build the Linux connector and node", "native", ["--native-connector", "x86_64-unknown-linux-musl"]),
+            ]:
+                command = ["cargo", "xtask", "package", "--out", str(first_start_inputs / directory), *arguments]
+                results.append((label, run(label, command)))
+        elif check == "release-first-start":
+            # First start needs the server, CLI, frontend and database, and launches no agent environments.
+            with tempfile.TemporaryDirectory(prefix="orch-first-start-") as package:
+                command = ["cargo", "xtask", "package", "--out", package, "--skip-image"]
+                if group == "install":
+                    command.extend(["--cli", str(first_start_inputs / "cli" / "orchctl"),
+                                    "--connectors", str(first_start_inputs / "native")])
+                built = run("package the installation", command)
+                results.append(("package the installation", built))
+                if built:
+                    results.append((check, run(check, ["bash", "scripts/smoke/first-start/run.sh"],
+                                               env={"ORCH_SMOKE_RELEASE_A": package})))
         elif word == "clippy":
             results.append((check, run(check, ["cargo", "clippy", "--workspace", "--all-targets", "--locked",
                                                "--keep-going", "--", "-D", "warnings"])))
@@ -122,6 +166,10 @@ def main(path, group="all"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
-    parser.add_argument("--group", choices=("all", "rust", "web"), default="all")
+    parser.add_argument("--group", choices=("all", "rust", "web", "inputs", "install"), default="all")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--defer-first-start", action="store_true", help="assign the installation to separate packaging runners")
+    mode.add_argument("--prepare-first-start", action="store_true", help="build native inputs for the installation runner")
     arguments = parser.parse_args()
-    sys.exit(main(arguments.path, arguments.group))
+    sys.exit(main(arguments.path, arguments.group, prepare_first_start=arguments.prepare_first_start,
+                  defer_first_start=arguments.defer_first_start))

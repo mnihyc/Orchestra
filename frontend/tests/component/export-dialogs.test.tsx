@@ -277,7 +277,7 @@ describe('a document as one file', () => {
   it('tells a person who reads it and may not export it for whom it is, and does not ask the server', async () => {
     document({}, ['doc.view']);
     draw(<DocumentFile target={target('document', 'Rollout plan')} open onClose={() => undefined} />);
-    expect(await screen.findByText('Taking this away as a file is for people Ada Lovelace names')).toBeInTheDocument();
+    expect(await screen.findByText('Only people Ada Lovelace names can export this as a file')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Export' }));
     expect(exportDocumentFile).not.toHaveBeenCalled();
   });

@@ -25,7 +25,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   useLocation: () => ({ pathname: '/resources/hosts/host', search: {}, searchStr: '' }),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/resources/ComponentUpdate', async (load) => ({ ...await load<object>(), useComponentUpdateAct: () => () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,

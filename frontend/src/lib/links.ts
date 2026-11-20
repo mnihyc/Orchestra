@@ -5,7 +5,7 @@ import { publicOrchLink, readOrchLink } from '@/lib/orchLinks';
 export { readOrchLink } from '@/lib/orchLinks';
 
 export type LinkKind = InlineRefKind | NodeKind | 'person' | 'group' | 'document_container'
-  | 'provider' | 'machine' | 'host' | 'environment' | 'agent' | 'template' | 'mcp_server' | 'mount' | 'skill';
+  | 'provider' | 'machine' | 'host' | 'environment' | 'agent' | 'template' | 'mcp_server' | 'mount' | 'skill' | 'pool';
 
 export interface LinkObject {
   kind: LinkKind;
@@ -43,7 +43,7 @@ const routes = {
   org: '/org/$id', project: '/project/$id', topic: '/topic/$id', thread: '/thread/$id', document: '/doc/$id', chat: '/chat/$id',
   document_container: '/document-folder/$id', person: '/u/$id', provider: '/resources/providers/$id', machine: '/resources/machines/$id',
   host: '/resources/hosts/$id', environment: '/resources/environments/$id', agent: '/resources/agents/$id',
-  template: '/resources/templates/$id', mcp_server: '/resources/mcp/$id', mount: '/resources/mounts/$id', skill: '/resources/skills/$id',
+  template: '/resources/templates/$id', mcp_server: '/resources/mcp/$id', mount: '/resources/mounts/$id', skill: '/resources/skills/$id', pool: '/resources/pools/$id',
 } as const;
 
 function objectPath(kind: keyof typeof routes, id: string): string {

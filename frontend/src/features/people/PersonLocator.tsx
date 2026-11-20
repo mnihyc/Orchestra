@@ -11,6 +11,17 @@ import { Avatar } from '@/ui/Avatar';
 import { Combobox } from '@/ui/Combobox';
 import { ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceException, DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
+import { UserChip } from '@/ui/UserChip';
+
+function readablePerson(value: unknown): value is UserRef {
+  if (typeof value !== 'object' || value === null) return false;
+  const id: unknown = Reflect.get(value, 'id'), name: unknown = Reflect.get(value, 'display_name'), username: unknown = Reflect.get(value, 'username'), kind: unknown = Reflect.get(value, 'kind'), avatar: unknown = Reflect.get(value, 'avatar');
+  if (typeof avatar !== 'object' || avatar === null) return false;
+  const text: unknown = Reflect.get(avatar, 'text'), color: unknown = Reflect.get(avatar, 'color');
+  return typeof id === 'string' && typeof name === 'string' && typeof username === 'string' && (kind === 'human' || kind === 'service') && typeof text === 'string' && typeof color === 'number';
+}
 
 export function PersonLocator({ label, value, person, orgId = null, onChoose }: {
   label: string;
@@ -30,6 +41,10 @@ export function PersonLocator({ label, value, person, orgId = null, onChoose }: 
   const hits = open && searchable && !waiting && !people.isError ? people.data ?? [] : [];
   const choose = (person: UserRef | null) => { onChoose(person); setTyped(''); };
   const selected = value === null ? t('trace.anyPerson') : person?.id === value ? person.display_name : t('trace.selectedPerson');
+  const observation = deviceChoiceOf(onChoose);
+  const savedId: unknown = typeof observation?.saved === 'object' && observation.saved !== null ? Reflect.get(observation.saved, 'id') : undefined;
+  const known = readablePerson(person) ? person : null;
+  const savedPerson = known?.id === savedId ? known : hits.find((hit) => hit.id === savedId);
   const press = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.target.getAttribute('role') !== 'combobox') return;
     // IME commits text; every other Enter stays in this locator, including an empty or dismissed list.
@@ -38,6 +53,8 @@ export function PersonLocator({ label, value, person, orgId = null, onChoose }: 
   return <div className="flex min-w-0 flex-col gap-1" onKeyDownCapture={press}>
     <div className="flex min-w-0 items-end gap-1">
       <Combobox label={label} query={typed} onQueryChange={setTyped} onOpenChange={setOpen}
+        aside={observation === undefined ? undefined : <DeviceChoiceException observation={observation} />}
+        facts={observation === undefined ? undefined : <DeviceChoiceFacts observation={observation} current={value === null ? t('trace.anyPerson') : known === null ? undefined : <UserChip user={known} />} saved={observation.saved === null ? t('trace.anyPerson') : savedPerson === null || savedPerson === undefined ? undefined : <UserChip user={savedPerson} />} inline />}
         displayValue={selected} placeholder={t('finder.bare.people')} fieldClassName="min-w-0 flex-1"
         loading={searchable && (waiting || people.isFetching)}
         empty={failed ? undefined : t(searchable ? 'trace.noPeople' : 'finder.namesMinimum')}

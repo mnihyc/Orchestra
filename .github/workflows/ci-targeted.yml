@@ -14,10 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  messages:
+    uses: ./.github/workflows/public-history.yml
+
   targeted:
     name: Targeted Rust (${{ github.ref_name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    outputs:
+      first_start: ${{ steps.checks.outputs.first_start }}
     services:
       # The database the deployment runs, by the same digest, as in the whole CI.
       postgres:
@@ -58,15 +63,85 @@ jobs:
       - name: Plan the assigned native fixtures
         id: native-fixtures
         run: |
+          python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_fixtures.py'
+          python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_targeted.py'
           fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --targets .ci-targets --plan)
           printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
+      - name: Install the deployment database search extensions
+        if: fromJSON(steps.native-fixtures.outputs.plan).search_extensions
+        env:
+          ORCH_CI_POSTGRES: ${{ job.services.postgres.id }}
+        # Match the full CI's pinned deployment libraries before any fixture template is migrated.
+        run: |
+          set -euo pipefail
+          docker build --tag orch-ci-database ./deploy/postgres
+          docker run --rm --entrypoint tar orch-ci-database -C /usr/local -cf - lib/postgresql/vector.so lib/postgresql/pg_bigm.so share/postgresql/extension |
+            docker exec -i "$ORCH_CI_POSTGRES" tar -C /usr/local -xf -
+          docker exec "$ORCH_CI_POSTGRES" psql -U orch -d postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_bigm;'
       - name: Install the native fixtures' C compiler
         if: ${{ fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector }}
         run: |
           bash .github/scripts/ci_apt_mirror.sh
           sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - name: Run the Rust checks .ci-targets names
-        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust
+        id: checks
+        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust --defer-first-start
+
+  first-start-inputs:
+    name: Build the installation CLI and native programs
+    needs: targeted
+    if: needs.targeted.outputs.first_start == 'true'
+    runs-on: ubuntu-24.04
+    # Use the release CLI runner's time and memory allowance for the serial musl build.
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '1'
+      RUST_MIN_STACK: '33554432'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare memory for the command-line build
+        run: bash .github/scripts/ci_memory.sh
+      - name: Build the native programs for first start
+        run: |
+          python3 .github/scripts/ci_memory_watch.py python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group inputs
+          tar -C .tmp/first-start-inputs -cf .tmp/first-start-inputs.tar cli native
+      - name: Keep the executable native inputs for first start
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-start-inputs
+          path: .tmp/first-start-inputs.tar
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: true
+
+  first-start:
+    name: Packaged installation
+    needs: first-start-inputs
+    runs-on: ubuntu-24.04
+    # The server compiles the same release engine on a fresh runner.
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: first-start-inputs
+          path: .tmp
+      - name: Prepare memory for server packaging
+        run: bash .github/scripts/ci_memory.sh
+      - name: Package the server and run first start with this commit's native programs
+        run: |
+          mkdir -p .tmp/first-start-inputs
+          tar -C .tmp/first-start-inputs -xf .tmp/first-start-inputs.tar
+          python3 .github/scripts/ci_memory_watch.py python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group install
 
   targeted-web:
     name: Targeted web (${{ github.ref_name }})
