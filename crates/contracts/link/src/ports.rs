@@ -81,6 +81,9 @@ impl std::hash::Hash for HostPortPeer {
 /// Current authority and the recorded ingress of a short-lived port use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PortTicketClaims {
+    /// Personal TCP use may also select an operator-named loopback listener.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub machine_reach: bool,
     /// The environment that owns the destination socket.
     pub environment_id: Id,
     /// The current runtime generation, checked at the last hop.

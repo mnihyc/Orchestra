@@ -26,6 +26,7 @@ async fn put(world: &World, who: &Who, at: Id, key: &str, value: Json, locked: b
         .call(NodeSettingSet, &[&at, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,

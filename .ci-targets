@@ -1,0 +1,1 @@
+test -p orch-api-core --test everything_scale --release -- simultaneous:: --nocapture --test-threads=1
