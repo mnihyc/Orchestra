@@ -84,7 +84,7 @@ pub async fn export_snapshot(conn: &mut Conn) -> Result<Snapshot, DbError> {
           'homes',jsonb_build_object('count',0,'included',false,'entries','[]'::jsonb,'reason','no registered homes'),
           'provider_states',jsonb_build_object('count',0,'included',false,'entries','[]'::jsonb,'reason','no registered provider runtimes'))
           || COALESCE((SELECT jsonb_object_agg(category,inventory) FROM grouped),'{}'::jsonb) || jsonb_build_object(
-          'blobs',jsonb_build_object('count',(SELECT count(*) FROM blobs),'included',false,'location','runtime/data/blobs',
+          'blobs',jsonb_build_object('count',(SELECT count(*) FROM blobs),'included',false,'location','/var/lib/orch/blobs',
             'location_status','known','reason','database references are not immutable blob bytes'),
           'browser_profiles',jsonb_build_object('count',null,'environments_requiring_inspection',(SELECT count(*) FROM envs),
             'included',false,'location_status','unknown','reason','no complete profile inventory exists; inspect the environment home/workspace'),
