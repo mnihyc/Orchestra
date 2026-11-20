@@ -49,6 +49,8 @@ export interface VirtualListProps {
   endSlackPx?: number;
   /** How near the start the reader has to come to be handed older rows, in pixels. */
   nearStartPx?: number;
+  /** Oldest loaded sequence while another page may be requested. */
+  olderCursor?: number | undefined;
   onNearStart?: () => void;
   onAtEnd?: (atEnd: boolean) => void;
   /** The rows that are in view now: the first and the last. */
@@ -109,6 +111,7 @@ export function VirtualList({
   startAtEnd = true,
   endSlackPx = END_SLACK_PX,
   nearStartPx = NEAR_START_PX,
+  olderCursor,
   onNearStart,
   onAtEnd,
   onRange,
@@ -372,6 +375,54 @@ export function VirtualList({
     };
   }, [checkEnd, follow, scroller, viewport, endOffset]);
 
+  const reachedCursor = useRef<number | undefined>(undefined);
+  const checkStart = useCallback((element: HTMLDivElement) => {
+    if (element.scrollTop - scrollMargin >= nearStartPx) {
+      reachedCursor.current = undefined;
+      return;
+    }
+    if (olderCursor !== undefined) reachedCursor.current = olderCursor;
+    onNearStart?.();
+  }, [nearStartPx, scrollMargin, olderCursor, onNearStart]);
+
+  // Prepending a page of folded work may keep the reader inside the same upper
+  // edge without another scroll event. Recheck after the virtualizer anchors it.
+  useLayoutEffect(() => {
+    if (olderCursor === undefined || reachedCursor.current === undefined || olderCursor >= reachedCursor.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (scroller.current !== null && reachedCursor.current !== undefined && olderCursor < reachedCursor.current) checkStart(scroller.current);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [olderCursor, checkStart, scroller]);
+
+  useEffect(() => {
+    const element = scroller.current;
+    if (element === null || onNearStart === undefined) return;
+    // At the physical top there may be upward wheel or key input without any scroll.
+    const upwardAtTop = () => { if (element.scrollTop <= 0) checkStart(element); };
+    const wheel = (event: WheelEvent) => { if (event.deltaY < 0) upwardAtTop(); };
+    let touchY: number | undefined;
+    const touchStart = (event: TouchEvent) => { touchY = event.touches[0]?.clientY; };
+    const touchMove = (event: TouchEvent) => {
+      const next = event.touches.length === 1 ? event.touches[0]?.clientY : undefined;
+      if (touchY !== undefined && next !== undefined && next > touchY) upwardAtTop();
+      touchY = next;
+    };
+    const key = (event: KeyboardEvent) => {
+      if (!event.defaultPrevented && ['Home', 'PageUp', 'ArrowUp'].includes(event.key) && element.scrollTop <= 0) checkStart(element);
+    };
+    element.addEventListener('wheel', wheel, { passive: true });
+    element.addEventListener('keydown', key);
+    element.addEventListener('touchstart', touchStart, { passive: true });
+    element.addEventListener('touchmove', touchMove, { passive: true });
+    return () => {
+      element.removeEventListener('wheel', wheel);
+      element.removeEventListener('keydown', key);
+      element.removeEventListener('touchstart', touchStart);
+      element.removeEventListener('touchmove', touchMove);
+    };
+  }, [scroller, checkStart, onNearStart]);
+
   const check = useCallback(() => {
     const element = scroller.current;
     if (element === null) return;
@@ -380,8 +431,8 @@ export function VirtualList({
       const first = virtualizer.getVirtualItems().find((row) => row.end > element.scrollTop);
       onPosition({ key: near || first === undefined ? null : keyOf(first.index), offset: first === undefined ? 0 : Math.max(0, element.scrollTop - first.start), atEnd: near });
     }
-    if (element.scrollTop < nearStartPx) onNearStart?.();
-  }, [checkEnd, nearStartPx, onNearStart, onPosition, keyOf, virtualizer, scroller]);
+    if (!near || reachedCursor.current !== undefined) checkStart(element);
+  }, [checkEnd, checkStart, onPosition, keyOf, virtualizer, scroller]);
 
   useEffect(() => {
     if (viewport === undefined || viewport === null) return;

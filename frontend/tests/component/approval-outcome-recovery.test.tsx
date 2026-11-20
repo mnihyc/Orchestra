@@ -9,6 +9,7 @@ import type * as Approvals from '@/api/approvals';
 import type * as Auth from '@/api/auth';
 import { ApiError } from '@/api/client';
 import { WaitingList } from '@/features/approvals/ApprovalList';
+import { DecidedCard } from '@/features/approvals/Card';
 import type { Approval } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
@@ -29,7 +30,7 @@ vi.mock('@/api/approvals', async (load) => ({ ...await load<typeof Approvals>(),
 }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['outcome-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useUserFeed: () => undefined, useSocketStatus: () => ({ phase: 'ready' }) }));
-vi.mock('@/realtime/stores/tree', () => ({ useNodePath: () => ({ path: [] }) }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodePath: () => ({ path: [] }) }));
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: { display_name: string } }) => <span>{user.display_name}</span> }));
 
@@ -48,6 +49,25 @@ async function removeFromList() {
 }
 function showWaiting() {
   return show(<><Capture /><WaitingList shape={{ filter: { scope: 'mine', state: 'pending' }, empty: { title: 'Nothing waits', description: '' } }} /></>);
+}
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps an accepted decision separate from delivery and reports a missing old receipt (${locale})`, async () => {
+    await setLocale(locale);
+    const delivery: NonNullable<Approval['delivery']> = { recipient_kind: 'native_harness', state: 'pending', last_attempt_at: null, problem: null };
+    const pending: Approval = { ...decided, delivery };
+    const view = show(<DecidedCard approval={pending} />);
+    expect(screen.getByText(locale === 'en' ? 'Decision accepted · Delivery pending' : '决定已接受 · 等待送达')).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { expanded: false }));
+    const body = view.container.querySelector('[data-fact-disclosure-body]');
+    expect(body).toHaveTextContent(locale === 'en' ? 'Delivery' : '送达状态');
+    view.rerender(<DecidedCard approval={{ ...decided, delivery: { ...delivery, state: 'applied', last_attempt_at: decided.decided_at } }} />);
+    expect(screen.queryByText(locale === 'en' ? 'Decision accepted · Delivery pending' : '决定已接受 · 等待送达')).toBeNull();
+    expect(body).toHaveTextContent(locale === 'en' ? 'Applied' : '已送达');
+    view.rerender(<DecidedCard approval={decided} />);
+    expect(body).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+    expect(body).not.toHaveTextContent(locale === 'en' ? 'Applied' : '已送达');
+  });
 }
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {

@@ -1578,6 +1578,7 @@ mod retained_host_tests {
             tool_executor_version: None,
             exp: at.unix_millis().div_euclid(1000) + 3600,
             port: Some(PortTicketClaims {
+                machine_reach: false,
                 environment_id: new_id(),
                 generation: 2,
                 port: 9000,

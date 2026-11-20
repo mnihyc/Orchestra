@@ -1,0 +1,1 @@
+test -p orch-api-core --test providers -- a_provider_owner_can_change_the_expiry_notice_and_return_to_the_inherited_value
