@@ -251,6 +251,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,6 +427,7 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
@@ -441,6 +443,7 @@ pub struct ScriptedCommands {
     link: Mutex<ControllerLink>,
     others: Mutex<HashMap<Id, ControllerLink>>,
     issued: Mutex<HashMap<Id, Issued>>,
+    lost_waits: Mutex<HashSet<String>>,
     clock: Arc<dyn Clock>,
     process: AtomicU64,
     /// Whether the link says that it holds events of a machine not taken in yet ([`World::hearing_behind`]).
@@ -458,6 +461,7 @@ impl ScriptedCommands {
             link: Mutex::new(link),
             others: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashMap::new()),
+            lost_waits: Mutex::new(HashSet::new()),
             clock,
             process: AtomicU64::new(1),
             behind: AtomicBool::new(false),
@@ -558,6 +562,11 @@ impl ScriptedCommands {
             .values()
             .filter(|entry| entry.cmd.kind == kind)
             .count()
+    }
+
+    /// Loses a live waiter's result after the machine answered; the retained status still has it.
+    pub fn lose_waits_of(&self, kind: CommandKind) {
+        lock(&self.lost_waits).insert(kind.as_str().to_owned());
     }
 
     /// The commands of a kind as they were issued (a secret still the reference to it, a ticket still the
@@ -669,7 +678,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -690,6 +699,14 @@ impl Commands for Process {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -726,6 +743,26 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let before = if let Some(facts) = command.input_facts.as_deref() {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            orch_engine::commands::retain_input_facts(&mut tx, facts, command.id, &command.body)
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -755,6 +792,7 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
@@ -782,6 +820,14 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        let loses_wait = lock(&self.commands.issued).get(&id).is_some_and(|issued| {
+            lock(&self.commands.lost_waits).contains(issued.cmd.kind.as_str())
+        });
+        if loses_wait {
+            return Err(CommandsError::Other(
+                "the live waiter lost its reply after the command ended".to_owned(),
+            ));
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 
@@ -1193,6 +1239,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1733,11 +1780,13 @@ impl World {
                     Command::ProviderStop(_) => CommandResult::ProviderStop(Empty {}),
                     Command::AgentStop(_) => CommandResult::AgentStop(Empty {}),
                     Command::AgentStart(_) => CommandResult::AgentStart(AgentStartResult {
+                        home: None,
                         reused: false,
                         harness_version: "1.0.0".to_owned(),
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1795,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt
@@ -2076,6 +2132,41 @@ impl World {
         self.scalar(sql, id).await
     }
 
+    /// Bulk validation changes the item table and the foreign key triggers on its referenced tables.
+    /// Live readers may visit those tables in a different order. Release a partial lock set before waiting.
+    async fn lock_history_tables(&self) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let statement: String = sqlx::query_scalar(
+            "SELECT 'LOCK TABLE ' || string_agg(rel::regclass::text, ', ' ORDER BY rel)
+                    || ' IN ACCESS EXCLUSIVE MODE NOWAIT'
+             FROM (SELECT 'items'::regclass::oid AS rel
+                   UNION SELECT confrelid FROM pg_constraint
+                   WHERE conrelid='items'::regclass AND contype='f') AS required",
+        )
+        .fetch_one(self.pool.pool())
+        .await
+        .unwrap();
+        tokio::time::timeout(PATIENCE, async {
+            loop {
+                let mut tx = self.pool.pool().begin().await.unwrap();
+                match sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+                    .execute(&mut *tx)
+                    .await
+                {
+                    Ok(_) => return tx,
+                    Err(sqlx::Error::Database(error))
+                        if error.code().as_deref() == Some("55P03") =>
+                    {
+                        tx.rollback().await.unwrap();
+                    }
+                    Err(error) => panic!("could not lock the history fixture tables: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the fixture tables become available after their current readers finish")
+    }
+
     /// Grows a thread that has at least one turn to `turns` turns by SQL: each new turn copies the first, with its items,
     /// in a few statements and with no row made one at a time. The history that results is one a person would not tell
     /// from a long one.
@@ -2125,7 +2216,7 @@ impl World {
         // A lateral record evaluates the JSON conversion once per row; the small template is materialized once.
         // The copies name what the template names: reading that out of each copy, a row at a time, is the reference
         // trigger's work and no part of what a long history proves, so it is off for this one statement.
-        let mut tx = self.pool.pool().begin().await.unwrap();
+        let mut tx = self.lock_history_tables().await;
         sqlx::query("ALTER TABLE items DISABLE TRIGGER related_thread_references")
             .execute(&mut *tx)
             .await

@@ -116,7 +116,7 @@ test('at 400 pixels filters fold away and complete rows use the page instead of 
   await expect(card.getByText('Created', { exact: true })).toBeVisible();
 });
 
-test('the admin column follows the session switch while Created remains the person’s choice', async ({ page }) => {
+test('administrator mode keeps the table columns chosen by the person', async ({ page }) => {
   await signIn(page);
   await page.goto('/everything');
   const tree = page.getByRole('treegrid', { name: 'Everything I can see' });
@@ -126,7 +126,7 @@ test('the admin column follows the session switch while Created remains the pers
   await page.getByRole('menuitemcheckbox', { name: 'Created', exact: true }).click();
   await expect(tree.getByRole('columnheader', { name: 'Created', exact: true })).toBeVisible();
   await asAdmin(page, true);
-  await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toBeVisible();
+  await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toHaveCount(0);
   await asAdmin(page, false);
   await expect(tree.getByRole('columnheader', { name: 'As admin', exact: true })).toHaveCount(0);
   await expect(tree.getByRole('columnheader', { name: 'Created', exact: true })).toBeVisible();
@@ -171,7 +171,7 @@ test('a shared leaf is reachable through minimal redacted path steps and a membe
   const tree = page.getByRole('treegrid', { name: 'Everything I can see' });
   await tree.getByRole('button', { name: 'Expand Shared with me', exact: true }).click();
   const root = tree.getByRole('row').filter({ hasText: 'Private place' });
-  await expect(root).toContainText('Path only');
+  await expect(root).toContainText('Navigation only');
   await expect(root.getByRole('link')).toHaveCount(0);
   await expect(root.getByRole('button', { name: /Actions for/ })).toHaveCount(0);
   await root.getByRole('button', { name: 'Expand Private place', exact: true }).click();

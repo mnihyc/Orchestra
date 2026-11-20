@@ -139,11 +139,12 @@ async fn message_key(s: &Scene, history_read: bool) -> Proof<String> {
         "allow":[{"operation":"AskMessageCreate","actions":actions}]
     }]}))?;
     assert!(scope.validate().is_empty());
-    let bearer = authentication::new_token(authentication::API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let bearer = authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut conn,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: person,
             name: "Question history permission",
             token_hash: &authentication::token_hash(&bearer),
@@ -1110,7 +1111,7 @@ async fn ordinary_members_cannot_add_or_open_another_persons_ask_attachment() ->
     s.app
         .app
         .blobs
-        .register(&mut conn, meta, s.transport.clock.now())
+        .register(&mut conn, &meta, s.transport.clock.now())
         .await?;
     orch_db::queries::uploads::remember(&mut conn, owner, &meta.hash, s.transport.clock.now())
         .await?;
