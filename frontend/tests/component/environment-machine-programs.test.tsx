@@ -32,7 +32,7 @@ vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefin
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/AgentReach', () => ({ AgentReach: () => null }));
 vi.mock('@/features/resources/agents/ProgramBuild', () => ({ EnvironmentPrograms: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>, PageHeader: ({ title }: { title: ReactNode }) => <header><h1>{title}</h1></header> }));
 
@@ -61,7 +61,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(screen.getByRole('tab', { name: i18n.t('resourceDetails.layout.tools') }));
     expect(await screen.findByRole('heading', { name: locale === 'en' ? 'Codex tools' : 'Codex 工具' })).toBeVisible();
     expect(screen.getByText(program.version)).toBeVisible(); expect(screen.getByText('…/agent bins/codex')).toBeVisible();
-    expect(screen.getByRole('switch', { name: locale === 'en' ? 'Any agent version' : '任意代理版本' })).not.toBeChecked();
+    expect(screen.getByRole('switch', { name: locale === 'en' ? 'Any agent version' : '任意智能体版本' })).not.toBeChecked();
     await waitFor(() => expect(calls.mcp).toHaveBeenCalledTimes(1)); expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.write).not.toHaveBeenCalled();
   });
 }

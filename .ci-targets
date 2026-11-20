@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web-e2e --project=chromium --workers=1 --retries=0 tests/e2e/native-web-items.spec.ts --grep "a reader sees one Working line"
+web test

@@ -3,7 +3,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::Json;
@@ -19,7 +19,8 @@ async fn key(world: &World, user: Id, rules: Vec<Json>, legacy: bool) -> String 
     if !legacy {
         assert!(scope.validate().is_empty());
     }
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let value = serde_json::to_value(scope).unwrap();
     let legacy_scopes = if legacy {
         vec!["ports.manage".to_owned()]
@@ -29,7 +30,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>, legacy: bool) -> String 
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native port capability control",
             token_hash: &token_hash(&secret),

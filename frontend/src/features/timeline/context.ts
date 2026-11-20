@@ -6,6 +6,8 @@
 import { createContext, useContext } from 'react';
 
 import type { WorkDetail } from '@/features/timeline/rows';
+import type { Turn } from '@/generated/api-types';
+import { useThreadPart } from '@/realtime/stores/thread';
 import type { DiffLayout } from '@/ui/DiffView';
 
 /** What picking items does to an item: whether the conversation is being picked from, whether this one is picked, and how to pick it. */
@@ -32,6 +34,15 @@ export type SelectPromptVersion = (continuationId: string | null, anchor?: Promp
 export interface PromptFocus { groupId: string; request: number }
 
 export interface TimelineContext {
+  /** A lane owns its order and recorded turn facts independently of the main stream. */
+  conversation?: {
+    order: readonly string[];
+    turns: ReadonlyMap<string, Turn>;
+    hasOlder: boolean;
+    hasNewer: boolean;
+    stream?: string;
+    ending?: 'recorded' | 'lost';
+  };
   /** Stored inspection uses an isolated renderer key and this actual id only for authorized stored reads. */
   inspection?: { threadId: string; continuationId?: string } | undefined;
   /** A child stream uses the same displays with tighter spacing and no composer of its own. */
@@ -46,13 +57,13 @@ export interface TimelineContext {
   threadId: string;
   /** The thread's name, for what is said of other places. */
   threadName: string;
+  /** How the reader reads: Normal, Verbose or Diagnostics. */
   detail: WorkDetail;
-  /** A live reading opens current tool output; stored/child renderers opt in explicitly. */
-  liveTools?: boolean;
+  hideHistory?: boolean;
+  /** Explicit navigation reveals these rows without changing the saved reading preference. */
+  revealed?: ReadonlySet<string>;
   /** This screen mounts each waiting decision once above its composer. */
   pinApprovals?: boolean;
-  /** Turns whose work is shown step by step in Steps. */
-  recent: ReadonlySet<string>;
   layout: DiffLayout;
   setLayout: (layout: DiffLayout) => void;
   meId: string | null;
@@ -71,8 +82,7 @@ export interface TimelineContext {
 const NOWHERE: TimelineContext = {
   threadId: '',
   threadName: '',
-  detail: 'steps',
-  recent: new Set(),
+  detail: 'normal',
   layout: 'one',
   setLayout: () => undefined,
   meId: null,
@@ -87,4 +97,16 @@ export const TimelineContextValue = createContext<TimelineContext>(NOWHERE);
 
 export function useTimelineContext(): TimelineContext {
   return useContext(TimelineContextValue);
+}
+
+export function useConversationTurn(turnId: string | null): Turn | undefined {
+  const { threadId, conversation } = useTimelineContext();
+  const held = useThreadPart(threadId, (view) => turnId === null ? undefined : view.turns.get(turnId));
+  return conversation === undefined ? held : turnId === null ? undefined : conversation.turns.get(turnId);
+}
+
+export function useConversationOrder(threadId: string): readonly string[] {
+  const context = useTimelineContext();
+  const held = useThreadPart(threadId, (view) => view.order);
+  return context.threadId === threadId ? context.conversation?.order ?? held : held;
 }
