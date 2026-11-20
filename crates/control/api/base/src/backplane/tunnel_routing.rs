@@ -392,7 +392,11 @@ impl Link {
                 && self.supports_tunnel_attachments(source)
                 && matches!(
                     claims.kind,
-                    TunnelKind::Exec | TunnelKind::Mcp | TunnelKind::Llm | TunnelKind::Port
+                    TunnelKind::Exec
+                        | TunnelKind::Program
+                        | TunnelKind::Mcp
+                        | TunnelKind::Llm
+                        | TunnelKind::Port
                 )
             {
                 route = self.designated_plan(claims).await?;

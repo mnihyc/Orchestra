@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::definitions::{Code, Refusal};
 use super::{Answer, CallContext};
-use crate::browsers::{BrowserFailure, Browsers, CLOSED_LIST_KEPT, OpenBrowser, Requester};
+use crate::browsers::{BrowserFailure, Browsers, OpenBrowser, Requester};
 use crate::engine::Engine;
 use crate::error::EngineError;
 
@@ -117,12 +117,7 @@ impl Engine {
                     let _ = browsers.look(environment).await;
                 }
                 let mut conn = self.inner.db.acquire().await?;
-                let mut found = rows::list(
-                    &mut conn,
-                    environment,
-                    self.inner.clock.now() - CLOSED_LIST_KEPT,
-                )
-                .await?;
+                let mut found = rows::list(&mut conn, environment).await?;
                 found.retain(|r| r.state != "closed");
                 found.sort_by_key(|r| r.thread_id != Some(thread.node_id) || r.opened_by.is_some());
                 for row in &found {
@@ -242,7 +237,7 @@ impl Engine {
             BrowserFailure::Unsupported=>(Code::Unsupported,"No Chromium-family browser was found. announce takes one you start with a program of your own and --remote-debugging-port=0.".to_owned()),
             BrowserFailure::DisplayTooMany{open,max}=>(Code::TooMany,format!("{open} displays run; the limit is {max}. Use a headless browser or close an owned display.")),
             BrowserFailure::TooMany{open,max}=>{
-                let mut conn=self.inner.db.acquire().await?;let mut rows=rows::list(&mut conn,environment,self.inner.clock.now()-CLOSED_LIST_KEPT).await?;
+                let mut conn=self.inner.db.acquire().await?;let mut rows=rows::list(&mut conn,environment).await?;
                 rows.retain(|r|r.state!="closed");rows.sort_by_key(|r|r.thread_id!=Some(thread)||r.opened_by.is_some());
                 (Code::TooMany,format!("{open} browsers run; the limit is {max}. Running: {}. You may close one of your own.",rows.iter().map(|r|format!("{} on {}{}",r.id,r.profile.as_deref().unwrap_or("an unnamed profile"),if r.thread_id==Some(thread)&&r.opened_by.is_none(){" (yours)"}else{""})).collect::<Vec<_>>().join(", ")))
             }

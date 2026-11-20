@@ -281,7 +281,7 @@ pub async fn kept(s: &Scene, bytes: &[u8]) -> (orch_types::Hash, i64) {
         .unwrap();
     let mut conn = s.rig.db.acquire().await.unwrap();
     blobs
-        .register(&mut conn, meta, s.rig.world.now())
+        .register(&mut conn, &meta, s.rig.world.now())
         .await
         .unwrap();
     (meta.hash, meta.size)

@@ -258,6 +258,20 @@ pub async fn queue(
         Mode::Start => &[status::STOPPED, status::PROVISIONING],
         Mode::Copy => &[status::NONE, status::PROVISIONING],
     };
+    crate::environment_preparation::accepted_job(
+        conn,
+        environment.id,
+        environment.generation,
+        if mode == Mode::Start {
+            orch_api_contract::threads::EnvironmentPreparationKind::Start
+        } else {
+            orch_api_contract::threads::EnvironmentPreparationKind::Create
+        },
+        job.id,
+        now,
+    )
+    .await
+    .map_err(MakeError::Internal)?;
     env_rows::set_status(conn, environment.id, from, status::PROVISIONING, None, now).await?;
     Ok(job)
 }
@@ -318,11 +332,14 @@ pub struct SpecInputs<'a> {
     pub volumes: &'a Json,
 }
 
+/// The variable that gives the connector in a unit the identifier of the runtime the unit is of.
+pub const UNIT_VARIABLE: &str = "ORCH_RUNTIME_ID";
+
 /// The body of `node.runtime.create`, in the stored form: the token is the reference to the secret that
 /// holds it, which the link seals to the host's key when the command is written.
 #[must_use]
 pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
-    let env: BTreeMap<String, String> = inputs
+    let mut env: BTreeMap<String, String> = inputs
         .spec
         .get("env")
         .and_then(Json::as_object)
@@ -335,12 +352,15 @@ pub fn runtime_spec(inputs: &SpecInputs<'_>) -> Json {
                 .collect()
         })
         .unwrap_or_default();
+    // The connector in the unit keeps the state of its machine on a volume that outlives the unit: it
+    // tells its own state from that of an earlier unit by this.
+    env.insert(UNIT_VARIABLE.to_owned(), inputs.runtime.to_string());
     // A harness that runs beside the tools needs the connector in the unit to host agents as well.
     let beside = !orch_agent_programs::Programs::colocated_for(inputs.spec).is_empty();
     let roles: &[&str] = if beside {
-        &["environment", "agent"]
+        &["environment", "agent", "provider"]
     } else {
-        &["environment"]
+        &["environment", "provider"]
     };
     json!({
         "runtime_id": inputs.runtime,
@@ -563,18 +583,36 @@ impl Provision {
             &environment.config,
         )
         .await?;
+        let pool = crate::resource_choice::host::retained(&mut tx, &owner, &environment).await?;
+        let admitted = plan
+            .get("admitted_host")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value::<Id>)
+            .transpose()
+            .map_err(EngineError::from)?;
         let named: Option<Id> = if let Some(recovery) = plan.get("recovery") {
             serde_json::from_value(recovery["host"].clone()).map_err(EngineError::from)?
         } else {
             match previous {
                 Some(host) => Some(host),
-                None => setting(
+                None if admitted.is_some() => admitted,
+                None => setting::<orch_provider_contract::pools::Target>(
                     &mut tx,
                     SettingsPlace::Environment(environment.id),
                     keys::ENV_HOST_ID,
                 )
                 .await
-                .map_err(EngineError::from)?,
+                .map_err(EngineError::from)?
+                .map(|target| {
+                    target.single_host().ok_or_else(|| {
+                        failed(
+                            "pool_choice_missing",
+                            "the new environment has no admitted host pool choice",
+                        )
+                    })
+                })
+                .transpose()?,
             }
         };
         let minutes_idle = setting::<i64>(
@@ -602,6 +640,37 @@ impl Provision {
                 host,
             )
             .await?
+        } else if let Some(pool) = &pool {
+            crate::resource_choice::host::current(
+                &mut tx,
+                &principal,
+                &owner,
+                &environment,
+                pool.host().ok_or_else(|| {
+                    failed(
+                        "pool_choice_missing",
+                        "the admitted pool member is not a host",
+                    )
+                })?,
+            )
+            .await?
+            .into_iter()
+            .collect()
+        } else if let Some(host) = admitted {
+            places::host_places_for_environment_among(
+                &mut tx,
+                &principal,
+                &Ask {
+                    home: environment.home_node_id,
+                    wanted: &wanted,
+                    current: None,
+                    minutes_idle,
+                    now,
+                },
+                environment.id,
+                &[host],
+            )
+            .await?
         } else {
             places::host_places_for_environment(
                 &mut tx,
@@ -625,6 +694,7 @@ impl Provision {
                 &known,
                 template.id,
                 &wanted.mounts,
+                &pool.as_ref().map_or_else(Vec::new, |pool| pool.pools()),
                 &mut listed,
             )
             .await
@@ -643,6 +713,16 @@ impl Provision {
                 "no_capacity",
                 "The selected Use entry has no remaining environment capacity.",
             ));
+        }
+        if previous.is_none()
+            && let Some(created) = &chosen.created
+        {
+            orch_db::queries::environments::record_creation_entries(
+                &mut tx,
+                environment.id,
+                &created.pool_entries,
+            )
+            .await?;
         }
         let standalone_check = if crate::environment_creation::standalone(&owner) {
             creator_authority::selected(
@@ -718,6 +798,7 @@ impl Provision {
             &mut tx,
             job.id(),
             &json!({
+                "calculation": chosen.place.calculation,
                 "host": chosen.place.host.id,
                 "host_name": chosen.place.host.name,
                 "runtime": runtime_id,
@@ -1358,6 +1439,11 @@ impl Provision {
                     spec[field] = value.clone();
                 }
             }
+            // What was kept says which runtime the old unit was of; this unit is of its own, and its connector
+            // puts the machine of the old unit aside by that.
+            if let Some(env) = spec["env"].as_object_mut() {
+                env.insert(UNIT_VARIABLE.to_owned(), json!(placed.runtime.id));
+            }
         }
         // Runtime replacement keeps the exact command definition for later recreation.
         job.remember(&json!({ "created_spec": spec })).await?;
@@ -1829,7 +1915,7 @@ impl Provision {
                     "Recovery files and history were not verified",
                 ));
             }
-            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(recipe.host)).execute(&mut *tx).await.map_err(DbError::from)?;
+            sqlx::query("UPDATE environments SET lost_at=NULL,lost_by=NULL,loss_missing=false,removal_phase=NULL,config=jsonb_set(config,'{env.host_id}',$2),revision=revision+1 WHERE id=$1").bind(current.id).bind(json!(orch_provider_contract::pools::Target::host(recipe.host))).execute(&mut *tx).await.map_err(DbError::from)?;
             crate::recovery::commit_threads(
                 job,
                 &mut tx,
@@ -1842,7 +1928,8 @@ impl Provision {
             )
             .await?;
         }
-        crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
+        let copy_released =
+            crate::initial_files::release(&mut tx, job.id(), Time::new(now)).await?;
         if self.mode == Mode::Make {
             crate::resource_facts::library::created(
                 &mut tx,
@@ -1887,6 +1974,9 @@ impl Provision {
             checked.check(self.engine.inner.clock.as_ref())?;
         }
         tx.commit().await.map_err(DbError::from)?;
+        if let Some(released) = copy_released {
+            released.settle(&self.engine).await;
+        }
         Ok(Done::Finished)
     }
 
@@ -1914,11 +2004,12 @@ impl Provision {
 
     async fn undo_make(&self, job: &Job, why: &Stop) -> Undone {
         if let Ok(mut tx) = self.engine.db().begin().await
-            && crate::initial_files::release(&mut tx, job.id(), Time::new(job.now()))
-                .await
-                .is_ok()
+            && let Ok(released) =
+                crate::initial_files::release(&mut tx, job.id(), Time::new(job.now())).await
+            && tx.commit().await.is_ok()
+            && let Some(released) = released
         {
-            let _ = tx.commit().await;
+            released.settle(&self.engine).await;
         }
         let Ok(plan) = job.plan().await else {
             return Undone::Partly("the job's plan could not be read".to_owned());
@@ -2238,6 +2329,7 @@ impl Phased for Provision {
             "runtime": plan.get("runtime"),
             "host": plan.get("host"),
             "warnings": plan.get("warnings"),
+            "calculation": plan.get("calculation"),
         }))
     }
 }
@@ -2337,8 +2429,12 @@ mod tests {
             spec["enroll_token"],
             json!({ "$secret": enrollment.secret })
         );
-        assert_eq!(spec["roles"], json!(["environment"]));
-        assert_eq!(spec["env"], json!({ "A": "b" }), "only text is a variable");
+        assert_eq!(spec["roles"], json!(["environment", "provider"]));
+        assert_eq!(
+            spec["env"],
+            json!({ "A": "b", "ORCH_RUNTIME_ID": runtime }),
+            "only text is a variable, and the unit is told which runtime it is of"
+        );
         assert_eq!(spec["labels"]["orch.system"], "acme");
         assert_eq!(spec["labels"]["orch.kind"], "environment");
         assert!(
