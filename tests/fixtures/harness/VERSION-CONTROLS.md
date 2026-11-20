@@ -21,6 +21,5 @@ the shared selector tests include Codex, Claude Code, dsh and a fourth kind.
 | dsh index spelling preserves one build identity | API `hosting::upgrade_tests::a_python_index_pre_release_pin_keeps_the_canonical_existing_build_identity` |
 | A fourth manifest gets native interface checks without new program code | API `harness_checks::a_program_that_is_nothing_but_a_manifest_has_its_builds_checked_by_its_interface_alone` |
 
-These are test names, not claims that this checkout ran them. The integrator
-compiles and runs the named native suites. Live vendor smoke remains independent
-of schema-derived or scripted offline evidence.
+These are test names; run the named native suites to see them pass. Live vendor
+smoke remains independent of schema-derived or scripted offline evidence.

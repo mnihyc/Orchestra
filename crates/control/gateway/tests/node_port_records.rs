@@ -41,6 +41,7 @@ async fn current_node_memory_reaches_the_api_with_its_owner_peers_and_reset_with
     records.opened(
         connection,
         &PortTicketClaims {
+            machine_reach: false,
             environment_id: environment,
             generation: 1,
             port: 3000,
