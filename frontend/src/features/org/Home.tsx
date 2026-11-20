@@ -93,7 +93,7 @@ function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />
     <OverviewRows org={org} onTab={onTab} participating={participating} />
-    {org.readme !== null && <PlaceReadme readme={org.readme} />}
+    {org.readme !== null && <PlaceReadme readme={org.readme} nodeId={org.id} />}
   </div>;
 }
 

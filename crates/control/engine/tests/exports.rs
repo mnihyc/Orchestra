@@ -672,6 +672,10 @@ async fn files_and_earlier_versions_go_in_when_they_are_asked_for_and_a_file_pas
         .map(|each| each.count)
         .sum();
     assert_eq!(too_large, 3, "the large file of each: {:?}", plan.left_out);
+    assert_eq!(
+        serde_json::to_value(plan.limits).unwrap()["max_file_bytes"],
+        64
+    );
     let made = o
         .world
         .engine()
@@ -680,6 +684,7 @@ async fn files_and_earlier_versions_go_in_when_they_are_asked_for_and_a_file_pas
         .unwrap();
     let ended = o.ended(&made).await;
     assert_eq!(ended.state, "succeeded", "{:?}", ended.error);
+    assert_eq!(ended.result.as_ref().unwrap()["omitted_items"], 3);
     let held = o.contents(o.world.ada, made.export.id).await;
     assert_eq!(
         entry(&held, "conversations/Writer.files/0001/in-1-notes.txt"),

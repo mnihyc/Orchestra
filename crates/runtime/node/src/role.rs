@@ -531,6 +531,7 @@ impl RoleHandler for NodeRole {
             id,
             Arc::clone(&node.clock),
             report,
+            call.work_deadline.clone(),
             cancel.clone(),
             u64::from(command.kind().deadline_secs()),
         );
