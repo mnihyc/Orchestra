@@ -61,6 +61,7 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(token)
         .body(&UploadSessionCreateBody {
+            to: None,
             name: "authored.txt".into(),
             size: bytes.len() as i64,
             media_type: Some("text/plain".into()),
@@ -85,6 +86,8 @@ async fn uploaded(app: &TestApp, token: &str, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained private upload has completed verification")
         .blob
 }
 
@@ -103,6 +106,19 @@ async fn read_job(app: &TestApp, token: &str, id: Id) -> Job {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_cancelled_and_keeps_the_authored_target()
  {
+    // This single-test executable also exercises blocking Docker cleanup.
+    // An independent timer can still report a stall if the async runtime stops responding.
+    let (_finished, completion) = std::sync::mpsc::channel::<()>();
+    let _watchdog = std::thread::spawn(move || {
+        if matches!(
+            completion.recv_timeout(common::PATIENCE * 3),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ) {
+            eprintln!("native upload probe exceeded three fixture wait periods");
+            std::process::exit(1);
+        }
+    });
+    eprintln!("native upload: starting the Docker lab");
     let Some(lab) = Lab::start().await else {
         return;
     };
@@ -113,6 +129,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         .set_applier(Arc::new(EngineApplier::new(world.api.app.engine.clone())));
     let mut node = NodeUnderTest::start(&world, &lab).await;
     let fleet = Fleet::new(&world, &lab, &node);
+    eprintln!("native upload: preparing the connector and enrolling the machine");
     let _program = fleet.prepare().await;
     let unit = fleet.unit("upload-stop");
     fleet.make(&unit, None).await.unwrap();
@@ -156,6 +173,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
     .await
     .unwrap();
     drop(conn);
+    eprintln!("native upload: attaching the environment");
     world
         .api
         .link
@@ -170,6 +188,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
                 data_sources: None,
                 environment_id: unit.environment_id,
                 workspace_root: None,
+                workspace: Default::default(),
                 ignore: Vec::new(),
                 index: IndexMode::Full,
                 mounts: Some(Vec::new()),
@@ -179,6 +198,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         )
         .await
         .unwrap();
+    eprintln!("native upload: waiting for the machine write policy");
     eventually("the physical machine's write policy", || async {
         let mut conn = world.db.acquire().await.unwrap();
         !orch_db::queries::environment_facts::refuses(
@@ -202,6 +222,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
     // More than two maximum link pieces forces an actual partial file before the held next range.
     let length = usize::try_from(orch_link_contract::content::MAX_CHUNK_BYTES * 2 + 17).unwrap();
     let bytes = vec![b'x'; length];
+    eprintln!("native upload: staging the private upload");
     let blob = uploaded(&app, &token, &bytes).await;
     let before = pin_count(&world, blob).await;
     assert_eq!(
@@ -221,6 +242,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         .token(&token)
         .query(&ThroughThreadQuery::default())
         .body(&EnvironmentUploadWriteBody {
+            relay: None,
             path: "authored.txt".into(),
             blob,
             expected_hash: Some(Hash::of(original.as_bytes()).to_string()),
@@ -233,7 +255,17 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         panic!("the first upload write answers with its full job");
     };
     assert_eq!(job.id, id);
+    eprintln!("native upload: waiting for the connector to request the held download");
     world.api.download.entered().await;
+    // A later range can arrive before the first write when the connector downloads in parallel.
+    eventually("the command-bound partial write progress", || async {
+        let current = read_job(&app, &token, id).await;
+        current.state == JobState::Running
+            && current.progress.percent < 100
+            && current.progress.bytes_done > 0
+            && current.progress.bytes_done < length as i64
+    })
+    .await;
     let staged = staged_files(&lab, &unit.name).await;
     assert_eq!(
         staged.len(),
@@ -247,24 +279,34 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
             .as_deref(),
         Some(original)
     );
-    eventually("the command-bound partial write progress", || async {
-        let current = read_job(&app, &token, id).await;
-        current.state == JobState::Running
-            && current.progress.percent < 100
-            && current.progress.bytes_done > 0
-            && current.progress.bytes_done < length as i64
-    })
-    .await;
-    assert_eq!(pin_count(&world, blob).await, before + 1);
     let current = orch_db::queries::jobs::job(&mut world.db.acquire().await.unwrap(), id)
         .await
         .unwrap()
         .unwrap();
     let command: Id = serde_json::from_value(current.plan["active_command"]["id"].clone()).unwrap();
+    let command_pins: i32 = sqlx::query_scalar(
+        "SELECT count(*)::int FROM command_blob_pins WHERE command_id=$1 AND job_id=$2 AND blob=$3",
+    )
+    .bind(command)
+    .bind(id)
+    .bind(blob.as_bytes().as_slice())
+    .fetch_one(&world.test_db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        command_pins, 1,
+        "the native reader holds its own command claim"
+    );
+    assert_eq!(
+        pin_count(&world, blob).await,
+        before + 1 + command_pins,
+        "the accepted job and its native reader each retain the content"
+    );
     assert_eq!(
         current.plan["active_command"]["machine"],
         serde_json::json!(machine)
     );
+    eprintln!("native upload: cancelling the write");
     let stopping = app.call(JobCancel, &[&id]).token(&token).send().await;
     assert!(stopping.status.is_success(), "{}", stopping.status);
     let stopping = stopping
@@ -289,6 +331,18 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         "Cancelled is downstream of the authenticated native result"
     );
     assert!(staged_files(&lab, &unit.name).await.is_empty());
+    eventually(
+        "the ended job releases both admitted and native reader claims",
+        || async { pin_count(&world, blob).await == before },
+    )
+    .await;
+    let command_pins: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM command_blob_pins WHERE command_id=$1")
+            .bind(command)
+            .fetch_one(&world.test_db.pool)
+            .await
+            .unwrap();
+    assert_eq!(command_pins, 0);
     assert_eq!(pin_count(&world, blob).await, before);
     let receipt = app
         .call(EnvironmentUploadWriteResult, &[&unit.environment_id, &id])
@@ -299,6 +353,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
     assert_eq!(receipt.status, axum::http::StatusCode::CONFLICT);
 
     // A source reply released after the stopped result cannot resume a writer or replace its target.
+    eprintln!("native upload: checking the file after cancellation");
     world.api.download.release();
     world
         .api
@@ -308,6 +363,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
             machine,
             &SerialKey::Environment(unit.environment_id),
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: unit.environment_id,
                 mount: None,
                 path: "authored.txt".into(),
@@ -328,8 +384,10 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         writes, 0,
         "an incomplete native file is never recorded as a completed write"
     );
+    eprintln!("native upload: stopping the fleet, node and world");
     world.api.app.engine.stop();
     fleet.stop(&unit).await.unwrap();
     node.stop().await;
     world.stop().await;
+    eprintln!("native upload: dropping the lab");
 }

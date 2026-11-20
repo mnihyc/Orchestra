@@ -4,16 +4,19 @@ import { offeredChoice } from '@/i18n/choices';
 import { providerPickerLabels } from '@/features/resources/providers/labels';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import type { ResourceSubject } from '@/features/resource-facts/facts';
+import { FactDisclosure, type FactDisclosureProps } from '@/ui/FactDisclosure';
+import { ApprovalDefaultFacts } from './ModelChoice';
 import { Badge } from '@/ui/Badge';
 import { modelName, type ChoiceOrigin, type Resolved } from './choices';
+import { unusableEnvironmentWords } from './words';
 
 export function ChoiceOriginMark({ origin }: { origin: ChoiceOrigin | 'manual' }) {
   const { t } = useTranslation();
-  return origin === null ? null : <Badge>{origin === 'manual' ? t('startImplicit.origin.manual') : origin === 'topic_default' ? t('start.topicDefault') : t(`startImplicit.origin.${origin}`)}</Badge>;
+  return origin === null ? null : <Badge className="whitespace-nowrap">{origin === 'manual' ? t('startImplicit.origin.manual') : origin === 'topic_default' ? t('start.topicDefault') : t(`startImplicit.origin.${origin}`)}</Badge>;
 }
 
 /** One origin describes the setup; only actual exceptions need their own mark. */
-export function StartValues({ resolved }: { resolved: Resolved }) {
+export function StartValues({ resolved, facts }: { resolved: Resolved; facts?: Pick<FactDisclosureProps, 'groups' | 'fragment'> }) {
   const { t } = useTranslation();
   const providerNames = providerPickerLabels(resolved.providers.map((row) => row.entry.provider));
   const values: { field: keyof Resolved['origins']; name: string | null; subject?: ResourceSubject }[] = [
@@ -40,10 +43,15 @@ export function StartValues({ resolved }: { resolved: Resolved }) {
   }
   return <>
     <ChoiceOriginMark origin={common} />
-    <span role="list" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+    <FactDisclosure fragment={facts?.fragment ?? (resolved.agent?.entry.approval_resolution?.reason === undefined || resolved.agent.entry.approval_resolution.reason === null ? undefined
+      : t('start.approvalFacts.replaced', { mode: resolved.agent.entry.approval_resolution.effective === null ? t('factDisclosure.notReported') : offeredChoice(t, 'approvalMode', resolved.agent.entry.approval_resolution.effective)?.name ?? resolved.agent.entry.approval_resolution.effective }))} groups={facts?.groups ?? []}><ApprovalDefaultFacts approval={resolved.agent?.entry.approval_resolution} /></FactDisclosure>
+    {/* At least 16rem: on a narrow screen the values take a line of their own instead of a squeezed column. */}
+    <span role="list" className="flex min-w-0 flex-1 basis-64 flex-wrap items-center gap-x-2 gap-y-1">
       {visible.map(({ field, name, subject }) => <span key={field} role="listitem" className="inline-flex min-w-0 flex-wrap items-center gap-1" data-start-value={field}>
         {subject===undefined ? <span className="max-w-full truncate" title={name ?? undefined}>{name}</span> : <ResourceChip subject={subject} hint={false}>{name}</ResourceChip>}
-        {resolved.origins[field] !== common && <ChoiceOriginMark origin={resolved.origins[field] ?? 'manual'} />}
+        {field === 'environment' && resolved.environmentNote?.kind === 'unusable'
+          ? <span className="min-w-0 max-w-full wrap-anywhere text-text-muted">{unusableEnvironmentWords(resolved.environmentNote, t)}</span>
+          : resolved.origins[field] !== common && <ChoiceOriginMark origin={resolved.origins[field] ?? 'manual'} />}
       </span>)}
     </span>
   </>;
