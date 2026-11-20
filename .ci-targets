@@ -1,0 +1,5 @@
+fmt
+clippy
+test -p orch-adapter-codex --lib
+test -p orch-adapter-codex --test history --test recorded_failures
+web test -- tests/component/native-web-attempts.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts

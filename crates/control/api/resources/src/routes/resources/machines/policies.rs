@@ -231,6 +231,7 @@ async fn execute(
         Ok(value) => value,
         Err(error) => return Err(failure(&mut conn, error).await?),
     };
+    let machine = prepared.row.id;
     if prepared.changes.is_empty() {
         guard.check_deadline(&ctx)?;
         let accepted = guard.principal().caller().clone();
@@ -291,6 +292,7 @@ async fn execute(
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine,
                     kind: command.kind.as_str().into(),
