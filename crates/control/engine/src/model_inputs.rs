@@ -360,10 +360,10 @@ impl Engine {
                 let key = format!("model-input:{id}");
                 crate::ingest::add_marker(&mut unit,delivery.thread,delivery.segment,delivery.turn,&json!({"marker":"orch_context","data":{"model_input_id":id,"purpose":delivery.purpose}}),&key).await?;
                 let seq = unit.stamp(delivery.thread).await?;
-                sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND native_ref=$2")
-                    .bind(delivery.thread).bind(&key).bind(id).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-                sqlx::query("UPDATE model_inputs SET item_id=(SELECT id FROM items WHERE thread_id=$2 AND native_ref=$3) WHERE id=$1")
-                    .bind(id).bind(delivery.thread).bind(&key).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND segment_id=$5 AND native_ref=$2")
+                    .bind(delivery.thread).bind(&key).bind(id).bind(seq).bind(delivery.segment).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                sqlx::query("UPDATE model_inputs SET item_id=(SELECT id FROM items WHERE thread_id=$2 AND segment_id=$4 AND native_ref=$3) WHERE id=$1")
+                    .bind(id).bind(delivery.thread).bind(&key).bind(delivery.segment).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
                 if let Some(input) = delivery.input {
                     sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND kind='user_message' AND payload->>'input_id'=$2::text")
                         .bind(delivery.thread).bind(input).bind(id).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;

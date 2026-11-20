@@ -7,11 +7,10 @@ import { ACME, configureThread, emit, scenario } from './support.ts';
 for (const width of [400, 1440] as const) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
   test(`goal defaults remain inherited when their rows were not supplied ${width}/${theme}/${locale}`, async ({ page }, info) => {
     await scenario(); await configureThread(ACME.mainThread, { reset: true }); await emit(ACME.mainThread, { thread: { goal: null } });
-    await page.route(`**/threads/${ACME.mainThread}/opening**`, async (route) => {
-      const response = await route.fetch(), opening: unknown = await response.json();
-      if (typeof opening !== 'object' || opening === null || !('settings' in opening) || !Array.isArray(opening.settings)) throw new Error('The actual thread opening must carry its native settings array.');
-      // A bounded source need not supply any goal-default rows; keep every other native fact.
-      await route.fulfill({ response, json: { ...opening, settings: opening.settings.filter((row: unknown) => typeof row !== 'object' || row === null || !('key' in row) || typeof row.key !== 'string' || !row.key.startsWith('thread.goal.')) } });
+    await page.route(`**/nodes/${ACME.mainThread}/settings`, async (route) => {
+      const response = await route.fetch(), settings: unknown = await response.json();
+      if (!Array.isArray(settings)) throw new Error('The settings reader supplies an array.');
+      await route.fulfill({ response, json: settings.filter((row: unknown) => typeof row !== 'object' || row === null || !('key' in row) || typeof row.key !== 'string' || !row.key.startsWith('thread.goal.')) });
     });
     await signInScreenRoute(page, { width, theme, locale }); await page.goto(`/thread/${ACME.mainThread}`);
     await page.locator('[data-thread-more]').click();

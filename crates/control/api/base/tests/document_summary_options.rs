@@ -18,7 +18,7 @@ use orch_api_contract::{
         DocumentSummaryOptionsGet, DocumentSummaryOptionsSet, SummaryOptionsBody, SummaryTarget,
     },
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{
     documents,
     identity::{self, NewApiToken},
@@ -35,11 +35,12 @@ fn body(options: Json, revision: i64) -> SummaryOptionsBody {
 async fn key(desk: &Desk, rule: Json, lifetime: chrono::Duration) -> String {
     let policy: KeyScope = serde_json::from_value(json!({"rules":[rule]})).unwrap();
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Document summary options",
             token_hash: &token_hash(&secret),
