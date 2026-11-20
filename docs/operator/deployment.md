@@ -1,196 +1,151 @@
-# Deployment
+# Install Orch
 
-How to install Orch on one Docker host, from the files of a release to a running system with its first
-administrator. What the pieces are and how they hold together is in [deploy/README.md](../../deploy/README.md).
+[简体中文](zh-CN/deployment.md)
 
-This release runs one API process. Browser and terminal socket tickets and their tunnels belong to the
-process that issued the ticket; a deployment with multiple API processes must route each socket to that process.
+Install Orch on one Linux Docker host, from the files of a release to a running system and its first administrator. At the end you have a stack that answers at an address, an administrator who can sign in, and a copy of the secrets away from the host.
+
+What the pieces are and how they hold together is in the [readme of the deployment directory](../../deploy/README.md).
 
 For the node's lifecycle programs and per-unit Docker pool, read [Node hooks and unit networks](node-hooks.md).
 Hooks are set with `orch-node policy set hooks`; the initial network pool accepts `[node.docker.networks]`.
-Existing node configuration is imported once without interrupting an upgrade. The worked routing recipe keeps a
-unit's outbound traffic closed while its host VPN is down.
+The node's machine policy is configured directly; no previous node configuration is imported.
+The worked routing recipe keeps a unit's outbound traffic closed while its host VPN is down.
 
-## What the host needs
+## Before you start
 
-- Linux with Docker and its Compose plugin (version 2), `bash`, GNU coreutils and `flock`. A person who can use
-  Docker runs everything below from a directory they can write. `curl` is needed to fetch a release. `unzip` is
-  optional: otherwise a container of the web edge's image unpacks the server archive. `b3sum` is optional:
-  otherwise the release's `orchctl` checks BLAKE3 hashes. `openssl` makes the example database password.
-  The shipped ownership setup assumes a rootful Docker daemon without user-namespace remapping: the service's
-  numeric UID must be the same on bind-mounted host directories. Rootless Docker or remapping needs a different
-  ownership and mount arrangement; it does not work with the supplied defaults. The deployment directory must
-  allow execution of the bundled `orchctl`. Without `b3sum`, the updater also executes a temporary copy under
-  `TMPDIR` (normally `/tmp`), so that temporary filesystem must allow execution too.
-- Three stock images, pulled on the first start: `postgres:17-alpine`, `debian:bookworm-slim` and `nginx:1.30-alpine`.
-  The release's Compose file selects each by its image-index digest as well as its tag (the database through
-  [its recipe](../../deploy/postgres/README.md), which adds pgvector and pg_bigm and is made by Compose on the
-  first start, with Alpine's build tools and the extensions' checked sources), and the manifest records the same
-  digests. The [release image script](../../scripts/release/README.md) prints current indexes for review and
-  refreshes the pins only with `--write`.
-  On a host without access to a registry, bring the stock images with `docker load` first; without access to the
-  build sources it also needs the built database image, whose Compose image name the database recipe gives.
-- The Default and Developer tools templates contain editable Dockerfiles. A host that offers builds makes the
-  selected image the first time an environment needs it, then reuses it on that host. Developer tools includes the
-  Default recipe as its first stage; the host does not need a previously built Default image or a checkout.
-  The job shows build progress and any failure. A clean Default build took about four minutes in one measurement;
-  a Developer tools build took about eleven minutes on a busy host. Cache, processor and network speed affect the time.
-  The Docker driver's
-  `build_timeout_secs` defaults to 1,800 seconds and can be changed by the host operator.
-  The first build needs the pinned Debian base from its registry, Debian packages, Node.js, npm packages and
-  Playwright's browser download; Developer tools also needs Docker's package repository. On an isolated host, use
-  suitable internal sources or an image archive as described in the [offline guide](offline.md).
-  The Default image includes a browser, VNC display and passwordless `sudo` for its agent account; a template
-  can disable that privilege. [Its page](../../images/orch-env-base/README.md) lists its contents and size.
-  Developer tools adds Docker Engine, QEMU and build tools.
-- An HTTPS front for the web edge, which is yours: Orch's own edge speaks plain HTTP on this host and expects
-  something in front of it to speak HTTPS to people. The [edge guide](edge.md) says what the front must do and
-  how to check it. For a trial on this host only, set `public_url` to `http://127.0.0.1:5180` and use the
-  web edge directly; machines on other hosts need a reachable HTTPS address.
-- Machines and managed runtimes reach the system through the gateway's pinned port, so that one port is the
-  only other thing to open in a firewall (`ORCH_GATEWAY_PUBLISH`, 9443 unless you choose another).
+You need:
 
-Nothing connects out of an Orch system unless somebody configured the thing it connects to: the worker to a mail
-server, to the Telegram Bot API, to webhooks and to the push services of people's browsers; the API to an
-identity provider or to a rate-catalogue address an administrator set; the node to image registries and to
-whatever a Dockerfile fetches; and `update.sh`, when you run it without a directory, to the release site.
+- **A Linux host**, x86_64 or ARM64, with Docker Engine and its Compose plugin (version 2), `bash`, GNU coreutils, `flock` and `curl`. `openssl` makes the database password. `unzip` and `b3sum` are optional: without them the updater unpacks the server archive in a container, and `orchctl` checks the checksums.
+- **Rootful Docker, without user-namespace remapping.** The services' numeric user id must be the same on the host's bind-mounted directories. Rootless Docker needs a different arrangement and does not work with the supplied defaults.
+- **Room on the host.** Recommended estimates, which are not limits (the stack sets none): to try Orch alone or with a colleague, 2 CPU cores, 4 GB of memory and 30 GB of disk; for a team of up to about 20 people, 4 cores, 8 GB and 100 GB of SSD. Every environment you run is a container on top of that. The Default environment image is about 1.6 GiB, and its browser needs memory when it runs. The estimates come from what the stack is made of, not from a measurement of a busy installation.
+- **A registry.** The first start pulls three stock images (`postgres:17-alpine`, `debian:bookworm-slim` and `nginx:1.30-alpine`) and builds the database image from the first (it adds pgvector and pg_bigm). On a host without registry access, follow [Running without internet access](offline.md).
+- **An HTTPS address** for the web application, unless you only try Orch on this host. Orch's web edge speaks plain HTTP on the host (`127.0.0.1:5180`) and expects a front that speaks HTTPS to people: [The HTTPS front](edge.md) says what the front must do. For a trial on this host, use `http://127.0.0.1:5180`.
+- **One open port**, 9443 unless you choose another, on which machines and managed environments reach the gateway.
 
-## Get the release
+Run one API process. Terminal, browser and display tickets, and their tunnels, belong to the process that issued them, so a second API process would need its own routing.
 
-A release is a directory of files and a `version.json` that lists them with the size and BLAKE3 hash of each.
-For `--from`, download `version.json`, `orch-deploy-<tag>.tar.gz`, `orch-frontend-dist.tar.gz`,
-`orch-server-linux-<arch>.zip` and `orchctl-linux-<arch>-musl` into the same directory, where `<arch>` is
-`x86_64` or `aarch64` for the Docker host. A host without release-site access can receive those files on a disk.
-Alternatively, download the deploy bundle and configure a release URL for `update.sh` to fetch the other files.
-Unpack the deploy bundle where the system is to live; this example keeps the release files in `$HOME/orch-release`:
+## 1. Get the release
+
+A release is a directory of files and a `version.json` that lists them with the size and BLAKE3 checksum of each. Choose a way.
+
+**Files in a directory.** Download these five files from the [release page](https://github.com/mnihyc/Orchestra/releases/latest) into one directory. `ARCH` is `x86_64` or `aarch64`, whichever the Docker host's processor is:
 
 ```sh
-mkdir -p "$HOME/orch"
-tar -xzf "$HOME/orch-release/orch-deploy-v0.1.0.tar.gz" -C "$HOME/orch"
-cd "$HOME/orch/deploy"
+TAG=v0.1.2        # the tag you install, with the "v"
+ARCH=$(uname -m)  # x86_64 or aarch64
+mkdir -p ~/orch-release && cd ~/orch-release
+for f in version.json orch-deploy-$TAG.tar.gz orch-frontend-dist.tar.gz orch-server-linux-$ARCH.zip orchctl-linux-$ARCH-musl; do
+  curl -fLO "https://github.com/mnihyc/Orchestra/releases/download/$TAG/$f"
+done
 ```
 
-`cargo xtask package --out DIR` can also make a release directory from a source checkout.
+A host that cannot reach GitHub can receive these files on a disk.
 
-## Say what you decide
+**Fetched.** Download only `orch-deploy-$TAG.tar.gz`. `update.sh` fetches the rest from this project's GitHub releases, as `.env` says.
+
+## 2. Unpack
+
+Unpack the deployment bundle where the system is to live, and work in its `deploy` directory:
 
 ```sh
-install -m 600 .env.example .env
+mkdir -p ~/orch
+tar -xzf orch-deploy-$TAG.tar.gz -C ~/orch     # run it where the bundle is
+cd ~/orch/deploy
 ```
 
-Set `POSTGRES_PASSWORD` in `.env` to something of at least 24 characters made of letters, digits, `-` and `_`;
-`openssl rand -base64 24 | tr '+/' '-_'` makes one. `update.sh` refuses a short one, one with other characters
-(it is written into a URL) and a placeholder. The other lines are commented out with their defaults:
-`ORCH_FRONTEND_BIND` (where the web edge is published; this host's loopback unless you change it),
-`ORCH_GATEWAY_PUBLISH`, `ORCH_RELEASE_URL` (where `update.sh` fetches from), `ORCH_READY_URL` and
-`COMPOSE_PROJECT_NAME`. For a first start that fetches files instead of using `--from`, set `ORCH_RELEASE_URL`:
-there is no installed command yet from which the updater could read the configured default.
-If the Docker socket is elsewhere, set `DOCKER_SOCKET` in `.env` so later Compose commands use the same socket,
-and make sure the Docker CLI also uses that daemon. The node sees it at `/var/run/docker.sock` inside the container.
-First start records the socket's numeric group as `ORCH_DOCKER_GID`. If the socket or its group later changes,
-set `ORCH_DOCKER_GID` in `.env` to the number printed by `stat -c %g /path/to/docker.sock`, then recreate the node with
-`docker compose up -d node`.
+## 3. Configure
 
-Keep `.env` readable by its owner alone. The updater sets its mode to 0600 and prints a line when it
-corrects it. If it cannot do that, it stops before Compose runs and asks the file's owner to run
-`chmod 600 -- .env`. Its values stay as you wrote them.
-After first start, `./runtime/cli/current/orchctl doctor --only secrets --env-file .env --secrets-dir
-config/secrets` names any password or secret file that others can read.
+1. Make `.env` and give it a database password:
 
-In `config/orch.toml`, set `[system] public_url` to the people's HTTPS address and replace the
-example in `[[gateway.endpoints]]` with the direct machine door. With a CDN, use two DNS records:
-the people's name proxied through the CDN and the machine name DNS-only to the Orch host. Without
-a CDN one name may serve both, on their respective ports. `/link` always accepts connections, but
-is advertised only if you add it to that list. See [Ways in and Certificates](edge.md).
-If `ORCH_GATEWAY_PUBLISH` changes the host port, change `[gateway] managed_endpoint` to the same host port
-on `gateway.orch.internal`; the bundled node's `[node] gateway_url` still uses port 9443 inside Compose.
-The Docker `gateway_host` stays local. Other nodes'
-environments follow their node by default; that node's `[gateway] managed_endpoint` may override it.
+   ```sh
+   install -m 600 .env.example .env
+   sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr '+/' '-_')/" .env
+   ```
 
-The node fetches the connector and Orch-served builds through its authenticated connection address
-and verifies their checksums. `public_url` need not be reachable from its containers. Vendor or
-internal mirror builds keep the operator-selected download address. `ORCH_READY_URL`, when set,
-selects the address the ordinary updater checks from the host.
+   The password has at least 24 characters of letters, digits, `-` and `_`. `update.sh` refuses a short one, one with other characters (it goes into a URL) and a placeholder. Keep `.env` readable by its owner alone.
+2. In `config/orch.toml`, set `public_url` in `[system]` to the HTTPS address people open (for a trial, `"http://127.0.0.1:5180"`).
+3. In the same file, replace the example address in `[[gateway.endpoints]]` with an address that machines can reach on the gateway port, and that also answers from inside the stack. While the example is there, **Add machine** gives no command and environments cannot connect. The bundled node comes online without it. See [The HTTPS front](edge.md) for the addresses, and [Configuration](configuration.md#set-the-stacks-env) for the other settings of `.env`.
 
-The node installer records the installing shell's proxy variables in its systemd service. The unit
-is readable only by root because a proxy address can contain a password; run the installer again
-to update those variables. Directory environments on connected personal machines are currently
-available on Linux; macOS and Windows connectors can still provide their other roles.
-If an image pull or build fails because the host's disk is full, free space on that host before
-retrying. A failed pull for lack of space does not fall back to an older cached tag.
-
-## Start it
+## 4. Start
 
 ```sh
-./update.sh first-start --from "$HOME/orch-release"      # files in a directory
-./update.sh first-start v0.1.0                          # or fetched from ORCH_RELEASE_URL
+./update.sh first-start --from ~/orch-release   # files in a directory
+./update.sh first-start $TAG                    # fetched
 ```
 
-It requires the three payloads and checks each one, together with any other manifest-listed file present in the
-directory, against `version.json`. It refuses a mismatch before installing anything. It writes the facts of this
-machine to `.env` (the user and group the services run as, the
-Docker group, this directory), unpacks the three payloads (server, frontend, `orchctl`) under `runtime/`, makes
-the secrets with `orchctl compose-secrets` (it refuses a `config/secrets/` that holds only part of a set),
-starts PostgreSQL, takes the first dump, starts the stack, and waits until `orchctl doctor` passes in the API's
-container: the API answers and reports the release's version, the gateway is connected to it, the worker beats,
-and the node has a session once there is an administrator to enroll it. The host's CLI also checks the page,
-API release and gateway upgrade through `public_url` (or the explicitly selected `ORCH_READY_URL`). A missing
-or broken edge fails readiness; an update restores the prior payloads and database. Then it prints, for example:
+`update.sh` checks every file against `version.json` before it installs anything, writes the facts of this host to `.env` (the user and group the services run as, the Docker group, this directory), unpacks the server, the web application and `orchctl` under `runtime/`, makes the secrets, starts PostgreSQL, takes the first backup, starts the stack, and waits until `orchctl doctor` passes. It ends with the address to open:
 
 ```
 ok    secrets          11 password and secret files are accessible by their owner alone
 ok    config           read /etc/orch/orch.toml: Orch at https://orch.example.com
-ok    database         connected to postgres:5432/orch (PostgreSQL 17.11); 1 migrations applied, the newest 1 (the release ships up to 1)
-ok    api              GET https://127.0.0.1:8443/health -> 200; /api/v1/meta -> release 0.1.0 (build 159)
-ok    gateway          heartbeat 5 s ago, release 0.1.0: the backplane to the API is connected
-ok    worker           heartbeat 5 s ago, release 0.1.0: alive
+ok    database         connected to postgres:5432/orch (PostgreSQL 17); 1 migrations applied
+ok    api              GET https://127.0.0.1:8443/health -> 200; /api/v1/meta -> release 0.1.2
+ok    gateway          heartbeat 5 s ago, release 0.1.2: the backplane to the API is connected
+ok    worker           heartbeat 5 s ago, release 0.1.2: alive
 wait  node             no host yet, and no one has signed up: the bundled node enrolls itself as soon as the first administrator exists
 all 7 checks passed
 ok    edge-page        GET / -> 200 text/html, with the content policy and the four other security headers
-ok    edge-api         GET /health -> 200; GET /api/v1/meta -> 200, release 0.1.0 (build 159), first administrator still to make: yes
+ok    edge-api         GET /health -> 200; GET /api/v1/meta -> 200, first administrator still to make: yes
 ok    edge-link        upgraded /link/v1/session: the gateway answers with the subprotocol orch-link.v1
 all 3 checks passed
 
-Orch v0.1.0 is running.
-
-  Authority fingerprint (SHA-256): 10d62a0f…
-    A machine that enrolls shows this; compare it before trusting the system.
-  Open https://orch.example.com (the stack's own web edge listens on http://127.0.0.1:5180),
-  and make the first administrator at /setup.
+Orch v0.1.2 is running.
+  Open https://orch.example.com and make the first administrator at /setup.
 ```
 
-If it fails before the end, it says why and leaves the journal; run the same command again, which takes up
-where it stopped (`docker compose logs <service>` shows a service's side). **Back `config/` up off the host
-now**: it holds the secrets, and losing `orch_master_key` or `orch_ca_key.pem` cannot be undone.
+Your output differs in addresses and numbers. If a step fails, `update.sh` says why and leaves its journal. Run the same command again: it takes up where it stopped. `docker compose logs <service>` shows a service's side.
 
-## The first administrator
+## 5. Check that it works
 
-Open the address. A system without people shows `/setup`, which makes the first system administrator and signs
-them in. Who may register afterwards is by invitation, as shipped; the system's mail server and the rest are
-entered in Management. The bundled node waits for this step: its token is registered by the API once the first
-administrator exists, and the node container restarts until then (its log says the token is unknown). It
-enrolls on a start after that, which takes up to a minute or two, and `orchctl doctor` shows its line go from
-`wait` to `ok`:
+1. Open the address. A system without people shows `/setup`: make the first system administrator there. You are signed in when it is done. Registration is by invitation as shipped; the other settings are entered in Management.
+2. The bundled node waits for that step and enrolls itself after it, which takes up to a minute or two. Check it:
 
-```sh
-docker compose exec api /opt/orchctl/orchctl doctor
-```
+   ```sh
+   docker compose exec api /opt/orchctl/orchctl doctor
+   ```
 
-## What is on disk
+   The `node` line goes from `wait` to `ok`. [Monitoring](monitoring.md) explains each line.
+3. If people should get sign-in codes, address confirmations and invitations by mail, set up email. Open **Management → Email and channels → New channel…**, choose **Email**, and fill in **Server** and **Sender**. The usual ports are 587 with **STARTTLS** and 465 with **TLS**. Enter the **User name** and **Password** of the account that sends the mail (the password is sealed under the master key as it is stored), and choose **Test** to send a sample before you rely on it. To do the same from a shell, write the fields as one JSON object in `runtime/data/mail.json`, which the api container sees as `/var/lib/orch/mail.json`:
+
+   ```json
+   {"host": "smtp.example.org", "port": "587", "security": "starttls", "username": "orch", "password": "app-password", "from": "Orch <orch@example.org>"}
+   ```
+
+   Every value is text. Only `host` and `from` are required; the other keys are `auth`, `reply_to`, `tls_ca` and `timeout_secs`. Put the channel, send a sample, and remove the file, which holds the password:
+
+   ```sh
+   docker compose exec api /opt/orchctl/orchctl channel put email --file /var/lib/orch/mail.json
+   docker compose exec api /opt/orchctl/orchctl channel test email --to you@example.org
+   rm runtime/data/mail.json
+   ```
+
+## 6. Keep the secrets
+
+**Copy `config/` away from the host now.** It holds the secrets, and losing `orch_master_key` or `orch_ca_key.pem` cannot be undone. See [Back up and restore](backup-and-restore.md).
+
+## What the install made
+
+All of it belongs to the user who ran `first-start`, so none of it needs privilege to copy, move or remove.
 
 | Path | What it holds |
-|------|---------------|
-| `.env`, `config/orch.toml` | Yours; an update keeps their values and protects `.env` with mode 600 |
-| `config/secrets/` | The secrets, mode 600 in a directory of mode 700 |
-| `runtime/postgres/data` | The database |
-| `runtime/data` | Blobs and uploads (`blobs/` is immutable and content-addressed) |
-| `runtime/node` | The bundled node's identity and its tool cache: the connector units run, and the builds of the three harnesses that [the release lists](../../deploy/README.md#harness-builds) (some 1.1 GB once unpacked) |
-| `runtime/{server,frontend,cli}/` | The unpacked releases, and the links `current` and `previous` |
-| `runtime/update-backups/` | The dumps: one before every update and rollback, and the ones `backup` takes |
-| `runtime/update/` | The journal of a transaction in progress, and the record of what is installed |
+|---|---|
+| `.env`, `config/orch.toml` | Yours. An update keeps your values and keeps `.env` at mode 600. |
+| `config/secrets/` | The secrets, mode 600 in a directory of mode 700. |
+| `runtime/postgres/data` | The database. |
+| `runtime/data` | Blobs and uploads. |
+| `runtime/node` | The bundled node's identity and tool cache, with the agent programs it unpacks (about 1.1 GB). |
+| `runtime/{server,frontend,cli}/` | The unpacked releases, and the links `current` and `previous`. |
+| `runtime/update-backups/` | The backups: one before every update and rollback, and the ones `backup` takes. |
+| `runtime/update/` | The journal of a transaction in progress, and the record of what is installed. |
 
-All of it is owned by the user the services run as, which is the one who ran `first-start`, so none of it needs
-privilege to copy, move or remove.
+## What to do next
+
+- Give Orch its HTTPS address and a gateway address: [The HTTPS front](edge.md).
+- Add a provider and start a first thread: [Getting started](../user/getting-started.md).
+- Connect a machine or a host: [Connect a machine](../user/connect-a-machine.md).
+- Plan your backups: [Back up and restore](backup-and-restore.md).
+- Update later: [Update and roll back](upgrades.md).
+- Something does not work: [Incidents](incidents.md).
 
 The release ships Codex 0.167.2 and Claude Code 2.1.322. Bypass lets the agent act without permission prompts inside
 its environment; whoever chooses it answers for those actions. See [How approvals work](../user/how-approvals-work.md).
@@ -221,4 +176,36 @@ FAIL  worker           last heard 58 s ago (release 0.1.0), and a live one repor
 
 The same program checks the edge in front of the stack, from wherever you are: see [the edge guide](edge.md).
 
+`./update.sh doctor` runs both checks once, as an update's wait for readiness does, and needs nothing else:
+
+```sh
+./update.sh doctor
+edge address: https://orch.example.com (from [system] public_url in config/orch.toml)
+inside the stack: orchctl doctor in the API's container
+ok    api              ...
+from this host: edge-page, edge-api and edge-link against https://orch.example.com
+ok    edge-page        ...
+doctor: every check passed
+```
+
+It prints every line of both as they come, names the address the edge check used and where it came from
+(`ORCH_READY_URL` in the environment or in `.env`, else `[system] public_url` in `config/orch.toml`), runs the
+second check even when the first fails, and exits 1 if either fails. It does not wait or retry, expects no
+particular release, and changes nothing.
+
 Native Claude Code transfers use temporary storage for archive payloads and file lists. Provision that storage for the largest transfer; archive copying uses bounded memory and runs outside the async request executor.
+
+## Move data to another disk
+
+`ORCH_DATA_DIR` holds the server's files, including blobs, frontend TLS and update status. `ORCH_POSTGRES_DATA_DIR` holds the PostgreSQL cluster. For a fresh installation, set either path in `.env` before first start. The defaults are `./runtime/data` and `./runtime/postgres/data`.
+
+To move an existing installation, mount the new disk persistently and choose two empty directories on it. Finish any open update and save a [backup](backup-and-restore.md). From the deployment directory, stop all writers and copy the stores with their ownership, permissions and links intact. These commands assume the current default paths and a disk mounted at `/mnt/orch`.
+
+```sh
+docker compose down
+mkdir -p /mnt/orch/server /mnt/orch/postgres
+cp -a ./runtime/data/. /mnt/orch/server/
+cp -a ./runtime/postgres/data/. /mnt/orch/postgres/
+```
+
+After both copies succeed, set `ORCH_DATA_DIR=/mnt/orch/server` and `ORCH_POSTGRES_DATA_DIR=/mnt/orch/postgres` in `.env`. Run `docker compose up -d`, then `./update.sh doctor`. Open an existing thread and one of its files before retiring the old copies. To revert before accepting writes, bring the stack down, restore the previous paths and start it again. Subsequent backups must copy blobs from the selected server directory.

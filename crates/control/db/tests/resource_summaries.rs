@@ -148,6 +148,7 @@ fn paragraph<'a>(source: &'a Json, refs: &'a Json) -> Outcome<'a> {
     Outcome::Paragraph(Paragraph {
         text: "The work is ready for review.",
         producer: source,
+        result_facts: None,
         source_snapshot: source,
         source_refs: refs,
     })

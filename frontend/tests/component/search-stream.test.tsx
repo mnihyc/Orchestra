@@ -3,28 +3,39 @@ import { useSelectedOrg } from '@/shell/org';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode, useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { SearchPage } from '@/features/search/Search';
 import type { SearchParams } from '@/features/search/params';
 import type { SearchFilters } from '@/api/search';
-import type { SearchHit, SearchStreamEvent as Event } from '@/generated/api-types';
+import type * as SearchApi from '@/api/search';
+import type { SearchHit, SearchMeaningSource, SearchMeaningSourcePage, SearchStreamEvent as Event } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { ApiError, client } from '@/api/client';
 import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
-import { show } from './support';
-const calls = vi.hoisted(() => ({failures: [] as Error[], personFailure: null as Error | null, abortAware: false, requests: [] as {filters: SearchFilters; receive: (event: Event) => void; signal: AbortSignal; cursor?: string; immediate?: boolean}[]}));
-vi.mock('@/api/search', async (original) => ({...await original<Record<string, unknown>>(), streamSearch: (filters: SearchFilters, receive: (event: Event) => void, signal: AbortSignal, cursor?: string, immediate?: boolean) => {
+import { show, skipOverflowFallback } from './support';
+import { deferred } from './deferred';
+
+skipOverflowFallback();
+const calls = vi.hoisted(() => ({failures: [] as Error[], personFailure: null as Error | null, abortAware: false,
+  sourcePage: vi.fn<() => Promise<SearchMeaningSourcePage>>(), sourceReads: [] as {cursor: string; offset: number; filter: string; signal: AbortSignal}[],
+  requests: [] as {filters: SearchFilters; receive: (event: Event) => void; signal: AbortSignal; cursor?: string; immediate?: boolean}[]}));
+vi.mock('@/api/search', async (original) => {
+  const actual = await original<typeof SearchApi>();
+  return {...actual, meaningSourcesQuery: (filters: SearchFilters, cursor: string, filter: string, readerView = '') => ({...actual.meaningSourcesQuery(filters, cursor, filter, readerView),
+    queryFn: ({pageParam, signal}: {pageParam: number; signal: AbortSignal}) => {calls.sourceReads.push({cursor, offset: pageParam, filter, signal}); return calls.sourcePage();},
+  }), streamSearch: (filters: SearchFilters, receive: (event: Event) => void, signal: AbortSignal, cursor?: string, immediate?: boolean) => {
   calls.requests.push({filters, receive, signal, ...(cursor === undefined ? {} : {cursor}), ...(immediate === undefined ? {} : {immediate})});
   const failure = calls.failures.shift();
   if (failure !== undefined) return Promise.reject(failure);
   return new Promise<void>((_resolve, reject) => {
     if (calls.abortAware) signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {once: true});
   });
-}}));
+}};});
 vi.mock('@/api/nodes', async (original) => ({...await original<Record<string, unknown>>(), orgsQuery: {queryKey: ['stream-orgs'], queryFn: () => []}}));
 vi.mock('@/api/trace', async (original) => ({...await original<Record<string, unknown>>(), selectedPersonQuery: (id: string) => ({
   queryKey: ['stream-person', id], enabled: id !== '', queryFn: () => calls.personFailure === null ? Promise.resolve({id, kind: 'human', username: 'ada', display_name: 'Ada', avatar: {text: 'A', color: 1}}) : Promise.reject(calls.personFailure),
 })}));
-vi.mock('@/shell/screen', () => ({useScreenHeading: () => undefined}));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(),useScreenHeading: () => undefined}));
 vi.mock('@/features/search/Hit', () => ({Hit: ({hit,matchField}: {hit: SearchHit;matchField?:string}) => <li data-match-field={matchField}><button>{hit.snippet}</button></li>}));
 function Page({initial = {q: 'release', sort: 'relevance'}}: {initial?: SearchParams}) {
   const [params, setParams] = useState(initial);
@@ -41,7 +52,7 @@ const originalSession = client.session.getState();
 const selectedOrgBefore = useSelectedOrg.getState();
 beforeEach(() => useSelectedOrg.setState({ orgId: '00000000-0000-4000-8000-000000000001' }));
 afterEach(() => useSelectedOrg.setState(selectedOrgBefore));
-beforeEach(() => {calls.requests.length = 0; calls.failures.length = 0; calls.personFailure = null; calls.abortAware = false;});
+beforeEach(() => {calls.requests.length = 0; calls.failures.length = 0; calls.personFailure = null; calls.abortAware = false; calls.sourceReads.length = 0; calls.sourcePage.mockReset();});
 afterEach(() => {cleanup(); vi.useRealTimers(); client.session.setState(originalSession);});
 /** The seconds the server holds the first screen's order open: long enough that a pause of the machine cannot end it during a case. */
 const OPEN_WINDOW_SECS = 3600;
@@ -51,6 +62,144 @@ async function start(initial?: SearchParams, pageSize = 2, windowSecs = OPEN_WIN
   await send({type: 'options', page_size: pageSize, reorder_window_secs: windowSecs, meaning_pause_ms: 800}, source('words', 'running'), source('meaning', 'running'));
   return view;
 }
+const servingSource = (name: string, cached = false): SearchMeaningSource => ({
+  root: {id: `root-${name}`, name: `Home ${name}`, kind: 'org', redacted: false},
+  model: {provider_id: 'provider-not-configurable', model_name: `route-${name}`, display_name: `Vector ${name}`},
+  usage_owner: cached ? null : {id: 'actual-query-writer', kind: 'human', username: 'ada', display_name: 'Ada', avatar: {text: 'A', color: 1}},
+  usage_owner_withheld: false, cached, observed_at: '2026-11-15T08:00:00Z',
+});
+const sourceSummary = (total = 2, unreported = false): Event => ({type: 'meaning_sources', cursor: 'captured-query', total, unreported, single: total === 1 ? servingSource('A').model : null, page: null});
+it.each(['en', 'zh-CN'] as const)('reads every captured serving source on intent without another query or model request in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send(hit('words'), order('words'), source('words'), source('meaning'), sourceSummary(), {type: 'cursor', cursor: null});
+    calls.sourcePage.mockResolvedValueOnce({sources: [servingSource('A')], next_offset: 1, total: 2, unreported: false})
+      .mockResolvedValueOnce({sources: [servingSource('B', true)], next_offset: null, total: 2, unreported: false});
+    expect(calls.sourceReads).toHaveLength(0);
+    expect(screen.queryByText('Vector A')).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('button', {name: i18n.t('common.details')}));
+    const body = await screen.findByRole('dialog', {name: i18n.t('common.details')});
+    expect(await within(body).findByText('Vector A')).toBeVisible();
+    expect(within(body).getByRole('link', {name: 'Home A'})).toBeVisible();
+    expect(within(body).getByRole('button', {name: 'Ada'})).toBeVisible();
+    await user.click(within(body).getByRole('button', {name: i18n.t('ui.pagination.more')}));
+    expect(await within(body).findByText('Vector B')).toBeVisible();
+    expect(within(body).getByText(i18n.t('search.sources.cached'))).toBeVisible();
+    expect(calls.sourceReads.map(({cursor, offset}) => ({cursor, offset}))).toEqual([{cursor: 'captured-query', offset: 0}, {cursor: 'captured-query', offset: 1}]);
+    expect(calls.requests).toHaveLength(1);
+    expect(rows()).toEqual(['words']);
+  } finally { cleanup(); await setLocale(previous); }
+});
+it('retires an unfinished source read when the reader changes and never paints the former reader’s facts', async () => {
+  const pending = deferred<SearchMeaningSourcePage>();
+  calls.sourcePage.mockReturnValue(pending.promise);
+  await start();
+  await send(hit('words'), order('words'), source('words'), source('meaning'), sourceSummary(), {type: 'cursor', cursor: null});
+  await userEvent.setup().click(within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('button', {name: i18n.t('common.details')}));
+  await waitFor(() => expect(calls.sourceReads).toHaveLength(1));
+  const old = calls.sourceReads[0]?.signal;
+  act(() => client.session.setState({userId: 'different-query-reader', readerVersion: (client.session.getState().readerVersion ?? 0) + 1}));
+  await waitFor(() => expect(old?.aborted).toBe(true));
+  await act(async () => {pending.resolve({sources: [servingSource('private earlier')], next_offset: null, total: 1, unreported: false}); await pending.promise;});
+  expect(screen.queryByText('Vector private earlier')).not.toBeInTheDocument();
+  expect(screen.queryByText('Home private earlier')).not.toBeInTheDocument();
+});
+it('keeps missing capture and withheld names distinct from zero sources or raw identifiers', async () => {
+  await start();
+  const hidden = servingSource('A');
+  calls.sourcePage.mockResolvedValue({sources: [{...hidden, root: {...hidden.root, id: 'private-root-identity', name: null, redacted: true}, usage_owner: null, usage_owner_withheld: true}], next_offset: null, total: 1, unreported: true});
+  await send(hit('words'), order('words'), source('words'), source('meaning'), sourceSummary(1, true), {type: 'cursor', cursor: null});
+  expect(screen.queryByText('Meaning · Vector A')).not.toBeInTheDocument();
+  await userEvent.setup().click(within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('button', {name: i18n.t('common.details')}));
+  const body = await screen.findByRole('dialog', {name: i18n.t('common.details')});
+  expect(await within(body).findByText('Vector A')).toBeVisible();
+  expect(within(body).getAllByText(i18n.t('search.sources.notShared'))).toHaveLength(2);
+  expect(within(body).getByText(i18n.t('factDisclosure.notReported'))).toBeVisible();
+  expect(body).not.toHaveTextContent('private-root-identity');
+  expect(body).not.toHaveTextContent('actual-query-writer');
+});
+it('ends a transient source read when its opening closes', async () => {
+  const pending = deferred<SearchMeaningSourcePage>(); calls.sourcePage.mockReturnValue(pending.promise);
+  await start();
+  await send(hit('words'), order('words'), source('words'), source('meaning'), sourceSummary(), {type: 'cursor', cursor: null});
+  const user = userEvent.setup();
+  const trigger = within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('button', {name: i18n.t('common.details')});
+  await user.click(trigger);
+  await waitFor(() => expect(calls.sourceReads).toHaveLength(1));
+  const signal = calls.sourceReads[0]?.signal;
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(signal?.aborted).toBe(true));
+  expect(screen.queryByRole('dialog', {name: i18n.t('common.details')})).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
+});
+it('finds a captured source beyond the loaded page using the native filter', async () => {
+  calls.sourcePage.mockResolvedValueOnce({sources: [servingSource('A')], next_offset: 1, total: 25, unreported: false})
+    .mockResolvedValueOnce({sources: [servingSource('unloaded match')], next_offset: null, total: 1, unreported: false});
+  await start();
+  await send(hit('words'), order('words'), source('words'), source('meaning'), sourceSummary(25), {type: 'cursor', cursor: null});
+  const user = userEvent.setup();
+  await user.click(within(screen.getByRole('region', {name: i18n.t('search.results')})).getByRole('button', {name: i18n.t('common.details')}));
+  const body = await screen.findByRole('dialog', {name: i18n.t('common.details')});
+  expect(await within(body).findByText('Vector A')).toBeVisible();
+  fireEvent.change(within(body).getByRole('textbox', {name: i18n.t('search.sources.find')}), {target: {value: 'unloaded match'}});
+  expect(await within(body).findByText('Vector unloaded match')).toBeVisible();
+  expect(calls.sourceReads.at(-1)).toMatchObject({offset: 0, filter: 'unloaded match'});
+  expect(within(body).queryByText('Vector A')).not.toBeInTheDocument();
+  expect(calls.requests).toHaveLength(1);
+});
+it.each(['en', 'zh-CN'] as const)('keeps a partial count and the unavailable Meaning reason in the existing status line in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send(hit('words'), order('words'), source('words'), source('meaning', 'unavailable', 'provider_disabled'), { type: 'cursor', cursor: null });
+    expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.total', { count: 1, number: '1+' }));
+    const reason = i18n.t('search.meaningReasons.provider_disabled');
+    expect(screen.getByRole('button', { name: `${i18n.t('search.meaningUnavailable')} · ${reason}` })).toBeVisible();
+    expect(rows()).toEqual(['words']);
+  } finally { cleanup(); await setLocale(previous); }
+});
+
+it('marks a continued result count as partial without changing the existing Show more steps', async () => {
+  await start(undefined, 1);
+  await send(hit('first'), hit('second'), order('first', 'second'), source('words'), source('meaning'), { type: 'cursor', cursor: 'more-matches' });
+  expect(screen.getByRole('status')).toHaveTextContent(i18n.t('search.total', { count: 2, number: '2+' }));
+  expect(rows()).toEqual(['first']);
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+  expect(rows()).toEqual(['first', 'second']);
+  expect(calls.requests).toHaveLength(1);
+});
+
+it.each(['en', 'zh-CN'] as const)('names an ended continuation beside its retained results in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send(hit('words'), order('words'), source('words'), source('meaning'), { type: 'cursor', cursor: 'ended-search' });
+    calls.failures.push(new ApiError({ type: 'orch:error:request.invalid', code: 'request.invalid', status: 400,
+      title: 'Invalid request', detail: '', request_id: 'ended-search', errors: [{ path: 'cursor', message: 'is expired or belongs to another search' }] }, null));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('search.more') }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(i18n.t('search.continuationEnded'));
+    expect(rows()).toEqual(['words']);
+    expect(screen.getByText(locale === 'en' ? 'End of current results' : '当前结果到此为止')).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
+
+it.each(['en', 'zh-CN'] as const)('describes indexed fields and the effective allowance before claiming an empty search in %s', async (locale) => {
+  const previous = currentLocale(); await setLocale(locale);
+  try {
+    await start();
+    await send({ type: 'coverage', conversation_chars: 24_000 }, source('words'), source('meaning'), { type: 'cursor', cursor: null });
+    const coverage = screen.getByRole('button', { name: i18n.t('search.coverage.label') });
+    expect(coverage).toBeVisible();
+    expect(screen.getByText(i18n.t('search.state.nothingIndexed', { query: 'release' }))).toBeVisible();
+    expect(screen.queryByText(i18n.t('search.state.nothing', { query: 'release' }))).not.toBeInTheDocument();
+    fireEvent.click(coverage);
+    expect(screen.getByText(i18n.t('search.coverage.about', { number: '24,000' }))).toBeVisible();
+    expect(screen.getByText(i18n.t('search.coverage.omitted'))).toBeVisible();
+  } finally { cleanup(); await setLocale(previous); }
+});
 it('starts a linked search through strict-mode remounts and cancels it when the view closes', async () => {
   const view = show(<StrictMode><Page /></StrictMode>);
   await waitFor(() => expect(calls.requests.length).toBeGreaterThan(0));
@@ -152,6 +301,8 @@ it.each(['not json', '[]', '{"sort":"gone","scope":"removed","q":"old text"}'])(
   expect(calls.requests[0]?.filters.sort).toBeUndefined();
   expect(calls.requests[0]?.filters.scope).toBe('00000000-0000-4000-8000-000000000001');
   expect(screen.getByRole('textbox', {name: i18n.t('search.field.label')})).toHaveValue('release');
+  expect(readViewChoice(`search-invalid-${saved}`, 'search', 'filters', '')).toBe(saved);
+  expect(screen.getByText(i18n.t('clientFacts.device.unavailableChoice'))).toBeVisible();
 });
 it.each([403, 404])('uses the default when the server refuses a restored scope (%s), preserving the new words', async (status) => {
   client.session.setState({userId: `search-gone-scope-${status}`});
@@ -165,7 +316,8 @@ it.each([403, 404])('uses the default when the server refuses a restored scope (
   expect(calls.requests[1]?.filters.scope).toBe('00000000-0000-4000-8000-000000000001');
   expect(calls.requests[1]?.filters.sort).toBeUndefined();
   expect(screen.queryByRole('alert')).toBeNull();
-  expect(readViewChoice(`search-gone-scope-${status}`, 'search', 'filters', '')).toBe('{}');
+  expect(readViewChoice(`search-gone-scope-${status}`, 'search', 'filters', '')).toBe(JSON.stringify({scope, sort: 'relevance'}));
+  expect(screen.getByText(i18n.t('clientFacts.device.unavailableChoice'))).toBeVisible();
 });
 it.each([403, 404])('clears an unavailable restored person without discarding the other search choices (%s)', async (status) => {
   client.session.setState({userId: `search-gone-owner-${status}`});
@@ -176,7 +328,8 @@ it.each([403, 404])('clears an unavailable restored person without discarding th
   await waitFor(() => expect(calls.requests.some((request) => request.filters.owner === owner)).toBe(true));
   await waitFor(() => expect(calls.requests.at(-1)?.filters.owner).toBeUndefined());
   expect(calls.requests.at(-1)?.filters).toMatchObject({q:'new words',sort:'relevance'});
-  expect(JSON.parse(readViewChoice(`search-gone-owner-${status}`, 'search', 'filters', ''))).toEqual({sort:'relevance'});
+  expect(JSON.parse(readViewChoice(`search-gone-owner-${status}`, 'search', 'filters', ''))).toEqual({owner,sort:'relevance'});
+  expect(screen.getByText(i18n.t('clientFacts.device.unavailableChoice'))).toBeVisible();
 });
 it('keeps an explicit unavailable person without revealing a name in Chinese', async () => {
   const previous = currentLocale();
@@ -222,9 +375,11 @@ it('keeps a meaning-first payload once while adopting the server’s later word 
   expect(rows()).toEqual(['both']);
   expect(within(list()).getByRole('button', {name:'both'}).closest('li')).toHaveAttribute('data-match-field','description');
 });
-it('keeps words when meaning is unavailable and puts its reason on hover', async () => {
+it('keeps words when meaning is unavailable and keeps its reason in the same disclosure', async () => {
   await start(); await send(hit('words'), order('words'), source('meaning', 'unavailable', 'Query vector timed out'), source('words'));
-  expect(rows()).toEqual(['words']); expect(screen.getByText(i18n.t('search.meaningUnavailable'))).toHaveAttribute('title', 'Query vector timed out');
+  expect(rows()).toEqual(['words']);
+  await userEvent.setup().click(screen.getByRole('button', {name: i18n.t('search.meaningUnavailable')}));
+  expect(within(await screen.findByRole('dialog')).getByText('Query vector timed out')).toBeVisible();
 });
 for (const locale of ['en', 'zh-CN'] as const) it.each(['provider_disabled', 'provider_removed'] as const)(`keeps cached meaning and names its index pause (%s, ${locale})`, async (reason) => {
   const previous = currentLocale();
@@ -233,8 +388,10 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['provider_disabled', 'pr
     await start();
     await send(hit('meaning', 'meaning'), hit('words'), order('meaning', 'words'), source('words'), source('meaning', 'done', reason));
     expect(rows()).toEqual(['meaning', 'words']);
-    const status = screen.getByRole('button', {name: i18n.t('search.indexPaused')});
-    expect(status).toHaveAttribute('title', i18n.t(`search.meaningReasons.${reason}`));
+    const status = screen.getByRole('button', {name: `${i18n.t('search.indexPaused')} · ${i18n.t(`search.meaningReasons.${reason}`)}`});
+    expect(status).toBeVisible();
+    await userEvent.setup().click(status);
+    expect(within(await screen.findByRole('dialog')).getByText(i18n.t(`search.meaningReasons.${reason}`))).toBeVisible();
     expect(screen.queryByText(i18n.t('search.meaningUnavailable'))).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByRole('button', {name: i18n.t('common.tryAgain')})).toBeNull();
@@ -244,7 +401,7 @@ it('keeps words and the provider pause reason when a fresh query cannot be embed
   await start();
   await send(hit('words'), order('words'), source('words'), source('meaning', 'unavailable', 'provider_disabled'));
   expect(rows()).toEqual(['words']);
-  expect(screen.getByRole('button', {name: i18n.t('search.meaningUnavailable')})).toHaveAttribute('title', i18n.t('search.meaningReasons.provider_disabled'));
+  expect(screen.getByRole('button', {name: `${i18n.t('search.meaningUnavailable')} · ${i18n.t('search.meaningReasons.provider_disabled')}`})).toBeVisible();
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByRole('button', {name: i18n.t('common.tryAgain')})).toBeNull();
 });
@@ -293,10 +450,12 @@ it('reveals all received results on the first Show more and resumes both sources
   expect(rows()).toEqual(['first', 'second', 'third']);
 });
 it('aborts the old search on a keystroke, debounces words, and asks meaning after a pause or immediately on Enter', async () => {
+  vi.useFakeTimers({shouldAdvanceTime: true});
   await start(); const field = screen.getByRole('textbox', {name: i18n.t('search.field.label')});
   fireEvent.change(field, {target: {value: 'rollback'}}); expect(calls.requests[0]?.signal.aborted).toBe(true);
   expect(calls.requests).toHaveLength(1);
-  await waitFor(() => expect(calls.requests.length).toBe(2)); expect(calls.requests[1]?.immediate).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(401); });
+  expect(calls.requests).toHaveLength(2); expect(calls.requests[1]?.immediate).toBe(false);
   fireEvent.submit(screen.getByRole('search')); await waitFor(() => expect(calls.requests.at(-1)?.immediate).toBe(true));
 });
 it('sends every filter in the one search request', async () => {
@@ -343,15 +502,17 @@ it.each(['回', '回滚'])('starts one indexed streamed search for a short Chine
   expect(rows()).toEqual([q]);
 });
 
-it('shows a meaning failure reason on tap and keyboard focus and closes it with Escape',async()=>{
+it('opens the same meaning failure facts by tap or keyboard and restores focus with Escape',async()=>{
   await start();await send(hit('words'),order('words'),source('meaning','unavailable','query_timeout'),source('words'));
-  const reason=screen.getByRole('button',{name:i18n.t('search.meaningUnavailable')});
-  fireEvent.click(reason);
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('search.meaningReasons.query_timeout'));
-  fireEvent.keyDown(reason,{key:'Escape'});
-  await waitFor(()=>expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
-  fireEvent.focus(reason);
-  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('search.meaningReasons.query_timeout'));
+  const reason=screen.getByRole('button',{name:`${i18n.t('search.meaningUnavailable')} · ${i18n.t('search.meaningReasons.query_timeout')}`});
+  const user=userEvent.setup();
+  await user.click(reason);
+  expect(await screen.findByRole('dialog')).toHaveTextContent(i18n.t('search.meaningReasons.query_timeout'));
+  await user.keyboard('{Escape}');
+  await waitFor(()=>expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(reason).toHaveFocus();
+  await user.keyboard(' ');
+  expect(await screen.findByRole('dialog')).toHaveTextContent(i18n.t('search.meaningReasons.query_timeout'));
 });
 
 it('first Show more reveals every received hit even while its latest order is held',async()=>{

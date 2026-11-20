@@ -9,7 +9,7 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 const main = (page: Page) => mainArea(page);
@@ -154,7 +154,7 @@ test('a topic is moved into a folder with its plan read first, and out of it aga
   // The plan, in words, before anything moves.
   await expect(dialog.getByText('Cart rewrite moves from Checkout to Payments.')).toBeVisible();
   await expect(dialog.getByText('On the 1 page inside it that follows the defaults: 1 person gains access, 1 person loses it.')).toBeVisible();
-  await expect(dialog.getByText('Roles it has from the place above: 1 person starts to hold one, 1 person stops.')).toBeVisible();
+  await expect(dialog.getByText('Roles it has from the place above: 1 person starts to hold a role, 1 person stops.')).toBeVisible();
   await expect(dialog.getByText('Linus Pauling').first()).toBeVisible();
   await expect(dialog.getByText('gains View Topic, Contribute to Topic on 2 pages')).toBeVisible();
   await expect(dialog.getByText('loses View Topic, Contribute to Topic on 1 page')).toBeVisible();
@@ -195,7 +195,7 @@ test('a folder is moved into another folder, to a project and to an org, and is 
   await screenMenu(page, 'Checkout');
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: /^Move the folder Checkout, in / });
-  await expect(dialog).toContainText('To another org, or into another project or folder, of the same tree.');
+  await expect(dialog).toContainText('To another organization, or into another project or folder, of the same tree.');
   const places = dialog.getByRole('radiogroup', { name: 'Move to' });
   for (const name of ['Shop', 'Checkout', 'Payments']) await expect(places.getByRole('radio', { name })).toBeDisabled();
   await expect(places.getByText('It is here already')).toBeVisible();

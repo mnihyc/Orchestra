@@ -140,7 +140,7 @@ export function useWorkspaceUploads(door: Door, blocked: string | false, refresh
         const key = JSON.stringify([candidate, expected, blob.blob]);
         let held = writes.get(key);
         if (held === undefined || held.terminal === true) { held = { id: crypto.randomUUID() }; writes.set(key, held); }
-        return writeUploadedFile(door, candidate, blob.blob, expected, signal, batch.id, report, held);
+        return writeUploadedFile(door, candidate, blob.blob, expected, signal, batch.id, report, held, blob.relay ?? undefined);
       }, choose);
       batch.saved.add(file);
       if (attempt !== undefined) attempt.outcome = 'complete';
@@ -148,7 +148,8 @@ export function useWorkspaceUploads(door: Door, blocked: string | false, refresh
       if (signal.aborted && client.session.getState().readerVersion === reader) void refresh(parentOf(stat.path));
       return stat;
     };
-    batch.ids = queue.add(files, undefined, attach);
+    batch.ids = queue.add(files, undefined, attach, undefined, (file) => ({ environment_id: door.environmentId,
+      path: uploadPath(directory, file), ...(door.threadId === null ? {} : { thread: door.threadId }) }));
   };
   useEffect(() => {
     for (const batch of batches.current) {

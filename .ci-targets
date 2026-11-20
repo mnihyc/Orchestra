@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-xtask --bin orch-xtask -- names::tests::the_tree_of_the_product_names_no_program_in_shared_code
+test -p orch-model-contract --lib -- protocol::tests::public_model_calls_forward_only_the_declared_interface_headers
+test -p orch-envhost --test environment
+test -p orch-api-core --test binding_options --test kfix_binding --test realtime_diagnostics
