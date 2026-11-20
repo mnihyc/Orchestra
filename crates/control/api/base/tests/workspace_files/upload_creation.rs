@@ -46,6 +46,7 @@ async fn one_upload(completed: bool) {
     let id = new_id();
     let act = new_id();
     let body = EnvironmentUploadWriteBody {
+        relay: None,
         path: "web/header-upload.txt".into(),
         blob,
         expected_hash: Some("none".into()),
@@ -110,6 +111,7 @@ async fn one_upload(completed: bool) {
         receipt
     );
     let changed = EnvironmentUploadWriteBody {
+        relay: None,
         path: "web/another.txt".into(),
         ..body.clone()
     };
