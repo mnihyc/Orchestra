@@ -213,6 +213,7 @@ mod tests {
         mode: MountMode,
     ) -> MountSpec {
         MountSpec {
+            resource_id: None,
             name: name.into(),
             kind,
             source: source.into(),

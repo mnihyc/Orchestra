@@ -62,12 +62,39 @@ orch_api_base::__api_bind_6de5279cdb!();
 /// The thread `thread` as the caller sees it.
 pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
     let principal = authorization::principal(ctx, conn).await?;
-    match crate::routes::nodes::view::one(conn, &principal, thread, ctx.now, Policy::default())
+    one_for(ctx, conn, &principal, thread).await
+}
+
+async fn one_for(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    thread: Id,
+) -> ApiResult<Thread> {
+    match crate::routes::nodes::view::one(conn, principal, thread, ctx.now, Policy::default())
         .await?
     {
         Some(Node::Thread(thread)) => Ok(thread),
         _ => Err(ApiError::not_found()),
     }
+}
+
+/// A failed native probe retains its actual blocking policy, without exposing arbitrary program diagnostics.
+pub(crate) fn harness_start_failed(policy: Option<&str>) -> ApiError {
+    let mut error = ApiError::new(
+        ErrorCode::BindingIncompatible,
+        "the selected harness could not start on this machine",
+    )
+    .with("reason", "harness_error");
+    if let Some(policy) = policy.filter(|policy| {
+        matches!(
+            *policy,
+            "agent.programs" | "tools.fetch" | "agent.harnesses"
+        )
+    }) {
+        error = error.with("policy", policy);
+    }
+    error
 }
 
 /// Why a thread could not be made, as the problem a client acts on.
@@ -102,6 +129,7 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
             "environment.use",
             "the environment is not there or is being removed",
         ),
+        CreateThreadError::AgentStartFailed(policy) => harness_start_failed(policy.as_deref()),
         CreateThreadError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",

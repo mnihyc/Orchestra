@@ -2,7 +2,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { environmentKey, environmentMcpKey, importEnvironmentMcp } from '@/api/environments';
+import { importEnvironmentMcp } from '@/api/environments';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import type { EnvironmentMcp, EnvironmentRef, MachineRef, McpFound } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
@@ -35,15 +35,13 @@ function ProgramImport({ environment, machine, source, rows, right }: { environm
         const identity = JSON.stringify([asked.reader, asked.environment.id, asked.machine.id, discoveryKey(row)]);
         let key = keys.current.get(identity);
         if (key === undefined) { key = newActKey(); keys.current.set(identity, key); }
-        const made = await importEnvironmentMcp(asked.environment.id, { name: row.name, source: row.source, scope: row.scope, directory: row.directory, enable: true }, key);
+        const made = await importEnvironmentMcp(asked.environment.id, { ...(row.origin === undefined || row.origin === null ? {} : { origin: row.origin }), name: row.name, source: row.source, scope: row.scope, directory: row.directory, enable: true }, key);
         if (!sameLibraryReader(asked.reader)) return;
         state.acknowledge(row, made.id); keys.current.delete(identity);
       }
     },
     onSettled: (_value, _error, asked) => {
       if (!sameLibraryReader(asked.reader)) return;
-      void cache.invalidateQueries({ queryKey: environmentMcpKey(asked.environment.id) });
-      void cache.invalidateQueries({ queryKey: environmentKey(asked.environment.id), exact: true });
       void cache.invalidateQueries({ queryKey: ['mcp-servers'] });
     },
   });
