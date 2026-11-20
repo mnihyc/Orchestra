@@ -7,7 +7,9 @@
 pub mod admission;
 pub mod command;
 pub mod context;
+pub mod dialogue;
 pub mod model;
+pub mod program;
 
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
@@ -44,18 +46,15 @@ pub const BUILTIN: Program = Program {
         .requires_native_harness(),
 };
 
-/// Inherited bounds, resolved before a turn starts. Hitting a bound leaves the
+/// Inherited counts, resolved before a turn starts. Hitting one leaves the
 /// retained conversation intact and the person can ask a narrower follow-up.
+/// What a model's window holds is no count: it bounds each request, never a turn.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Model steps in one user turn.
     pub steps: u32,
     /// Total tool invocations in that turn.
     pub tools: u32,
-    /// Bytes from any one tool result.
-    pub tool_bytes: usize,
-    /// Total tool-result bytes sent during that turn.
-    pub turn_tool_bytes: usize,
 }
 
 /// An authorized, retained call prepared using current model, payer and caps.
@@ -76,19 +75,31 @@ pub struct Step {
     /// Asking person, independent of the payer.
     pub person: Id,
     /// Credential-keeping machine.
-    pub machine: Id,
+    pub machine: Option<Id>,
     /// Fully constrained model request, without a credential.
-    pub request: ProviderGenerate,
+    pub request: dialogue::Request,
 }
 
 /// A completed tool response; its operation/reference witness is retained by
 /// the host so that every resumed model request checks its source again.
 #[derive(Debug, Clone)]
 pub struct ToolAnswer {
-    /// Bounded untrusted material and canonical source links.
+    /// Untrusted material and canonical source links, as long as the source gave it.
     pub content: String,
     /// Whether the tool was refused or failed.
     pub is_error: bool,
+}
+
+/// A backend's result for one real model turn. Every result has already gone through its usage path.
+pub enum ModelReply {
+    Answer {
+        output: Box<GenerationOutput>,
+        room_for_next: bool,
+    },
+    ContextReduced,
+    InvalidFormat {
+        repairable: bool,
+    },
 }
 
 /// The API's request-local authority and durable conversation adapter.
@@ -101,9 +112,22 @@ pub trait TurnHost: Send + Sync {
     /// Restore the original admitted identity, refresh every earlier tool result,
     /// then resolve today's model, payer, constraints, Use and usage caps. Retain
     /// the prepared command before returning, so provider deltas have an owner.
-    async fn prepare(&self, input: &GenerationInput) -> Result<Step, EngineError>;
+    async fn prepare(&self, input: &GenerationInput, repair: bool) -> Result<Step, EngineError>;
+    /// Run one prepared request. A backend returns model output; only the host loop can invoke a read.
+    async fn generate(
+        &self,
+        engine: &Engine,
+        step: &Step,
+        repair: bool,
+    ) -> Result<ModelReply, EngineError>;
+    /// Close an unanswered step before refreshing its sources for a bounded format repair.
+    async fn discard(&self, step: &Step) -> Result<(), EngineError>;
     /// Stop is checked before every tool as well as before each model step.
     async fn check_active(&self) -> Result<(), EngineError>;
+    /// A provider refused the combined input and answer allowance. Reduce the answer allowance first;
+    /// only a refusal with the smallest answer learns an input window and triggers compaction.
+    /// Return false when no smaller retry can be prepared.
+    async fn window_exceeded(&self, step: &Step) -> Result<bool, EngineError>;
     /// Persist the finished assistant step before executing its requested tools.
     async fn assistant(&self, step: &Step, output: &GenerationOutput) -> Result<(), EngineError>;
     /// Retain a visible summary before preparing the next step from the native journal.
@@ -119,24 +143,56 @@ pub trait TurnHost: Send + Sync {
     async fn tool_answer(&self, id: &str, answer: &ToolAnswer) -> Result<Option<Id>, EngineError>;
 }
 
-/// Apply the same UTF-8 byte bound to first delivery and to resumed current
-/// projections, retaining an explicit indication that a narrower read is needed.
-pub fn bound_tool_result(content: &mut String, limit: usize) {
-    if content.len() <= limit {
-        return;
+/// The line a shortened tool result ends in: that it was shortened and where the whole source is.
+fn shortened_note(link: Option<&str>) -> String {
+    match link {
+        Some(link) => format!(
+            "\n[Result shortened to fit the context; the whole source is at {link}. Open it or read a narrower part.]"
+        ),
+        None => "\n[Result shortened to fit the context; read a narrower part.]".to_owned(),
     }
-    const NOTE: &str = "\n[Result shortened; use its canonical link or a narrower read.]";
-    if limit < NOTE.len() {
-        content.clear();
-        content.push_str(&NOTE[..limit]);
-        return;
-    }
-    let mut end = limit - NOTE.len();
+}
+
+/// `content` cut to `limit` bytes, the shortening line included, at a character boundary. A limit the line
+/// itself fills leaves the line alone.
+fn shortened(content: &str, limit: usize, link: Option<&str>) -> String {
+    let note = shortened_note(link);
+    let mut end = limit.saturating_sub(note.len()).min(content.len());
     while !content.is_char_boundary(end) {
         end -= 1;
     }
-    content.truncate(end);
-    content.push_str(NOTE);
+    let mut cut = String::with_capacity(end + note.len());
+    cut.push_str(&content[..end]);
+    cut.push_str(&note);
+    cut
+}
+
+/// Apply the same UTF-8 length bound to first delivery and to resumed current projections, ending a cut in
+/// the line that says so. A bound that is the length of an earlier cut repeats that cut exactly.
+pub fn bound_tool_result(content: &mut String, limit: usize, link: Option<&str>) {
+    if content.len() > limit {
+        *content = shortened(content, limit, link);
+    }
+}
+
+/// Cut a tool result to what `tokens` tokens hold in this model's request, as the longest cut that fits: the
+/// rest of the window is no longer there to carry more. The cut is found by its length, so that a later
+/// refresh of the same source, bounded by the length it was delivered at, gives the same text.
+pub fn fit_tool_result(model: &str, content: &mut String, tokens: i64, link: Option<&str>) {
+    if context::result_tokens(model, content) <= tokens {
+        return;
+    }
+    // `fits` is a length known to fit (the line alone is the least a cut can be); `over` one known to be too long.
+    let (mut fits, mut over) = (0usize, content.len());
+    while over - fits > 1 {
+        let middle = fits + (over - fits) / 2;
+        if context::result_tokens(model, &shortened(content, middle, link)) <= tokens {
+            fits = middle;
+        } else {
+            over = middle;
+        }
+    }
+    bound_tool_result(content, fits, link);
 }
 
 /// Recover a bounded retained dialogue at user-turn boundaries. A stopped turn
@@ -288,6 +344,7 @@ impl Engine {
     /// Stop uses the exact retained command IDs, never a process or credential-wide match.
     pub async fn cancel_ask_calls(&self, calls: &[Id]) -> Result<(), EngineError> {
         for call in calls {
+            self.stop_program_ask(*call).await?;
             if self.inner.commands.status(*call).await?.is_some() {
                 self.inner.commands.cancel(*call).await?;
             }
@@ -470,10 +527,12 @@ impl Engine {
         )
         .await?
         {
+            let mut text = delta.text.clone();
+            orch_types::storable::normalize_text(&mut text);
             let data = orch_api_contract::ask::AskEventData::Delta {
                 message_id: item,
                 offset: delta.offset,
-                text: delta.text.clone(),
+                text,
             };
             orch_db::queries::ask::emit(unit.conn, thread, &serde_json::to_value(data)?).await?;
         }
@@ -488,87 +547,76 @@ impl Engine {
         mut input: GenerationInput,
         limits: Limits,
     ) -> Result<GenerationStop, EngineError> {
-        if limits.steps == 0
-            || limits.tools == 0
-            || limits.tool_bytes == 0
-            || limits.turn_tool_bytes < limits.tool_bytes
-        {
-            return Err(EngineError::unreadable("the Ask loop limits are invalid"));
-        }
         let mut calls = 0u32;
-        let mut tool_bytes = 0usize;
+        let mut repairing = false;
         for _ in 0..limits.steps {
             host.check_active().await?;
-            let step = host.prepare(&input).await?;
-            if (!step.summarizing && step.request.input.tools != input.tools)
-                || (step.summarizing && !step.request.input.tools.is_empty())
+            let step = host.prepare(&input, repairing).await?;
+            if (!step.summarizing && step.request.input().tools != input.tools)
+                || (step.summarizing && !step.request.input().tools.is_empty())
             {
                 return Err(EngineError::unreadable(
                     "Ask tool declarations changed during preparation",
                 ));
             }
-            let outgoing = Outgoing::new(step.id, step.machine, SerialKey::None, &step.request)
-                .map_err(|error| EngineError::unreadable(error.to_string()))?;
-            let command = orch_link_contract::commands::Cmd::new(
-                step.id,
-                &SerialKey::None,
-                self.inner.clock.time(),
-                &step.request,
-            )?;
-            if serde_json::to_vec(&orch_link_contract::frames::Frame::from(command))?.len()
-                > orch_link_contract::version::MAX_FRAME_BYTES as usize
-            {
-                return Err(EngineError::unreadable(
-                    "the Ask request exceeds the machine message budget",
-                ));
-            }
-            host.issue(self, outgoing).await?;
-            let outcome = self
-                .inner
-                .commands
-                .wait(step.id)
-                .await
-                .map_err(|error| EngineError::unreadable(error.to_string()))?;
-            let answer: ProviderGenerateResult = match outcome {
-                Outcome::Succeeded(value) => serde_json::from_value(value)?,
-                Outcome::Failed(error) => {
-                    self.count_failed_ask_step(&step, &error).await?;
-                    return Err(EngineError::unreadable(error.detail));
+            let (output, may_continue) = match host.generate(self, &step, repairing).await? {
+                ModelReply::Answer {
+                    output,
+                    room_for_next,
+                } => {
+                    repairing = false;
+                    (output, room_for_next)
                 }
-                Outcome::Cancelled => return Err(EngineError::unreadable("Ask was stopped")),
-                Outcome::Expired => {
-                    return Err(EngineError::unreadable("the Ask provider request expired"));
+                ModelReply::ContextReduced => continue,
+                ModelReply::InvalidFormat { repairable } => {
+                    host.discard(&step).await?;
+                    if repairing || !repairable {
+                        return Err(EngineError::unreadable(
+                            "The model returned an invalid Ask reply.",
+                        ));
+                    }
+                    repairing = true;
+                    continue;
                 }
             };
-            let may_continue = self.count_ask_step(&step, &answer).await?;
-            answer
-                .output
+            output
                 .validate()
                 .map_err(|_| EngineError::unreadable("the model returned invalid tool calls"))?;
+            // Reserve the whole batch before any member can execute.
+            let requested = output
+                .message
+                .content
+                .iter()
+                .filter(|part| matches!(part, GenerationPart::ToolCall { .. }))
+                .count();
+            calls = u32::try_from(requested)
+                .ok()
+                .and_then(|n| calls.checked_add(n))
+                .filter(|&n| n <= limits.tools)
+                .ok_or_else(|| EngineError::unreadable("the Ask tool budget ended"))?;
             host.check_active().await?;
             if step.summarizing {
-                host.summary(&step, &answer.output).await?;
+                host.summary(&step, &output).await?;
             } else {
-                host.assistant(&step, &answer.output).await?;
+                host.assistant(&step, &output).await?;
             }
             if !may_continue {
-                return Err(EngineError::unreadable("An Ask usage cap has been reached"));
+                return Err(EngineError::unreadable(
+                    "A usage limit for Ask has been reached. Try again after it resets, or ask an administrator.",
+                ));
             }
-            if answer.output.stop == GenerationStop::Refused {
+            if output.stop == GenerationStop::Refused {
                 return Err(EngineError::unreadable("The model refused this question"));
             }
             if step.summarizing {
                 continue;
             }
-            input.messages.push(answer.output.message.clone());
-            if answer.output.stop != GenerationStop::Tools {
-                return Ok(answer.output.stop);
+            input.messages.push(output.message.clone());
+            if output.stop != GenerationStop::Tools {
+                return Ok(output.stop);
             }
             let mut results = Vec::new();
-            // Provider call IDs belong to one assistant step; the host journals
-            // a separate logical witness when a later step reuses the same ID.
-            let mut call_ids = std::collections::HashSet::new();
-            for part in &answer.output.message.content {
+            for part in &output.message.content {
                 let GenerationPart::ToolCall {
                     id,
                     name,
@@ -577,19 +625,8 @@ impl Engine {
                 else {
                     continue;
                 };
-                if !call_ids.insert(id.clone()) {
-                    return Err(EngineError::unreadable(
-                        "the model reused a tool call identity",
-                    ));
-                }
                 host.check_active().await?;
-                calls = calls
-                    .checked_add(1)
-                    .ok_or_else(|| EngineError::unreadable("the Ask tool budget ended"))?;
-                if calls > limits.tools {
-                    return Err(EngineError::unreadable("the Ask tool budget ended"));
-                }
-                let mut result = if input.tools.iter().any(|tool| tool.name == *name) {
+                let result = if input.tools.iter().any(|tool| tool.name == *name) {
                     host.tool(id, name, arguments).await?
                 } else {
                     ToolAnswer {
@@ -597,11 +634,8 @@ impl Engine {
                         is_error: true,
                     }
                 };
-                bound_tool_result(&mut result.content, limits.tool_bytes);
-                tool_bytes = tool_bytes.saturating_add(result.content.len());
-                if tool_bytes > limits.turn_tool_bytes {
-                    return Err(EngineError::unreadable("the Ask source budget ended"));
-                }
+                // Keep the complete checked read. The next preparation fits the page and history
+                // together with these results before any text is shortened for the model.
                 let witness = host.tool_answer(id, &result).await?;
                 results.push(GenerationPart::ToolResult {
                     call_id: id.clone(),
@@ -621,6 +655,51 @@ impl Engine {
         ))
     }
 
+    /// The credential keeper's model step, including its original accounting and context-window handling.
+    pub async fn generate_ask_api(
+        &self,
+        host: &dyn TurnHost,
+        step: &Step,
+    ) -> Result<ModelReply, EngineError> {
+        let outgoing = Outgoing::new(
+            step.id,
+            step.machine
+                .ok_or_else(|| EngineError::unreadable("The Ask API keeper is absent."))?,
+            SerialKey::None,
+            step.request.api()?,
+        )
+        .map_err(|error| EngineError::unreadable(error.to_string()))?;
+        host.issue(self, outgoing).await?;
+        let outcome = self
+            .inner
+            .commands
+            .wait(step.id)
+            .await
+            .map_err(EngineError::from)?;
+        let answer: ProviderGenerateResult = match outcome {
+            Outcome::Succeeded(value) => serde_json::from_value(value)?,
+            Outcome::Failed(error) => {
+                self.keep_ask_storage_gap(step).await?;
+                self.count_failed_ask_step(step, &error).await?;
+                // A provider that says the request is longer than its model's context has shown a window
+                // the estimate did not know: the next preparation makes the conversation shorter.
+                if is_context_overflow(&error) && host.window_exceeded(step).await? {
+                    return Ok(ModelReply::ContextReduced);
+                }
+                return Err(EngineError::unreadable(error.detail));
+            }
+            Outcome::Cancelled => return Err(EngineError::unreadable("Ask was stopped")),
+            Outcome::Expired => {
+                return Err(EngineError::unreadable("the Ask provider request expired"));
+            }
+        };
+        let may_continue = self.count_ask_step(step, &answer).await?;
+        Ok(ModelReply::Answer {
+            output: Box::new(answer.output),
+            room_for_next: may_continue,
+        })
+    }
+
     async fn count_ask_step(
         &self,
         step: &Step,
@@ -630,6 +709,45 @@ impl Engine {
         let room = self.count_ask_step_in(&mut tx, step, answer).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(room)
+    }
+
+    async fn keep_ask_storage_gap(&self, step: &Step) -> Result<(), EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let code: Option<String> = sqlx::query_scalar(
+            "SELECT sqlstate FROM command_storage_gaps WHERE command_id=$1 AND NOT applied",
+        )
+        .bind(step.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(orch_db::DbError::from)?;
+        let Some(code) = code else {
+            return Ok(());
+        };
+        orch_db::queries::threads::lock(&mut tx, step.thread).await?;
+        let item: Option<Id> =
+            sqlx::query_scalar("SELECT item_id FROM ask_calls WHERE id=$1 AND thread_id=$2")
+                .bind(step.id)
+                .bind(step.thread)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        let Some(item) = item else {
+            return Ok(());
+        };
+        let Some(item) = orch_db::queries::threads::item(&mut tx, item).await? else {
+            return Ok(());
+        };
+        let mut unit = crate::unit::Unit::new(&mut tx, self.inner.clock.now());
+        self.record_item_storage_gap(&mut unit, &item, &code, None)
+            .await?;
+        sqlx::query("UPDATE command_storage_gaps SET applied=true WHERE command_id=$1")
+            .bind(step.id)
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        let finished = unit.finish().await?;
+        self.commit(tx, finished).await?;
+        Ok(())
     }
 
     /// Count the actual retained reply even after its controller outcome became
@@ -668,8 +786,8 @@ impl Engine {
             turn: call.turn_id,
             segment: call.segment_id,
             person: call.person_id,
-            machine: call.machine_id,
-            request,
+            machine: Some(call.machine_id),
+            request: dialogue::Request::Api(request),
         };
         self.count_ask_step_in(conn, &step, &answer)
             .await
@@ -697,6 +815,7 @@ impl Engine {
         step: &Step,
         answer: &ProviderGenerateResult,
     ) -> Result<bool, EngineError> {
+        let request = step.request.api()?;
         let tokens = answer.usage;
         self.count_own_use_context(
             conn,
@@ -710,11 +829,11 @@ impl Engine {
                     .map_or_else(|| self.inner.clock.now(), |time| time.get()),
                 topic: step.root,
                 thread: Some(step.thread),
-                provider: step.request.provider_id,
+                provider: request.provider_id,
                 entry: None,
                 person: Some(step.person),
-                model: &step.request.model_name,
-                protocol: Some(&step.request.protocol),
+                model: &request.model_name,
+                protocol: Some(&request.protocol),
                 tokens: orch_db::usage::ledger::Tokens {
                     input: tokens.input_tokens,
                     cached_input: tokens.cached_input_tokens,
@@ -731,18 +850,15 @@ impl Engine {
         // Count, warn and audit in the same transaction. This also covers a
         // final answer which has no following model step to perform admission.
         let tier = orch_model_contract::parameters::requested_tier_for_caps(
-            &step.request.protocol,
-            step.request
-                .params
-                .as_ref()
-                .unwrap_or(&orch_types::Json::Null),
+            &request.protocol,
+            request.params.as_ref().unwrap_or(&orch_types::Json::Null),
         );
         let room = self
             .room_for_ask(
                 conn,
                 step.root,
-                step.request.provider_id,
-                &step.request.model_name,
+                request.provider_id,
+                &request.model_name,
                 tier.as_deref(),
                 step.person,
                 Some(step.turn),
@@ -761,6 +877,17 @@ impl Engine {
         };
         self.count_ask_step(step, &answer).await.map(|_| ())
     }
+}
+
+/// Whether a provider answered that the request is longer than the context of its model: the connector
+/// classifies the upstream's answer, whatever words the vendor used, and says so in the failure it reports.
+fn is_context_overflow(error: &orch_link_contract::commands::CommandError) -> bool {
+    error
+        .details
+        .as_ref()
+        .and_then(|details| details.pointer("/failure/code"))
+        .and_then(serde_json::Value::as_str)
+        == Some("context_overflow")
 }
 
 pub(crate) fn failed_answer(
@@ -910,12 +1037,66 @@ mod tests {
     }
 
     #[test]
-    fn unicode_tool_results_fit_the_byte_budget_with_the_shortening_note() {
+    fn unicode_tool_results_fit_the_length_with_the_shortening_line() {
         let mut result = "来源😀".repeat(1000);
-        bound_tool_result(&mut result, 128);
-        assert!(result.len() <= 128);
+        bound_tool_result(&mut result, 256, None);
+        assert!(result.len() <= 256);
         assert!(result.starts_with("来源😀"));
-        assert!(result.ends_with("a narrower read.]"));
+        assert!(result.ends_with("read a narrower part.]"));
+    }
+
+    #[test]
+    fn a_result_larger_than_the_room_is_cut_to_it_with_a_line_that_says_where_the_whole_source_is()
+    {
+        let model = "gpt-6-sol";
+        let whole = format!("{{\"data\":\"{}\"}}", "word ".repeat(5000));
+        for tokens in [60, 400, 2000] {
+            let mut cut = whole.clone();
+            fit_tool_result(model, &mut cut, tokens, Some("/topic/1"));
+            assert!(context::result_tokens(model, &cut) <= tokens, "{tokens}");
+            assert!(
+                context::result_tokens(model, &cut) + 16 >= tokens,
+                "{tokens}: it is the longest cut that fits, not a shorter one"
+            );
+            assert!(cut.ends_with("Open it or read a narrower part.]"));
+            assert!(cut.contains("/topic/1"));
+            assert!(cut.starts_with("{\"data\":\"word word"));
+            // A refresh of the same source, bounded by the length the result was delivered at, repeats the cut.
+            let mut again = whole.clone();
+            bound_tool_result(&mut again, cut.len(), Some("/topic/1"));
+            assert_eq!(again, cut, "{tokens}");
+        }
+        let mut short = "short".to_owned();
+        fit_tool_result(model, &mut short, 60, None);
+        assert_eq!(short, "short", "a result that fits is not touched");
+    }
+
+    #[test]
+    fn a_result_is_cut_at_a_character_boundary_and_a_room_of_nothing_leaves_the_line() {
+        let model = "claude-sonnet-5";
+        let whole = "来源😀".repeat(3000);
+        let mut cut = whole.clone();
+        fit_tool_result(model, &mut cut, 300, None);
+        assert!(context::result_tokens(model, &cut) <= 300);
+        assert!(cut.starts_with("来源😀"));
+        let mut none = whole;
+        fit_tool_result(model, &mut none, 0, None);
+        assert!(none.starts_with('\n') && none.ends_with("read a narrower part.]"));
+    }
+
+    #[test]
+    fn a_request_called_too_long_is_told_from_the_failure_the_connector_classified() {
+        use orch_link_contract::commands::{CommandError, ErrorCode};
+        let failure = |code: &str| {
+            CommandError::new(ErrorCode::Internal, "the generation upstream answered 400")
+                .with_details(json!({"failure":{"code":code,"status":400}}))
+        };
+        assert!(is_context_overflow(&failure("context_overflow")));
+        assert!(!is_context_overflow(&failure("rate_limited")));
+        assert!(!is_context_overflow(&CommandError::new(
+            ErrorCode::Internal,
+            "the upstream answered 400"
+        )));
     }
 
     #[test]

@@ -409,6 +409,44 @@ async fn a_model_and_an_effort_must_be_ones_the_provider_lists() {
 }
 
 #[tokio::test]
+async fn a_thread_can_start_with_a_generation_model_and_explains_why_an_embedding_model_cannot() {
+    let s = Scene::new().await;
+    let request = CreateThread {
+        binding: Some(binding(&s)),
+        model: Some(MODEL.to_owned()),
+        environment: Some(EnvironmentChoice::Use(s.on.environment)),
+        ..CreateThread::default()
+    };
+    for purpose in ["embedding", "generation"] {
+        sqlx::query("UPDATE provider_models SET parameters=parameters || $3 WHERE provider_id=$1 AND model_name=$2")
+            .bind(s.on.provider)
+            .bind(MODEL)
+            .bind(json!({"purposes":[purpose]}))
+            .execute(s.rig.db.pool()).await.unwrap();
+        let result = s
+            .rig
+            .world
+            .app
+            .call(ThreadCreate, &[&s.tree.topic.base.id])
+            .token(&s.ada.token)
+            .body(&request)
+            .send()
+            .await;
+        if purpose == "embedding" {
+            let refusal = result.problem();
+            assert_eq!(refusal.code, ErrorCode::ModelNotAllowed);
+            assert_eq!(refusal.extra["reason"], "generation_unsupported");
+            assert_eq!(refusal.extra["model"], MODEL);
+        } else {
+            assert_eq!(
+                result.ok().into_full().unwrap().model.as_deref(),
+                Some(MODEL)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn an_input_sent_with_the_thread_starts_it_at_once() {
     let s = Scene::new().await;
     let made = s

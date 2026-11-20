@@ -47,7 +47,7 @@ impl Authority {
 }
 
 async fn owner(conn: &mut Conn, machine: Id) -> ApiResult<orch_db::queries::identity::UserRow> {
-    let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+    let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
         .bind(machine)
         .fetch_optional(&mut *conn)
         .await

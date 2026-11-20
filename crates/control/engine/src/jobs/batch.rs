@@ -788,6 +788,7 @@ impl Engine {
             });
         }
         let operation = crate::notifications::NotificationOperation {
+            actor: principal.user(),
             id: batch,
             kind: "switch".into(),
             name: String::new(),
