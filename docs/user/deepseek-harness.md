@@ -45,7 +45,7 @@ then retry; the thread keeps the program's own reason.
 ## What the plugin adds
 
 Orch ships a plugin that runs inside dsh and adds what the protocol does not carry. The program says which of
-these work in the build you have; the **Harnesses** page lists what is off and why.
+these work in the build you have; the **Agent programs** page of Management lists what is off and why.
 
 - Live text and reasoning as the model writes it.
 - Adding to a running turn.

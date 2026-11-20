@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-envhost --lib -- git_actions::
+test -p orch-envhost --test git_https
+test -p orch-engine --test source --test source_uniform
+test -p orch-engine --lib -- jobs::source::
+test -p orch-api-core --lib
+test -p orch-api-core --test workspace_source --test workspace_source_scopes
+test -p orch-connector-core --lib

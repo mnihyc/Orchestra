@@ -349,12 +349,17 @@ async fn recovery_proof_lifetime_resets_admission_and_source_times_cannot_be_wri
 }
 
 async fn token(s: &Scene, user: Id) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
-    let token = new_token(API_TOKEN_PREFIX);
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
+    let token = new_api_token(orch_types::new_id());
     let mut conn = s.rig.db.acquire().await.unwrap();
-    orch_db::queries::identity::testing::insert_api_token(&mut conn, user, &token_hash(&token))
-        .await
-        .unwrap();
+    orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        orch_api_contract::api_keys::key_id(&token).unwrap(),
+        user,
+        &token_hash(&token),
+    )
+    .await
+    .unwrap();
     sqlx::query("UPDATE api_tokens SET scopes = ARRAY['provider.manage'] WHERE token_hash = $1")
         .bind(token_hash(&token))
         .execute(&mut *conn)
@@ -644,10 +649,11 @@ async fn explicit_reset_key(
         KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
     };
     use orch_access_contract::permissions::ObjectKind;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
-    let key = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let key = new_api_token(issued_key_id);
     let hash = token_hash(&key);
     let kind = KeyTargetKind::Object(ObjectKind::Provider);
     let scope = KeyScope {
@@ -670,7 +676,7 @@ async fn explicit_reset_key(
     create_api_token_scoped(
         &mut s.rig.db.acquire().await.unwrap(),
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "confirmed provider reset",
             token_hash: &hash,
