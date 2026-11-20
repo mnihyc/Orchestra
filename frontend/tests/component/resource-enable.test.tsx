@@ -9,12 +9,12 @@ import { show } from './support';
 
 const read = vi.hoisted(() => vi.fn<(target: FactTarget) => Promise<ResourceImpact>>());
 vi.mock('@/api/resource-impact', () => ({ resourceImpactQuery: (target: FactTarget) => ({ queryKey: ['enable-review', target], queryFn: () => read(target), retry: false }) }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const target: FactTarget = { object: { kind: 'provider', id: '00000000-0000-4000-8000-000000000001' }, model_id: null };
 function facts(): ResourceImpact {
   const empty = { count: 0, threads: 0, visible: [], hidden: 0, since: null };
-  return { target, name: 'Team provider', stopping: false,
+  return { target, name: 'Team provider', stopping: false, applications: [], application_complete: true,
     facts: { subject: { kind: 'resource', object: target.object }, as_of: '2026-10-28T00:00:00Z', dependents: [], dependents_complete: true, uses: null },
     activity: { running: empty, stopped: empty, waiting: { count: 6, threads: 4, hidden: 3, since: '2026-03-03T00:00:00Z', visible: [{ object: { kind: 'thread', id: '00000000-0000-4000-8000-000000000002' }, name: 'Repair redirects', relation: 'binding', until: null }] } },
   };

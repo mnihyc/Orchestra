@@ -63,7 +63,7 @@ fn every_named_payload_has_a_concrete_schema_and_refuses_unrelated_values() {
 #[test]
 fn starting_a_profile_preserves_its_vendor_configuration_but_refuses_unknown_request_members() {
     let literal = json!({ "id":ID,"k":"agent.start","key":null,
-    "deadline":"2026-10-14T16:00:00.000Z","b":{
+    "work":{"secs":30,"nanos":0},"b":{
         "provider_id":ID,"agent_id":OTHER,"harness_kind":"example",
         "profile":{"harness_version":null,"config":{"vendor_setting":"kept"},"env":{"LANG":"C.UTF-8"}},
         "home":null,"provider_config":{}

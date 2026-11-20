@@ -108,6 +108,23 @@ impl Engine {
         let has_key: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='api_key')",
         ).bind(snapshot.provider.id).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        let endpoint_names = upstreams
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row.get("protocol").and_then(Json::as_str))
+            .collect::<Vec<_>>();
+        let translation = snapshot
+            .arrangement
+            .protocol
+            .as_deref()
+            .and_then(|protocol| {
+                orch_model_contract::translator::builtin_translation(protocol, &endpoint_names)
+            });
+        let outgoing = translation
+            .as_ref()
+            .map(|route| route.to.as_str())
+            .or(snapshot.arrangement.protocol.as_deref());
         let mut account = Provider::default();
         for row in upstreams.as_array().into_iter().flatten() {
             let (Some(protocol), Some(address)) = (
@@ -116,7 +133,7 @@ impl Engine {
             ) else {
                 continue;
             };
-            if snapshot.arrangement.protocol.as_deref() != Some(protocol) {
+            if outgoing != Some(protocol) {
                 continue;
             }
             account

@@ -10,7 +10,7 @@ import { ThreadStateIcon } from '@/ui/ThreadState';
 import type { ThreadDisplay } from '@/generated/api-types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, MessagesSquare, Star } from 'lucide-react';
-import { type KeyboardEvent, type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
@@ -70,10 +70,19 @@ function howOf(event: { ctrlKey: boolean; metaKey: boolean; altKey: boolean }, a
 export function Finder({ ready = true }: { ready?: boolean }) {
   const { open, opened, seed, commandPrefix } = useFinder();
   // Every opening begins anew: the field, the choice, the card, and what was asked for.
-  return <Session key={opened} open={open} seed={seed} commandPrefix={commandPrefix} ready={ready} />;
+  return <Opening key={opened} open={open} seed={seed} commandPrefix={commandPrefix} ready={ready} />;
 }
 
-function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: string; commandPrefix: string | null; ready: boolean }) {
+interface OpeningProps { open: boolean; seed: string; commandPrefix: string | null; ready: boolean }
+
+function Opening(props: OpeningProps) {
+  const [retained, setRetained] = useState(props.open);
+  const finish = useCallback(() => setRetained(false), []);
+  if (props.open && !retained) setRetained(true);
+  return props.open || retained ? <Session {...props} finish={finish} /> : null;
+}
+
+function Session({ open, seed, commandPrefix, ready, finish }: OpeningProps & { finish: () => void }) {
   const participating = useFinder((state) => state.participating);
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -87,6 +96,10 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
   const [card, setCard] = useState<NameHit | null>(null);
   const [file, setFile] = useState<FileSource | null>(null);
   const [tagChoice, setTagChoice] = useState<NameHit | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => {
+    if (dismissed && !open && file === null && tagChoice === null) finish();
+  }, [dismissed, open, file, tagChoice, finish]);
   const [expanded, setExpanded] = useState<ReadonlySet<GroupId>>(new Set());
   // The row the reader walked to; before they walk, the first row is the chosen one.
   const [walkedTo, setWalkedTo] = useState<string | null>(null);
@@ -276,7 +289,7 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
         const run = afterClose.current;
         afterClose.current = null;
         // Otherwise the dialog restores its opener before the chosen destination takes focus.
-        if (run !== null) queueMicrotask(run);
+        queueMicrotask(() => { run?.(); setDismissed(true); });
       }}
       label={t(commandPrefix === null ? 'finder.title' : 'workbench.openView.choose')}
       showTitle={viewsOnly}
