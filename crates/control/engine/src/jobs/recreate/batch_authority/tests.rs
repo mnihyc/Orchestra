@@ -838,7 +838,12 @@ async fn lost_member_authority_does_not_prevent_owned_candidate_cleanup_and_old_
         .machine
         .handler
         .on(CommandKind::NodeRuntimeStart, |_| {
-            Ok(CommandResult::NodeRuntimeStart(Empty {}))
+            Ok(CommandResult::NodeRuntimeStart(
+                orch_link_contract::commands::NodeRuntimeStartResult {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
+                    reused: false,
+                },
+            ))
         });
     let recreate = Recreating::of(&s.job.row().await?)?;
     assert_eq!(

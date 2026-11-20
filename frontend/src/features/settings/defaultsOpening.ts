@@ -1,6 +1,6 @@
 /** A visible settings consumer and its visible Chat share the independently admitted opening. */
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useLayoutEffect, useState } from 'react';
+import { useLayoutEffect, useMemo, useState } from 'react';
 import { nodeChatOpeningQuery } from '@/api/chats';
 import { settingsKey } from '@/api/settings';
 import { nodeKey } from '@/api/nodes';
@@ -28,24 +28,25 @@ function metadataAddress(href: string | null): string | null {
 export function useDefaultsOpening(nodeId: string | null, chat?: ChatReader, capable = true) {
   const instance = useViewInstance();
   const cache = useQueryClient();
-  const state = useWorkbench();
+  const layout = useWorkbench((state) => state.layout);
   const owner = instance?.content === true ? instance.id : instance?.headingOwner ?? null;
-  const tab = owner === null ? null : findTab(state.layout, owner)?.tab ?? null;
-  const href = tab === null ? null : contentAddress(tab);
-  const target = href === null ? null : parsePageAddress(href);
+  const active = useWorkbench((state) => state.activeContent === owner);
+  const tab = useMemo(() => owner === null ? null : findTab(layout, owner)?.tab ?? null, [layout, owner]);
+  const href = useMemo(() => tab === null ? null : contentAddress(tab), [tab]);
+  const target = useMemo(() => href === null ? null : parsePageAddress(href), [href]);
   const routeNavigation = target === null ? null : settingsNavigation(target.pathname, target.search);
   const navigation = routeNavigation !== null && (routeNavigation.kind === 'org' || routeNavigation.kind === 'project' || routeNavigation.kind === 'topic') ? routeNavigation : null;
   const unfiltered = target?.search.setting === undefined || target.search.setting === '';
-  const known = nodeId === null ? undefined : cache.getQueryData<Node>(nodeKey(nodeId));
+  const known = nodeId === null || navigation?.kind !== 'org' || navigation.current !== 'members' ? undefined : cache.getQueryData<Node>(nodeKey(nodeId));
   const settingsOnly = navigation?.kind === 'org' && navigation.current === 'members'
     && known?.kind === 'org' && known.access.permissions.includes('members.manage');
   const relevant = capable && unfiltered && nodeId !== null && owner !== null && (navigation?.current === 'defaults' || settingsOnly)
     && (navigation.kind === 'org' || navigation.id === nodeId);
-  const candidates = relevant ? allTabs(state.layout).filter((candidate) => {
+  const candidates = relevant ? allTabs(layout).filter((candidate) => {
     if (candidate.view !== 'chat') return false;
     if (candidate.of?.node !== undefined) return candidate.of.node === nodeId;
     if (candidate.scope?.mode === 'fixed') return candidate.scope.target.id === nodeId && candidate.scope.target.kind === navigation.kind;
-    return state.activeContent === owner;
+    return active;
   }).map((candidate) => candidate.id) : [];
   const contentOpening = useShownViewOpening(relevant ? [owner] : []);
   const chatOpening = useShownViewOpening(candidates);
