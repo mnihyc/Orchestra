@@ -566,6 +566,7 @@ async fn collecting_uses_an_actual_native_barrier_and_keeps_every_intermediate_e
         thread,
         segment,
         SessionEvent::SessionLost(SessionLost {
+            uncertain: false,
             reason: "native barrier".into(),
         }),
     )

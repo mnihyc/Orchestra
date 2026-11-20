@@ -1,0 +1,2 @@
+web test
+web-e2e tests/e2e/resource-details.spec.ts tests/e2e/usage.spec.ts tests/e2e/usage-axis.spec.ts --project=chromium --grep "resource details are bounded, reachable and lazy|a record is followed to its thread|Usage axis ink fits"
