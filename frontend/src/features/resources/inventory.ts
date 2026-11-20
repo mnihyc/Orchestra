@@ -1,5 +1,5 @@
 /** Typed resource views carried by the one authorized Everything pager. */
-import type { EverythingKind, EverythingResource } from '@/generated/api-types';
+import type { EverythingKind, ResourceListRow } from '@/generated/api-types';
 import type { ResourceKind } from './trail';
 
 export const INVENTORY_KINDS: Record<ResourceKind, EverythingKind> = {
@@ -8,13 +8,13 @@ export const INVENTORY_KINDS: Record<ResourceKind, EverythingKind> = {
 };
 
 export const resourceReaders = {
-  providers: (row: EverythingResource) => row.kind === 'provider' ? row.value : null,
-  agents: (row: EverythingResource) => row.kind === 'agent' ? row.value : null,
-  environments: (row: EverythingResource) => row.kind === 'environment' ? row.value : null,
-  hosts: (row: EverythingResource) => row.kind === 'host' ? row.value : null,
-  machines: (row: EverythingResource) => row.kind === 'machine' ? row.value : null,
-  templates: (row: EverythingResource) => row.kind === 'template' ? row.value : null,
-  mcp: (row: EverythingResource) => row.kind === 'mcp_server' ? row.value : null,
-  mounts: (row: EverythingResource) => row.kind === 'mount' ? row.value : null,
-  skills: (row: EverythingResource) => row.kind === 'skill' ? row.value : null,
+  providers: (row: ResourceListRow) => row.kind === 'provider' ? row.value : null,
+  agents: (row: ResourceListRow) => row.kind === 'agent' ? row.value : null,
+  environments: (row: ResourceListRow) => row.kind === 'environment' ? row.value : null,
+  hosts: (row: ResourceListRow) => row.kind === 'host' ? row.value : null,
+  machines: (row: ResourceListRow) => row.kind === 'machine' ? row.value : null,
+  templates: (row: ResourceListRow) => row.kind === 'template' ? row.value : null,
+  mcp: (row: ResourceListRow) => row.kind === 'mcp_server' ? row.value : null,
+  mounts: (row: ResourceListRow) => row.kind === 'mount' ? row.value : null,
+  skills: (row: ResourceListRow) => row.kind === 'skill' ? row.value : null,
 };
