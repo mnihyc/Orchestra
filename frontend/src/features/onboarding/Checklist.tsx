@@ -2,6 +2,7 @@
  * The org page supplies its name; only its root's owners see missing setup. All ticks come from one current read;
  * choosing a mode or closing this card changes only the person's portable interface state.
  */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronDown, CircleHelp, FileText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -153,8 +154,8 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
             {solo !== undefined && <Button action="chooseOrg" size="sm" pending={mutation.isPending} onClick={() => choose(solo, 'solo')}>{t('firstSteps.workAlone')}</Button>}
           </div>
         </div>}
-        {mode !== null && <details open={progressOpen} onToggle={(event) => keepProgressOpen(event.currentTarget.open)} className="group">
-          <summary className="focus-ring flex cursor-pointer items-center gap-2 py-2 text-sm font-medium text-text-muted"><ChevronDown aria-hidden />{t('firstSteps.progress')}</summary>
+        {mode !== null && <details open={progressOpen} onToggle={(event) => { if (event.currentTarget.open !== progressOpen) keepProgressOpen(event.currentTarget.open); }} className="group">
+          <summary className="focus-ring flex cursor-pointer items-center gap-2 py-2 text-sm font-medium text-text-muted"><ChevronDown aria-hidden />{t('firstSteps.progress')}<DeviceChoiceWriterException writer={keepProgressOpen} /></summary><DeviceExpansionFacts writer={keepProgressOpen} open={progressOpen} />
           <StepList data={{ ...data, work_mode: mode }} contextPath={contextPath} />
         </details>}
     </section> : <Button action="show" className="self-start" size="sm" variant="ghost" pending={mutation.isPending} onClick={() => saveDismissal(false)}>{t('firstSteps.show')}</Button>}

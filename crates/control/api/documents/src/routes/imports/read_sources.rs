@@ -247,6 +247,7 @@ impl native::Selected for Files {
     type Query = PageQuery;
     type Value = FilePage;
     type Reply = Page<String>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::IMPORT_FILES;
 
     fn select<'a>(
