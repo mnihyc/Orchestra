@@ -296,6 +296,7 @@ impl Deletion {
             link::insert_command_with_authority(
                 conn,
                 &link::NewCommand {
+                    content_transit: false,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),

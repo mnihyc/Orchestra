@@ -24,6 +24,7 @@ The contract between Orch and any agent harness: the `AgentAdapter` trait with t
 | [tool_answers](src/tool_answers.rs) | The model-facing projection of structured Orch tool results. |
 | [credentials](src/credentials.rs) | Credential forms with their custody and lifetime, what an adapter issues and accepts, and exchange. |
 | [login](src/login.rs) | Sign-in methods as declarations (fields, kind, what each yields; an import takes a credential as text or as the path of a file inside the runtime), the state a running sign-in reports, and a provider's own options. |
+| [history::spool](src/history/spool.rs) | Temporary disk index for native history records. |
 | [history](src/history.rs) | Native and neutral archives, import fidelity and exact native input-prefix/source identities. |
 | [arrangement](src/arrangement.rs) | Which arrangement a thread gets: what is available from the declarations and the facts, in what order, and what is permitted. |
 | [facts](src/facts.rs) | What a profile is configured with, and what a machine and an environment report of themselves. |

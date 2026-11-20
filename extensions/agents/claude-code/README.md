@@ -80,7 +80,7 @@ the speed it was asked for. Against a model server that is not the vendor's the 
 | [discovery](src/discovery.rs) | Sessions found in a Claude Code home; the MCP servers of its own configuration, a user's and a directory's, by name, and one definition read out for an import. |
 | [history::record](src/history/record.rs) | Adoption records reconcile item slots on disk and stream the latest complete turns. |
 | [history::reader](src/history/reader.rs) | Captured transcripts yield one historical mapping batch at a time. |
-| [history::spool](src/history/spool.rs) | Temporary indexed files keep historical item and tool correlation off the heap. |
+| [history::spool](../../../crates/contracts/agent/src/history/spool.rs) | Temporary indexed files keep historical item and tool correlation off the heap. |
 | [history](src/history.rs) | Transcript export, import and fork between homes; arrival from another harness by summary. |
 | [native_history](src/native_history.rs) | Exact transcript ownership, measurements and removal in managed Claude Code homes. |
 | [instruction_sources](src/instruction_sources.rs) | Reported instruction loads and imports, observed without changing the harness's decisions or text. |

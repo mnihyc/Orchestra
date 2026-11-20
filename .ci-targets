@@ -1,0 +1,7 @@
+test -p orch-agent-contract --lib
+test -p orch-adapter-claude-code --test history
+test -p orch-adapter-codex --test history
+test -p orch-adapter-codex --test discovery_scale
+test -p orch-adapter-claude-code --lib -- a_hundred_thousand_alternate_transcripts_use_a_disk_index_and_streamed_file_sets
+test -p orch-adapter-codex --lib -- a_million_native_metadata_rows_use_paged_disk_indexes_instead_of_home_maps
+test -p orch-adapter-claude-code --lib -- cancelling_transcript_work_stops_before_another_mapping_batch

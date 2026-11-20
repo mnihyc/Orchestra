@@ -74,7 +74,7 @@ not corrected, and a harness that cannot render its catalogue leaves a manager t
 | [provider](src/provider.rs) | Sign-in on the provider (a code, an existing sign-in file given as text or by its path inside the runtime, a workspace token), the workspace restriction, usage facts and model suggestions. |
 | [discovery](src/discovery.rs) | Sessions found in a Codex home; the MCP servers of its own configuration, the home's and a directory's, by name, and one definition read out for an import. |
 | [history](src/history.rs) | Neutral conversion of a carried conversation into the Responses items a new thread is told. |
-| [native_history::spool](src/native_history/spool.rs) | Temporary native-history indexes keep home metadata and family walks off the heap. |
+| [native_history::spool](src/native_history/spool.rs) | Sequential disk log and cancellation for native history traversal. |
 | [native_history](src/native_history.rs) | Exact native history ownership, measurements and removal in managed Codex homes. |
 | [parameters](src/parameters.rs) | Map effort and eligible neutral parameters to Codex fields; the speeds and access programs Codex offers for a model, which a provider enables before a thread shows them. |
 

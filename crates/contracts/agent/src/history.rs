@@ -16,6 +16,8 @@
 //! as JSON Lines of items, the main stream only, oldest first: every adapter that declares `import_neutral`
 //! reads it.
 
+pub mod spool;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Hash, Id};
