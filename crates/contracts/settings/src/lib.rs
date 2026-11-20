@@ -16,6 +16,7 @@ mod examples;
 pub mod merge;
 pub mod provenance;
 pub mod registry;
+pub mod transfers;
 pub mod unit;
 pub mod version_override;
 

@@ -32,16 +32,16 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
     return <a {...props} ref={ref} href={href}>{typeof children === 'function' ? children({ isActive: route.path === href }) : children}</a>;
   }),
 }));
-vi.mock('@/features/access/AdminMode', () => ({ useManagementAvailable: () => false }));
-vi.mock('@/features/inbox/Counters', () => ({ useInboxCounters: () => ({ unread: 0, approvalsPending: 0 }), useCounterWords: () => ({ unread: null, approvals: null }), CountBadge: () => null }));
-vi.mock('@/features/navigation/counts', () => ({ useUnreadChats: () => 0 }));
-vi.mock('@/features/navigation/currentOrg', () => ({ useNavigationOrg: () => useSelectedOrg((state) => state.orgId) }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabels: (places: readonly { id: string; name: string }[]) => new Map(places.map((place) => [place.id, place.name])) }));
-vi.mock('@/features/navigation/Resources', () => ({ RESOURCES_VIEW: 'resource-navigation' }));
-vi.mock('@/shell/keys', () => ({ useActionKeys: () => undefined }));
-vi.mock('@/shell/screen', () => ({ useCurrentHeading: () => null }));
-vi.mock('@/realtime/stores/tree', () => ({ useNodePath: () => ({ orgId: ACME.org }) }));
+vi.mock('@/features/access/AdminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(), useManagementAvailable: () => false }));
+vi.mock('@/features/inbox/Counters', async (loadOriginal) => ({ ...await loadOriginal<object>(), useInboxCounters: () => ({ unread: 0, approvalsPending: 0 }), useCounterWords: () => ({ unread: null, approvals: null }), CountBadge: () => null }));
+vi.mock('@/features/navigation/counts', async (loadOriginal) => ({ ...await loadOriginal<object>(), useUnreadChats: () => 0 }));
+vi.mock('@/features/navigation/currentOrg', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigationOrg: () => useSelectedOrg((state) => state.orgId) }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabels: (places: readonly { id: string; name: string }[]) => new Map(places.map((place) => [place.id, place.name])) }));
+vi.mock('@/features/navigation/Resources', async (loadOriginal) => ({ ...await loadOriginal<object>(), RESOURCES_VIEW: 'resource-navigation' }));
+vi.mock('@/shell/keys', async (loadOriginal) => ({ ...await loadOriginal<object>(), useActionKeys: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useCurrentHeading: () => null }));
+vi.mock('@/realtime/stores/tree', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodePath: () => ({ orgId: ACME.org }) }));
 
 const before = useWorkbench.getState();
 beforeEach(() => {
@@ -114,4 +114,13 @@ it.each(['navigation', 'resource-navigation'])('docks %s when its edge peek was 
   await user.click(control);
   expect(useWorkbench.getState().layout.left).toMatchObject({ open: true, active: view });
   expect(useWorkbench.getState().overlay).toBeNull();
+});
+
+
+it('keeps Ask visually distinct from Help on the navigation rail', () => {
+  showRail();
+  const ask = screen.getByRole('button', { name: i18n.t('ask.open') });
+  const help = screen.getByRole('link', { name: i18n.t('screens.help.title') });
+  expect(ask.querySelector('svg.lucide-sparkles')).not.toBeNull();
+  expect(help.querySelector('svg.lucide-circle-question-mark')).not.toBeNull();
 });

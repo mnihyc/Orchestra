@@ -421,9 +421,22 @@ pub fn normalized(report: &ReadReport) -> Result<ProviderFacts, serde_json::Erro
     Ok(facts)
 }
 
-/// Reads the model report's nullable list, supplying only the optional display defaults and keeping its cap.
+/// Reads a nullable model list under the shipped whole-response default.
 pub fn models(value: &Json, secrets: &[String]) -> Result<ReadModels, &'static str> {
-    if serde_json::to_vec(value).map_err(|_| "malformed")?.len() > REPORT_BYTES {
+    models_with_limit(
+        value,
+        secrets,
+        orch_provider_contract::models::UpstreamPolicy::default().whole_limit(),
+    )
+}
+
+/// The normalized catalogue uses the same captured whole-response allowance as its discovery pages.
+pub fn models_with_limit(
+    value: &Json,
+    secrets: &[String],
+    max_bytes: usize,
+) -> Result<ReadModels, &'static str> {
+    if serde_json::to_vec(value).map_err(|_| "malformed")?.len() > max_bytes {
         return Err("too_large");
     }
     if value.is_null() {
