@@ -96,7 +96,8 @@ export function installOverflowTooltips(doc: Document): () => void {
     opening = undefined;
     leaving = undefined;
     if (active === null) return;
-    const { owner, tooltip } = active;
+    const { owner, source, tooltip } = active;
+    if (!candidates.has(source)) sizes?.unobserve(source);
     const remaining = (owner.getAttribute('aria-describedby') ?? '').split(/\s+/).filter((id) => id !== '' && id !== tooltip.id);
     if (remaining.length === 0) owner.removeAttribute('aria-describedby');
     else owner.setAttribute('aria-describedby', remaining.join(' '));
@@ -154,6 +155,7 @@ export function installOverflowTooltips(doc: Document): () => void {
       const ids = (owner.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
       owner.setAttribute('aria-describedby', [...ids, tooltip.id].join(' '));
       active = { source, owner, tooltip, keyboard };
+      if (!candidates.has(source)) sizes?.observe(source);
     };
     if (keyboard || immediate) open();
     else opening = view.setTimeout(open, OVERFLOW_REST_MS);
@@ -283,13 +285,18 @@ export function installOverflowTooltips(doc: Document): () => void {
     };
     const texts = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     for (let text = texts.nextNode(); text !== null; text = texts.nextNode()) mark(text.parentElement);
+    // Links and controls already receive focus. Their hints are read on focus or hover
+    // and observed while open; only standalone labels need a keyboard stop discovered here.
+    const inControl = new Set<Element>(root.querySelectorAll(CONTROLS));
+    if (root.closest(CONTROLS) !== null) inControl.add(root);
     for (const element of elements) {
+      if (element.parentElement && inControl.has(element.parentElement)) inControl.add(element);
       // Native input previews and shadow hosts can render values without light-DOM text.
       if (element instanceof HTMLElement && (element.shadowRoot !== null ||
         element instanceof HTMLInputElement && element.type === 'text' && element.getAttribute('role') === 'combobox')) mark(element);
     }
     for (const element of elements) {
-      if (!(element instanceof HTMLElement)) continue;
+      if (!(element instanceof HTMLElement) || (inControl.has(element) && !candidates.has(element))) continue;
       if (!withText.has(element) && !candidates.has(element) && !element.hasAttribute('data-overflow-text') && !element.hasAttribute('title')) continue;
       const wanted = clipsText(getComputedStyle(element)) || element.hasAttribute('data-overflow-text') || (element.hasAttribute('title') && renderedText(element).includes('…'));
       if (!wanted && !candidates.has(element)) continue;

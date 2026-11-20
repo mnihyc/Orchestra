@@ -272,6 +272,7 @@ async fn receipt_matches(
         let expected = build_command(row, *phase, row.started_at.unwrap_or(row.created_at))?;
         if let Some(actual) = orch_db::queries::link::command(conn, answer.command).await? {
             let retained = RetainedCommand {
+                after: actual.after_command_id,
                 machine: actual.machine_id,
                 kind: actual.kind.clone(),
                 key: actual.serial_key().map(str::to_owned),
@@ -319,6 +320,7 @@ async fn from_receipts(conn: &mut Conn, row: &JobRow) -> Result<Option<Witness>,
             return Ok(None);
         };
         let retained = RetainedCommand {
+            after: None,
             machine: actual.machine_id,
             kind: actual.kind.clone(),
             key: actual.serial_key().map(str::to_owned),
@@ -434,7 +436,8 @@ async fn read_on(
         return Ok(None);
     };
     let pending = pending(&row, request, reference)?;
-    let seconds = setting(conn, keys::MEASUREMENT_VALID_SECS).await?;
+    let valid_policy = super::super::policy_setting(conn, keys::MEASUREMENT_VALID_SECS).await?;
+    let seconds = valid_policy.seconds;
     if !pending
         && !valid(
             &row,
@@ -485,6 +488,15 @@ async fn read_on(
     }
     let count = Count {
         reference: Measurement {
+            timing: Some(super::super::assessed_timing(
+                &row,
+                valid_policy,
+                super::super::timing(&row).and_then(|value| value.observer_policy),
+                row.plan["keep_until"]
+                    .as_str()
+                    .and_then(|value| value.parse::<Time>().ok()),
+                engine.inner.clock.now(),
+            )),
             job_id: row.id,
             measured_at: row
                 .finished_at

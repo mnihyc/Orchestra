@@ -7,7 +7,6 @@ use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::common::PageQuery;
 use crate::nodes::NodeRef;
 use crate::resources::{HostRef, MachineRef};
 use crate::routes::Access::{Rule, User};
@@ -361,9 +360,9 @@ pub struct StorageQuery {
     /// `under_7_days`, `7_to_30_days`, `30_days_plus` or `unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
-    /// The existing list convention.
+    /// Search the disclosed records and continue through their ordered pages.
     #[serde(flatten)]
-    pub page: PageQuery,
+    pub page: crate::common::CollectionQuery,
 }
 
 /// The same screen's figures, breakdowns and page of retained records.

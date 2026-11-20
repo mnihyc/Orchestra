@@ -32,6 +32,28 @@ export async function showWorkbenchView(page: Page, name: string | RegExp): Prom
   await expect(chooser).toHaveCount(0);
 }
 
+/** Turns on, in Settings, Interface, that a hidden bar peeks when the pointer rests at its edge; the person's choice is kept for the person like the others. */
+export async function showHiddenBarsOnHover(page: Page): Promise<void> {
+  await page.goto('/settings/interface');
+  const hover = page.getByRole('switch', { name: /^Show hidden bars on hover: (On|Off)$/ });
+  await expect(hover).toBeVisible();
+  if (await hover.getAttribute('aria-checked') !== 'true') {
+    const saved = page.waitForResponse((response) => response.request().method() === 'PUT' && new URL(response.url()).pathname.endsWith('/me/state/sidebar'));
+    await hover.click();
+    expect((await saved).ok()).toBe(true);
+  }
+  await expect(page.getByRole('switch', { name: 'Show hidden bars on hover: On' })).toBeChecked();
+}
+
+/** The pointer comes to the strip at the edge of a hidden bar and rests there: the left bar's is beside the rail, the right bar's is the last pixel of the window. */
+export async function restAtEdge(page: Page, bar: 'left' | 'right'): Promise<void> {
+  const width = page.viewportSize()?.width ?? 1440;
+  const rail = await page.locator('[data-navigation-rail]').boundingBox();
+  const x = bar === 'right' ? width - 1 : (rail?.x ?? 0) + (rail?.width ?? 0) + 4;
+  await page.mouse.move(Math.max(x - 240, 1), 520);
+  await page.mouse.move(x, 520, { steps: 6 });
+}
+
 /** Read the retained identity after the normal workbench save completes. */
 export async function waitForSavedTabId(page: Page, tab: Locator): Promise<string> {
   const elementId = await tab.getAttribute('id');

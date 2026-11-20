@@ -1,3 +1,7 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { CopyId } from '@/ui/CopyId';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 /** Personal API-token operation rules, expiry, review and revocation.
  *
@@ -7,12 +11,12 @@ import { ThreadStateIcon } from '@/ui/ThreadState';
  * it again; a creation answered again says it was made, with Revoke and make another. A token is
  * ended for good by revoking it, which asks once.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { KeyRound, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { createToken, revokeToken, tokensQuery } from '@/api/users';
+import { createToken, revokeToken, tokensPageQuery } from '@/api/users';
 import { isPlainClick } from '@/features/chat/open';
 import { PLACE_ICONS, placePath } from '@/features/navigation/places';
 import { PersonalFrame } from '@/features/settings/PersonalFrame';
@@ -155,7 +159,9 @@ export function TokenPlace({ node }: { node: ApiTokenInfo['node'] }) {
 
 export function Tokens() {
   const { t } = useTranslation();
-  const list = useQuery(tokensQuery);
+  const search = useCollectionSearch("tokens");
+  const list = useInfiniteQuery(tokensPageQuery(search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   // Back from proving the linked sign-in again: the form opens as it was left, with the proof.
   const [returned] = useState(() => {
     const back = returnedToTokenForm();
@@ -182,6 +188,7 @@ export function Tokens() {
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="font-medium wrap-anywhere text-text">{token.name}</span>
+            <CopyId value={token.id} />
             {!scopesShown && <div className="text-sm text-text-muted"><ScopesCell token={token} compact /></div>}
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
@@ -227,15 +234,17 @@ export function Tokens() {
           {t('tokens.new.button')}
         </Button>
       </div>
+      <CollectionSearch name={t("tokens.table")} {...search} />
       {list.isPending ? (
         <SkeletonRows read={list} rows={3} />
       ) : list.isError ? (
         <ErrorState error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
-      ) : list.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState icon={<KeyRound aria-hidden />} title={t('tokens.none')} />
       ) : (
-        <Table label={t('tokens.table')} columns={columns} rows={list.data} rowKey={(token) => token.id} />
+        <Table label={t('tokens.table')} columns={columns} rows={rows} virtual rowKey={(token) => token.id} />
       )}
+      <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
       {making && <NewToken returned={returned} onClose={() => setMaking(false)} />}
       {reviewing !== null && <Dialog open onOpenChange={(open) => !open && setReviewing(null)} title={t('operationKeys.reviewTitle', { name: reviewing.name })} size="lg" footer={<Button onClick={() => setReviewing(null)}>{t('common.close')}</Button>}><KeyReview key={reviewing.id} token={reviewing} /></Dialog>}
       <ConfirmDialog
