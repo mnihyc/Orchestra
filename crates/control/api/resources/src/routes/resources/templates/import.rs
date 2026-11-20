@@ -408,6 +408,7 @@ impl effects::ApplyOwned for Import {
                 .dispatcher()
                 .issue_stored_before(
                     StoredCommand {
+                        content_transit: false,
                         id: Some(command.id),
                         machine: command.machine,
                         kind: command.kind.as_str().to_owned(),
@@ -427,13 +428,22 @@ impl effects::ApplyOwned for Import {
             {
                 return Err(failed(ctx, unavailable()).await);
             }
-            let proposal: NodeTemplateImportResult = match ctx
+            let waited = ctx
                 .app
                 .link
                 .dispatcher()
                 .wait_for::<NodeTemplateImport>(command.id)
-                .await
-            {
+                .await;
+            // The archives were uploaded for this one reading and the host has had them: they go from the
+            // server now, whatever the reading came to, unless something else holds them.
+            let uploaded: Vec<orch_types::Hash> = archive_references(&input.command().values)
+                .map(|archives| archives.into_iter().map(|archive| archive.hash).collect())
+                .unwrap_or_else(|_| Vec::new());
+            ctx.app
+                .blobs
+                .forget_after_transfer(&ctx.app.db, &uploaded, ctx.app.clock.now())
+                .await;
+            let proposal: NodeTemplateImportResult = match waited {
                 Ok(reply) => reply,
                 Err(_) => return Err(failed(ctx, unavailable()).await),
             };

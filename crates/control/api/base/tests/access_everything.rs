@@ -48,7 +48,7 @@ async fn office() -> Office {
         .call(ProviderCreate, &[])
         .token(&desk.ada.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Team key".to_owned(),
             home_id: desk.org,
             access: None,

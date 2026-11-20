@@ -179,7 +179,7 @@ test('thread status is a compact fact whose reason remains under the pointer', a
 test('device actions and document filters say their effects directly', async ({ page }) => {
   await signIn(page);
   await page.goto('/settings/interface');
-  for (const name of ['Restore tips', 'Clear last org', 'Clear device data']) {
+  for (const name of ['Restore hints', 'Clear last org', 'Clear device data']) {
     await expect(page.getByRole('button', { name, exact: true }).first()).toBeVisible();
   }
   await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);
@@ -206,7 +206,7 @@ test('a known environment gate explains and blocks New shell before an impossibl
   await page.goto(`/thread/${ACME.mainThread}`);
   await showWorkbenchView(page, 'Terminal');
   await expect(page.getByRole('button', { name: 'Open a new shell', exact: true }).first()).toBeDisabled();
-  await expect(page.getByText('Shells are turned off for this environment. Whoever manages it can turn them on in the Environment view.').first()).toBeVisible();
+  await expect(page.getByText('Terminals are turned off for this environment. Whoever manages it can turn them on in the Environment view.').first()).toBeVisible();
 });
 
 for (const [kind, first, next, name] of [
@@ -550,7 +550,7 @@ for (const locale of ['en', 'zh-CN'] as const) test(`known secondary navigation 
   await signIn(page);
     const english = locale === 'en';
     await page.goto(`/thread/${ACME.mainThread}`); await language(page, locale);
-    await expect(page.locator('[data-thread-header]').getByRole('button', { name: english ? 'Find in the conversation' : '在对话中查找', exact: true }).locator('[data-action-icon="search"]')).toBeVisible();
+    await expect(page.locator('[data-thread-header]').getByRole('button', { name: english ? 'Find in the conversation' : '在会话中查找', exact: true }).locator('[data-action-icon="search"]')).toBeVisible();
     await page.goto('/resources/providers'); await language(page, locale);
     await page.getByRole('button', { name: english ? 'Add provider' : '添加提供方', exact: true }).click();
     await expect(page.getByRole('button', { name: english ? 'Next' : '下一步', exact: true }).locator('[data-action-icon="next"]')).toBeVisible();

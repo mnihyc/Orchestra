@@ -146,6 +146,7 @@ fn ticket_for(
             tool_executor_version: None,
             exp: rig.deadline().unix_millis() / 1000,
             port: Some(PortTicketClaims {
+                machine_reach: false,
                 environment_id: rig.environment,
                 generation,
                 port,
@@ -379,6 +380,92 @@ async fn an_environment_only_machine_publishes_its_directory_and_withdraws_live_
         reason.contains("ports") && reason.contains("environment") && reason.contains("operator"),
         "{reason}"
     );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_person_with_machine_port_reach_can_forward_only_a_named_loopback_listener() {
+    let server = Service::start(None, 0, "RFB 003.008\n");
+    let mut rig = EnvRig::new();
+    rig.config.ports.allowed.clear();
+    rig.config.ports.loopback_tcp.insert(server.port);
+    rig.start().await;
+    let directory = rig.directory("named-listener");
+    rig.attach(&directory).await;
+    let opener = opener_ready(&rig).await;
+    let ticket = ticket_for(
+        &rig,
+        opener.machine_id,
+        server.port,
+        PortTransport::Tcp,
+        None,
+    );
+    let mut claims = orch_link_contract::tunnels::Ticket::parse(&ticket)
+        .unwrap()
+        .claims()
+        .clone();
+    let port = claims.port.as_mut().unwrap();
+    port.opening_id = None;
+    port.source.caller = PortCaller::Person {
+        user: serde_json::from_value(serde_json::json!({
+            "id": new_id(), "kind": "human", "username":"viewer", "display_name":"Viewer",
+            "avatar":{"text":"V","color":1}
+        }))
+        .unwrap(),
+    };
+    assert!(
+        opener
+            .open(&rig.signer.sign(&claims).unwrap())
+            .await
+            .is_err()
+    );
+    claims.jti = new_id();
+    claims.service = format!("port/{}", claims.jti);
+    claims.port.as_mut().unwrap().machine_reach = true;
+    // A personal entry cannot turn this declaration into a shared opening.
+    let mut shared = claims.clone();
+    shared.jti = new_id();
+    shared.service = format!("port/{}", shared.jti);
+    let wider = shared.port.as_mut().unwrap();
+    wider.audience = Some(orch_api_contract::ports::PortOpeningKind::Place);
+    wider.opening_id = Some(new_id());
+    assert!(
+        opener
+            .open(&rig.signer.sign(&shared).unwrap())
+            .await
+            .is_err()
+    );
+    let mut stream = opener
+        .open(&rig.signer.sign(&claims).unwrap())
+        .await
+        .unwrap();
+    let mut greeting = [0; 12];
+    tokio::time::timeout(PATIENCE, stream.read_exact(&mut greeting))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&greeting, b"RFB 003.008\n");
+    let policy = &rig.connector.as_ref().unwrap().services().policy;
+    policy
+        .set_here(
+            orch_link_contract::policy::PolicyKey::Ports,
+            &serde_json::json!({"allowed":["place"],"loopback_tcp":[]}),
+        )
+        .unwrap();
+    let closed = tokio::time::timeout(PATIENCE, stream.read(&mut greeting))
+        .await
+        .unwrap();
+    assert!(closed.is_err() || closed.unwrap() == 0);
+    claims.jti = new_id();
+    claims.service = format!("port/{}", claims.jti);
+    assert!(
+        opener
+            .open(&rig.signer.sign(&claims).unwrap())
+            .await
+            .is_err()
+    );
+    opener.machine.link.shutdown().await;
     rig.stop().await;
 }
 

@@ -350,11 +350,17 @@
       "area": "topic",
       "level": "advanced",
       "with": "topic.interact",
-      "on": ["topic"],
+      "on": [
+        "topic"
+      ],
       "label": "Start threads",
       "allows": "Start threads in the topic; whoever starts one owns it.",
       "profiles": false,
-      "holders": ["role", "group", "user"],
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
       "options_schema": null
     },
     {
@@ -434,11 +440,17 @@
       "area": "project",
       "level": "advanced",
       "with": "project.interact",
-      "on": ["project"],
+      "on": [
+        "project"
+      ],
       "label": "Create topics",
       "allows": "Create topics in the project; whoever creates one owns it.",
       "profiles": false,
-      "holders": ["role", "group", "user"],
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
       "options_schema": null
     },
     {
@@ -500,11 +512,17 @@
       "area": "org",
       "level": "advanced",
       "with": "org.manage",
-      "on": ["org"],
+      "on": [
+        "org"
+      ],
       "label": "Archive",
       "allows": "Archive the org with everything inside it, and bring it back.",
       "profiles": false,
-      "holders": ["role", "group", "user"],
+      "holders": [
+        "role",
+        "group",
+        "user"
+      ],
       "options_schema": null
     },
     {
@@ -860,6 +878,16 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "purposes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/ProviderUsePurpose"
+            },
+            "description": "Which uses this entry allows. Left out, Ask and other work are both allowed."
+          },
           "models": {
             "type": [
               "array",
@@ -981,6 +1009,23 @@
               "id"
             ],
             "description": "One place an entry names: a kind and the identifier of one of that kind."
+          },
+          "ProviderUsePurpose": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "ask",
+                "description": "Read-only Ask conversations.",
+                "x-default-selected": true
+              },
+              {
+                "type": "string",
+                "const": "work",
+                "description": "Threads, summaries and other work.",
+                "x-default-selected": true
+              }
+            ],
+            "description": "The use an entry allows through a provider."
           }
         }
       }
@@ -1102,11 +1147,18 @@
       "area": "environment",
       "level": "use",
       "with": null,
-      "on": ["environment"],
+      "on": [
+        "environment"
+      ],
       "label": "Use Environment",
       "allows": "Start threads in the environment and have its agents act for oneself there.",
       "profiles": true,
-      "holders": ["role", "group", "user", "node"],
+      "holders": [
+        "role",
+        "group",
+        "user",
+        "node"
+      ],
       "options_schema": null
     },
     {
