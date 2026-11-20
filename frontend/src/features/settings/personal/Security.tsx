@@ -49,6 +49,7 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input, PasswordInput } from '@/ui/Input';
 import { QrCode } from '@/ui/QrCode';
 import { RelativeTime } from '@/ui/RelativeTime';
+import { RenewalFacts } from '@/ui/RenewalFacts';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { toast } from '@/ui/Toast';
@@ -565,6 +566,7 @@ function Sessions() {
                 <p className="flex flex-wrap items-center gap-2 text-base font-medium text-text">
                   <span className="wrap-anywhere">{browserName(session.user_agent) || t('security.sessions.unknown')}</span>
                   {session.current && <Badge tone="accent">{t('security.sessions.thisOne')}</Badge>}
+                  {session.current && <RenewalFacts />}
                 </p>
                 <p className="flex flex-wrap gap-x-3 text-sm text-text-muted">
                   {session.ip !== null ? <span className="font-mono">{session.ip}</span> : <span>{t('security.sessions.notReported')}</span>}
