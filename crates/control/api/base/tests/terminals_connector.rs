@@ -404,7 +404,7 @@ async fn machine_row(db: &Db, machine: Id, name: &str, roles: &[String]) {
             platform_os: "linux",
             platform_arch: "x86_64",
             connector_version: "0.1.0",
-            protocol_version: 1,
+            protocol_version: i32::try_from(orch_link_contract::version::PROTOCOL_VERSION).unwrap(),
             cert_serial: &serial,
             cert_fingerprint: &fingerprint,
             cert_not_after: Utc::now() + chrono::Duration::days(300),
@@ -518,7 +518,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -646,6 +646,7 @@ impl Plant {
         let link = Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
             .expect("a link without gateways can be made");
         let app: App = Arc::new(AppState {
+            metrics_listener_failed: old.metrics_listener_failed.clone(),
             host_ports: old.host_ports.clone(),
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
@@ -820,6 +821,8 @@ impl Plant {
     /// Attaches the environment to the connector, as the step that does so in the system does.
     async fn attach_environment(&self) {
         let body = EnvAttach {
+            workspace: Default::default(),
+
             resources: None,
             data_generation: None,
             storage: None,

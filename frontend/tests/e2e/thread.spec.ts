@@ -366,6 +366,46 @@ test('who is looking at a thread is shown, and a thread taken away from its read
   await expect(page.getByText('You can no longer see this thread.')).toBeVisible();
 });
 
+test('a folded opening fills the conversation from its end without a wheel gesture', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const previous = Array.from({ length: 9 }, (_, i) => turn(`turn-${i}`, { ordinal: i + 1, state: 'completed', inputId: `input-${i}` }));
+  const latest = turn('latest', { ordinal: 10, state: 'completed', inputId: 'input-latest' });
+  await emit(MAIN, {
+    turns: [...previous, latest],
+    items: [...previous.flatMap((one) => [
+      userMessage(`question-${one.id}`, `Question ${one.ordinal}`, { author: ADA, turn: one.id }),
+      agentMessage(`answer-${one.id}`, `Answer ${one.ordinal}`, { turn: one.id }),
+    ]), userMessage('latest-question', 'The latest question', { author: ADA, turn: latest.id }),
+    ...Array.from({ length: 40 }, (_, i) => command(`step-${i}`, { command: 'inspect', exit: 0, turn: latest.id })),
+    agentMessage('latest-answer', 'The final answer', { turn: latest.id })],
+  });
+  let releaseHistory!: () => void;
+  const history = new Promise<void>((resolve) => { releaseHistory = resolve; });
+  let olderReads = 0;
+  await page.route((url) => url.pathname === `/api/v1/threads/${MAIN}/items` && url.searchParams.has('before'), async (route) => {
+    olderReads += 1;
+    await history;
+    await route.continue();
+  });
+  const log = conversation(page);
+  const gapBelowLastRow = () => log.evaluate((element) => {
+    const port = element.closest('[data-scroll-area]')!;
+    const last = element.querySelector('li[data-index]:last-child')!;
+    return Math.abs(port.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom);
+  });
+  try {
+    await open(page);
+    await expect(log.getByText('The final answer', { exact: true })).toBeInViewport();
+    await expect.poll(gapBelowLastRow).toBeLessThanOrEqual(1);
+  } finally {
+    releaseHistory();
+  }
+  await expect(log.getByText('The latest question', { exact: true })).toBeInViewport();
+  await expect(log.getByText('The final answer', { exact: true })).toBeInViewport();
+  await expect.poll(gapBelowLastRow).toBeLessThanOrEqual(1);
+  expect(olderReads).toBe(1);
+});
+
 test('the work of an older turn is folded into one line, which opens to its steps', async ({ page }) => {
   await playScene(MAIN, 'history');
   await open(page);
@@ -698,7 +738,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // The menu of an item begins the picking with that item; every item then has a box, and the bar stands in place of the one the message is written in.
   const first = conversation(page).locator('[data-item="u1"]');
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   const bar = page.getByRole('toolbar', { name: 'Selected items' });
   await expect(bar.getByText('1 selected')).toBeVisible();
@@ -721,7 +761,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // Cancel leaves everything as it was. The box took the keyboard, and the screen it shares with the conversation went down to it: the first item is brought back.
   await scrollConversationToTop(page);
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await page.getByRole('toolbar', { name: 'Selected items' }).getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByRole('toolbar', { name: 'Selected items' })).toHaveCount(0);

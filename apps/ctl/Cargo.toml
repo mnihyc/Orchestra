@@ -31,6 +31,7 @@ orch-config.workspace = true
 orch-conformance.workspace = true
 orch-connector-core.workspace = true
 orch-db.workspace = true
+orch-human-check.workspace = true
 orch-driver-contract.workspace = true
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
