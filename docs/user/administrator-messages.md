@@ -8,6 +8,8 @@ summary: Open a message from your Inbox and read its sender, time and contents.
 
 # Read an administrator message
 
+This page shows how to open a message from an administrator in your Inbox and read who sent it, when, and what it says.
+
 ## Read the message
 
 Open a message from your [Inbox](notices-and-announcements.md#read-your-inbox)

@@ -53,7 +53,7 @@ test('one search box leads the page with a desktop filter column, phone sheet an
     await page.setViewportSize({ width, height });
     await page.goto('/search');
     await expect(words(page)).toBeVisible();
-    for (const name of ['All', 'Conversations', 'Chats', 'Documents', 'Files']) await expect(page.getByRole('tab', { name, exact: true })).toBeVisible();
+    for (const name of ['All', 'Threads', 'Chats', 'Documents', 'Files']) await expect(page.getByRole('tab', { name, exact: true })).toBeVisible();
     const sidebar = page.getByRole('complementary', { name: 'Narrow the search' });
     const button = page.getByRole('button', { name: 'Filters', exact: true });
     if (width >= 1024) {

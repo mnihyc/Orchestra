@@ -73,6 +73,7 @@ fn full(env: Id, org: Id, machine: Id) -> Vec<Json> {
 }
 fn body(name: &str) -> EnvironmentMcpImportCreateBody {
     EnvironmentMcpImportCreateBody {
+        origin: None,
         source: "codex".to_owned(),
         scope: McpScope::User,
         name: "search".to_owned(),

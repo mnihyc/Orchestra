@@ -53,9 +53,6 @@ only its exact description key, which the live query client accepts.
 - `AgentEdits.tsx`: A file that is open following the agent's writing: the changed lines marked until the next turn, and who changed it.
 - `AddToMessage.ts`: A file, some lines, a difference or a selection of a shell's output put into the conversation's composer as a reference.
 - `Unavailable.tsx`: What the place of a file shows when its content cannot be had: why, and what can still be done.
-- `OpenWith.tsx`: Open with… and Download, in a file's menu: the viewers that take a file, and the one a person chose for that kind remembered for them.
-- `Follow.tsx`: Follow: each file the agent reads or writes brought to the front at the lines it touched, until the person types in a file or picks another tab.
-- `DocumentFile.tsx`: A file a document holds, opened in the same view and saved in place by whoever may write the document.
 - `viewers/Code.tsx`: Code and text: highlighting, line numbers, folding, find and replace, go to a line, several cursors.
 - `viewers/Markdown.tsx`: Markdown: the source beside the rendered text, or either alone; raw HTML never rendered.
 - `viewers/Image.tsx`: Images, fitted, zoomed and moved, with their size; an SVG drawn as an image, with its source beside.

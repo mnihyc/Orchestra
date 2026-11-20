@@ -23,7 +23,7 @@ use orch_api_contract::{
         UploadedBlob,
     },
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, storage, uploads};
 use orch_types::{Hash, Id, Json, new_id};
 use places::Who;
@@ -55,11 +55,12 @@ async fn list(world: &World, token: &str, query: &PageQuery) -> Page<UploadInven
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Upload inventory scope control",
             token_hash: &token_hash(&secret),
@@ -287,6 +288,7 @@ async fn a_partial_upload_reports_real_progress_time_and_can_be_cancelled_after_
         .call(UploadSessionCreate, &[])
         .token(&owner.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 4,
             name: "partial.bin".into(),
             media_type: None,
@@ -385,6 +387,7 @@ async fn system_upload_inventory_records_owners_partials_and_shared_bytes_and_ad
         .call(UploadSessionCreate, &[])
         .token(&owner.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: 20,
             name: "unfinished.dat".into(),
             media_type: None,
@@ -408,6 +411,10 @@ async fn system_upload_inventory_records_owners_partials_and_shared_bytes_and_ad
         i64::try_from(b"a machine transfer that is not yet complete".len()).unwrap(),
         Some(machine),
         world.now(),
+        storage::UploadRetention {
+            seconds: 86400,
+            default_source: true,
+        },
     )
     .await
     .unwrap();
@@ -602,13 +609,19 @@ struct OpenGate {
 }
 #[async_trait::async_trait]
 impl BlobStore for OpenGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         let read = self.inner.get(hash, range).await?;
@@ -627,8 +640,13 @@ impl BlobStore for OpenGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 fn gate_open(world: &mut World, hash: Hash) -> Arc<OpenGate> {
@@ -653,6 +671,7 @@ fn gate_open(world: &mut World, hash: Hash) -> Arc<OpenGate> {
         build: old.build,
         blobs: orch_api_core::blobs::Blobs::new(gate.clone(), gate.directory.path()),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });
