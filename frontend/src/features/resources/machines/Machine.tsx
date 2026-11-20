@@ -217,9 +217,9 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
             ]} />,
           },
           { value: 'storage', label: t('resourceDetails.layout.storage'), panel: <DetailSections label={t('resourceDetails.layout.storage')} sections={[
+            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} dataDirectory={machine.data_directory} /> },
             { value: 'mounts', label: t('resourceDetails.mount.here.title'), panel: <MountsHere machine={machine.id} name={machine.name} /> },
             { value: 'directories', label: t('environmentData.roots'), panel: <EnvironmentDirectoriesHere machine={machine.id} /> },
-            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} dataDirectory={machine.data_directory} /> },
           ]} /> },
           { value: 'policy', label: t('machines.tabs.policy'), panel: machine.access === null || machine.access === undefined
             ? <MachinePolicyTab machine={machine} />

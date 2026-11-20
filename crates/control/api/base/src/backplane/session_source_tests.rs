@@ -83,6 +83,11 @@ impl Wire {
             .await;
     }
 
+    /// Whether nothing has been sent back to the machine yet.
+    pub(super) fn is_silent(&mut self) -> bool {
+        self.out.try_recv().is_err()
+    }
+
     pub(super) async fn ack(&mut self, stream: &Stream, seq: i64) {
         let outgoing = tokio::time::timeout(ACK_WAIT, self.out.recv())
             .await
@@ -158,6 +163,21 @@ impl Office {
             .execute(&mut *conn)
             .await
             .unwrap();
+        let environment = resources::access_fixtures::insert_environment(
+            &mut conn,
+            person,
+            Some(topic),
+            "Session workspace",
+            "connected",
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE environments SET machine_id=$2 WHERE id=$1")
+            .bind(environment)
+            .bind(owner)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
         threads::insert_segment(
             &mut conn,
             &threads::NewSegment {
@@ -165,7 +185,7 @@ impl Office {
                 thread_id: thread,
                 agent_id: new_id(),
                 provider_id: new_id(),
-                environment_id: new_id(),
+                environment_id: environment,
                 env_generation: 1,
                 arrangement: "together",
                 executor: None,
@@ -226,10 +246,206 @@ impl Office {
 
 fn raw() -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 1,
         direction: "in".to_owned(),
         payload: json!({"message": "private session output"}),
     })
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason() {
+    let office = Office::new(true).await;
+    let id = new_id();
+    let mut conn = office.db.pool.acquire().await.unwrap();
+    queries::insert_command(
+        &mut conn,
+        &queries::NewCommand {
+            id,
+            machine_id: office.owner,
+            kind: "fs.read",
+            body: &json!({}),
+            serial_key: None,
+            content_transit: false,
+            deadline_at: office.app.clock.now() + chrono::Duration::hours(1),
+        },
+        office.app.clock.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_reply_data() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.result->>'text' = 'rejected value' THEN
+            RAISE EXCEPTION 'synthetic reply refusal' USING ERRCODE='22P05';
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER reject_reply_data BEFORE UPDATE ON commands FOR EACH ROW EXECUTE FUNCTION reject_reply_data();")
+        .execute(&mut *conn).await.unwrap();
+    let progress = Progress::Succeeded(json!({"text":"rejected value"}));
+    write_progress(&mut conn, id, &progress, &office.app.clock)
+        .await
+        .unwrap();
+    write_progress(&mut conn, id, &progress, &office.app.clock)
+        .await
+        .unwrap();
+    let (state, error): (String, serde_json::Value) =
+        sqlx::query_as("SELECT state,error FROM commands WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed");
+    assert_eq!(error["code"], "storage.data");
+    assert_eq!(error["retryable"], false);
+    let code: String =
+        sqlx::query_scalar("SELECT sqlstate FROM command_storage_gaps WHERE command_id=$1")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(code, "22P05");
+    office.app.app.link.shutdown();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason()
+-> ::futures::future::LocalBoxFuture<'static, ()> {
+    Box::pin(a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues() {
+    let office = Office::new(true).await;
+    sqlx::raw_sql("CREATE SEQUENCE native_data_refusals;
+        CREATE FUNCTION reject_native_data() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.payload->>'text' = 'reject this value' THEN
+            PERFORM nextval('native_data_refusals');
+            RAISE EXCEPTION 'synthetic data refusal' USING ERRCODE='22P05';
+          END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER reject_native_data BEFORE INSERT OR UPDATE ON items FOR EACH ROW EXECUTE FUNCTION reject_native_data();")
+        .execute(&office.db.pool).await.unwrap();
+    // Reports must name an actual turn of this session before the intake reaches its writer.
+    let turn = new_id();
+    let mut tx = office.db.pool.begin().await.unwrap();
+    threads::lock(&mut tx, office.thread).await.unwrap();
+    let seq = orch_db::sequences::next(&mut tx, office.thread)
+        .await
+        .unwrap()
+        .unwrap();
+    let input = threads::insert_input(
+        &mut tx,
+        &threads::NewInput {
+            id: new_id(),
+            thread_id: office.thread,
+            author_id: None,
+            submission_authority: None,
+            run_as: None,
+            run_as_authority: None,
+            source: "system",
+            content: &json!([{"type":"text","text":"Synthetic native turn"}]),
+            delivery: "queue",
+            state: "pending",
+            turn_id: None,
+            client_id: None,
+            limit_bypass: None,
+            place: threads::Place::End,
+            at: office.app.clock.now(),
+            plan: false,
+        },
+        seq,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let seq = orch_db::sequences::next(&mut tx, office.thread)
+        .await
+        .unwrap()
+        .unwrap();
+    threads::insert_turn(
+        &mut tx,
+        &threads::NewTurn {
+            id: turn,
+            thread_id: office.thread,
+            segment_id: office.segment,
+            input_id: input.id,
+            model: "fixture",
+            effort: None,
+            params: &json!({}),
+            lease_id: None,
+            limit_bypass: None,
+            at: office.app.clock.now(),
+        },
+        seq,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE turns SET state='completed',completed_at=$2,native_end_confirmed=true WHERE id=$1",
+    )
+    .bind(turn)
+    .bind(office.app.clock.now())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE thread_inputs SET state='delivered',turn_id=$2,delivered_at=$3 WHERE id=$1",
+    )
+    .bind(input.id)
+    .bind(turn)
+    .bind(office.app.clock.now())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let stream = office.stream();
+    let mut owner = Wire::new(&office.app.app.link, office.owner).await;
+    for (seq, reference, text) in [
+        (1, "before", "Before"),
+        (2, "rejected", "reject this value"),
+        (3, "after", "After"),
+    ] {
+        let event=Event::decode("item.started",json!({"turn_id":turn,"native_ref":reference,"stream":"main","kind":"agent_message","payload":{"text":text,"text_len":text.chars().count()}})).unwrap();
+        owner.send(&office.app, &stream, seq, &event).await;
+        owner.ack(&stream, seq).await;
+    }
+    assert_eq!(office.cursor(office.owner).await, Some(3));
+    let refusals: i64 = sqlx::query_scalar("SELECT last_value FROM native_data_refusals")
+        .fetch_one(&office.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        refusals, 1,
+        "a deterministic refusal is never resent as a transient failure"
+    );
+    let gap: serde_json::Value = sqlx::query_scalar(
+        "SELECT storage_gap FROM items WHERE segment_id=$1 AND native_ref='rejected'",
+    )
+    .bind(office.segment)
+    .fetch_one(&office.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(gap["sqlstate"], "22P05");
+    assert_eq!(gap["event_seq"], 2);
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM items WHERE segment_id=$1 AND payload->>'text' IN ('Before','After')",
+    )
+    .bind(office.segment)
+    .fetch_one(&office.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 2);
+    office.app.app.link.shutdown();
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn __api_run_a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues()
+-> ::futures::future::LocalBoxFuture<'static, ()> {
+    Box::pin(a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues())
 }
 
 #[cfg(any(test, feature = "test-support"))]

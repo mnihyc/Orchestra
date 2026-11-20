@@ -1,0 +1,5 @@
+test -p orch-engine --lib -- tools::source::tests::source_generation_retention_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger --exact
+test -p orch-engine --test turns -- a_second_queued_input_runs_with_default_worker_stacks_even_if_the_suite_stack_is_larger --exact
+test -p orch-engine --test agent_access_birth --test sharing
+test -p orch-authz --test pages --test resource_pages --test giving --test entry_changes_bound
+clippy
