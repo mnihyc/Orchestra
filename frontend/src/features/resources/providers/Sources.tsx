@@ -120,7 +120,17 @@ export function ProviderSources({provider}:{provider:Provider}) {
     if (keeper !== null) {
       const upstreams=policy.data?.keys.find((entry) => entry.key === 'provider.upstreams')?.value;
       const allowed=Array.isArray(upstreams) ? upstreams.filter((value):value is string => typeof value === 'string') : null;
-      if (!allowed?.includes(address.trim())) result.push(<span key="machine">{t(allowed === null ? 'providerSources.upstreamUnknown' : 'providerSources.upstreamWarning',{address})}{' '}<Link to="/resources/machines/$id" params={{id:keeper.id}} search={{tab:'policy'}} className={linkClasses}>{t('providerSources.machinePolicy',{machine:keeper.name})}</Link></span>);
+      const permits=allowed?.some((entry)=>{
+        if(entry==='*')return true;
+        try {
+          const base=new URL(entry),prefix=base.pathname.replace(/\/+$/u,'');
+          return ['http:','https:'].includes(base.protocol) && base.origin===url.origin
+            && base.username==='' && base.password==='' && base.search==='' && base.hash===''
+            && url.username==='' && url.password===''
+            && (prefix==='' || url.pathname===prefix || url.pathname.startsWith(prefix+'/'));
+        } catch {return false;}
+      });
+      if (!permits) result.push(<span key="machine">{t(allowed === null ? 'providerSources.upstreamUnknown' : 'providerSources.upstreamWarning',{address})}{' '}<Link to="/resources/machines/$id" params={{id:keeper.id}} search={{tab:'policy'}} className={linkClasses}>{t('providerSources.machinePolicy',{machine:keeper.name})}</Link></span>);
     }
     return result;
   };
@@ -144,7 +154,16 @@ export function SourcesForm({provider,facts,models,httpAllowed,onSave,warnings,u
   const [saved,setSaved]=useState(false);
   const allowed=holds(provider.access,'provider.manage');
   const why=denial(t,'provider.manage',provider.name,provider.owner);
-  const changed=reviewed.revision !== provider.revision;
+  // A provider's revision also moves when its state or its figures are read again, which is not an edit of its sources.
+  // Only a change of what this form edits, met while a draft exists, is a conflict; anything else is followed quietly.
+  const saved_as=(one:Provider) => JSON.stringify([sourceDraft(one.sources.facts),sourceDraft(one.sources.models),one.secrets_set.filter((name) => name.startsWith('source:'))]);
+  const moved=reviewed.revision !== provider.revision;
+  const sameSources=moved && saved_as(reviewed) === saved_as(provider);
+  const changed=moved && !sameSources && (dirty.facts || dirty.models);
+  if (moved && !changed) {
+    setReviewed(provider);
+    if (!sameSources) { setDetails(sourceDraft(provider.sources.facts)); setListing(sourceDraft(provider.sources.models)); }
+  }
   const context=(element:'facts' | 'models',offers:SourceOffers) => {
     const draft=element === 'facts' ? details : listing;
     const choice=reviewed.sources[element];

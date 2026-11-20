@@ -1,8 +1,10 @@
 /** Share names the holder, its level and its source; people behind a group load only on request. */
-import { cleanup, screen, within } from '@testing-library/react';
+import { act, cleanup, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Access from '@/api/access';
+import { formatExact } from '@/lib/time';
+import { serverClock } from '@/lib/serverClock';
 import { AccessRoster } from '@/features/access/AccessRoster';
 import type { Changes } from '@/features/access/changes';
 import { linesOf } from '@/features/access/model';
@@ -69,4 +71,41 @@ it('keeps an uneditable inherited level read-only and offers no ineffective acti
   expect(view.container.querySelectorAll('[aria-haspopup="menu"]')).toHaveLength(0);
   expect(calls.take).not.toHaveBeenCalled();
   expect(calls.level).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('marks a retained native-valid snapshot when its recorded grant ends in %s',async(locale)=>{
+  await setLocale(locale);const now=Date.now(),end=new Date(now+60_000).toISOString();serverClock.observe(new Date(now).toISOString(),now,now);
+  try {
+    const p=page();p.rows=p.rows.map((row)=>({...row,entries:row.entries.map((entry)=>({...entry,expires_at:end}))}));
+    const view=show(<AccessRoster lines={linesOf(p,CATALOGUE,'thread')} target={target} page={p} catalogue={CATALOGUE} changes={changes} meId={ADA.id} onTake={calls.take} onLevel={calls.level}/>);
+    expect(view.container).not.toHaveTextContent(i18n.t('access.holder.expired',{date:''}).trim());
+    act(()=>serverClock.observe(end,now,now));
+    expect(view.container).toHaveTextContent(locale==='en'?'Expired access':'授权已到期');
+  } finally {serverClock.clear();}
+});
+
+it('does not call a mixed live and expired set of stored entries wholly expired',()=>{
+  const now=Date.now();serverClock.observe(new Date(now).toISOString(),now,now);
+  try {
+    const p=page();let first=true;p.rows=p.rows.map((row)=>({...row,entries:row.entries.map((entry)=>{const end=first?'2000-01-01T12:00:00.000Z':null;first=false;return {...entry,expires_at:end};})}));
+    const view=show(<AccessRoster lines={linesOf(p,CATALOGUE,'thread')} target={target} page={p} catalogue={CATALOGUE} changes={changes} meId={ADA.id} onTake={calls.take} onLevel={calls.level}/>);
+    expect(view.container).not.toHaveTextContent('Expired access');
+  } finally {serverClock.clear();}
+});
+
+
+for(const locale of ['en','zh-CN'] as const)for(const timeZone of ['Asia/Shanghai','America/New_York'])it(`distinguishes the enforced expiry minutes and exposes their exact instant in ${locale}/${timeZone}`,async()=>{
+  await setLocale(locale);useAppearance.setState({locale,timeZone});
+  const now=Date.parse('2026-11-15T00:00:00Z'),clock=vi.spyOn(Date,'now').mockReturnValue(now);
+  serverClock.observe(new Date(now).toISOString(),now,now);
+  const first='2026-11-15T12:05:00.000Z',second='2026-11-15T12:45:00.000Z';
+  try {
+    const p=page();p.rows=p.rows.map((row)=>({...row,entries:row.entries.map((entry)=>({...entry,created_at:'2026-11-14T00:00:00.000Z',expires_at:entry.holder.kind==='group'?first:second}))}));
+    const view=show(<AccessRoster lines={linesOf(p,CATALOGUE,'thread')} target={target} page={p} catalogue={CATALOGUE} changes={changes} meId={ADA.id} onTake={calls.take} onLevel={calls.level}/>);
+    const early=view.container.querySelector<HTMLTimeElement>(`time[datetime="${first}"]`),late=view.container.querySelector<HTMLTimeElement>(`time[datetime="${second}"]`);
+    expect(early).not.toBeNull();expect(late).not.toBeNull();if(early===null||late===null)throw new Error('Each deadline must retain its exact native instant');
+    const hour=timeZone==='Asia/Shanghai'?(locale==='en'?'08':'20'):'07';expect(early).toHaveTextContent(`${hour}:05`);expect(late).toHaveTextContent(`${hour}:45`);
+    await userEvent.hover(early);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(formatExact(first,{locale,timeZone}));
+  } finally {clock.mockRestore();serverClock.clear();}
 });

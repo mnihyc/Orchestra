@@ -130,6 +130,7 @@ impl Files {
                 assert_eq!(body.environment_id, environment);
                 if body.path == "web" {
                     return Ok(CommandResult::FsStat(FileStat {
+                        facts: None,
                         entry: DirEntry {
                             name: "web".into(),
                             path: body.path.clone(),
@@ -148,6 +149,7 @@ impl Files {
                 assert!(body.path.starts_with("web/"));
                 assert!(body.mount.is_none());
                 Ok(CommandResult::FsStat(FileStat {
+                    facts: None,
                     entry: DirEntry {
                         name: "result.bin".into(),
                         path: body.path.clone(),
@@ -175,6 +177,7 @@ impl Files {
                 assert!(body.mount.is_none());
                 assert!(body.max_bytes.is_some_and(|limit| size <= limit));
                 Ok(CommandResult::FsFetch(FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash,
                     size,
                     mtime_ns,
@@ -594,6 +597,7 @@ async fn one_unreadable_file_leaves_the_text_and_every_other_file_unsent() {
                     return Err(CommandError::new(ErrorCode::NotFound, "not there"));
                 }
                 Ok(CommandResult::FsFetch(FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash,
                     size: 64,
                     mtime_ns,
@@ -656,6 +660,7 @@ async fn an_upload_acknowledgement_for_a_truncated_file_cannot_be_attached() {
             .handler
             .on(CommandKind::FsFetch, move |_| {
                 Ok(CommandResult::FsFetch(FsFetchResult {
+                    minimum_reach: orch_link_contract::policy::FileReach::Roots,
                     hash,
                     size: 63,
                     mtime_ns,
