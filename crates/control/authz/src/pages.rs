@@ -467,7 +467,7 @@ pub enum ChangeError {
         owner: Id,
     },
     /// An entry that names somebody from outside the root tree, new or given a new end, would run
-    /// beyond the bound of its place (`sharing.external_max_days`): it has no end, or a later one.
+    /// beyond the bound of its place (`sharing.external_max_minutes`): it has no end, or a later one.
     #[error("an entry for somebody from outside would run beyond the bound of its place")]
     ExternalLifetime {
         /// The latest end it may have, counted from now.
@@ -1439,6 +1439,8 @@ async fn places_not_seen(
         (WhereKind::Environment, Permission::EnvironmentView),
         (WhereKind::Host, Permission::HostView),
         (WhereKind::Machine, Permission::MachineView),
+        (WhereKind::EnvironmentPool, Permission::PoolView),
+        (WhereKind::HostPool, Permission::PoolView),
     ] {
         let ids: Vec<Id> = asked
             .iter()
@@ -1494,14 +1496,19 @@ fn exceeds_what_the_giver_holds(
     if resource.kind != ResourceKind::Provider || setup.owns_or_administers() {
         return Ok(Beyond::Within);
     }
-    let mut written: Vec<(String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
+    let mut written: Vec<(Permission, String, &ProviderUse, Option<ProviderUse>)> = Vec::new();
     for (index, row) in checked.rows.iter().enumerate() {
-        if row.permission != Permission::ProviderUse {
+        if !row.permission.has_provider_options() {
             continue;
         }
         for (entry, added) in row.add.iter().enumerate() {
             if let Options::ProviderUse(options) = &added.options {
-                written.push((format!("rows[{index}].add[{entry}]"), options, None));
+                written.push((
+                    row.permission,
+                    format!("rows[{index}].add[{entry}]"),
+                    options,
+                    None,
+                ));
             }
         }
         for (entry, update) in row.update.iter().enumerate() {
@@ -1517,27 +1524,30 @@ fn exceeds_what_the_giver_holds(
                 continue;
             };
             written.push((
+                row.permission,
                 format!("rows[{index}].update[{entry}]"),
                 options,
                 Some(before),
             ));
         }
     }
-    let wider: Vec<(&String, &ProviderUse)> = written
+    let wider: Vec<(Permission, &String, &ProviderUse)> = written
         .iter()
-        .filter(|(_, options, before)| {
+        .filter(|(_, _, options, before)| {
             !before.as_ref().is_some_and(|before| options.within(before))
         })
-        .map(|(path, options, _)| (path, *options))
+        .map(|(permission, path, options, _)| (*permission, path, *options))
         .collect();
     if wider.is_empty() {
         return Ok(Beyond::Within);
     }
-    let Ok(Ok(held)) = crate::usable::access(&setup.frame, resource, site, None, false) else {
-        return Ok(Beyond::NoUse);
-    };
     let mut named: Vec<(String, EntryMember)> = Vec::new();
-    for (path, options) in wider {
+    for (permission, path, options) in wider {
+        let Ok(Ok(held)) =
+            crate::usable::access_for(&setup.frame, resource, site, None, false, permission)
+        else {
+            return Ok(Beyond::NoUse);
+        };
         let nearest = held
             .each
             .iter()
@@ -1563,6 +1573,10 @@ fn exceeds_what_the_giver_holds(
 /// a sentence a client reads as it is; the screen has the same words in each language.
 fn beyond_sentence(member: EntryMember) -> (&'static str, &'static str) {
     match member {
+        EntryMember::Purposes => (
+            "purposes",
+            "allows more uses than any one entry of yours does",
+        ),
         EntryMember::Models => (
             "models",
             "allows more models than any one entry of yours does",
@@ -2079,7 +2093,7 @@ where
             resource.kind == ResourceKind::Provider && shared.keeps_to_its_owner(resource)
         })
         && checked.rows.iter().any(|row| {
-            row.permission == Permission::ProviderUse
+            row.permission.has_provider_options()
                 && (!row.add.is_empty() || !row.update.is_empty())
         })
     {
@@ -2360,6 +2374,47 @@ where
         }
     }
 
+    // File entries narrow the giver's current act and geometry, including this credential's usable shell.
+    if setup.resource.as_ref().is_some_and(|resource| resource.kind == ResourceKind::Environment)
+        && !setup.owns_or_administers()
+        && let Some(site) = &setup.site
+    {
+        let held = crate::file_reach::in_frame(&setup.frame, site)?;
+        let bound = crate::file_reach::machine_bound(conn, site.id).await?;
+        let terminal = held.terminal && crate::file_reach::terminal_available(conn, site.id, bound).await?;
+        let held = held.resolved(terminal, bound);
+        let mut faults = Vec::new();
+        for (index, row) in checked.rows.iter().enumerate() {
+            let allowed = match row.permission {
+                Permission::FilesView => held.view,
+                Permission::FilesManage => held.manage,
+                Permission::PortsView => Some(if crate::file_reach::port_machine_in(&setup.frame, site)? {
+                    orch_access_contract::permissions::FileReach::Machine
+                } else {
+                    orch_access_contract::permissions::FileReach::Roots
+                }),
+                _ => continue,
+            };
+            for (entry, added) in row.add.iter().enumerate() {
+                if let Options::Files(options) = &added.options
+                    && !allowed.is_some_and(|reach| options.reach <= reach)
+                {
+                    faults.push(FieldError { path: format!("rows[{index}].add[{entry}].options.reach"), message: "allows more than your current reach".to_owned() });
+                }
+            }
+            for (entry, update) in row.update.iter().enumerate() {
+                let Some(Options::Files(options)) = &update.options else { continue; };
+                let before = entries_now.iter().find(|stored| stored.entry.id == update.entry)
+                    .map(|stored| crate::options::read(stored.permission, &stored.entry)).transpose()?;
+                let narrowing = matches!(before, Some(Options::Files(before)) if options.within(&before));
+                if !narrowing && !allowed.is_some_and(|reach| options.reach <= reach) {
+                    faults.push(FieldError { path: format!("rows[{index}].update[{entry}].options.reach"), message: "allows more than your current reach".to_owned() });
+                }
+            }
+        }
+        if !faults.is_empty() { return Err(ChangeError::Invalid(faults)); }
+    }
+
     // What an entry in the Use row of a provider names is held to what its giver holds, whether the
     // entry is new or changed: one rule for adding and for editing. An entry may always be narrowed.
     if let Some(site) = &setup.site {
@@ -2588,7 +2643,7 @@ where
     }
 
     // An entry that names somebody from outside the root tree runs no longer than the bound of its
-    // place (`sharing.external_max_days`, counted from now): a new one without an end or with a later
+    // place (`sharing.external_max_minutes`, counted from now): a new one without an end or with a later
     // one is refused with the latest end it may have and the place that sets the bound, and so is one
     // given a new end beyond it. An admin who names themself is no outsider to what they administer.
     if let Some(site) = &setup.site

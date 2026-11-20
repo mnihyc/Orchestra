@@ -1,6 +1,8 @@
 //! Environment services and the policy of their hosting machine, resolved without placement assumptions.
 
+use super::read_facts::with_snapshot;
 use crate::{Conn, DbError};
+use orch_access_contract::permissions::Placement;
 use orch_types::{Id, Json};
 
 /// The policy member of one machine report; null alone means no policy was reported.
@@ -71,10 +73,15 @@ pub fn environment_delegated(policy: Option<&Json>) -> bool {
 pub async fn access_profiles(
     conn: &mut Conn,
     environments: &[Id],
-) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
-    use orch_access_contract::permissions::Placement;
+) -> Result<Vec<(Id, Placement)>, DbError> {
     if environments.is_empty() {
         return Ok(Vec::new());
+    }
+    if let [id] = environments
+        && let Some(row) =
+            with_snapshot(conn, |last| last.profile.filter(|(known, _)| known == id)).flatten()
+    {
+        return Ok(vec![row]);
     }
     let units: Vec<(Id, bool)> = sqlx::query_as(
         "SELECT id, placement='managed' OR template_id IS NOT NULL FROM environments WHERE id=ANY($1)",
@@ -88,7 +95,7 @@ pub async fn access_profiles(
     } else {
         of_many(conn, &directories).await?.into_iter().collect()
     };
-    Ok(units
+    let profiles: Vec<_> = units
         .into_iter()
         .map(|(id, unit)| {
             let reported = facts.get(&id);
@@ -111,7 +118,11 @@ pub async fn access_profiles(
                 },
             )
         })
-        .collect())
+        .collect();
+    if let [profile] = profiles.as_slice() {
+        let _ = with_snapshot(conn, |last| last.profile = Some(*profile));
+    }
+    Ok(profiles)
 }
 
 /// Current environment services; a unit connector never substitutes its policy for its host's.
@@ -130,6 +141,17 @@ pub async fn of_many(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
+    if let [id] = environments
+        && let Some(row) = with_snapshot(conn, |last| {
+            last.machine
+                .as_ref()
+                .filter(|(known, _)| known == id)
+                .cloned()
+        })
+        .flatten()
+    {
+        return Ok(vec![row]);
+    }
     type ReportRow = (Id, Option<Id>, Option<Json>, Option<Json>, Option<String>);
     let rows:Vec<ReportRow> = sqlx::query_as(
         "SELECT e.id,CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END AS machine_id,
@@ -149,7 +171,7 @@ pub async fn of_many(
                  AND NOT (e.status='moving' AND e.machine_id IS NOT NULL AND r.generation>e.generation)
                ORDER BY r.created_at DESC LIMIT 1) r ON true
            LEFT JOIN nodes home ON home.id=e.home_node_id
-           LEFT JOIN LATERAL (SELECT s.value #>> '{}' AS host_id,s.locked FROM settings s
+           LEFT JOIN LATERAL (SELECT CASE WHEN s.value->>'type'='single' AND s.value#>>'{resource,kind}'='host' THEN s.value#>>'{resource,id}' END AS host_id,s.locked FROM settings s
                WHERE s.key='env.host_id' AND (s.node_id IS NULL OR s.node_id=ANY(home.path))
                ORDER BY s.locked DESC,
                    CASE WHEN s.locked THEN COALESCE(array_position(home.path,s.node_id),0) END ASC,
@@ -159,7 +181,7 @@ pub async fn of_many(
            LEFT JOIN LATERAL (SELECT target.* FROM hosts target
                WHERE CASE WHEN r.id IS NOT NULL THEN target.id=r.host_id ELSE
                    target.id::text=COALESCE(planned.host_id,CASE WHEN scoped.locked THEN scoped.host_id
-                        WHEN e.config ? 'env.host_id' THEN e.config->>'env.host_id' ELSE scoped.host_id END) END
+                        WHEN e.config ? 'env.host_id' THEN CASE WHEN e.config->'env.host_id'->>'type'='single' AND e.config#>>'{env.host_id,resource,kind}'='host' THEN e.config#>>'{env.host_id,resource,id}' END ELSE scoped.host_id END) END
                ORDER BY target.schedulable DESC,target.id LIMIT 1) h ON true
            LEFT JOIN LATERAL (SELECT target.drivers -> t.driver AS descriptor FROM hosts target
                WHERE r.id IS NULL AND e.template_id IS NOT NULL AND h.id IS NULL
@@ -167,8 +189,8 @@ pub async fn of_many(
                ORDER BY target.schedulable DESC,target.id LIMIT 1) offered ON true
            LEFT JOIN machines m ON m.id=CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END
           WHERE e.id=ANY($1)",
-    ).bind(environments).fetch_all(conn).await?;
-    Ok(rows
+    ).bind(environments).fetch_all(&mut *conn).await?;
+    let machines: Vec<_> = rows
         .into_iter()
         .map(|(id, machine_id, descriptor, policy, runtime)| {
             (
@@ -187,7 +209,11 @@ pub async fn of_many(
                 },
             )
         })
-        .collect())
+        .collect();
+    if let [machine] = machines.as_slice() {
+        let _ = with_snapshot(conn, |last| last.machine = Some(machine.clone()));
+    }
+    Ok(machines)
 }
 
 /// The host that is the facade of the physical machine `machine`, if it is one.
@@ -445,7 +471,17 @@ pub async fn ownership_sources(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, String, Id)>, DbError> {
-    Ok(sqlx::query_as(
+    use super::read_facts::with_opening;
+    if environments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let [id] = environments
+        && let Some(rows) =
+            with_opening(conn, |facts| facts.ownership_sources.get(id).cloned()).flatten()
+    {
+        return Ok(rows);
+    }
+    let rows: Vec<(Id, String, Id)> = sqlx::query_as(
         "SELECT e.id,CASE WHEN h.id IS NULL THEN 'machine' ELSE 'host' END,COALESCE(h.id,m.id)
          FROM environments e JOIN machines m ON m.id=e.machine_id
          LEFT JOIN hosts h ON h.machine_id=m.id
@@ -454,6 +490,12 @@ pub async fn ownership_sources(
            AND m.deleted_at IS NULL AND m.status='active'",
     )
     .bind(environments)
-    .fetch_all(conn)
-    .await?)
+    .fetch_all(&mut *conn)
+    .await?;
+    if let [id] = environments {
+        let _ = with_opening(conn, |facts| {
+            facts.ownership_sources.insert(*id, rows.clone())
+        });
+    }
+    Ok(rows)
 }

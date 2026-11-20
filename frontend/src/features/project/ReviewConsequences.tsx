@@ -9,6 +9,7 @@ import { permissionLabel } from '@/lib/permissions';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
+import { RetentionFacts } from './RetentionFacts';
 
 export function ReviewPlace({ place }: { place: Exclude<NodeOrSystem, 'system'> }) {
   const { t } = useTranslation();
@@ -30,7 +31,7 @@ export function ArchiveConsequences({ plan }: { plan: NodeArchivePlan }) {
   const { t } = useTranslation();
   const unknown = t('placeReview.notVisible');
   return <div className="flex min-w-0 flex-col gap-3 text-sm">
-    <p>{t(plan.archiving ? 'placeReview.archiveAbout' : 'placeReview.unarchiveAbout')}</p>
+    <div className="flex flex-wrap items-center gap-2"><p>{t(plan.archiving ? 'placeReview.archiveAbout' : 'placeReview.unarchiveAbout')}</p><RetentionFacts retention={plan.retention} /></div>
     <p>{t('placeReview.documentsReadOnly', { count: plan.counts.documents })}</p>
     <ul className="flex flex-col gap-1" aria-label={t('placeReview.subtree')}>{plan.subtree.map((item) => <li key={item.node.id} className="flex flex-wrap items-baseline gap-x-2"><span>{t(`finder.kinds.${item.node.kind}`)}</span><ReviewPlace place={item.node} /><span className="text-text-muted">{t(item.read_only_after ? 'placeReview.readOnly' : 'placeReview.ordinaryRights')}{item.own_archived && !plan.archiving ? ` · ${t('placeReview.ownArchiveKept')}` : ''}</span></li>)}</ul>
     {plan.archiving ? <ul className="flex flex-col gap-3" aria-label={t('placeReview.work')}>{plan.work.map((item) => <li key={item.thread.id} className="flex flex-col gap-1"><ReviewPlace place={item.thread} /><Facts rows={[
@@ -69,6 +70,6 @@ export function DeleteConsequences({ plan }: { plan: NodeDeletePlan }) {
       { name: t('placeReview.purgeAt'), value: <RelativeTime at={plan.purge_at} /> },
       { name: t('placeReview.restoreBy'), value: <span>{permissionLabel(plan.restore_by.permission)}{' · '}{plan.restore_by.place === 'system' ? t('placeReview.system') : <ReviewPlace place={plan.restore_by.place} />}</span> },
     ]} />
-    <p>{t('placeReview.deleteAbout')}</p><p className="text-text-muted">{t('placeReview.expires')}{' '}<RelativeTime at={plan.expires_at} /></p>
+    <div className="flex flex-wrap items-center gap-2"><p>{t('placeReview.deleteAbout')}</p><RetentionFacts retention={plan.retention} /></div><p className="text-text-muted">{t('placeReview.expires')}{' '}<RelativeTime at={plan.expires_at} /></p>
   </div>;
 }

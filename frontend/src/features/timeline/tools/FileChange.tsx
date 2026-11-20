@@ -14,16 +14,18 @@ import { useRecordedItem } from '@/features/timeline/historical';
 import { FileLink, FilePathAttachment } from '@/features/files/FileLink';
 import { DiffView, type DiffViewProps } from '@/ui/DiffView';
 import { ReviewableDiff } from '@/features/source/Review';
+import { nativeFieldMasked } from '../masking';
 
 const ICONS = { add: FilePlus, modify: FilePen, delete: FileMinus, rename: FileSymlink } as const;
 
 /** The changes of one step, one difference after the other. `writing`: the step is still under way. */
-export function FileChanges({ changes, writing = false, showCounts = true, showHeadings = true, itemId }: { changes: readonly FileChange[]; writing?: boolean; showCounts?: boolean; showHeadings?: boolean; itemId?: string }) {
+export function FileChanges({ changes, writing = false, showCounts = true, showHeadings = true, itemId, maskedPaths = [] }: { changes: readonly FileChange[]; writing?: boolean; showCounts?: boolean; showHeadings?: boolean; itemId?: string; maskedPaths?: readonly number[] }) {
   const { t } = useTranslation();
   const { threadId, layout, setLayout, inspection, readOnly, canInteract } = useTimelineContext();
   return (
     <div className="flex flex-col gap-3">
       {changes.map((change, index) => {
+        const hidden = maskedPaths.includes(index);
         const Icon = ICONS[change.change];
         const props: DiffViewProps = { diff: change.diff, change: change.change, binary: change.binary, truncated: change.truncated, writing,
           layout, onLayout: setLayout, label: t('timeline.change.label', { path: change.path }), showCounts, showToolbar: showHeadings };
@@ -33,17 +35,18 @@ export function FileChanges({ changes, writing = false, showCounts = true, showH
               <Icon className="text-text-muted" aria-hidden />
               <span className="font-mono text-text wrap-anywhere">
                 {change.old_path !== null && `${change.old_path} → `}
-                {change.change === 'delete' ? change.path : <FileLink path={change.path} />}
+                {hidden || change.change === 'delete' ? change.path : <FileLink path={change.path} />}
               </span>
               <span className="text-text-subtle">{t(`timeline.change.${change.change}`)}</span>
+              {hidden && <span className="text-xs text-text-subtle">{t('timeline.masking.path')}</span>}
               {showCounts && !change.binary && (
                 <span className="text-xs text-text-muted tabular-nums">
                   <span className="text-success-text">{`+${change.added}`}</span> <span className="text-danger-text">{`−${change.removed}`}</span>
                 </span>
               )}
             </p>}
-            {change.binary && change.change !== 'delete' && <FilePathAttachment path={change.path} />}
-            {itemId === undefined ? <DiffView {...props} /> : <ReviewableDiff {...props} threadId={threadId} path={change.path} itemId={itemId} mayComment={inspection === undefined && readOnly !== true && canInteract} />}
+            {!hidden && change.binary && change.change !== 'delete' && <FilePathAttachment path={change.path} />}
+            {itemId === undefined || hidden ? <DiffView {...props} /> : <ReviewableDiff {...props} threadId={threadId} path={change.path} itemId={itemId} mayComment={inspection === undefined && readOnly !== true && canInteract} />}
           </section>
         );
       })}
@@ -58,5 +61,5 @@ export function FileChangeDisplay({ item }: { item: ChangeItem }) {
   const recorded = useRecordedItem(threadId, item);
   const tool = item.payload.tool;
   if (tool.kind !== 'file_change') return null;
-  return <FileChanges changes={tool.changes} itemId={item.id} writing={item.status === 'in_progress' && !recorded} showCounts={false} showHeadings={tool.changes.length !== 1} />;
+  return <FileChanges changes={tool.changes} itemId={item.id} maskedPaths={tool.changes.flatMap((_, index) => nativeFieldMasked(item.payload, `/tool/changes/${index}/path`) ? [index] : [])} writing={item.status === 'in_progress' && !recorded} showCounts={false} showHeadings={tool.changes.length !== 1} />;
 }
