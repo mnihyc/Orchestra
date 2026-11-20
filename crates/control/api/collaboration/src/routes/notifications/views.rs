@@ -110,11 +110,15 @@ pub fn health_view(word: &str) -> NotificationRouteHealth {
     serde_json::from_value(Json::String(word.to_owned())).unwrap_or(NotificationRouteHealth::Never)
 }
 
-/// Why a route fails, while it is in a failure episode.
+/// Why a route is waiting on an invalid zone or remains in a delivery failure episode.
 #[must_use]
 pub fn failure_view(route: &RouteRow) -> Option<NotificationRouteFailure> {
-    route.failure_episode?;
     let kept = route.last_error.as_ref()?;
+    if route.failure_episode.is_none()
+        && kept.get("code").and_then(Json::as_str) != Some("invalid_timezone")
+    {
+        return None;
+    }
     Some(NotificationRouteFailure {
         code: kept
             .get("code")
@@ -192,6 +196,7 @@ pub fn route_view(facts: RouteFacts<'_>) -> NotificationRoute {
     } = facts;
     let minutes = |value: Option<i32>| value.and_then(|minutes| u32::try_from(minutes).ok());
     NotificationRoute {
+        pending_delivery: None,
         id: route.map(|route| route.id),
         channel_id,
         channel,
@@ -400,6 +405,56 @@ pub fn notifier_view(descriptor: &NotifierDescriptor, language: &str) -> Notifie
             digest: shipped(Form::Digest),
         },
     }
+}
+
+/// Own classified durable facts, with the current quiet-hours and pause eligibility.
+pub async fn pending_delivery(
+    conn: &mut orch_db::Conn,
+    user: Id,
+    route: Id,
+    now: chrono::DateTime<chrono::Utc>,
+    blocked: bool,
+) -> Result<Option<orch_api_contract::notifications::PendingDelivery>, orch_db::DbError> {
+    use orch_api_contract::notifications::{ChannelAcceptanceState, PendingDelivery};
+    let Some(row) =
+        orch_db::queries::notifications::outbox::delivery_facts(conn, user, route).await?
+    else {
+        return Ok(None);
+    };
+    let expired = row.state == "sending" && row.next_eligible_at.is_some_and(|at| at <= now);
+    let mut next = if blocked || row.state == "sending" && !expired {
+        None
+    } else {
+        row.next_eligible_at
+    };
+    if next.is_some()
+        && let Some(person) = orch_db::queries::notifications::people::recipient(conn, user).await?
+    {
+        match orch_worker_core::quiet_hours::outward_held_until(
+            &person.timezone,
+            person.quiet_window(),
+            person.pause_until,
+            next.unwrap_or(now).max(now),
+        ) {
+            Ok(Some(hold)) => next = next.map(|at| at.max(hold)),
+            Ok(None) => {}
+            Err(_) => next = None,
+        }
+    }
+    let acceptance = if row.state == "sent" {
+        ChannelAcceptanceState::Accepted
+    } else if expired || row.unconfirmed {
+        ChannelAcceptanceState::Unknown
+    } else {
+        ChannelAcceptanceState::Pending
+    };
+    Ok(Some(PendingDelivery {
+        attempts: i64::from(row.attempts) + i64::from(row.state == "sending"),
+        last_attempt_at: row.last_attempt_at.map(Time::new),
+        next_eligible_at: next.map(Time::new),
+        acceptance,
+        safe_problem: None,
+    }))
 }
 
 #[cfg(any(test, feature = "test-support"))]

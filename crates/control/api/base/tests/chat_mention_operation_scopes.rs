@@ -30,13 +30,13 @@ struct Key {
 }
 async fn key(world: &support::World, user: Id, rules: Vec<Value>) -> Key {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let stored = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -57,14 +57,15 @@ async fn key(world: &support::World, user: Id, rules: Vec<Value>) -> Key {
     Key { id, secret }
 }
 async fn legacy(world: &support::World, user: Id, scopes: &[&str]) -> String {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let scopes: Vec<String> = scopes.iter().map(|scope| (*scope).to_owned()).collect();
     create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native mention legacy control",
             token_hash: &token_hash(&secret),
@@ -484,6 +485,7 @@ async fn legacy_send_ceilings_and_disabled_sending_keep_their_original_list_and_
         .call(NodeSettingSet, &[&room.topic, &"chat.enabled"])
         .token(&room.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
