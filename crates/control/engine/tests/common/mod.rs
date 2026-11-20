@@ -251,6 +251,7 @@ impl ResourceAccess for TestAccess {
             None => None,
         };
         let wanted = orch_authz::options::Wanted {
+            purpose: ask.purpose,
             model: ask.model.map(|model| (model, &[][..])),
             effort: ask.effort,
             at: place.as_ref(),
@@ -426,6 +427,7 @@ impl LiveSink for Recorder {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    session_offer: Option<Box<orch_engine::tools::catalogue::AcceptedOrchTools>>,
     cmd: Cmd,
     machine: Id,
     handle: CommandHandle,
@@ -436,11 +438,13 @@ struct Issued {
 /// twice under one identifier is made once, and when the API "restarts" the ones that did not end are
 /// handed to the new link, as the API's rows would be.
 pub struct ScriptedCommands {
+    hub: Hub,
     db: Db,
     primary: Id,
     link: Mutex<ControllerLink>,
     others: Mutex<HashMap<Id, ControllerLink>>,
     issued: Mutex<HashMap<Id, Issued>>,
+    lost_waits: Mutex<HashSet<String>>,
     clock: Arc<dyn Clock>,
     process: AtomicU64,
     /// Whether the link says that it holds events of a machine not taken in yet ([`World::hearing_behind`]).
@@ -451,13 +455,15 @@ pub struct ScriptedCommands {
 }
 
 impl ScriptedCommands {
-    fn new(db: Db, primary: Id, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
+    fn new(db: Db, primary: Id, hub: Hub, link: ControllerLink, clock: Arc<dyn Clock>) -> Self {
         Self {
+            hub,
             db,
             primary,
             link: Mutex::new(link),
             others: Mutex::new(HashMap::new()),
             issued: Mutex::new(HashMap::new()),
+            lost_waits: Mutex::new(HashSet::new()),
             clock,
             process: AtomicU64::new(1),
             behind: AtomicBool::new(false),
@@ -558,6 +564,11 @@ impl ScriptedCommands {
             .values()
             .filter(|entry| entry.cmd.kind == kind)
             .count()
+    }
+
+    /// Loses a live waiter's result after the machine answered; the retained status still has it.
+    pub fn lose_waits_of(&self, kind: CommandKind) {
+        lock(&self.lost_waits).insert(kind.as_str().to_owned());
     }
 
     /// The commands of a kind as they were issued (a secret still the reference to it, a ticket still the
@@ -669,7 +680,7 @@ fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -686,10 +697,22 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 
 #[async_trait]
 impl Commands for Process {
+    fn machine_connected(&self, machine: Id) -> bool {
+        self.commands.hub.session_of(machine).is_some()
+    }
+
     async fn retained_body(&self, id: Id) -> Result<Option<Json>, CommandsError> {
         Ok(lock(&self.commands.issued)
             .get(&id)
             .map(|issued| issued.cmd.body.clone()))
+    }
+    async fn retained_session_offer(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(lock(&self.commands.issued)
+            .get(&id)
+            .and_then(|command| command.session_offer.as_deref().cloned()))
     }
     async fn retained_command(
         &self,
@@ -726,6 +749,26 @@ impl Commands for Process {
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
         self.alive()?;
+        let before = if let Some(facts) = command.input_facts.as_deref() {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let mut tx = self
+                .commands
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            orch_engine::commands::retain_input_facts(&mut tx, facts, command.id, &command.body)
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Body(error.to_string()))?;
+            None
+        } else {
+            before
+        };
         let mut issued = lock(&self.commands.issued);
         if issued.contains_key(&command.id) {
             if let Some(check) = before {
@@ -755,6 +798,7 @@ impl Commands for Process {
         issued.insert(
             command.id,
             Issued {
+                session_offer: command.session_offer,
                 cmd,
                 machine: command.machine,
                 handle,
@@ -782,6 +826,14 @@ impl Commands for Process {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let outcome = self.wait_handle(handle).await?;
+        let loses_wait = lock(&self.commands.issued).get(&id).is_some_and(|issued| {
+            lock(&self.commands.lost_waits).contains(issued.cmd.kind.as_str())
+        });
+        if loses_wait {
+            return Err(CommandsError::Other(
+                "the live waiter lost its reply after the command ended".to_owned(),
+            ));
+        }
         self.commands.complete_admitted(id, outcome).await
     }
 
@@ -1193,6 +1245,7 @@ impl World {
     }
 
     async fn build_profile(setup: Setup, profile: Json) -> Self {
+        let _ = orch_engine::raw_events::install_master_key(master_key());
         let advertised_version = profile
             .get("harness_version")
             .and_then(Json::as_str)
@@ -1361,6 +1414,7 @@ impl World {
         let commands = Arc::new(ScriptedCommands::new(
             pool.clone(),
             machine_id,
+            hub.clone(),
             link.clone(),
             Arc::clone(&clock),
         ));
@@ -1733,11 +1787,13 @@ impl World {
                     Command::ProviderStop(_) => CommandResult::ProviderStop(Empty {}),
                     Command::AgentStop(_) => CommandResult::AgentStop(Empty {}),
                     Command::AgentStart(_) => CommandResult::AgentStart(AgentStartResult {
+                        home: None,
                         reused: false,
                         harness_version: "1.0.0".to_owned(),
                         descriptor: serde_json::from_value(lock(&declared).clone()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: Some(open.mcp.iter().map(|server| server.name.clone()).collect()),
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1746,6 +1802,13 @@ impl World {
                     }),
                     Command::SessionOpenFenced(open) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: Some(
+                                open.session
+                                    .mcp
+                                    .iter()
+                                    .map(|server| server.name.clone())
+                                    .collect(),
+                            ),
                             native_session_ref: if matches!(
                                 open.session.mode,
                                 SessionMode::Resume | SessionMode::Adopt

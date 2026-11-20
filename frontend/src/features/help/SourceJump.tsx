@@ -21,7 +21,7 @@ export function SettingSourceJumpHost() {
 function ThreadSource({ id, setting }: { id: string; setting: string }) {
   const { t } = useTranslation();
   const router = useRouter();
-  const node = useQuery({ ...nodeQuery(id), staleTime: 0, refetchOnMount: 'always' });
+  const node = useQuery({ ...nodeQuery(id), refetchOnMount: 'always' });
   const close = () => {
     const location = router.state.location;
     const search = new URLSearchParams(location.searchStr);
