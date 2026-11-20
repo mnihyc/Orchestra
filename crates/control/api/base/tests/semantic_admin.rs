@@ -42,6 +42,7 @@ async fn only_a_system_admin_reads_where_search_by_meaning_stands_and_an_org_is_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.enabled"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -203,7 +204,7 @@ async fn local_embeddings_uses_ordinary_editable_removable_templates_and_provide
         .call(ProviderCreate, &[])
         .token(&c.root.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Local embeddings".into(),
             home_id: c.acme,
             access: None,
@@ -315,7 +316,35 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
     let c = cast(&world).await;
     places::join(&world, c.acme, c.acme, &c.root, "admin", &c.boss).await;
     let generation = orch_types::new_id();
-    let provider = orch_types::new_id();
+    let provider = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.boss.token)
+        .body(&CreateProvider::Api {
+            runtime_location: None,
+            name: "Embedding recipe".into(),
+            home_id: c.acme,
+            access: None,
+            arrangements: None,
+            runtime_config: None,
+            upstreams: vec![Upstream {
+                protocol: "openai-embeddings".into(),
+                base_url: "https://embeddings.invalid/v1".into(),
+                options: json!({"auth":"none"}),
+            }],
+            api_key: None,
+            secrets: None,
+            key_machine_id: None,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the restore control names an existing provider")
+        .provider
+        .base
+        .id;
     sqlx::query("INSERT INTO search_generations (id,org_id,provider_id,model_name,asked_dimensions,dimensions,query_prefix,document_prefix,chunking,state,created_at)
         VALUES ($1,$2,$3,'old-model',256,256,'query: ','text: ','parts-v1:64','active',$4)")
         .bind(generation).bind(c.acme).bind(provider).bind(world.now()).execute(&world.db.pool).await.unwrap();
@@ -325,6 +354,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,
@@ -385,6 +415,7 @@ async fn keeping_the_current_model_restores_its_prompts_and_chunk_size_together_
         .call(NodeSettingSet, &[&c.acme, &"search.semantic.embeddings"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: named.clone(),
             locked: None,
             expected_revision: None,

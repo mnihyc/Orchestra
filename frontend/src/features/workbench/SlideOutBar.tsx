@@ -2,6 +2,7 @@
 import { type ReactNode, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { SideBarId } from './layout';
+import { edgeOf, noteSeen, pointerSeen } from './peek';
 import { Drawer } from '@/ui/Drawer';
 
 /** A short grace period lets a pointer cross to a menu without dismissing its source. */
@@ -17,8 +18,9 @@ export function SlideOutBar({ bar, size, open, docked, onClose, children }: { ba
     timer.current = setTimeout(() => {
       timer.current = undefined;
       // A menu or card keeps the bar it came from until its own dismissal.
-      if (body.current?.parentElement?.matches(':hover') === true
-        || document.querySelector(`[data-bar-edge="${bar}"]:hover, [role="menu"], [data-radix-popper-content-wrapper]:hover`) !== null) leave();
+      const seen = pointerSeen();
+      if (body.current?.parentElement?.matches(':hover') === true || seen !== null && edgeOf(seen, [bar]) === bar
+        || document.querySelector('[role="menu"], [data-radix-popper-content-wrapper]:hover') !== null) leave();
       else onClose();
     }, LEAVE_MS);
   }, [onClose, bar]);
@@ -27,13 +29,17 @@ export function SlideOutBar({ bar, size, open, docked, onClose, children }: { ba
     if (!open) return;
     const move = (event: PointerEvent) => {
       if (event.pointerType === 'touch') return;
+      noteSeen(event.clientX);
       const target = event.target;
-      if (target instanceof Element && (body.current?.parentElement?.contains(target) === true
-        || target.closest(`[data-bar-edge="${bar}"], [role="menu"], [data-radix-popper-content-wrapper]`) !== null)) cancel();
+      if (edgeOf(event.clientX, [bar]) === bar || target instanceof Element && (body.current?.parentElement?.contains(target) === true
+        || target.closest('[role="menu"], [data-radix-popper-content-wrapper]') !== null)) cancel();
       else leave();
     };
+    // A pointer that leaves the window leaves the bar it peeked at.
+    const out = () => { noteSeen(null); leave(); };
     document.addEventListener('pointermove', move);
-    return () => document.removeEventListener('pointermove', move);
+    document.documentElement.addEventListener('pointerleave', out);
+    return () => { document.removeEventListener('pointermove', move); document.documentElement.removeEventListener('pointerleave', out); };
   }, [open, bar, cancel, leave]);
   useEffect(() => {
     if (!open) return;

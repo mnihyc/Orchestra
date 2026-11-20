@@ -123,6 +123,7 @@ pub fn from_value(declarations: &Declarations, capability: &str, value: Json) ->
         web_reference(declarations, capability, chosen)?
     };
     let route = declarations.routes.get(&reference.route)?;
+    reference.validate().ok()?;
     if !definition
         .modes
         .get("service")?
