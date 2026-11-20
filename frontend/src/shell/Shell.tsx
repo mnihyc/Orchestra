@@ -10,7 +10,7 @@ import { CloseViews } from '@/features/workbench/CloseViews';
 import { WorkspaceCommands } from '@/features/workbench/workspaceActions';
 import { useRouterState } from '@tanstack/react-router';
 import { PanelBottom, PanelLeft, PanelRight } from 'lucide-react';
-import { Activity, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Activity, memo, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
@@ -62,10 +62,13 @@ import { useKeyChoices } from '@/shell/keys';
 import { Shortcuts } from '@/shell/Shortcuts';
 import { IconButton } from '@/ui/IconButton';
 import { ScreenTitleBar } from '@/shell/TitleBar';
-import { useVisibleLayout } from '@/features/workbench/availability';
+import { useVisibleLayout, useWorkbenchBars } from '@/features/workbench/availability';
 import { StatusBar } from '@/ui/StatusBar';
 import { SkipMain } from '@/shell/SkipMain';
+import { mark } from '@/lib/marks';
 import { useShellBootstrap } from '@/shell/bootstrap';
+import { useKeepShell } from '@/shell/keepShell';
+import { uncover } from '@/shell/keptShell';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { ErrorState } from '@/ui/ErrorState';
 import { OverlayChoices } from '@/features/workbench/OverlayChoices';
@@ -104,7 +107,7 @@ function TitleBar({ beside }: { beside: boolean }) {
   const helpFor = useWorkbenchChoiceHelp();
   const screen = useWorkbench((state) => state.screen);
   const arrangement = useWorkbench((state) => state.arrangement);
-  const layout = useVisibleLayout();
+  const layout = useWorkbenchBars();
   const overlay = useWorkbench((state) => state.overlay);
   const toggle = useWorkbench((state) => state.toggle);
   const choose = useWorkbench((state) => state.choose);
@@ -137,7 +140,7 @@ function TitleBar({ beside }: { beside: boolean }) {
   );
 }
 
-export function Shell({ children, leavingAdmin = false }: { children: ReactNode; leavingAdmin?: boolean }) {
+export function Shell({ leavingAdmin = false }: { children: ReactNode; leavingAdmin?: boolean }) {
   useEffect(() => {
     window.addEventListener('dragover', unclaimedFileDrop);
     window.addEventListener('drop', unclaimedFileDrop);
@@ -145,10 +148,12 @@ export function Shell({ children, leavingAdmin = false }: { children: ReactNode;
   }, []);
   const userId = useStore(client.session, (state) => state.userId);
   const bootstrap = useShellBootstrap(userId);
-  if (userId === null) return <><SkipMain /><main id="main-content" data-main-area tabIndex={-1} className="h-dvh bg-bg text-text outline-none"><ScreenLoading /></main></>;
   const ready = bootstrap.data?.person.id === userId;
-  const pending = bootstrap.isError ? <div className="p-4 sm:p-6"><ErrorState error={bootstrap.error} onRetry={() => void bootstrap.refetch()} /></div> : <ScreenLoading />;
-  return <FrameReadiness.Provider value={{ ready, pending }}><ShellFrame key={userId} userId={userId} ready={ready} leavingAdmin={leavingAdmin}>{children}</ShellFrame></FrameReadiness.Provider>;
+  const { isError, error, refetch } = bootstrap;
+  const frame = useMemo(() => ({ ready, pending: isError
+    ? <div className="p-4 sm:p-6"><ErrorState error={error} onRetry={() => void refetch()} /></div> : <ScreenLoading /> }), [ready, isError, error, refetch]);
+  if (userId === null) return <><SkipMain /><main id="main-content" data-main-area tabIndex={-1} className="h-dvh bg-bg text-text outline-none"><ScreenLoading /></main></>;
+  return <FrameReadiness.Provider value={frame}><ShellFrame key={userId} userId={userId} ready={ready} leavingAdmin={leavingAdmin} /></FrameReadiness.Provider>;
 }
 
 /** A bootstrap transition pauses admitted services while preserving their dialogs and drafts. */
@@ -170,12 +175,38 @@ function FrameServices() {
   return <><ShellCommands /><WorkspaceCommands /><TutorialHost /></>;
 }
 
-function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children: ReactNode; leavingAdmin: boolean; ready: boolean }) {
+function HostedViews() {
+  const layout = useVisibleLayout();
+  return <ViewHost layout={layout} />;
+}
+
+function CloseHelpOnNavigation() {
+  const href = useRouterState({ select: (state) => state.location.href });
+  const previousHref = useRef(href);
+  useLayoutEffect(() => {
+    if (previousHref.current !== href && useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
+    previousHref.current = href;
+  }, [href]);
+  return null;
+}
+
+const ShellFrame = memo(function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; leavingAdmin: boolean; ready: boolean }) {
   const frame = useFrameReadiness();
   const [addressed, setAddressed] = useState(false);
   const admitAddress = useCallback(() => setAddressed(true), []);
   const admitted = ready && addressed;
+  const [wasReady, setWasReady] = useState(ready);
+  if (ready && !wasReady) setWasReady(true);
+  const pageAdmitted = addressed && (ready || !wasReady && !leavingAdmin);
+  useEffect(() => { mark('start/shell-drawn'); }, []);
+  useEffect(() => { if (admitted) { mark('start/shell-ready'); uncover(); } }, [admitted]);
+  useEffect(() => { if (pageAdmitted) uncover(); }, [pageAdmitted]);
+  useKeepShell(userId, admitted);
   const readerVersion = useStore(client.session, (state) => state.readerVersion ?? 0);
+  const empty = useWorkbench((state) => state.activeContent === null);
+  useLayoutEffect(() => {
+    if (admitted && empty) mark('page/content', { user: userId, reader: String(readerVersion), view: '', address: '/workbench', outcome: 'ready' });
+  }, [admitted, empty, userId, readerVersion]);
   const viewAdmission = useRef<ReturnType<typeof holdViewReveals> | null>(null);
   useLayoutEffect(() => {
     const admission = holdViewReveals(userId, readerVersion);
@@ -184,23 +215,18 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
   }, [userId, readerVersion]);
   useLayoutEffect(() => { if (!admitted) viewAdmission.current?.pause(); }, [admitted, userId, readerVersion]);
   useEffect(() => { if (admitted) viewAdmission.current?.admit(); }, [admitted, userId, readerVersion]);
-  const href = useRouterState({ select: (state) => state.location.href });
-  const previousHref = useRef(href);
-  useLayoutEffect(() => {
-    if (previousHref.current !== href && useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
-    previousHref.current = href;
-  }, [href]);
   const shape = useShape();
-  const visibleLayout = useVisibleLayout();
   const beside = shape === 'wide';
   const [shortcutList, setShortcutList] = useState(false);
   const showShortcuts = useCallback(() => setShortcutList(true), []);
   const focusMode = useWorkbench((state) => state.focusMode);
+  const readiness = useMemo(() => ({ ready: admitted, pageReady: pageAdmitted, pending: frame.pending }), [admitted, pageAdmitted, frame.pending]);
 
   return (
     <>
-      <PageRouting ready={ready} onAddressed={admitAddress} />
-      <FrameReadiness.Provider value={{ ready: admitted, pending: frame.pending }}>
+      <PageRouting onAddressed={admitAddress} />
+      <CloseHelpOnNavigation />
+      <FrameReadiness.Provider value={readiness}>
       <AdmittedServices ready={admitted}><FrameServices />
       <HelpOverlayHost />
       <Shortcuts listOpen={shortcutList} onListOpenChange={setShortcutList} />
@@ -214,7 +240,7 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
       <OpenViewCommands />
       <HelpWork>
       <SkipMain />
-      <AdmittedServices ready={admitted}><ViewHost layout={visibleLayout} /></AdmittedServices>
+      <AdmittedServices ready={pageAdmitted}><HostedViews /></AdmittedServices>
       {shape === 'small' ? (
         <MobileNavigation onShortcuts={showShortcuts} pending={leavingAdmin} focusMode={focusMode} />
       ) : (
@@ -240,4 +266,4 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
       </FrameReadiness.Provider>
     </>
   );
-}
+});

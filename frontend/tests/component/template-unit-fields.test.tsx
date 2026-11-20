@@ -61,7 +61,7 @@ it('the runtime lists each declared program with its kind and literal command, r
   const list = screen.getByRole('region', { name: 'Registered programs' });
   expect(within(list).getAllByRole('listitem')).toHaveLength(4);
   for (const program of plugins) expect(within(list).getByText(JSON.stringify(program.command))).toBeInTheDocument();
-  expect(within(list).getByText(/Read-only · declared by this runtime's template/)).toBeInTheDocument();
+  expect(within(list).getByText(/Read-only · declared by this provider's template/)).toBeInTheDocument();
   expect(within(list).queryByRole('textbox')).not.toBeInTheDocument();
   expect(within(list).queryByRole('button')).not.toBeInTheDocument();
 });
