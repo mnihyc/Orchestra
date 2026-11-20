@@ -8,7 +8,9 @@ use orch_provider_contract::capabilities::{
 };
 use orch_provider_contract::{SourceError, SourceErrorCode};
 use orch_summarizer_contract::descriptor::SummaryField;
-use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRequest};
+use orch_summarizer_contract::summarizer::{
+    OUTPUT_CUT, SummarizeError, Summarizer, SummaryRequest,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -91,6 +93,10 @@ fn failure(error: SummarizeError) -> SourceError {
             false,
             "the summary completion was refused",
         ),
+        // The answer ran into its output allowance: its own code, so that whoever is told can raise it.
+        SummarizeError::Failed { message, retryable } if message == OUTPUT_CUT => {
+            (SourceErrorCode::TooLarge, retryable, OUTPUT_CUT)
+        }
         SummarizeError::Failed { retryable, .. } => (
             SourceErrorCode::Unavailable,
             retryable,
@@ -155,7 +161,7 @@ impl CapabilityExecutor for Executor {
             items: vec![CapabilityItem {
                 family: "summary".into(),
                 native_ref,
-                payload: json!({"text":text}),
+                payload: json!({"text":text,"result_facts":result.conformance}),
             }],
             usage: orch_types::Json::Null,
         })
