@@ -9,7 +9,7 @@ mod support;
 use chrono::Duration;
 use http::StatusCode;
 use orch_api_contract::nodes::TopicMove;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{hierarchy, identity, threads};
 use orch_types::new_id;
 use places::{make_org, make_project, make_topic, person};
@@ -67,11 +67,12 @@ async fn move_rechecks_before_bulk_hierarchy_effect_after_actual_descendant_wait
         .find(|row| row.id == child)
         .unwrap()
         .path;
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: owner.id(),
             name: "Bulk native writer deadline",
             token_hash: &token_hash(&secret),

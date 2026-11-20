@@ -80,7 +80,7 @@ function RecoveryForm({ ids, others, onStarted, onClose }: { ids: readonly strin
   const carrying = (row: EnvironmentRecoveryRow) => {
     if (row.blockers.some((blocker) => blocker.code === 'measurement_pending')) return <MeasurementReason waiting planning={stale} fallback={null} />;
     const files = row.files ?? row.move_plan?.files;
-    const coverage = !row.listing_available ? t('loss.listingUnavailable') : files === undefined ? row.switch_plan === null ? '' : t('loss.threads', { count: row.switch_plan.plans.length, number: formatNumber(row.switch_plan.plans.length, locale) }) : t('loss.fileCoverage', { copied: formatNumber(files.file_count - files.missing.count, locale), total: formatNumber(files.file_count, locale), missing: formatNumber(files.missing.count, locale) });
+    const coverage = !row.listing_available ? t('loss.listingUnavailable') : files === undefined ? row.switch_plan === null ? '' : t('loss.threads', { count: row.switch_plan.plans.length, number: formatNumber(row.switch_plan.plans.length, locale) }) : t('loss.fileCoverage', { count: files.file_count, copied: formatNumber(files.file_count - files.missing.count, locale), total: formatNumber(files.file_count, locale), missing: formatNumber(files.missing.count, locale) });
     if (!row.restored) return coverage;
     const restored = t('loss.restored', { size: row.restored_bytes === null ? '–' : formatBytes(row.restored_bytes, locale) });
     return !row.listing_available || (files !== undefined && (files.missing.count > 0 || files.bytes_to_download > 0)) ? `${restored} · ${coverage}` : restored;

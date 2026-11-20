@@ -13,6 +13,7 @@ import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { Textarea } from '@/ui/Textarea';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 /** The three fates in the order plans offer them. */
 export const MOUNT_FATES: readonly MountFate[] = ['detach', 'as_is', 'copy'];
@@ -29,12 +30,14 @@ export function EditMount({ mount, onClose, onCreated }: { mount?: Mount; onClos
   const [enabled, setEnabled] = useState(mount?.enabled ?? true);
   const [fate, setFate] = useState<MountFate>(mount?.default_fate ?? 'as_is');
   const changed = mount === undefined ? true : name !== mount.name || description !== mount.description || target !== mount.target || readOnly !== mount.read_only || enabled !== mount.enabled || fate !== mount.default_fate;
+  const runtimeChanged=mount!==undefined&&(target!==mount.target||readOnly!==mount.read_only||enabled!==mount.enabled);
+  const application=useApplicationImpact({object:{kind:'mount',id:mount?.id??''},model_id:null},runtimeChanged);
   const save = useMutation({ mutationFn: () => {
     const body = { name: name.trim(), description, home_id: home, target, read_only: readOnly, default_fate: fate };
     return mount === undefined ? createMount(body, actKey(body)) : updateMount(mount.id, { expected_revision: mount.revision, name: name.trim(), description, target, read_only: readOnly, enabled, default_fate: fate });
   },
     onSuccess: (row) => { if (mount === undefined) cache.setQueryData(mountKey(row.id), row); onCreated?.(row); onClose(); } });
-  return <EditDialog admin={adminSpec(mount, 'mount.manage')} title={mount === undefined ? t('resourceDetails.mount.add') : t('resources.edit.title', { name: mount.name })} changed={changed} valid={name.trim() !== '' && target.startsWith('/') && (mount !== undefined || home !== '')} pending={save.isPending} error={save.error} onSave={() => save.mutate()} onClose={onClose}>
+  return <EditDialog admin={adminSpec(mount, 'mount.manage')} title={mount === undefined ? t('resourceDetails.mount.add') : t('resources.edit.title', { name: mount.name })} changed={changed} valid={name.trim() !== '' && target.startsWith('/') && (mount !== undefined || home !== '')&&application.ready} pending={save.isPending} error={save.error} onSave={() => save.mutate()} onClose={onClose}>
     <Input label={t('resources.edit.name')} value={name} disabled={save.isPending} onChange={(event) => setName(event.target.value)} data-autofocus />
     <Textarea label={t('resources.listDescription')} value={description} disabled={save.isPending} onChange={(event) => setDescription(event.target.value)} />
     {mount === undefined && <HomePicker value={home} onChange={setHome} disabled={save.isPending} />}
@@ -43,6 +46,6 @@ export function EditMount({ mount, onClose, onCreated }: { mount?: Mount; onClos
     {mount !== undefined && <Switch label={t('resourceDetails.enabled')} checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} />}
     <Select<MountFate> label={t('resourceDetails.mount.defaultFate')} value={fate} disabled={save.isPending} onValueChange={setFate}
       options={MOUNT_FATES.map((value) => ({ value, ...choiceOption(t, `mountFate.${value}`) }))} />
-    <p className="text-sm text-text-muted">{t('resourceDetails.mount.changeHelp')}</p>
+    {runtimeChanged&&<ApplicationPreview read={application.read} kind={enabled?'change':'disable'}/>}
   </EditDialog>;
 }
