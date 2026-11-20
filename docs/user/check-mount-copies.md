@@ -15,13 +15,13 @@ manager. It does not copy, synchronize or change the mount's permissions.
 
 A move, fork or environment-switch plan lists each mount. Choose **Detach**,
 **Mount as-is** or **Copy** from the choices actually available. The mount's
-default is preselected; **Mount as-is** is the shipped default. **All mounts** changes the common choice; each row
+default is preselected; **Mount as-is** is the default. **All mounts** changes the common choice; each row
 can still override it. An unavailable choice explains its reason.
 
 Mount as-is uses the destination's location. Copy transfers the selected data
 before work starts there. If that location already holds data, choose **Replace**
 or **Keep both**. Keep both copies into a new location. The plan states what is kept and the retention before
-confirmation. Read the size, pending counts and required authority.
+confirmation. Read the size, pending counts and required permission.
 
 ## Content check
 

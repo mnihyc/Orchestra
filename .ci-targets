@@ -1,0 +1,5 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test ownership_settings_native_scopes
+test -p orch-api-core --test everything_scale -- a_team_members_first_screen_is_served_in_under_one_hundred_milliseconds --nocapture

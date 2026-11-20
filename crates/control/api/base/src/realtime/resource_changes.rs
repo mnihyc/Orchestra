@@ -91,6 +91,35 @@ impl Resources {
             }
         }
         for feed in active {
+            if let Feed::ProviderRow(id) = feed {
+                // Only first-paint facts and aggregate membership are watched here. In particular,
+                // neither accepted model declarations nor the upstream catalogue is materialized.
+                let row: Option<Json> = sqlx::query_scalar(
+                    "SELECT jsonb_build_object('name',p.name,'status',p.status,'revision',p.revision,
+                       'facts',p.facts-ARRAY['models','spend','available_resets','extra_usage']::text[],
+                       'facts_overrides',p.facts_overrides-ARRAY['models','spend','available_resets','extra_usage']::text[],
+                       'listed',CASE WHEN jsonb_typeof(p.facts->'models')='array' THEN jsonb_array_length(p.facts->'models') ELSE NULL END,
+                       'models',(SELECT COUNT(*) FROM provider_models m WHERE m.provider_id=p.id),
+                       'enabled',(SELECT COUNT(*) FROM provider_models m WHERE m.provider_id=p.id AND m.enabled),
+                       'running',(SELECT COUNT(*) FROM threads t JOIN nodes n ON n.id=t.node_id WHERE t.provider_id=p.id AND t.state='running' AND n.deleted_at IS NULL))
+                     FROM providers p WHERE p.id=$1",
+                ).bind(id).fetch_optional(&mut *conn).await.map_err(Fail::other)?;
+                if let Some(row) = row {
+                    let fingerprint = Hash::of(format!("{epoch}:{row}").as_bytes());
+                    if self
+                        .fingerprints
+                        .insert(feed.clone(), fingerprint)
+                        .is_none_or(|before| before != fingerprint)
+                    {
+                        coordinator.queue(
+                            feed.clone(),
+                            serde_json::json!({"what":"changed"}),
+                            false,
+                        );
+                    }
+                }
+                continue;
+            }
             let Feed::Resource { kind, id } = feed else {
                 continue;
             };
