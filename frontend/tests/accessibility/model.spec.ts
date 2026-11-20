@@ -64,7 +64,7 @@ test('the row editor of a model: switches off, then on with what a thread starts
   await dialog.getByRole('group', { name: 'Context' }).getByRole('button', { name: 'Use 1M' }).click();
   await dialog.getByRole('group', { name: 'Context' }).getByRole('radio', { name: 'Custom' }).click();
   await dialog.getByRole('group', { name: 'Context' }).getByLabel('Threads start with, in tokens').fill('2000000');
-  await expect(dialog.getByText('A thread cannot start with more than the largest (1,000,000).')).toBeVisible();
+  await expect(dialog.getByText('A thread cannot start with more context than the largest (1,000,000).')).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role=dialog]');
 });
 
