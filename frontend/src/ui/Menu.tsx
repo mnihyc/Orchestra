@@ -10,7 +10,7 @@
  */
 import { Check, ChevronRight } from 'lucide-react';
 import { DropdownMenu } from 'radix-ui';
-import { isValidElement, useCallback, useRef, type Ref, type ComponentProps, type ComponentType, type ReactNode } from 'react';
+import { isValidElement, useCallback, useRef, type Ref, type ComponentProps, type ComponentType, type ReactNode, type KeyboardEvent } from 'react';
 
 import { ActionIcon, actionForLabel, type ActionId } from '@/ui/actions';
 import { Choice, ChoicePicker, choiceName, hasChoiceDescription, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
@@ -23,6 +23,9 @@ import { useScrolls } from '@/ui/useScrolls';
 import { handReturnTargetToPrompt, useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
 import { Tooltip } from '@/ui/Tooltip';
+import { FactDisclosureBody, type FactDisclosureBodyProps } from '@/ui/FactDisclosure';
+import { deviceChoiceOf, offeredDeviceChoice } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceException, DeviceChoiceFacts, DeviceToggleFacts } from '@/ui/DeviceChoiceFacts';
 
 export type MenuEntry =
   | (ChoiceName<string> & ChoiceDetails & {
@@ -44,6 +47,7 @@ export type MenuEntry =
     })
   | { type: 'separator'; id: string }
   | { type: 'label'; id: string; label: string }
+  | { type: 'facts'; id: string; label: string; body: FactDisclosureBodyProps }
   | { type: 'sub'; action?: ActionId; id: string; label: string; icon?: ReactNode; entries: readonly MenuEntry[] }
   | {
       type: 'radio';
@@ -100,6 +104,37 @@ const ROW_BASE =
   'focus-inset flex min-h-8 cursor-default gap-2 rounded-sm px-2 py-1 select-none data-[highlighted]:bg-bg-muted';
 const ROW = cx(ROW_BASE, 'items-center');
 
+function entryReceipt(entry: MenuEntry) {
+  if (entry.type === 'check') return deviceChoiceOf(entry.onCheckedChange);
+  if (entry.type !== 'radio') return undefined;
+  const receipt = deviceChoiceOf(entry.onValueChange);
+  return receipt === undefined ? undefined : offeredDeviceChoice(receipt, entry.value, entry.options.map((option) => option.value));
+}
+
+function RadioChoiceFacts({ entry }: { entry: Extract<MenuEntry, { type: 'radio' }> }) {
+  const observation = entryReceipt(entry);
+  if (observation === undefined) return null;
+  const name = (value: unknown) => {
+    const option = entry.options.find((option) => option.value === value);
+    if (option === undefined) return undefined;
+    const label = choiceName(option);
+    return option.preview?.renderName?.(label) ?? label;
+  };
+  return <div className="border-t border-border p-2"><DeviceChoiceFacts observation={observation} current={name(entry.value)} saved={name(observation.saved)} inline /></div>;
+}
+
+/** Read-only names inside facts keep their own keyboard interaction within this same menu. */
+export function focusMenuFacts(event: KeyboardEvent<HTMLElement>): void {
+  if (event.key !== 'Tab' || !event.currentTarget.contains(event.target as Node)) return;
+  const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[data-fact-disclosure-body] button:not([disabled]), [data-fact-disclosure-body] a[href], [data-fact-disclosure-body] [tabindex="0"]'));
+  if (controls.length === 0) return;
+  const at = controls.findIndex((control) => control === event.target);
+  const next = at < 0 ? event.shiftKey ? controls.at(-1) : controls[0] : controls[at + (event.shiftKey ? -1 : 1)];
+  const choices = event.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]');
+  event.preventDefault();
+  (next ?? (event.shiftKey ? choices[choices.length - 1] : choices[0]))?.focus();
+}
+
 /** A custom row, including a drop target, keeps the menu's keyboard and focus behavior. */
 export function MenuItem({ className, ...props }: ComponentProps<typeof DropdownMenu.Item>) {
   return <DropdownMenu.Item {...props} className={cx(ROW, className)} />;
@@ -111,6 +146,8 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
     <>
       {entries.map((entry) => {
         switch (entry.type) {
+          case 'facts':
+            return <parts.Item key={entry.id} asChild onSelect={(event) => event.preventDefault()}><FactDisclosureBody {...entry.body} aria-label={entry.label} /></parts.Item>;
           case 'separator':
             return <parts.Separator key={entry.id} className="-mx-1 my-1 h-px bg-border" />;
           case 'label':
@@ -123,8 +160,7 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
             return <SubEntries key={entry.id} parts={parts} entry={entry} />;
           case 'radio':
             return (
-              <parts.RadioGroup
-                key={entry.id}
+              <div key={entry.id} className="contents"><parts.RadioGroup
                 aria-label={entry.label}
                 value={entry.value}
                 onValueChange={entry.onValueChange}
@@ -142,12 +178,13 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
                   </parts.RadioItem></ChoiceCard>}</Choice>
                 ))}
               </parts.RadioGroup>
+              <RadioChoiceFacts entry={entry} />
+              </div>
             );
           case 'check':
             return (
-              <Choice
+              <div key={entry.id} className="contents"><Choice
                 presentation="picker"
-                key={entry.id}
                 name={choiceName(entry)}
                 description={entry.description}
                 compact
@@ -165,7 +202,7 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
                 </span>
                 {(entry.action !== undefined || entry.icon !== undefined) && <span className="text-text-muted">{entry.action === undefined ? entry.icon : <ActionIcon action={entry.action} />}</span>}
                 {content}
-              </parts.CheckboxItem>}</Choice>
+              </parts.CheckboxItem>}</Choice>{deviceChoiceOf(entry.onCheckedChange) !== undefined && <DeviceToggleFacts writer={entry.onCheckedChange} checked={entry.checked} inline />}</div>
             );
           default: {
             const off = typeof entry.disabled === 'string';
@@ -254,6 +291,8 @@ export interface MenuProps {
    * list gives its entries this way, so that nothing is made for every row, only for the one asked.
    */
   content?: ReactNode;
+  /** Read-only facts of this same choice, inside its existing opening. */
+  facts?: ReactNode;
   /** What the list is of, for a screen reader. */
   label: string;
   side?: 'top' | 'right' | 'bottom' | 'left';
@@ -264,7 +303,7 @@ export interface MenuProps {
   onCloseAutoFocus?: ComponentProps<typeof DropdownMenu.Content>['onCloseAutoFocus'];
 }
 
-export function Menu({ trigger, entries = [], content, label, side = 'bottom', align = 'start', open, onOpenChange, onCloseAutoFocus }: MenuProps) {
+export function Menu({ trigger, entries = [], content, facts, label, side = 'bottom', align = 'start', open, onOpenChange, onCloseAutoFocus }: MenuProps) {
   const [shown, changeOpen, covered] = useTransientLayer(open, onOpenChange);
   const { attach: attachScrolls, scrollProps } = useScrolls();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -276,6 +315,10 @@ export function Menu({ trigger, entries = [], content, label, side = 'bottom', a
     // lands where it was aimed, and nothing under it is hidden from a screen reader meanwhile.
     <DropdownMenu.Root modal={false} open={shown} onOpenChange={changeOpen}>
       <DropdownMenu.Trigger asChild ref={triggerRef} disabled={isValidElement<{ disabled?: boolean }>(trigger) && trigger.props.disabled === true}>{trigger}</DropdownMenu.Trigger>
+      {entries.flatMap((entry) => {
+        const observation = entryReceipt(entry);
+        return observation === undefined ? [] : [<DeviceChoiceException key={entry.id} observation={observation} />];
+      })}
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           onCloseAutoFocus={(event) => {
@@ -285,6 +328,7 @@ export function Menu({ trigger, entries = [], content, label, side = 'bottom', a
           }}
           style={covered ? { display: 'none' } : placeStyle(place)}
           onInteractOutside={(event) => { if (covered || isInspectionTarget(event.target)) event.preventDefault(); }}
+          onKeyDown={focusMenuFacts}
           ref={attach}
           {...scrollProps}
           aria-label={label} aria-labelledby={undefined}
@@ -294,7 +338,7 @@ export function Menu({ trigger, entries = [], content, label, side = 'bottom', a
           collisionPadding={8} {...floatingAttachment}
           className={menuContentClasses}
         >
-          <ChoicePicker>{content ?? <MenuEntries parts={DROPDOWN_PARTS} entries={entries} />}</ChoicePicker>
+          <ChoicePicker>{content ?? <MenuEntries parts={DROPDOWN_PARTS} entries={entries} />}{facts}</ChoicePicker>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

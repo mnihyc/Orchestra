@@ -16,7 +16,7 @@ use chrono::Duration;
 use futures::stream;
 use http::{Request, StatusCode};
 use orch_access_contract::{decisions::ObjectRef, permissions::ResourceKind};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::{Machine, Played};
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -1187,7 +1187,7 @@ async fn a_subscription_registered_from_a_machine_requires_the_callers_current_a
             .await
             .unwrap();
         let token = new_id();
-        scene.writer.token = new_token(API_TOKEN_PREFIX);
+        scene.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scene.world.conn().await,
             &NewApiToken {

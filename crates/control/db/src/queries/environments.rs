@@ -156,6 +156,17 @@ pub async fn lock_environment_entries(conn: &mut Conn, entries: &[Id]) -> Result
             constraint: "environment_capacity_requires_transaction".into(),
         });
     }
+    let mut audiences = entries.to_vec();
+    audiences.sort_unstable();
+    audiences.dedup();
+    for entry in audiences {
+        // Lending rows and permission rows share the same count fence. Locking in
+        // identity order also serializes requests whose bounded audiences overlap.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
+            .bind(entry)
+            .execute(&mut *conn)
+            .await?;
+    }
     let _: Vec<Id> = sqlx::query_scalar(
         "SELECT id FROM permission_entries WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE",
     )
@@ -179,13 +190,48 @@ pub async fn other_environments_made_through(
     existing: Option<Id>,
 ) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM environments WHERE host_entry_id = ANY($1) AND deleted_at IS NULL
-         AND ($2::uuid IS NULL OR id <> $2)",
+        "SELECT count(*) FROM (
+           SELECT id FROM environments WHERE host_entry_id=ANY($1) AND deleted_at IS NULL
+           UNION SELECT e.id FROM environment_creation_entries a
+             JOIN environments e ON e.id=a.environment_id
+             WHERE a.entry_id=ANY($1) AND e.deleted_at IS NULL
+           UNION SELECT p.id FROM provider_creation_entries a
+             JOIN providers p ON p.id=a.provider_id
+             WHERE a.entry_id=ANY($1) AND p.deleted_at IS NULL
+         ) audience WHERE $2::uuid IS NULL OR id<>$2",
     )
     .bind(entries)
     .bind(existing)
     .fetch_one(conn)
     .await?)
+}
+
+/// Persist all actual pool and lending audiences in the same transaction as registration.
+pub async fn record_creation_entries(
+    conn: &mut Conn,
+    environment: Id,
+    entries: &[Id],
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO environment_creation_entries(environment_id,entry_id)
+        SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(environment)
+    .bind(entries)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Provider units reserve the same real Host/Pool audiences at their native placement admission.
+pub async fn record_provider_creation_entries(
+    conn: &mut Conn,
+    provider: Id,
+    entries: &[Id],
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO provider_creation_entries(provider_id,entry_id) SELECT $1,unnest($2::uuid[]) ON CONFLICT DO NOTHING")
+        .bind(provider).bind(entries).execute(conn).await?;
+    Ok(())
 }
 
 /// A machine that holds a location of a mount, with whose it is and which host it is.
@@ -378,6 +424,8 @@ pub mod thread_engine {
     /// An environment, as far as a turn needs it.
     #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
     pub struct EnvironmentRow {
+        /// The metadata revision observed with this exact environment association.
+        pub revision: i64,
         /// Its identifier.
         pub id: Id,
         /// Its name.
@@ -414,8 +462,18 @@ pub mod thread_engine {
 
     /// The environment `id`.
     pub async fn environment(conn: &mut Conn, id: Id) -> Result<Option<EnvironmentRow>, DbError> {
+        crate::queries::snapshot::by_id(
+            conn,
+            id,
+            |rows| &mut rows.workspaces,
+            |conn, id| Box::pin(load_environment(conn, id)),
+        )
+        .await
+    }
+
+    async fn load_environment(conn: &mut Conn, id: Id) -> Result<Option<EnvironmentRow>, DbError> {
         let mut found: Option<EnvironmentRow> = sqlx::query_as(
-            "SELECT id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id, template_id,
+            "SELECT revision, id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id, template_id,
                     generation, status, status_detail, facts, remove_at, deleted_at
                FROM environments WHERE id = $1",
         )
@@ -1045,6 +1103,7 @@ pub mod workspace {
         environment: Id,
         manifest: &Hash,
         taken_at: DateTime<Utc>,
+        source_facts: Option<&Json>,
     ) -> Result<Option<Option<Hash>>, DbError> {
         let before: Option<Option<Vec<u8>>> = sqlx::query_scalar(
             "SELECT manifest_blob FROM environments WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
@@ -1055,13 +1114,24 @@ pub mod workspace {
         let Some(before) = before else {
             return Ok(None);
         };
-        sqlx::query("UPDATE environments SET manifest_blob = $2, manifest_at = $3 WHERE id = $1")
+        sqlx::query("UPDATE environments SET manifest_blob = $2, manifest_at = $3, manifest_source_facts = $4 WHERE id = $1")
             .bind(environment)
             .bind(manifest.as_bytes().as_slice())
             .bind(taken_at)
+            .bind(source_facts)
             .execute(conn)
             .await?;
         Ok(Some(before.as_deref().map(hash_of).transpose()?))
+    }
+
+    /// Facts retained with exactly this manifest. Missing capture never borrows current settings.
+    pub async fn manifest_source_facts(
+        conn: &mut Conn,
+        environment: Id,
+        manifest: &Hash,
+    ) -> Result<Option<Json>, DbError> {
+        Ok(sqlx::query_scalar::<_, Option<Json>>("SELECT manifest_source_facts FROM environments WHERE id=$1 AND manifest_blob=$2 AND deleted_at IS NULL")
+            .bind(environment).bind(manifest.as_bytes().as_slice()).fetch_optional(conn).await?.flatten())
     }
 
     /// A change an agent made to a file, with where it came from.
@@ -1077,8 +1147,8 @@ pub mod workspace {
         pub change: Json,
     }
 
-    /// The latest change to each path that the file-change tool calls of the threads in an
-    /// environment reported: those of one thread, of one turn, or of every thread there.
+    /// The latest reported change per path, using a turn's diff snapshot where one is available.
+    /// An exact item still returns that item's historical file changes.
     pub async fn latest_changes(
         conn: &mut Conn,
         environment: Id,
@@ -1090,14 +1160,28 @@ pub mod workspace {
             "SELECT DISTINCT ON (c.change ->> 'path') i.id, i.thread_id, i.updated_at, c.change
                FROM items i
                JOIN threads t ON t.node_id = i.thread_id
-              CROSS JOIN LATERAL jsonb_array_elements(i.payload #> '{tool,changes}') WITH ORDINALITY AS c(change, n)
+              CROSS JOIN LATERAL jsonb_array_elements(CASE
+                WHEN i.kind='marker' AND i.payload#>>'{data,change}'='turn_diff'
+                  AND jsonb_typeof(i.payload#>'{data,value,changes}')='array'
+                  THEN i.payload#>'{data,value,changes}'
+                WHEN jsonb_typeof(i.payload#>'{tool,changes}')='array' THEN i.payload#>'{tool,changes}'
+                ELSE '[]'::jsonb END) WITH ORDINALITY AS c(change, n)
               WHERE t.environment_id = $1
-                AND i.kind = 'tool_call' AND i.payload #>> '{tool,kind}' = 'file_change'
-                AND jsonb_typeof(i.payload #> '{tool,changes}') = 'array'
+                AND ((i.kind='marker' AND i.payload->>'marker'='harness_changed'
+                      AND i.payload#>>'{data,change}'='turn_diff'
+                      AND jsonb_typeof(i.payload#>'{data,value,changes}')='array')
+                  OR (i.kind='tool_call' AND i.payload#>>'{tool,kind}'='file_change'
+                      AND jsonb_typeof(i.payload#>'{tool,changes}')='array'
+                      AND ($4::uuid IS NOT NULL OR NOT EXISTS (
+                        SELECT 1 FROM items snapshot WHERE snapshot.turn_id=i.turn_id
+                          AND snapshot.segment_id=i.segment_id AND snapshot.stream=i.stream
+                          AND snapshot.kind='marker' AND snapshot.payload->>'marker'='harness_changed'
+                          AND snapshot.payload#>>'{data,change}'='turn_diff'
+                          AND jsonb_typeof(snapshot.payload#>'{data,value,changes}')='array'))))
                 AND ($2::uuid IS NULL OR i.thread_id = $2)
                 AND ($3::uuid IS NULL OR i.turn_id = $3)
                 AND ($4::uuid IS NULL OR i.id = $4)
-              ORDER BY c.change ->> 'path', i.seq_created DESC, c.n DESC",
+              ORDER BY c.change ->> 'path', i.updated_at DESC, i.seq_updated DESC, c.n DESC",
         )
         .bind(environment)
         .bind(thread)
@@ -1731,6 +1815,31 @@ pub mod hosting {
         Ok(())
     }
 
+    /// Whether the host said, the last time it spoke of this runtime, that it holds no unit for it: a unit
+    /// that is stopped and missing is made again by the next start, not started.
+    pub async fn unit_missing(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(loss_missing, false) FROM runtimes WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(conn)
+        .await?
+        .unwrap_or(false))
+    }
+
+    /// Writes down whether the host holds no unit for this runtime: it said so in what it reported, or it answered
+    /// the stop of the unit with "no such unit".
+    pub async fn set_unit_missing(conn: &mut Conn, id: Id, missing: bool) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE runtimes SET loss_missing = $2 WHERE id = $1 AND loss_missing IS DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(missing)
+        .execute(conn)
+        .await?;
+        Ok(())
+    }
+
     /// Retires a runtime: replaced, or its environment removed, and waiting for the reaper from `at`.
     pub async fn retire_runtime(
         conn: &mut Conn,
@@ -1759,8 +1868,8 @@ pub mod hosting {
         detail: &str,
         again_at: DateTime<Utc>,
         at: DateTime<Utc>,
-    ) -> Result<(), DbError> {
-        sqlx::query(
+    ) -> Result<bool, DbError> {
+        let moved = sqlx::query(
             "UPDATE runtimes SET remove_at = $3, state_detail = $2, updated_at = $4 WHERE id = $1",
         )
         .bind(id)
@@ -1768,8 +1877,9 @@ pub mod hosting {
         .bind(again_at)
         .bind(at)
         .execute(conn)
-        .await?;
-        Ok(())
+        .await?
+        .rows_affected();
+        Ok(moved > 0)
     }
 
     /// The retired runtimes whose time has come, and the runtimes of environments whose removal is
@@ -2048,8 +2158,8 @@ pub mod hosting {
         detail: &str,
         again_at: DateTime<Utc>,
         at: DateTime<Utc>,
-    ) -> Result<(), DbError> {
-        sqlx::query(
+    ) -> Result<bool, DbError> {
+        let moved = sqlx::query(
             "UPDATE environments SET remove_at = $2, status_detail = $3, updated_at = $4
               WHERE id = $1 AND deleted_at IS NULL",
         )
@@ -2058,8 +2168,9 @@ pub mod hosting {
         .bind(detail)
         .bind(at)
         .execute(conn)
-        .await?;
-        Ok(())
+        .await?
+        .rows_affected();
+        Ok(moved > 0)
     }
 
     /// The root org of a node that is not deleted.
@@ -2238,12 +2349,16 @@ pub mod hosting {
         pub remove_at: Option<DateTime<Utc>>,
         /// The session of its machine that `env.attach` was last done in.
         pub attached_session: Option<DateTime<Utc>>,
+        /// The retry boundary retained with the last refusal, independent of metadata edits.
+        pub attach_retry_at: Option<DateTime<Utc>>,
         /// Whether its machine has a session now, and the system accepts it.
         pub here: bool,
         /// Whether its machine takes the role of an environment.
         pub serves: bool,
         /// When the session of its machine began: the moment of the last word about its presence.
         pub session: Option<DateTime<Utc>>,
+        /// The environment configuration selected by this attach attempt.
+        pub revision: i64,
     }
 
     impl Connected {
@@ -2259,7 +2374,7 @@ pub mod hosting {
 
     const CONNECTED_SELECT: &str =
         "SELECT e.id, e.machine_id, e.workspace_root, e.status, e.status_detail, e.updated_at,
-               e.remove_at, e.attached_session,
+               e.remove_at, e.attached_session, e.attach_retry_at, e.revision,
                (m.online AND m.status = 'active' AND m.deleted_at IS NULL) AS here,
                ('environment' = ANY(m.roles)) AS serves,
                COALESCE(m.session_started_at,m.last_seen_at) AS session
@@ -2278,12 +2393,12 @@ pub mod hosting {
     /// The environments on people's machines whose status does not follow their machine: one that
     /// says it is up while its machine has no session, and one whose machine has a session that the
     /// attach was not tried in (or that stands `none` or `offline` in one). One that failed to attach
-    /// in the session its machine has is only listed again once `retry_before` has passed since it
-    /// did; in a later session it is listed at once. An environment whose removal is scheduled is
+    /// in the session its machine has is only listed again once its captured retry time has passed;
+    /// in a later session it is listed at once. An environment whose removal is scheduled is
     /// left alone.
     pub async fn connected_out_of_step(
         conn: &mut Conn,
-        retry_before: DateTime<Utc>,
+        now: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<Connected>, DbError> {
         Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -2298,11 +2413,11 @@ pub mod hosting {
                    OR (m.online AND m.status = 'active' AND m.deleted_at IS NULL
                        AND (e.attached_session IS DISTINCT FROM COALESCE(m.session_started_at,m.last_seen_at)
                             OR e.status IN ('none', 'offline')
-                            OR (e.status = 'failed' AND e.updated_at <= $1)))
+                            OR (e.status = 'failed' AND (e.attach_retry_at IS NULL OR e.attach_retry_at <= $1))))
                     )
               ORDER BY e.id LIMIT $2"
         )))
-        .bind(retry_before)
+        .bind(now)
         .bind(limit)
         .bind(CONNECTED_STATUSES.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>())
         .fetch_all(conn)
@@ -2321,7 +2436,7 @@ pub mod hosting {
     ) -> Result<bool, DbError> {
         let moved = sqlx::query(
             "UPDATE environments
-                SET status = CASE WHEN status='stopped' THEN 'stopped' ELSE 'running' END, status_detail = NULL, attached_session = $2, facts = $3, updated_at = $4
+                SET status = CASE WHEN status='stopped' THEN 'stopped' ELSE 'running' END, status_detail = NULL, attached_session = $2, attach_retry_at = NULL, environment_preparation=NULL, facts = $3, updated_at = $4
               WHERE id = $1 AND placement = 'connected' AND deleted_at IS NULL AND remove_at IS NULL
                 AND status = ANY($5)",
         )
@@ -2339,6 +2454,28 @@ pub mod hosting {
         Ok(moved > 0)
     }
 
+    /// A new machine session has its own immediate attempt, not the old session's retry wait.
+    pub async fn connected_attempting(
+        conn: &mut Conn,
+        id: Id,
+        session: Option<DateTime<Utc>>,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        let moved = sqlx::query(
+            "UPDATE environments SET attach_retry_at=NULL, facts=facts-'attach_retry'
+            WHERE id=$1 AND attached_session IS DISTINCT FROM $2 AND attach_retry_at IS NOT NULL",
+        )
+        .bind(id)
+        .bind(session)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if moved > 0 {
+            stamp_environment(conn, id, at).await?;
+        }
+        Ok(())
+    }
+
     /// Records that an environment on a person's machine could not be attached in the session of its
     /// machine that began at `session`: it is `failed`, with why, and is tried again once a while has
     /// passed or when the machine has another session. Returns whether it was still one that the
@@ -2349,12 +2486,18 @@ pub mod hosting {
         session: Option<DateTime<Utc>>,
         detail: &str,
         at: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        revision: i64,
     ) -> Result<bool, DbError> {
         let moved = sqlx::query(
             "UPDATE environments
-                SET status = 'failed', status_detail = $2, attached_session = $5, updated_at = $3
+                SET status = 'failed', status_detail = $2, attached_session = $5, updated_at = $3,
+                    attach_retry_at = $6, environment_preparation=NULL,
+                    facts = facts || jsonb_build_object('attach_retry', jsonb_build_object(
+                        'last_attempt_at', $3::timestamptz, 'next_eligible_at', $6::timestamptz,
+                        'last_problem', $2::text, 'revision', $7::bigint))
               WHERE id = $1 AND placement = 'connected' AND deleted_at IS NULL AND remove_at IS NULL
-                AND status = ANY($4)",
+                AND status = ANY($4) AND revision = $7",
         )
         .bind(id)
         .bind(detail)
@@ -2366,6 +2509,8 @@ pub mod hosting {
                 .collect::<Vec<_>>(),
         )
         .bind(session)
+        .bind(retry_at)
+        .bind(revision)
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -2666,7 +2811,7 @@ pub mod changes {
         keep: bool,
         now: DateTime<Utc>,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE environments SET config = jsonb_set(config,'{env.host_id}',COALESCE(to_jsonb($2::uuid),'null'::jsonb)),updated_at = $3 WHERE id = $1")
+        sqlx::query("UPDATE environments SET config = jsonb_set(config,'{env.host_id}',CASE WHEN $2::uuid IS NULL THEN 'null'::jsonb ELSE jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid)) END),updated_at = $3 WHERE id = $1")
             .bind(environment).bind(host).bind(now).execute(&mut *conn).await?;
         if keep {
             sqlx::query("UPDATE runtimes SET remove_at = NULL WHERE id = $1")

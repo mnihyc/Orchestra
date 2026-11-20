@@ -9,3 +9,6 @@
 
 pub mod range;
 pub mod store;
+
+/// Physical publication and retirement coordination shared by store handles.
+pub mod lifetime;

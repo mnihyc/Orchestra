@@ -37,7 +37,7 @@ describe('task guidance', () => {
     for (const [id, queries] of [
       ['connect-a-machine', ['another instance', '连接机器']],
       ['add-a-provider', ['GPU', 'API key']],
-      ['register-your-program', ['custom agent', '代理适配器']],
+      ['register-your-program', ['custom agent', '智能体适配器']],
       ['temporary-environments', ['ephemeral', '临时']],
       ['message-queue', ['steer', '消息队列']],
     ] as const) for (const language of ['en', 'zh-CN']) {

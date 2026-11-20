@@ -29,7 +29,46 @@ pub use orch_settings::SettingView;
 
 use orch_settings::resolve_all;
 
+use crate::middleware::authorization;
+use orch_authz::{Act, Policy};
 pub use orch_types::Id;
+use std::collections::BTreeSet;
+
+/// The native readers' existing NodeView decision, on this operation's current Principal.
+/// The caller owns credential restoration and operation admission on the supplied snapshot;
+/// no child endpoint selection, replacement caller or wide-name proof is created here.
+pub async fn readable(conn: &mut Conn, principal: &Principal, node: Id) -> ApiResult<()> {
+    let bounded = principal
+        .caller()
+        .grant()
+        .is_some_and(|grant| grant.operation_scope().is_some());
+    authorization::require_projected(
+        conn,
+        principal,
+        node,
+        authorization::VIEW,
+        Act::Use,
+        Policy::default(),
+        bounded,
+    )
+    .await
+}
+
+/// The settings provenance bound by a thread opening. Each setting supplies its
+/// source nodes independently of the write hint computed when presenting it.
+pub async fn setting_source_nodes(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+) -> ApiResult<BTreeSet<Id>> {
+    readable(conn, principal, node).await?;
+    placed(conn, node).await?;
+    let views = resolve_all(conn, Place::Node(node))
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(views.into_iter().flat_map(|view| view.nodes()).collect())
+}
+
 /// Raw resolved values and write hints, without a projected Node reference.
 #[derive(Clone)]
 pub struct PreparedSettings {
@@ -93,13 +132,22 @@ pub async fn resolved_views(
     let (_, kind) = placed(conn, node).await?;
     let policy = policy_at(conn, node).await?;
     let holds = Holds::of(conn, principal, node, kind, policy).await?;
-    let views = resolve_all(conn, Place::Node(node))
-        .await
-        .map_err(ApiError::internal)?;
     let scope = scope_of(kind);
+    let place = Place::Node(node);
+    let views = match keys {
+        Some(keys) => {
+            let defs: Vec<_> = validation::keys_at(scope)
+                .filter(|def| keys.contains(&def.key))
+                .collect();
+            orch_settings::Snapshot::load(conn, place, orch_settings::Wanted::Keys(&defs))
+                .await
+                .map_err(ApiError::internal)?
+                .views()
+        }
+        None => resolve_all(conn, place).await.map_err(ApiError::internal)?,
+    };
     Ok(views
         .into_iter()
-        .filter(|view| keys.is_none_or(|keys| keys.contains(&view.def().key)))
         .map(|view| {
             let need =
                 validation::need_for_node(view.def(), scope, node, holds.thread_environment());

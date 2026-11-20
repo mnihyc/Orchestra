@@ -5,6 +5,7 @@
  * last had it open. One that an agent made carries the mark of the agent. The newest change comes first.
  * Deleted documents are listed at the foot, with Restore, for whoever could have deleted them.
  */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { useListChoice } from '@/lib/listState';
 import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
@@ -139,8 +140,9 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
           onClick={() => setDeleted((on) => !on)}
         >
           <ChevronDown aria-hidden className={cx('size-4 transition-transform', !deleted && '-rotate-90')} />
-          {deletedDocs.length === 0 && !gone.hasNextPage ? t('documents.list.recentlyDeleted') : t(gone.hasNextPage ? 'documents.list.recentlyDeletedMore' : 'documents.list.recentlyDeletedCount', { count: deletedDocs.length })}
+          {deletedDocs.length === 0 && !gone.hasNextPage ? t('documents.list.recentlyDeleted') : t(gone.hasNextPage ? 'documents.list.recentlyDeletedMore' : 'documents.list.recentlyDeletedCount', { count: deletedDocs.length })}<DeviceChoiceWriterException writer={setDeleted} />
         </button>
+        {deleted && <DeviceExpansionFacts writer={setDeleted} open={deleted} />}
         {deleted && (
           <div id={deletedId} className="flex flex-col gap-2">
             {gone.isError && deletedDocs.length === 0 ? <ErrorState compact error={gone.error} retrying={gone.isRefetching} onRetry={() => void gone.refetch()} /> : <ul className="divide-y divide-border rounded-lg border border-border bg-surface">
