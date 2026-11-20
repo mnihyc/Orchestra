@@ -8,6 +8,7 @@ import { capabilityBackendsQuery, capabilityProviderQuery, selectedCapabilityBac
 import type { SettingsTarget } from '@/api/settings';
 import type { BackendRef, CapabilityBackendCandidate } from '@/generated/api-types';
 import { ResourceName } from '@/features/resource-facts/ResourceFacts';
+import { SettingsSuggestion } from '@/features/settings/SettingsSuggestion';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
 import { backendCapabilities, changeBackend, selectedBackend } from './capabilityBackendValue';
@@ -53,6 +54,7 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const selectedProvider = selected?.offering?.provider ?? '';
   const [draftProvider, setDraftProvider] = useState<string | null>(null);
+  const [suggested,setSuggested]=useState<string|null>(null);
   const provider = draftProvider ?? selectedProvider;
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState('');
@@ -86,7 +88,12 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
     {multi && <span className="text-xs text-text-muted">{capName}</span>}
     <div className="grid min-w-0 grid-cols-1 items-start gap-2 sm:grid-cols-2">
       <ProviderDefaultChoice shape={{ type: 'id' }} size="md" value={provider} label={providerLabel} disabled={disabled} hideLabel
-        onChange={(next) => { if (typeof next === 'string') { setDraftProvider(next); requested.current = ''; setTyped(''); setOpen(false); } }} />
+        onChange={(next) => { if (typeof next === 'string') {setSuggested(null); setDraftProvider(next); requested.current = ''; setTyped(''); setOpen(false); } }}
+        proposal={disabled || selected!==null ? undefined : <SettingsSuggestion request={{kind:'backend',place,capability,...(provider===''?{}:{provider})}} onUse={(choice)=>{
+          if(choice.kind!=='backend')return;
+          setSuggested(identity(choice.candidate.backend));setDraftProvider(choice.provider.id);
+          onSelected(choice.candidate.backend);
+        }}/>} />
       <div className="flex min-w-0 flex-col gap-1" onKeyDownCapture={(event) => { if (event.key === 'Enter') event.preventDefault(); }}>
         <ResourcePickerLookup pickerKey={`capability-backend-${capability}`} id={input} size="md" label={routeLabel} hideLabel disabled={disabled || provider === ''} error={error}
           query={typed} onQueryChange={(next) => { requested.current = next.trim(); setTyped(next); }} displayValue={chosenLabel} placeholder={t(provider === '' ? 'capabilityBackend.providerFirst' : 'capabilityBackend.choose')}
@@ -97,9 +104,10 @@ function BackendChoice({ reader, place, capability, title, multi, selected, onSe
           onSelect={(option) => {
             const row = rows.find((row) => identity(row.backend) === option.value);
             if (row === undefined || !row.eligible || waiting || list.isFetching || disabled) return;
-            setOpen(false); requested.current = ''; setTyped('');
+            setSuggested(null);setOpen(false); requested.current = ''; setTyped('');
             onSelected(selected !== null && identity(selected) === identity(row.backend) ? selected : row.backend);
           }} />
+        {selected!==null && suggested===identity(selected) && <span className="text-sm text-text-muted">{t('settingsSuggestions.source')}</span>}
         {!open && current.isError && !hidden(current.error) && <ErrorState compact title={t('capabilityBackend.unavailable')} error={current.error} retrying={current.isFetching} onRetry={() => void current.refetch()} />}
         {chosen !== undefined && !chosen.eligible && provider === selectedProvider && <span className="text-xs text-text-muted">{reason(chosen)}</span>}
       </div>

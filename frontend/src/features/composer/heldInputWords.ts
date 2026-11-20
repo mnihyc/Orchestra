@@ -18,9 +18,9 @@ export function heldInputWords(input: ThreadInput, thread: Thread | null, t: TFu
   if (input.state_detail === 'background_wake_off') return t('backgroundWake.wakeOffHold');
   if (input.state_detail === 'author_lost_access') return t('backgroundWake.authorLostHold', { name: sender });
   if (input.queue_held) return t('composer.queue.heldStop');
-  if (input.state_detail === 'cap_reached') return t('composer.queue.heldCap', { name: sender });
-  if (input.state_detail === 'owner_lacks_access') return t('composer.queue.heldOwner', { owner: thread?.owner.display_name ?? '', provider: thread?.binding?.provider.name ?? '' });
-  if (input.state_detail === 'second_step_required') return t('composer.queue.heldSecondStep', { name: sender });
+  if (input.state_detail === 'cap_reached') return t('composer.queue.heldCap');
+  if (input.state_detail === 'owner_lacks_access') return t('composer.queue.heldOwner', { provider: thread?.binding?.provider.name ?? '' });
+  if (input.state_detail === 'second_step_required') return t('composer.queue.heldSecondStep');
   if (input.state_detail === 'model_use_required') {
     const selectedModel = thread?.model;
     const model = selectedModel === null || selectedModel === undefined ? '' : modelDisplayName(thread?.model_display);

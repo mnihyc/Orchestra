@@ -19,7 +19,7 @@ use orch_api_contract::auth::{
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{OrgServiceAccountCreate, OrgServiceAccountCreateBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, new_id};
@@ -45,7 +45,8 @@ fn rule(kind: KeyIdentityKind, id: Id, operations: &[(&str, &[KeyAction])]) -> K
 }
 
 async fn key(world: &World, user: Id, rules: Vec<KeyRule>) -> String {
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     let hash = token_hash(&token);
     let scope = serde_json::to_value(KeyScope {
         rules,
@@ -56,7 +57,7 @@ async fn key(world: &World, user: Id, rules: Vec<KeyRule>) -> String {
     identity::create_api_token_scoped(
         &mut conn,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Account control",
             token_hash: &hash,
@@ -426,7 +427,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(old_one.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(old.len(), 2);
     let expiry = old
         .iter()
@@ -444,7 +446,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(first.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         sessions.len(),
         3,
@@ -586,7 +589,8 @@ async fn a_key_revokes_actual_owned_sessions_and_never_invents_a_session_to_keep
         .token(bobs.token())
         .send()
         .await
-        .ok()[0]
+        .ok()
+        .items[0]
         .id;
     let claimed = key(
         &world,
@@ -720,10 +724,61 @@ async fn service_keys_keep_profile_authority_without_acquiring_human_sign_in_sta
             .is_empty()
     );
     assert!(
-        identity::api_token_by_hash(&mut conn, &token_hash(&token), world.now())
-            .await
-            .unwrap()
-            .is_some(),
+        identity::api_token_by_identity(
+            &mut conn,
+            orch_api_contract::api_keys::key_id(&token).unwrap(),
+            &token_hash(&token),
+            world.now()
+        )
+        .await
+        .unwrap()
+        .is_some(),
         "the valid service key remains usable"
+    );
+}
+
+#[tokio::test]
+async fn a_correctly_checksummed_key_is_refused_when_its_stored_identity_does_not_match() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let encoded_id = new_id();
+    let value = orch_api_contract::api_keys::encode(encoded_id, &[37; 32]);
+    let hash = token_hash(&value);
+    let stored_id = new_id();
+    identity::create_api_token(
+        &mut *world.conn().await,
+        &identity::NewApiToken {
+            id: stored_id,
+            user_id: ada.id,
+            name: "Identity-bound fixture",
+            token_hash: &hash,
+            scopes: &["*".to_owned()],
+            node_id: None,
+            at: world.now(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(MeGet, &[])
+            .token(&value)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::AuthInvalidToken
+    );
+    sqlx::query("UPDATE api_tokens SET id=$2 WHERE id=$1")
+        .bind(stored_id)
+        .bind(encoded_id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        world.app.call(MeGet, &[]).token(&value).send().await.status,
+        200
     );
 }
