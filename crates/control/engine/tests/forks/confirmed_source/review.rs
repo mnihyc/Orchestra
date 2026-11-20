@@ -128,6 +128,8 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         .fetch_one(rig.world.pool.pool())
         .await
         .unwrap();
+    let opens_before = rig.world.commands.issued_of("session.open")
+        + rig.world.commands.issued_of("session.open.fenced");
     rig.world.restart_api().await;
     rig.world.engine().attach_blobs(rig.store.clone());
     rig.say(side, "Resume the recovered side").await;
@@ -138,14 +140,17 @@ async fn a_side_recovers_its_own_conversation_without_substituting_its_parent_or
         third.text
     );
     assert_eq!(rig.world.segment_of(side).await, recovered);
-    let opens = rig.world.commands.issued_bodies("session.open");
-    let fenced = rig.world.commands.issued_bodies("session.open.fenced");
-    assert!(opens.iter().chain(fenced.iter()).any(|(_, body)| {
-        let body = body.get("session").unwrap_or(body);
-        body["segment_id"] == recovered.to_string()
-            && body["mode"] == "resume"
-            && body["native_session_ref"] == native
-    }));
+    // A restarted API verifies this exact recovered conversation by resume before trusting its native identity.
+    assert_eq!(
+        rig.world.commands.issued_of("session.open")
+            + rig.world.commands.issued_of("session.open.fenced"),
+        opens_before + 1
+    );
+    {
+        let peer = rig.native.lock().unwrap();
+        assert_eq!(peer.threads.get(&side), Some(&native));
+        assert!(peer.sessions.contains_key(&native));
+    }
     rig.world.shutdown().await;
 }
 
@@ -469,12 +474,14 @@ async fn observed_success(
     // UPDATE of the native reference or a fabricated creation success.
     rig.world
         .machine
-        .publish(
+        .publish_from(
+            Some(original.id),
             &Stream::Session {
                 thread_id: side,
                 segment_id: body.session.segment_id,
             },
             &Event::SessionOpened(SessionOpened {
+                opening_id: original.id,
                 native_session_ref: opened.native_session_ref.clone(),
                 resumed: false,
             }),

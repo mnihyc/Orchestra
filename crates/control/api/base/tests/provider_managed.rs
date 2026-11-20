@@ -129,6 +129,7 @@ fn the_harness_answers(s: &Scene, provider: Id) -> Heard {
     let handler = &s.rig.machine.handler;
     handler.on(K::AgentStart, |_: &Command| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".to_owned(),
             descriptor: serde_json::from_value(declared()).unwrap(),
@@ -422,7 +423,7 @@ async fn stopped(s: &Scene, provider: Id) {
 
 fn subscription(s: &Scene, name: &str) -> CreateProvider {
     CreateProvider::Subscription {
-        runtime_machine_id: None,
+        runtime_location: None,
         key_machine_id: None,
         name: name.to_owned(),
         home_id: s.tree.org.base.id,
@@ -438,7 +439,7 @@ fn subscription(s: &Scene, name: &str) -> CreateProvider {
 
 fn on_a_key(s: &Scene, name: &str) -> CreateProvider {
     CreateProvider::Api {
-        runtime_machine_id: None,
+        runtime_location: None,
         name: name.to_owned(),
         home_id: s.tree.org.base.id,
         access: None,
@@ -454,6 +455,353 @@ fn on_a_key(s: &Scene, name: &str) -> CreateProvider {
         key_machine_id: None,
         sources: None,
     }
+}
+
+/// The existing scripted connector is the current connector of this hosted environment.
+async fn hosted_connection(s: &Scene) -> (Id, Id, Id) {
+    let mut conn = s.rig.world.conn().await;
+    let host =
+        fixtures::insert_resource(&mut conn, "host", Some(s.bea.id()), None, "Connection host")
+            .await
+            .unwrap();
+    start_resource(
+        &mut conn,
+        ObjectRef {
+            kind: ResourceKind::Host.into(),
+            id: host,
+        },
+        s.bea.id(),
+        NewAccess::OnlyMe,
+        Time::new(s.rig.world.now()),
+    )
+    .await
+    .unwrap();
+    let template = fixtures::insert_resource(
+        &mut conn,
+        "template",
+        Some(s.ada.id()),
+        Some(s.tree.org.base.id),
+        "Connection environment",
+    )
+    .await
+    .unwrap();
+    let runtime = new_id();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,machine_id,unit_name,environment_id,driver,template_id,spec_hash,state) VALUES($1,'environment',$2,$3,$4,$5,'docker',$6,$7,'running')")
+        .bind(runtime).bind(host).bind(s.rig.machine_id).bind(format!("connection-{runtime}"))
+        .bind(s.on.environment).bind(template).bind(vec![0_u8;32]).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE machines SET placement='managed',host_id=$2,runtime_id=$3,facts=facts||$4 WHERE id=$1")
+        .bind(s.rig.machine_id).bind(host).bind(runtime)
+        .bind(json!({"provider_runtime_descriptor":{"lifecycle":"attach"}})).execute(&mut *conn).await.unwrap();
+    sqlx::query(
+        "UPDATE environments SET placement='managed',status='running',template_id=$2 WHERE id=$1",
+    )
+    .bind(s.on.environment)
+    .bind(template)
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    (host, template, runtime)
+}
+
+#[tokio::test]
+async fn a_provider_runs_through_the_existing_environments_connector_without_making_another_unit() {
+    let s = scene().await;
+    hosted_connection(&s).await;
+    let request: CreateProvider = serde_json::from_value(json!({
+        "kind":"api", "name":"Connection in the workspace", "home_id":s.tree.org.base.id,
+        "runtime_location":{"kind":"environment","environment_id":s.on.environment},
+        "upstreams":[{"protocol":"openai-responses","base_url":"https://api.example.com/v1","options":{}}],
+        "api_key":"fixture-environment-key"
+    })).unwrap();
+    let made = s
+        .rig
+        .world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&s.ada.token)
+        .body(&request)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .provider;
+    assert_eq!(
+        made.machine.as_ref().map(|machine| machine.id),
+        Some(s.rig.machine_id)
+    );
+    let wire = serde_json::to_value(&made).unwrap();
+    assert_eq!(
+        wire["connection_environment"]["id"],
+        json!(s.on.environment)
+    );
+    let setup = s
+        .rig
+        .world
+        .app
+        .call(orch_api_contract::resources::ProviderSetupGet, &[])
+        .token(&s.ada.token)
+        .query(&orch_api_contract::resources::ProviderSetupGetQuery {
+            org_id: s.tree.org.base.id,
+            provider_id: None,
+        })
+        .send()
+        .await
+        .ok();
+    let location = setup
+        .environments
+        .unwrap()
+        .into_iter()
+        .find(|row| row.environment.id == s.on.environment)
+        .unwrap();
+    assert_eq!(location.connector.unwrap().machine.id, s.rig.machine_id);
+    for environment in [s.on.environment, new_id()] {
+        let list = s
+            .rig
+            .world
+            .app
+            .call(orch_api_contract::resources::ProviderList, &[])
+            .token(&s.ada.token)
+            .query(&orch_api_contract::resources::ProviderListQuery {
+                connection_environment_id: Some(environment),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        assert_eq!(
+            list.items
+                .iter()
+                .filter_map(|provider| provider.as_visible())
+                .any(|provider| provider.base.id == made.base.id),
+            environment == s.on.environment
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM runtimes WHERE provider_id=$1")
+        .bind(made.base.id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "the existing environment supplies the connection, without another runtime"
+    );
+}
+
+#[tokio::test]
+async fn an_environment_connection_cannot_be_chosen_by_somebody_who_cannot_use_that_environment() {
+    let s = scene().await;
+    hosted_connection(&s).await;
+    let own = places::make_org(&s.rig.world, &s.bea, "Bea’s team", "bea-team").await;
+    let request: CreateProvider = serde_json::from_value(json!({
+        "kind":"api", "name":"Unavailable connection", "home_id":own.base.id,
+        "runtime_location":{"kind":"environment","environment_id":s.on.environment},
+        "upstreams":[{"protocol":"openai-responses","base_url":"https://api.example.com/v1","options":{}}]
+    })).unwrap();
+    let refused = s
+        .rig
+        .world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&s.bea.token)
+        .body(&request)
+        .send()
+        .await
+        .problem();
+    assert!(matches!(
+        refused.code,
+        ErrorCode::AuthzDenied | ErrorCode::NotFound
+    ));
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM providers WHERE name='Unavailable connection'")
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        count, 0,
+        "a location that cannot be used creates no provider"
+    );
+}
+
+/// A connection uses the existing environment rather than provisioning another unit.
+async fn environment_provider(s: &Scene) -> Id {
+    let mut request = on_a_key(s, "Workspace connection");
+    let CreateProvider::Api {
+        runtime_location, ..
+    } = &mut request
+    else {
+        unreachable!()
+    };
+    *runtime_location = Some(
+        orch_api_contract::resources::ProviderConnectionLocation::Environment {
+            environment_id: s.on.environment,
+        },
+    );
+    s.rig
+        .world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&s.ada.token)
+        .body(&request)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .provider
+        .base
+        .id
+}
+
+#[tokio::test]
+async fn a_connection_follows_its_environment_after_a_new_connector_replaces_the_old_one() {
+    install_master_key(MasterKey::new(MASTER));
+    let s = Scene::without_supervisor().await;
+    let (host, template, old_runtime) = hosted_connection(&s).await;
+    let provider = environment_provider(&s).await;
+    let mut conn = s.rig.world.conn().await;
+    let machine = orch_db::queries::resources::testing::insert_machine(
+        &mut conn,
+        "Replacement connector",
+        "managed",
+    )
+    .await
+    .unwrap();
+    let runtime = new_id();
+    sqlx::query("UPDATE runtimes SET state='retired' WHERE id=$1")
+        .bind(old_runtime)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,machine_id,unit_name,environment_id,driver,template_id,spec_hash,state) VALUES($1,'environment',$2,$3,$4,$5,'docker',$6,$7,'running')")
+        .bind(runtime).bind(host).bind(machine).bind(format!("replacement-{runtime}"))
+        .bind(s.on.environment).bind(template).bind(vec![0_u8;32]).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE machines SET online=true,runtime_id=$2,host_id=$3 WHERE id=$1")
+        .bind(machine)
+        .bind(runtime)
+        .bind(host)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE environments SET machine_id=$2 WHERE id=$1")
+        .bind(s.on.environment)
+        .bind(machine)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let changed =
+        orch_db::queries::provider_connections::synchronize(&mut conn, s.rig.world.now(), 1)
+            .await
+            .unwrap();
+    assert_eq!(changed, vec![provider]);
+    assert_eq!(
+        orch_db::queries::provider_connections::available(&mut conn, provider)
+            .await
+            .unwrap(),
+        Some(true)
+    );
+    assert!(
+        orch_db::queries::provider_connections::synchronize(&mut conn, s.rig.world.now(), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(conn);
+    let shown = get(&s, provider).await;
+    assert_eq!(shown.machine.as_ref().map(|row| row.id), Some(machine));
+    assert_eq!(
+        shown.connection_environment.as_ref().map(|row| row.id),
+        Some(s.on.environment)
+    );
+    let units: i64 = sqlx::query_scalar("SELECT count(*) FROM runtimes WHERE provider_id=$1")
+        .bind(provider)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(units, 0);
+}
+
+#[tokio::test]
+async fn a_connection_waits_for_its_stopped_environment_and_never_relocates_after_removal() {
+    install_master_key(MasterKey::new(MASTER));
+    let s = Scene::without_supervisor().await;
+    hosted_connection(&s).await;
+    let provider = environment_provider(&s).await;
+    let mut conn = s.rig.world.conn().await;
+    sqlx::query("UPDATE providers SET status='ready' WHERE id=$1")
+        .bind(provider)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE environments SET status='stopped' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    orch_db::queries::provider_connections::synchronize_presence(&mut conn, s.rig.world.now())
+        .await
+        .unwrap();
+    assert_eq!(
+        orch_db::queries::provider_connections::available(&mut conn, provider)
+            .await
+            .unwrap(),
+        Some(false)
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM providers WHERE id=$1")
+        .bind(provider)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(status, "offline");
+    sqlx::query("UPDATE environments SET status='running' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        orch_db::queries::provider_connections::synchronize_presence(&mut conn, s.rig.world.now())
+            .await
+            .unwrap(),
+        vec![provider]
+    );
+    sqlx::query("UPDATE environments SET status='removed',deleted_at=$2 WHERE id=$1")
+        .bind(s.on.environment)
+        .bind(s.rig.world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        orch_db::queries::provider_connections::synchronize(&mut conn, s.rig.world.now(), 1)
+            .await
+            .unwrap(),
+        vec![provider]
+    );
+    assert_eq!(
+        orch_db::queries::provider_connections::available(&mut conn, provider)
+            .await
+            .unwrap(),
+        Some(false)
+    );
+    drop(conn);
+    assert!(matches!(
+        s.rig
+            .engine
+            .start_provider_runtime(provider, Some(s.ada.id()))
+            .await,
+        Err(orch_engine::provider_runtime::RuntimeError::Unavailable(_))
+    ));
+    let shown = get(&s, provider).await;
+    assert!(shown.machine.is_none());
+    assert_eq!(
+        shown.connection_environment.unwrap().status,
+        orch_api_contract::environment::EnvironmentStatus::Removed
+    );
+    let units: i64 = sqlx::query_scalar("SELECT count(*) FROM runtimes WHERE provider_id=$1")
+        .bind(provider)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(units, 0);
 }
 
 async fn get(s: &Scene, provider: Id) -> Provider {
@@ -893,14 +1241,17 @@ async fn a_script_is_told_to_import_a_credential_instead_of_beginning_an_interac
     let s = scene().await;
     let provider = managed_and_up(&s).await;
     let heard = the_harness_answers(&s, provider);
-    let token = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let token = orch_api_core::middleware::authentication::new_api_token(orch_types::new_id());
     let hash = orch_api_core::middleware::authentication::token_hash(&token);
     let mut conn = s.rig.db.acquire().await.unwrap();
-    orch_db::queries::identity::testing::insert_api_token(&mut conn, s.ada.id(), &hash)
-        .await
-        .unwrap();
+    orch_db::queries::identity::testing::insert_api_token(
+        &mut conn,
+        orch_api_contract::api_keys::key_id(&token).unwrap(),
+        s.ada.id(),
+        &hash,
+    )
+    .await
+    .unwrap();
     sqlx::query("UPDATE api_tokens SET scopes = ARRAY['provider.manage'] WHERE token_hash = $1")
         .bind(hash)
         .execute(&mut *conn)
@@ -1371,6 +1722,34 @@ async fn the_page_of_a_managed_provider_shows_its_runtime_and_when_it_stops_or_r
 }
 
 #[tokio::test]
+async fn a_provider_shows_whether_its_forced_stop_still_waits_for_its_host() {
+    install_master_key(MasterKey::new(MASTER));
+    let s = Scene::without_supervisor().await;
+    let provider = managed_and_up(&s).await;
+    stopped(&s, provider).await;
+    for reason in [
+        runtime_rows::STOPPED_FORCED,
+        runtime_rows::STOPPED_PERSON,
+        runtime_rows::STOPPED_IDLE,
+        "the host stopped it because its disk is full",
+    ] {
+        sqlx::query("UPDATE runtimes SET state_detail = $2 WHERE provider_id = $1")
+            .bind(provider)
+            .bind(reason)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        let runtime = get(&s, provider).await.runtime.unwrap();
+        assert_eq!(runtime.state, "stopped");
+        assert_eq!(
+            runtime.detail.as_deref(),
+            Some(reason),
+            "the page can distinguish a stop that waits for its host from one it confirmed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_runtime_that_is_stopped_is_started_by_hand_with_a_job_and_a_provider_on_a_persons_machine_has_none()
  {
     let s = scene().await;
@@ -1431,7 +1810,14 @@ async fn a_runtime_is_not_stopped_by_hand_while_a_turn_runs_on_it_unless_the_req
     let provider = managed_and_up(&s).await;
     let stop = |who: &str, interrupt: Option<bool>| {
         let call = s.rig.world.app.call(ProviderStop, &[&provider]).token(who);
-        async move { call.body(&ProviderStartStopBody { interrupt }).send().await }
+        async move {
+            call.body(&ProviderStartStopBody {
+                interrupt,
+                force: None,
+            })
+            .send()
+            .await
+        }
     };
     // Somebody who does not manage the provider cannot.
     let refused = stop(&s.eve.token, None).await.problem();
@@ -1895,6 +2281,44 @@ async fn a_deleted_provider_is_signed_out_first_and_its_runtime_is_retired() {
 }
 
 #[tokio::test]
+async fn a_provider_whose_unit_is_stopping_failed_or_stopped_is_deleted_and_no_unit_makes_it_not_ready()
+ {
+    for state in ["stopping", "failed", "stopped"] {
+        let s = scene().await;
+        let provider = managed_and_up(&s).await;
+        sqlx::query("UPDATE runtimes SET state = $2 WHERE provider_id = $1")
+            .bind(provider)
+            .bind(state)
+            .execute(s.rig.db.pool())
+            .await
+            .unwrap();
+        let reply = s
+            .rig
+            .world
+            .app
+            .call(ProviderDelete, &[&provider])
+            .token(&s.ada.token)
+            .send()
+            .await;
+        assert!(
+            reply.status.is_success(),
+            "a unit that is {state} does not keep its provider from being deleted: {:?}",
+            reply.body
+        );
+        eventually("the unit to be retired with its provider", || async {
+            let now: String =
+                sqlx::query_scalar("SELECT state FROM runtimes WHERE provider_id = $1")
+                    .bind(provider)
+                    .fetch_one(s.rig.db.pool())
+                    .await
+                    .unwrap();
+            matches!(now.as_str(), "retired" | "removed")
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn creating_units_keep_retained_facts_without_idle_or_renewal_schedules() {
     let s = scene().await;
     s.rig.engine.stop();
@@ -1995,14 +2419,14 @@ async fn login_key(
     provider: Id,
     operations: &[&str],
 ) -> (String, Id, orch_access_contract::key_scope::KeyScope) {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope = serde_json::from_value(json!({"rules":[{
         "target":{"kind":"provider","id":provider,"reach":"self"},
         "allow":operations.iter().map(|operation| json!({"operation":operation,"actions":["manage"]})).collect::<Vec<_>>()
     }]})).unwrap();
-    let token = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let token = new_api_token(id);
     create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {

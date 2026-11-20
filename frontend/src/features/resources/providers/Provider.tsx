@@ -2,6 +2,7 @@
  * Runtime, source, arrangement, access and lifecycle controls live in Settings; old bookmarks still
  * reach their content. Only the active section loads, and the setup banner owns its next action.
  */
+import { ModelTranslation, interfaceName } from '@/features/models/ModelTranslation';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import { PlugZap } from 'lucide-react';
@@ -18,6 +19,7 @@ import { ProviderDangerZone } from '@/features/resources/providers/DangerZone';
 import { ProviderKey } from '@/features/resources/providers/Key';
 import { ProviderModels } from '@/features/resources/providers/Models';
 import { ProviderRuntime } from '@/features/resources/providers/Runtime';
+import { ProviderConnectionEnvironment } from './ConnectionEnvironment';
 import { ProviderSettings } from '@/features/resources/providers/Settings';
 import { providerState } from '@/features/resources/providers/state';
 import { ProviderThreads } from '@/features/resources/providers/Threads';
@@ -63,7 +65,14 @@ function Skeletons(props: SkeletonReads) {
 }
 
 function Overview({ provider }: { provider: ProviderRow }) {
-  return <PlanPanel provider={provider} resets />;
+  const { t } = useTranslation();
+  return <>
+    {provider.kind === 'api' && <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-text-muted" aria-label={t('modelTranslation.interfaces')}>
+      {provider.protocols.map((protocol) => <span key={protocol}>{interfaceName(protocol,t)}</span>)}
+      {provider.translated_protocols?.map((translation) => <ModelTranslation key={translation.from} value={translation} />)}
+    </div>}
+    <PlanPanel provider={provider} resets />
+  </>;
 }
 
 export interface ProviderScreenProps {
@@ -133,6 +142,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
         actions={<HeadingActs admin={adminSpec(provider, 'provider.manage')} name={provider.name} primary={shown === 'settings' ? null : page.primary} edit={page.edit} menu={page.menu} />}
       />
       <ProviderSetupNotice provider={provider} manage={manage} currentTab={shown} onTab={(next) => onTab(providerTab(next) ?? 'overview')} />
+      <ProviderConnectionEnvironment provider={provider}/>
       <CopySetupResult kind="provider" id={provider.id} />
       {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={()=>void query.refetch()}>{t('common.tryAgain')}</Button>}/>}
       <Tabs label={t('providers.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-3" />
