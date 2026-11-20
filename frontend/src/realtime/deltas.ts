@@ -36,7 +36,7 @@ export interface Applied {
 }
 
 /** How much of a command's output is held: the end of it, which is what is read while it runs. */
-export const OUTPUT_TAIL_CHARS = 16 * 1024;
+export const OUTPUT_TAIL_BYTES = 16 * 1024;
 
 /** The most pieces held for an item that is not known yet or is being read again, before the oldest is dropped. */
 export const HELD_PIECES_MOST = 256;
@@ -99,8 +99,16 @@ export type DeltaOutcome =
   | { kind: 'foreign' };
 
 /** The tail of an output that is held, with whether anything was cut from its front. */
-function tail(text: string): { text: string; cut: boolean } {
-  return text.length <= OUTPUT_TAIL_CHARS ? { text, cut: false } : { text: text.slice(text.length - OUTPUT_TAIL_CHARS), cut: true };
+function tail(text: string, limit: number): { text: string; cut: boolean } {
+  const bytes = encoder.encode(text);
+  if (bytes.length <= limit) return { text, cut: false };
+  let first = Math.max(0, bytes.length - limit);
+  while (first < bytes.length) {
+    const byte = bytes[first];
+    if (byte === undefined || (byte & 0xc0) !== 0x80) break;
+    first += 1;
+  }
+  return { text: new TextDecoder().decode(bytes.subarray(first)), cut: true };
 }
 
 /** Adds one piece to an item whose field has come to `applied`. */
@@ -122,7 +130,7 @@ export function applyDelta(item: Item, applied: number, delta: Delta): DeltaOutc
   }
   if (item.kind === 'tool_call' && item.payload.tool.kind === 'command' && delta.field === 'output') {
     const output = item.payload.tool.output;
-    const kept = tail(output.inline + data);
+    const kept = tail(output.inline + data, output.inline_limit ?? OUTPUT_TAIL_BYTES);
     const next = {
       ...output,
       inline: kept.text,

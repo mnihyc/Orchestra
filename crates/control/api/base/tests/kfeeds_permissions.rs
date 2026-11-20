@@ -124,6 +124,8 @@ async fn publish_raw(rig: &Rig, thread: Id, message: &str) {
         segment_id: segment,
     };
     let event = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: orch_db::queries::raw_events::last_number(
             &mut rig.pool.acquire().await.unwrap(),
             segment,

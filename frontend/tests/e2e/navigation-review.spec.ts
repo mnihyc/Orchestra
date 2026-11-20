@@ -192,7 +192,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await shot(page, `${prefix}-explicit-columns`);
     if (width === 400) await page.locator('[data-container-choice="right:team"]').click();
     const right = page.locator('[data-workbench-bar="right"]:visible');
-    await inlineState(right, 'No chat on this screen', 'A chat belongs to an org, a project, a topic or a thread.');
+    await inlineState(right, 'No chat on this screen', 'A chat belongs to an organization, a project, a topic or a thread.');
     await shot(page, `${prefix}-empty-chat`);
     if (width === 400) await page.keyboard.press('Escape');
     await page.goto(`/thread/${ACME.mainThread}`);

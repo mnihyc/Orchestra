@@ -250,6 +250,7 @@ async fn failed_unadopted_provider_successor_preserves_the_current_connector_and
         key.agent,
         key.machine,
         &orch_db::queries::resources::thread_engine::HarnessReport {
+            home: None,
             status: "online",
             detail: None,
             version: Some("1.0.0"),

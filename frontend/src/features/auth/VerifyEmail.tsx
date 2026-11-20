@@ -12,6 +12,8 @@ import { useTranslation } from 'react-i18next';
 import { metaQuery, resendConfirmation } from '@/api/auth';
 import { ApiError } from '@/api/client';
 import { AuthCard } from '@/features/auth/Frame';
+import { HumanCheckNotice, HumanCheckWidget, useHumanCheck } from '@/features/auth/HumanCheck';
+import type { HumanCheckAct } from '@/generated/api-types';
 import { useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
@@ -20,6 +22,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { linkClasses } from '@/ui/link';
 import { SkeletonRows } from '@/ui/Skeleton';
+
+/** What the form that asks for the link again asks the human check for. */
+const RESENDING: readonly HumanCheckAct[] = ['resend'];
 
 /** How using the link went. */
 export type Verification =
@@ -85,7 +90,18 @@ export function VerifyEmail({ outcome, onRetry }: VerifyEmailProps) {
 function ResendForm() {
   const { t } = useTranslation();
   const form = useForm({ login: '' }, { login: (value) => (value.trim() === '' ? t('auth.rules.loginMissing') : null) });
-  const again = useMutation({ mutationFn: resendConfirmation, onError: (error) => form.refuse(error) });
+  const check = useHumanCheck(RESENDING);
+  const again = useMutation({
+    mutationFn: async (login: string) => {
+      const token = await check.take('resend');
+      try {
+        await (token === null ? resendConfirmation(login) : resendConfirmation(login, token));
+      } finally {
+        check.spend(false);
+      }
+    },
+    onError: (error) => form.refuse(error),
+  });
 
   if (again.isSuccess) return <InlineAlert tone="success">{t('auth.verify.resent')}</InlineAlert>;
 
@@ -106,9 +122,11 @@ function ResendForm() {
         {...form.field('login')}
       />
       {again.error !== null && form.field('login').error === undefined && <ErrorAlert error={again.error} />}
-      <Button type="submit" block pending={again.isPending}>
+      <HumanCheckWidget check={check} act="resend" />
+      <Button type="submit" block pending={again.isPending} disabled={check.waiting('resend')} reason={check.waiting('resend') ? t('auth.humanCheck.waiting') : undefined}>
         {t('auth.verify.resend')}
       </Button>
+      <HumanCheckNotice check={check} act="resend" />
     </form>
   );
 }

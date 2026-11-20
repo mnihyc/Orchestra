@@ -70,3 +70,11 @@ for (const opening of ['hover', 'focus', 'tap'] as const) it(`opens the token pl
     await waitFor(() => expect(document.querySelector('[data-reference-card]')).toBeNull());
   }
 });
+
+it('copies the public ID of the chosen key from its list row', async () => {
+  const user = userEvent.setup();
+  show(<Tokens />);
+  const row = await screen.findByRole('row', { name: /Read release/ });
+  await user.click(within(row).getByRole('button', { name: i18n.t('common.copyId') }));
+  expect(await navigator.clipboard.readText()).toBe('some');
+});

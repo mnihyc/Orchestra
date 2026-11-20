@@ -67,7 +67,7 @@ pub async fn publish(
     operation: Id,
     new: &NewNotification<'_>,
 ) -> Result<Option<Announced>, DbError> {
-    let receiver:Option<i64>=sqlx::query_scalar("SELECT u.inbox_seq FROM users u LEFT JOIN notification_prefs p ON p.user_id=u.id WHERE u.id=$1 AND u.kind='human' AND u.status='active' AND NOT COALESCE(p.disabled_kinds ? $2,false) FOR UPDATE OF u").bind(new.user_id).bind(new.kind).fetch_optional(&mut *conn).await?;
+    let receiver:Option<i64>=sqlx::query_scalar("SELECT i.inbox_seq FROM user_inboxes i JOIN users u ON u.id=i.user_id LEFT JOIN notification_prefs p ON p.user_id=u.id WHERE u.id=$1 AND u.kind='human' AND u.status='active' AND NOT COALESCE(p.disabled_kinds ? $2,false) FOR UPDATE OF i").bind(new.user_id).bind(new.kind).fetch_optional(&mut *conn).await?;
     if receiver.is_none() {
         return Ok(None);
     }
@@ -84,7 +84,7 @@ pub async fn publish(
         return Ok(None);
     }
     let seq: i64 = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq=inbox_seq+1 WHERE id=$1 RETURNING inbox_seq",
+        "UPDATE user_inboxes SET inbox_seq=inbox_seq+1 WHERE user_id=$1 RETURNING inbox_seq",
     )
     .bind(new.user_id)
     .fetch_one(&mut *conn)

@@ -97,6 +97,9 @@ test('the same person reaches private content only with their current session sw
   await expect(page.getByRole('button', { name: /Open.*admin/ })).toHaveCount(0);
   await asAdmin(page, true);
   await expect(page.getByText('Paragraph 1: the quick brown fox jumps over the lazy dog.')).toBeVisible();
+  await expect(indicator).toBeChecked();
+  await expect(page.getByRole('switch', { name: 'As admin: On', exact: true })).toHaveCount(1);
+  await expect(page.locator('[data-main-area] [data-as-admin-mark]:visible')).toHaveCount(0);
   await expect(page.getByRole('img', { name: 'Private · You see this as a system admin', exact: true })).toBeVisible();
   await page.reload();
   await expect(indicator).toHaveAttribute('data-as-admin', 'true');
