@@ -14,6 +14,7 @@ pub mod admin_messages;
 pub mod admin_sources;
 pub mod adoption_sources;
 pub mod agent_sources;
+pub mod api_keys;
 pub mod approvals;
 pub mod artifact_sources;
 pub mod ask;
@@ -90,11 +91,14 @@ pub mod ports;
 pub mod processes;
 pub mod program_admin;
 pub mod programs;
+pub mod provider_relay_sources;
 pub mod provider_update_sources;
+pub mod public_addresses;
 pub mod resource_facts;
 pub mod resource_facts_sources;
 pub mod resource_groups;
 pub mod resource_reads;
+pub mod resource_rows;
 pub mod resources;
 pub mod restore_sources;
 pub mod routes;
@@ -112,6 +116,7 @@ pub mod source_sources;
 pub mod storage;
 pub mod storage_sources;
 pub mod summaries;
+pub mod summary_facts;
 pub mod summary_sources;
 pub mod surface;
 pub mod template_import_sources;
@@ -138,5 +143,6 @@ pub mod reference_sources;
 /// Native host enrollment source declaration.
 pub mod host_enrollment_sources;
 
+pub mod mount_copy_sources;
 /// Native mount location source declarations.
 pub mod mount_location_sources;

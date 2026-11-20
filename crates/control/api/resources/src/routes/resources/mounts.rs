@@ -116,6 +116,7 @@ const NAME_MAX: usize = 32;
 /// Binds all mount resource requests.
 pub fn mount(registry: &mut Registry) {
     read::mount(registry);
+    copy::mount(registry);
     registry
         .on_snapshot_read_with_optional_operation(
             api::MachineMountList,
@@ -134,7 +135,6 @@ pub fn mount(registry: &mut Registry) {
             creation::create,
         )
         .on(api::MountUpdate, update)
-        .on(api::MountDelete, delete)
         .on_with_operation(
             api::MountLocationSet,
             locations::resolve_set,
@@ -351,7 +351,7 @@ async fn prepare_inventory_one(
         );
         let by = refusals::user_refs(conn, &[location.created_by]).await?;
         let sizes: Json = sqlx::query_scalar(
-            "SELECT COALESCE(facts->'mount_sizes','[]'::jsonb) FROM machines WHERE id=$1",
+            "SELECT COALESCE((SELECT mount_sizes FROM hosts WHERE machine_id=$1),'[]'::jsonb)",
         )
         .bind(location.machine_id)
         .fetch_one(&mut *conn)
@@ -526,7 +526,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,
@@ -578,6 +583,7 @@ async fn seen(
     };
     Ok(Some((reference, host)))
 }
+orch_api_base::__api_bind_a94d90d474!();
 
 fn kept_ask(data: &rows::KeptRow) -> LocationAsk {
     LocationAsk {
@@ -605,6 +611,12 @@ async fn update(ctx: Ctx, (): (), body: api::MountUpdateBody) -> ApiResult<Mount
     if let Some(target) = &body.target {
         check_target(target).map_err(|error| invalid("target", &error.to_string()))?;
     }
+    if body.notify.is_some() && body.enabled.is_none() {
+        return Err(ApiError::invalid(
+            "notify",
+            "a notice choice belongs to an enabled change",
+        ));
+    }
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     require(
         &mut tx,
@@ -624,6 +636,23 @@ async fn update(ctx: Ctx, (): (), body: api::MountUpdateBody) -> ApiResult<Mount
         )
         .with("current", show(&ctx, &mut tx, &principal, id).await?));
     }
+    let availability_changed = body.enabled.is_some_and(|enabled| enabled != row.enabled);
+    let people = if availability_changed && body.notify == Some(true) {
+        let target = orch_api_contract::resource_facts::FactTarget {
+            object: ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Mount,
+                id,
+            },
+            model_id: None,
+        };
+        let raw =
+            orch_engine::resource_facts::target_dependents(&mut tx, &target, ctx.app.clock.time())
+                .await
+                .map_err(ApiError::engine)?;
+        Some(super::notices::mount_audience(&mut tx, &principal, id, &raw).await?)
+    } else {
+        None
+    };
     let old = (
         row.name.clone(),
         row.description.clone(),
@@ -666,6 +695,9 @@ async fn update(ctx: Ctx, (): (), body: api::MountUpdateBody) -> ApiResult<Mount
             rows::changed(&mut tx, &candidates, ctx.now).await?;
         }
         record(&ctx, &mut tx, orch_db::audit::action!(AuditAction::MountUpdated), id, home(&row), &format!("Changed the mount {}", row.name), json!({"mount": id, "name": row.name, "target": row.target, "read_only": row.read_only, "enabled": row.enabled, "default_fate": row.default_fate})).await?;
+    }
+    if let Some(people) = people {
+        super::notices::notify_mount_change(&ctx, &mut tx, &principal, &row, people).await?;
     }
     let result = show(&ctx, &mut tx, &principal, id).await?;
     tx.commit().await.map_err(DbError::from)?;
@@ -799,25 +831,6 @@ async fn remove_location(
     .await
 }
 
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-    require(
-        &mut tx,
-        &principal,
-        ResourceKind::Mount,
-        id,
-        Permission::MountManage,
-    )
-    .await?;
-    let row = rows::lock(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    delete_native(&ctx, &mut tx, &principal, &row).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
-}
-
 /// The original native uses/volume confirmation rules, before any location is changed.
 pub(crate) async fn deletion_inventory(
     ctx: &Ctx,
@@ -889,6 +902,9 @@ pub(crate) async fn delete_native(
 
 #[path = "mounts/creation.rs"]
 pub mod creation;
+
+#[path = "mounts/copy.rs"]
+mod copy;
 
 #[path = "mounts/locations.rs"]
 pub mod locations;

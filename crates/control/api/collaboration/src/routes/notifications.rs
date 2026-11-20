@@ -123,7 +123,7 @@ pub(crate) fn notifiers() -> &'static Notifiers {
 pub(crate) fn surroundings(ctx: &Ctx) -> Surroundings {
     Surroundings {
         system_name: ctx.app.config.system.name.clone(),
-        public_url: ctx.app.config.system.public_url.clone(),
+        address_seed: ctx.app.config.system.address_seed(),
     }
 }
 

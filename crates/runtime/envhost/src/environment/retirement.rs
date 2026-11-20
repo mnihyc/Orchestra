@@ -23,6 +23,7 @@ struct State {
 pub(super) struct Finalizer {
     pub(super) attachment: Id,
     pub(super) kind: Kind,
+    pub(super) mount_directories: Vec<(u64, crate::platform::FileNumber)>,
     state: tokio::sync::Mutex<State>,
 }
 
@@ -38,6 +39,7 @@ impl Finalizer {
     ) -> (Arc<Self>, oneshot::Sender<()>) {
         let id = environment.id;
         let attachment = environment.directory_attachment;
+        let mount_directories = environment.data_directories.clone();
         let pages = Arc::clone(&host.directory_pages);
         let host = Arc::downgrade(host);
         let (start, ready) = oneshot::channel();
@@ -63,6 +65,7 @@ impl Finalizer {
         let finalizer = Arc::new(Self {
             attachment,
             kind,
+            mount_directories,
             state: tokio::sync::Mutex::new(State {
                 task: Some(task),
                 outcome: None,
