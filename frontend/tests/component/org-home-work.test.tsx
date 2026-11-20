@@ -82,7 +82,7 @@ vi.mock('@/api/personal', async (original) => ({ ...await original<typeof Person
 }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined, reloadOrgTree: calls.retryTree }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
   Link: ({ children, to, params, ...anchor }: ComponentProps<'a'> & { to?: string; params?: Record<string, string>; children: ReactNode }) =>
     <a {...anchor} href={params?.threadId === undefined ? '#place' : `/thread/${params.threadId}`} data-route={to}>{children}</a>,
@@ -91,9 +91,9 @@ vi.mock('@/features/org/Activity', () => ({ ActivityFeed: () => null, OrgActivit
 vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof UsageBoardModule>(), UsageSection: () => null }));
 vi.mock('@/features/org/ProjectCards', () => ({ DepartmentCard: () => <p>Department summary</p>, ProjectCard: () => <p>Project summary</p> }));
 vi.mock('@/features/settings/org/Members', () => ({ Members: () => <p>Members body</p> }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => null }));
-vi.mock('@/features/navigation/OrgSwitcher', () => ({ orgInitial: () => 'A', orgColor: () => 1 }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeMenuButton: () => null }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => null }));
+vi.mock('@/features/navigation/OrgSwitcher', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgInitial: () => 'A', orgColor: () => 1 }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => null }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => null }));
 vi.mock('@/features/ports/Outside', () => ({ OutsideOpenings: () => null }));
@@ -153,7 +153,7 @@ describe.each(modes)('org daily work in %s/%s', (locale, theme) => {
     const daily = await screen.findByRole('region', { name: i18n.t('places.org.work.waiting') });
     expect(within(daily).getAllByText('Deploy staging')).toHaveLength(1);
     expect(within(daily).getByText(locale === 'en' ? 'Waiting for your approval' : '等待你批准')).toBeVisible();
-    expect(within(daily).getByText(locale === 'en' ? 'Blocked: no suitable sandbox' : '已阻塞：没有适用的沙箱')).toBeVisible();
+    expect(within(daily).getByText(locale === 'en' ? 'Blocked: no suitable environment' : '已阻塞：没有适用的环境')).toBeVisible();
     const recents = screen.getByRole('region', { name: i18n.t('places.org.work.recent') });
     expect(await within(recents).findByText('Hunt the login bug')).toBeVisible();
     expect(within(recents).queryByText('Deploy staging')).not.toBeInTheDocument();
