@@ -174,7 +174,7 @@ test('New message: choosing people for a direct chat, and for a group with its n
   await expectAccessibleInBothThemes(page);
 });
 
-test('an admin who reads the chats of others and of places, with the sentence that says it is silent', async ({ page }) => {
+test('an admin can identify and open a private chat from its marked row', async ({ page }) => {
   await chats('/chat', { org: ACME.org, members: ['dora', 'linus'], name: 'Docs crew' });
   await chats('/say', { node: 'Fix login', as: 'dora', text: 'A word on this topic' });
   await signIn(page);
@@ -186,8 +186,8 @@ test('an admin who reads the chats of others and of places, with the sentence th
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('link', { name: 'Docs crew' }).click();
-  // The mark is on the chat's row and beside its open conversation alike.
-  await expect(page.getByRole('img', { name: 'You see this as an admin of Acme' })).toHaveCount(2);
+  // The row identifies this chat's provenance. The title bar identifies the session.
+  await expect(page.getByRole('img', { name: 'You see this as an admin of Acme' })).toHaveCount(1);
   await expectAccessibleInBothThemes(page);
 });
 

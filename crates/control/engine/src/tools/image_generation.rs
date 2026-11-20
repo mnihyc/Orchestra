@@ -50,10 +50,48 @@ impl PreparedInput {
     }
 }
 
+fn inline_image_input(
+    binding: &orch_provider_contract::capabilities::Binding,
+    input: Json,
+    pixels: &[orch_image_backends::InputImage],
+) -> Result<Json, EngineError> {
+    orch_image_backends::materialize_inline_inputs(binding, input, pixels)
+        .map_err(EngineError::unreadable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     type Proof = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[test]
+    fn inline_image_inputs_larger_than_eight_megabytes_are_prepared_for_the_provider() -> Proof {
+        let binding = orch_provider_contract::capabilities::Binding {
+            request: json!({"body":{
+                "images":{"from_input":"/images"}, "prompt":{"from_input":"/prompt"}
+            }}),
+            extensions: BTreeMap::from([(
+                "x_input_images".into(),
+                json!({
+                    "encoding":"inline-json", "field":"images", "item":{"url":{"from_input":"/url"}}
+                }),
+            )]),
+            ..Default::default()
+        };
+        // Nine MiB of inline text fits the shipped message allowance. The verified
+        // binary pixels are smaller because base64 adds one third.
+        let image = orch_image_backends::InputImage {
+            name: "source-1".into(),
+            media_type: "image/png".into(),
+            bytes: vec![17; 9 * 1024 * 1024 / 4 * 3],
+        };
+        let input = inline_image_input(&binding, json!({"prompt":"An orchard"}), &[image])?;
+        let url = input["images"][0]["url"]
+            .as_str()
+            .ok_or("missing inline image")?;
+        assert!(url.len() > 9 * 1024 * 1024);
+        Ok(())
+    }
 
     #[test]
     fn the_native_image_request_uses_only_declared_neutral_options_and_immutable_tool_identity()
@@ -598,13 +636,7 @@ impl Engine {
                                     bytes: self.image_blob_bytes(*blob, *size).await?,
                                 });
                             }
-                            input.value = orch_image_backends::materialize_inline_inputs(
-                                &binding,
-                                input.value,
-                                &pixels,
-                                orch_link_contract::version::MAX_FRAME_BYTES as usize,
-                            )
-                            .map_err(EngineError::unreadable)?;
+                            input.value = inline_image_input(&binding, input.value, &pixels)?;
                             // The verified pixels are now part of neutral JSON itself. No unresolved
                             // image reference is discarded or delegated to a JSON-only keeper.
                             images.clear();
@@ -803,11 +835,12 @@ impl Engine {
             .blobs()
             .ok_or_else(|| EngineError::unreadable("The image store is unavailable."))?;
         let mut values = Vec::with_capacity(images.len());
+        let mut publications = Vec::new();
         for image in images {
             let media_type = media(&image)?;
             let blob = Hash::of(&image.bytes);
             let size = i64::try_from(image.bytes.len()).map_err(EngineError::unreadable)?;
-            store
+            let publication = store
                 .put(
                     &blob,
                     Some(size),
@@ -815,6 +848,7 @@ impl Engine {
                 )
                 .await
                 .map_err(EngineError::unreadable)?;
+            publications.push(publication);
             values.push((
                 blob,
                 size,
@@ -824,9 +858,11 @@ impl Engine {
             ));
         }
         let mut raw_blobs = Vec::new();
-        let raw_input = self.image_raw_text(&call.arguments, &mut raw_blobs).await?;
+        let raw_input = self
+            .image_raw_text(&call.arguments, &mut raw_blobs, &mut publications)
+            .await?;
         let raw_output = self
-            .image_raw_text(accepted.raw_result(), &mut raw_blobs)
+            .image_raw_text(accepted.raw_result(), &mut raw_blobs, &mut publications)
             .await?;
         let mut tx = self.db().begin().await?;
         source::check_call(&mut tx, call).await?;
@@ -908,6 +944,7 @@ impl Engine {
         &self,
         value: &Json,
         metadata: &mut Vec<(Hash, i64)>,
+        publications: &mut Vec<orch_blob_contract::store::Stored>,
     ) -> Result<orch_api_contract::threads::OutputRef, EngineError> {
         let text = serde_json::to_string(value)?;
         let mut preview = orch_api_contract::threads::OutputRef::of(&text);
@@ -917,10 +954,11 @@ impl Engine {
                 .ok_or_else(|| EngineError::unreadable("The image result store is unavailable."))?;
             let hash = Hash::of(text.as_bytes());
             let size = i64::try_from(text.len()).map_err(EngineError::unreadable)?;
-            store
+            let publication = store
                 .put(&hash, Some(size), stream_of(vec![bytes::Bytes::from(text)]))
                 .await
                 .map_err(EngineError::unreadable)?;
+            publications.push(publication);
             metadata.push((hash, size));
             preview = preview.with_blob(hash);
         }

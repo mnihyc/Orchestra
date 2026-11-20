@@ -12,6 +12,7 @@ import type { Item } from '@/generated/api-types';
 import { AgentReferences } from '@/features/people/AgentReferences';
 import { useTimelineContext } from '@/features/timeline/context';
 import { ItemFrame } from '@/features/timeline/ItemActions';
+import { DeliveryResolutionFacts } from '@/features/composer/DeliveryResolutionFacts';
 import { cx } from '@/ui/cx';
 import { Markdown } from '@/ui/Markdown';
 import { TimeOfDay } from '@/ui/TimeOfDay';
@@ -31,12 +32,13 @@ export function AnnouncementCard({ item }: { item: AnnouncementItem }) {
         aria-label={toThread ? t('timeline.announcement.message') : t('timeline.announcement.title')}
         className={cx('flex flex-col gap-1 rounded-lg border px-3 py-2', severity === 'important' ? 'border-warning/40 bg-warning-subtle' : 'border-border bg-surface')}
       >
-        <p className="flex items-center gap-2 text-sm text-text-muted">
+        <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted">
           <Icon aria-hidden />
           <span>{lead}</span>
           <TimeOfDay at={item.created_at} className="text-xs text-text-subtle" />
           {severity === 'important' && <span className="text-xs font-medium text-text">· {t('timeline.announcement.important')}</span>}
-        </p>
+          <DeliveryResolutionFacts resolution={item.payload.delivery_resolution} actual={item.payload.delivered_as} threadId={threadId} />
+        </div>
         {!toThread && title !== '' && <p className="text-base font-semibold text-text">{title}</p>}
         {body.trim() !== '' && (
           // A message from another thread was written for this one: its references are this thread's to resolve.

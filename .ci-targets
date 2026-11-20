@@ -1,0 +1,2 @@
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- --skip simultaneous:: --nocapture --test-threads=1
