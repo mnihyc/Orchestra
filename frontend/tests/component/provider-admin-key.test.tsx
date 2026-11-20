@@ -9,6 +9,7 @@ import { sourceChoiceSet,localizedSourceFields } from '@/features/resources/prov
 import { memberState } from '@/features/resources/providers/details';
 import { i18n,setLocale } from '@/i18n';
 import { Button } from '@/ui/Button';
+import { SECRET_DOTS } from '@/ui/SecretField';
 import { show } from './support';
 const submitted=vi.fn<(value:SourceChoiceSet)=>void>();
 const fields:Field[]=[{name:'admin_key',label:'Admin key',type:'secret',required:false,help:null,choices:null,default:null,max_bytes:null}];
@@ -20,14 +21,19 @@ function Form({saved=false}:{saved?:boolean}){
 }
 beforeEach(()=>vi.clearAllMocks());
 for(const locale of ['en','zh-CN'] as const){
-  it(`writes a default source key once and keeps a blank saved value in ${locale}`,async()=>{
+  it(`writes a default source key once and keeps a saved value, shown as dots that are set, in ${locale}`,async()=>{
     await setLocale(locale);
     try{
       show(<Form saved/>);
-      const input=screen.getByLabelText(`${locale==='en'?'Admin key':'管理密钥'} ${i18n.t('ui.field.optional')}`,{exact:true});
-      expect(input).toHaveValue('');expect(input).toHaveAttribute('type','password');
+      const label=`${locale==='en'?'Admin key':'管理密钥'} ${i18n.t('ui.field.optional')}`;
+      // A saved key is never an empty box: it is dots, marked Set, with Replace.
+      expect(screen.getByLabelText(label,{exact:true})).toHaveValue(SECRET_DOTS);
+      expect(screen.getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
       await userEvent.click(screen.getByRole('button',{name:i18n.t('providerSources.save')}));
       expect(submitted).toHaveBeenLastCalledWith({by:'default'});
+      await userEvent.click(screen.getByRole('button',{name:i18n.t('settingsEditors.secret.replace')}));
+      const input=screen.getByLabelText(label,{exact:true});
+      expect(input).toHaveValue('');expect(input).toHaveAttribute('type','password');
       await userEvent.type(input,'new-admin-fixture');
       await userEvent.click(screen.getByRole('button',{name:i18n.t('providerSources.save')}));
       expect(submitted).toHaveBeenLastCalledWith({by:'default',secrets:{admin_key:'new-admin-fixture'}});
@@ -38,8 +44,8 @@ for(const locale of ['en','zh-CN'] as const){
     await setLocale(locale);
     try{
       show(<Form saved/>);
-      await userEvent.click(screen.getByRole('button',{name:i18n.t('providerSources.removeSavedKey')}));
-      expect(screen.getByText(i18n.t('providerSources.keyWillBeRemoved'))).toBeVisible();
+      await userEvent.click(screen.getByRole('button',{name:i18n.t('settingsEditors.secret.remove')}));
+      expect(screen.getByText(i18n.t('settingsEditors.secret.removed'))).toBeVisible();
       await userEvent.click(screen.getByRole('button',{name:i18n.t('providerSources.save')}));
       expect(submitted).toHaveBeenLastCalledWith({by:'default',secrets:{admin_key:null}});
     }finally{await setLocale('en');}

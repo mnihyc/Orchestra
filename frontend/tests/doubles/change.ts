@@ -1935,14 +1935,14 @@ export class Change implements Part {
     return { input, seq: side.seq };
   }
 
-  private sideInterrupt(person: Person, id: string): Turn {
+  private sideInterrupt(person: Person, id: string): { state: 'stopped'; requested_at: string; turn: Turn } {
     const side = this.sideOf(id);
     this.world.places.need(person, side.parent, 'thread.interact');
     const running = [...side.turns.values()].find((entry) => entry.state === 'running');
     if (running === undefined) throw new Refusal(409, 'thread.not_running', 'nothing runs in this side thread');
     const stopped: Turn = { ...running, state: 'interrupted', completed_at: iso(Date.now()), phase: null, interrupted_by: this.user(person.me.username) };
     this.sideEmit(side, { turns: [stopped], thread: { state: 'idle', current_turn_id: null } });
-    return stopped;
+    return { state: 'stopped', requested_at: iso(Date.now()), turn: stopped };
   }
 
   private sideEmit(side: SideRecord, rows: { items?: Item[]; turns?: Turn[]; inputs?: ThreadInput[]; thread?: Partial<Thread> }): void {
