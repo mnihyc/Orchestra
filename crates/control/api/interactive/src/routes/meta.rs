@@ -47,6 +47,7 @@ use axum::response::Response;
 use http::StatusCode;
 
 use orch_api_contract::auth::HealthGet;
+use orch_api_contract::auth::InterfaceDefaults;
 
 use orch_api_contract::auth::LinkTrust;
 
@@ -166,10 +167,18 @@ pub(crate) async fn on_connection(
     caller: Option<&crate::middleware::authentication::Authed>,
 ) -> ApiResult<Meta> {
     let policy = system_policy(conn).await?;
-    let defs: Vec<_> = [keys::SYSTEM_BANNER, keys::STORAGE_MAX_BLOB_BYTES]
-        .into_iter()
-        .filter_map(registry::get)
-        .collect();
+    let defs: Vec<_> = [
+        keys::SYSTEM_BANNER,
+        keys::STORAGE_MAX_BLOB_BYTES,
+        keys::INTERFACE_KEPT_CLOSED_TABS,
+        keys::INTERFACE_PROGRESS_DELAY_MS,
+        keys::INTERFACE_CATCH_UP_ABOVE_ITEMS,
+        keys::INTERFACE_READ_FRESHNESS_MS,
+        keys::INTERFACE_CONNECTION_QUALITY,
+    ]
+    .into_iter()
+    .filter_map(registry::get)
+    .collect();
     let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&defs))
         .await
         .map_err(ApiError::internal)?;
@@ -187,6 +196,8 @@ pub(crate) async fn on_connection(
             auto_register,
         })
         .collect();
+    // What the pages that ask for a human check are told: nothing while no check is on.
+    let human_check = crate::sign_in::human_check::policy(conn).await?.shown();
     // Whoever the request says is asking learns whether they may make a team org now; nobody
     // signed in may not, and a token that does not hold is nobody here, as anywhere public.
     let may_create_org = caller.is_some_and(|caller| may_make_org(policy.org_creation, caller));
@@ -205,6 +216,7 @@ pub(crate) async fn on_connection(
         local_login: policy.local_login,
         email_code_login,
         identity_providers,
+        human_check,
         locales: vec![Locale::En, Locale::ZhCn],
         // A notice that has ended is not shown, though its row stays.
         banner: banner.filter(|banner| banner.until.is_none_or(|until| until.get() > ctx.now)),
@@ -228,6 +240,41 @@ pub(crate) async fn on_connection(
             max_input_chars: i64::from(INPUT_TEXT_MAX_CHARS),
             max_image_bytes: IMAGE_UPLOAD_MAX_BYTES,
             max_upload_bytes: max_upload.unwrap_or(i64::MAX),
+        },
+        interface_defaults: InterfaceDefaults {
+            catch_up_above_items: setting(&snapshot, keys::INTERFACE_CATCH_UP_ABOVE_ITEMS)?,
+            kept_closed_tabs: setting(&snapshot, keys::INTERFACE_KEPT_CLOSED_TABS)?
+                .unwrap_or_default(),
+            progress_delay_ms: setting(&snapshot, keys::INTERFACE_PROGRESS_DELAY_MS)?
+                .unwrap_or_default(),
+            catch_up_above_items_source: Some(orch_api_contract::settings::SettingSource {
+                scope: match snapshot
+                    .resolve(
+                        registry::get(keys::INTERFACE_CATCH_UP_ABOVE_ITEMS).ok_or_else(|| {
+                            ApiError::internal("catch-up default is not registered")
+                        })?,
+                    )
+                    .source
+                    .scope
+                {
+                    orch_settings_contract::provenance::SourceScope::Default => {
+                        orch_api_contract::settings::SettingScope::Default
+                    }
+                    orch_settings_contract::provenance::SourceScope::System => {
+                        orch_api_contract::settings::SettingScope::System
+                    }
+                    _ => {
+                        return Err(ApiError::internal(
+                            "catch-up default has a non-system source",
+                        ));
+                    }
+                },
+                node: None,
+            }),
+            read_freshness_ms: setting(&snapshot, keys::INTERFACE_READ_FRESHNESS_MS)?
+                .unwrap_or_default(),
+            connection_quality: setting(&snapshot, keys::INTERFACE_CONNECTION_QUALITY)?
+                .unwrap_or_default(),
         },
     })
 }
@@ -281,6 +328,9 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Setu
         },
     )
     .await?;
+    if crate::routes::notifications::push_public_key().is_some() {
+        orch_worker_core::channel_setup::ensure_system_push(&mut tx, user.id, ctx.now).await?;
+    }
     let how = json!({ "proofs": [SignInProof::Password], "setup": true });
     let opened = open_session(&ctx, &mut tx, &user, how).await?;
     orch_db::idempotency::creation::observe_account(&mut tx, user.id, "setup_account", 200).await?;

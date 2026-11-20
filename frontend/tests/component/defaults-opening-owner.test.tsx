@@ -29,7 +29,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), us
   Link: ({ to, params, children, activeOptions: _activeOptions, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string>; children?: ReactNode; activeOptions?: unknown }) => <a {...props} href={to.replace(/\$(\w+)/g, (_match: string, key: string) => params?.[key] ?? '')}>{children}</a>,
   useRouterState: ({ select }: { select: (state: { location: typeof route.location }) => unknown }) => select({ location: route.location }),
   useRouter: () => ({ state: { location: route.location }, history: { replace: vi.fn() } }) }));
-vi.mock('@/shell/FrameReadiness', () => ({ useFrameReady: () => true }));
+vi.mock('@/shell/FrameReadiness', async (loadOriginal) => ({ ...await loadOriginal<object>(), useFrameReady: () => true }));
 vi.mock('@/features/chat/ChatView', () => ({ ChatView: ({ chatId }: { chatId: string }) => <output aria-label="Visible chat">{chatId}</output> }));
 
 const world = new World(), ada = world.people.get('ada')!;

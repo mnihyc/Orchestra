@@ -20,10 +20,10 @@ const reads = vi.hoisted(() => ({
   directory: vi.fn<(path: string) => DirectoryWindow>(),
   navigate: vi.fn<(path: string, action: string) => void>(),
 }));
-vi.mock('@/features/files/door', () => ({ useEnvironment: () => reads.environment() }));
-vi.mock('@/features/files/useDirectoryTree', () => ({ useDirectoryTree: (door: Door, path: string) => ({
+vi.mock('@/features/files/door', () => ({ useEnvironment: (id: string | null) => id === null ? { environment: undefined, failed: null } : reads.environment() }));
+vi.mock('@/features/files/useDirectoryTree', () => ({ useDirectoryTree: (door: Door, path: string, _binding: string | null, enabled = true) => ({
   tree: { navigate: reads.navigate }, capacity: null,
-  directories: new Map([[directoryKey(door.environmentId, path), reads.directory(path)]]),
+  directories: enabled ? new Map([[directoryKey(door.environmentId, path), reads.directory(path)]]) : new Map(),
 }) }));
 
 let environment: Environment;
@@ -53,9 +53,9 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const user = userEvent.setup(); show(<Field />);
     expect(reads.environment).not.toHaveBeenCalled(); expect(reads.directory).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: i18n.t('change.directory.change') }));
-    await user.type(screen.getByRole('textbox', { name: i18n.t('change.directory.label') }), 'apps/project');
+    await user.type(screen.getByRole('combobox', { name: i18n.t('change.directory.label') }), 'apps/project');
     expect(screen.getByLabelText('Native change request')).toHaveTextContent('"directory":"apps/project"');
-    expect(reads.environment).not.toHaveBeenCalled(); expect(reads.directory).not.toHaveBeenCalled();
+    expect(reads.environment).toHaveBeenCalled(); expect(reads.directory).toHaveBeenCalledWith('apps');
     await user.click(screen.getByRole('button', { name: i18n.t('change.directory.keep') }));
     expect(screen.getByLabelText('Native change request')).not.toHaveTextContent('directory');
     await user.click(screen.getByRole('button', { name: i18n.t('change.directory.change') }));
@@ -78,7 +78,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const user = userEvent.setup(); show(<Field target={false} />);
     await user.click(screen.getByRole('button', { name: i18n.t('change.directory.change') }));
     expect(screen.getByRole('button', { name: i18n.t('change.directory.browse') })).toHaveAttribute('aria-disabled', 'true');
-    await user.type(screen.getByRole('textbox', { name: i18n.t('change.directory.label') }), 'src');
+    await user.type(screen.getByRole('combobox', { name: i18n.t('change.directory.label') }), 'src');
     expect(screen.getByLabelText('Native change request')).toHaveTextContent('"directory":"src"');
     expect(reads.environment).not.toHaveBeenCalled();
   });
@@ -93,3 +93,28 @@ it('does not let an old cached directory be chosen after the environment read fa
   expect(screen.queryByRole('button', { name: 'web' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Native change request')).not.toHaveTextContent('directory');
 });
+
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`completes one real workspace directory at a time without adding a root dropdown ${locale}`, async () => {
+    await setLocale(locale);
+    reads.directory.mockImplementation((path): DirectoryWindow => ({ ...EMPTY, status: 'ready', source: 'live',
+      entries: path === '' ? [entry('orch', '', 'dir'), entry('organ', '', 'dir'), entry('or-file.txt')] : path === 'orch' ? [entry('src', 'orch', 'dir')] : [],
+      canNext: false, page: { incoming: null, revision: 'native-completion', ordinal: 1 } }));
+    const user = userEvent.setup(); show(<Field />);
+    await user.click(screen.getByRole('button', { name: i18n.t('change.directory.change') }));
+    expect(screen.queryByRole('combobox', { name: i18n.t('directoryChoice.root') })).not.toBeInTheDocument();
+    const input = screen.getByRole('combobox', { name: i18n.t('change.directory.label') });
+    await user.type(input, 'or');
+    expect(await screen.findByRole('option', { name: 'orch' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'or-file.txt' })).not.toBeInTheDocument();
+    await user.keyboard('{Tab}');
+    expect(input).toHaveFocus(); expect(input).toHaveValue('orch/');
+    expect(screen.getByLabelText('Native change request')).toHaveTextContent('"directory":"orch"');
+    expect(reads.directory).toHaveBeenCalledWith('orch');
+    await user.keyboard('{ArrowRight}');
+    expect(input).toHaveValue('orch/src/');
+    expect(screen.getByLabelText('Native change request')).toHaveTextContent('"directory":"orch/src"');
+    expect(screen.getByLabelText('Native change request')).not.toHaveTextContent(environment.workspace_root);
+  });
+}

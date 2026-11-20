@@ -105,6 +105,25 @@ describe('lost text, rather than a clipping class', () => {
 });
 
 describe('the single delegated reader', () => {
+
+  it('opens settings links without measuring every label and still reveals a clipped name until it fits', () => {
+    const link = document.createElement('a');
+    link.href = '#defaults';
+    const { element, size } = label('Organisation defaults and inherited settings');
+    link.append(element);
+    document.body.append(link);
+    const styles = vi.spyOn(window, 'getComputedStyle');
+    install();
+    expect(styles.mock.calls.some(([node]) => node === link || node === element)).toBe(false);
+    expect(element).not.toHaveAttribute('tabindex');
+    link.focus();
+    expect(tip()).toHaveTextContent('Organisation defaults and inherited settings');
+    expect(observeSizes).toHaveBeenCalledWith(element);
+    size.contentWidth = size.width;
+    reportResize(element);
+    expect(tip()).toBeNull();
+    expect(unobserveSizes).toHaveBeenCalledWith(element);
+  });
   it('does not read styles for a text-free icon mutation and still discovers later text', async () => {
     const root = document.createElement('section');
     root.append(document.createElementNS('http://www.w3.org/2000/svg', 'svg'));
