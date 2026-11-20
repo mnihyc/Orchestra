@@ -707,6 +707,26 @@ impl Capabilities {
     }
 }
 
+/// The current result of the program's Auto approval conformance case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoApprovalState {
+    NotProven,
+    Failed,
+    Passed,
+    Unavailable,
+}
+
+/// Server-owned Auto evidence. Profile overrides cannot supply or change it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AutoApprovalCheck {
+    /// Whether the unfiltered program declaration offered Auto.
+    pub declared: bool,
+    pub state: AutoApprovalState,
+    /// Whether a kept build has the program's Auto case available to run.
+    pub check_available: bool,
+}
+
 /// Everything an adapter declares about its harness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentDescriptor {
@@ -744,6 +764,9 @@ pub struct AgentDescriptor {
     /// Policy and confinement still apply.
     #[serde(default)]
     pub approval_modes: Vec<ApprovalMode>,
+    /// Current Auto proof, attached by the server rather than declared by a profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_auto: Option<AutoApprovalCheck>,
     /// What its own sandbox can enforce; `["open"]` is none.
     #[serde(default)]
     pub sandbox_modes: Vec<SandboxMode>,
@@ -754,6 +777,10 @@ pub struct AgentDescriptor {
     /// What it claims to do.
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// Optional features declared by this program and whether each ships enabled.
+    /// Resolved settings override these values without changing the declaration.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, bool>,
     /// The parameters its harness accepts.
     #[serde(default)]
     pub parameters: Vec<ParameterDef>,
@@ -771,6 +798,12 @@ pub struct AgentDescriptor {
 }
 
 impl AgentDescriptor {
+    /// This program's shipped features with the place's explicit settings laid over them.
+    #[must_use]
+    pub fn feature_values(&self, settings: &BTreeMap<String, bool>) -> BTreeMap<String, bool> {
+        crate::parameters::feature_values(&self.features, settings)
+    }
+
     /// Per-access capability facts owned by this program extension. Missing facts declare no support.
     /// The extension key is additive, so older stored descriptors keep their exact meaning.
     #[must_use]
@@ -1006,6 +1039,12 @@ impl AgentDescriptor {
     pub fn with_overrides(&self, overrides: &Json) -> Result<Self, serde_json::Error> {
         let mut merged = serde_json::to_value(self)?;
         merge_patch(&mut merged, overrides);
+        if let Some(merged) = merged.as_object_mut() {
+            merged.insert(
+                "approval_auto".to_owned(),
+                serde_json::to_value(&self.approval_auto)?,
+            );
+        }
         // Native profile mappings describe the program's real syntax, and the options that hold back a turn's end
         // the program's real behaviour: neither is an overrideable limit.
         for key in [
@@ -1103,6 +1142,46 @@ fn merge_patch(target: &mut Json, patch: &Json) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_profile_cannot_make_an_unproved_auto_choice_pass_its_check() {
+        let mut declaration = codex();
+        declaration["approval_modes"] = json!(["on_request"]);
+        declaration["approval_auto"] =
+            json!({"declared":true,"state":"not_proven","check_available":true});
+        let descriptor: AgentDescriptor = serde_json::from_value(declaration).unwrap();
+        let changed = descriptor
+            .with_overrides(&json!({"approval_modes":["auto"],
+            "approval_auto":{"declared":true,"state":"passed","check_available":true}}))
+            .unwrap();
+        assert_eq!(changed.approval_auto, descriptor.approval_auto);
+        assert!(!changed.approval_modes.contains(&ApprovalMode::Auto));
+        assert_eq!(
+            descriptor
+                .with_overrides(&json!({"approval_auto":null}))
+                .unwrap()
+                .approval_auto,
+            descriptor.approval_auto
+        );
+    }
+
+    #[test]
+    fn each_programs_feature_defaults_are_overlaid_by_explicit_place_choices() {
+        let mut declaration = codex();
+        declaration["features"] = json!({"example.extra_tools":true,"example.previews":false});
+        let descriptor: AgentDescriptor = serde_json::from_value(declaration).unwrap();
+        assert!(descriptor.feature_values(&BTreeMap::new())["example.extra_tools"]);
+        let values = descriptor.feature_values(&BTreeMap::from([
+            ("example.extra_tools".to_owned(), false),
+            ("example.previews".to_owned(), true),
+        ]));
+        assert!(!values["example.extra_tools"]);
+        assert!(values["example.previews"]);
+        assert!(
+            descriptor.features["example.extra_tools"],
+            "the declaration remains unchanged"
+        );
+    }
 
     /// A descriptor of the first built-in adapter, as it is published.
     fn codex() -> Json {

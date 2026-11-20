@@ -16,7 +16,7 @@ async fn active(conn: &mut Conn, machine: Id) -> Result<bool, DbError> {
     // The batch holds the machine's row until it commits, without a shared barrier: a revocation
     // waits for the batch, or the batch waits for the revocation and then sees it, and is refused.
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR SHARE",
+        "SELECT status = 'active' AND deleted_at IS NULL FROM machines WHERE id = $1 FOR KEY SHARE",
     )
     .bind(machine)
     .fetch_optional(&mut *conn)
@@ -197,6 +197,25 @@ pub async fn accepts(
 
 fn id(body: &Json, key: &str) -> Option<Id> {
     body.get(key)?.as_str()?.parse().ok()
+}
+
+/// Whether `machine` is the unit that enrolled for the environment's current runtime while the
+/// environment's own row does not name it yet. What such a unit reports is held until the row names
+/// it: it is not another machine's report, and nothing is refused or counted for it.
+pub async fn awaits_attachment(
+    conn: &mut Conn,
+    machine: Id,
+    environment: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runtimes r JOIN environments e ON e.id = r.environment_id
+         WHERE r.environment_id = $1 AND r.machine_id = $2 AND r.successor_of IS NULL
+         AND r.state IN ('creating','running') AND e.machine_id IS DISTINCT FROM $2)",
+    )
+    .bind(environment)
+    .bind(machine)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// Whether the machine is the registered node of this runtime's host.
