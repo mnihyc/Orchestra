@@ -706,6 +706,7 @@ async fn covered_running(
             .collect(),
     )
     .await?;
+    let mut reservations = HashSet::new();
     Ok(turns
         .into_iter()
         .filter(|turn| {
@@ -716,6 +717,7 @@ async fn covered_running(
                     groups_in(&groups, turn.provider_id, &turn.model),
                 )
                 && covers_tier(cap, tier_of_running(turn).as_deref())
+                && (!is_running(cap) || reservations.insert(turn.reservation))
         })
         .collect())
 }
@@ -1252,6 +1254,7 @@ impl Engine {
         let mut governed = ask.clone();
         if let Some(work) = &work {
             governed.thread = work.node;
+            governed.person = work.person;
             governed.path = threads::node_path(unit.conn, work.node).await?;
         }
         let ask = &governed;
@@ -1276,7 +1279,11 @@ impl Engine {
         rows::lock_for_counting(&mut *unit.conn, &running).await?;
         let mut standings: Vec<Standing> = Vec::new();
         for each in &limited {
-            standings.push(standing(&mut *unit.conn, &each.cap, ask.person, now).await?);
+            let mut status = standing(&mut *unit.conn, &each.cap, ask.person, now).await?;
+            if let Some(turn) = work.as_ref().and_then(|work| work.ask_turn) {
+                allow_existing_reservation(unit.conn, &mut status, ask.person, turn, now).await?;
+            }
+            standings.push(status);
         }
         self.note_standings(unit, &standings).await?;
 
@@ -1728,17 +1735,8 @@ async fn own_room_with(
         }
         let person = person_for(&each.cap, work.person);
         let mut status = standing(conn, &each.cap, person, now).await?;
-        if is_running(&each.cap)
-            && let OwnRoom::Turn(Some(current)) = reservation
-        {
-            let active = rows::running(conn, &each.cap, person, now).await?;
-            if covered_running(conn, &each.cap, active)
-                .await?
-                .iter()
-                .any(|turn| turn.turn_id == current)
-            {
-                status.used = status.used.floor_sub(Micros::whole(1));
-            }
+        if let OwnRoom::Turn(Some(current)) = reservation {
+            allow_existing_reservation(conn, &mut status, person, current, now).await?;
         }
         let may_finish = matches!(reservation, OwnRoom::Turn(Some(_)))
             && !is_running(&each.cap)
@@ -1747,6 +1745,26 @@ async fn own_room_with(
         standings.push(status);
     }
     Ok((has_room, standings))
+}
+
+async fn allow_existing_reservation(
+    conn: &mut Conn,
+    status: &mut Standing,
+    person: Option<Id>,
+    current: Id,
+    now: DateTime<Utc>,
+) -> Result<(), EngineError> {
+    if is_running(&status.cap) {
+        let active = rows::running(conn, &status.cap, person_for(&status.cap, person), now).await?;
+        if covered_running(conn, &status.cap, active)
+            .await?
+            .iter()
+            .any(|turn| turn.reservation == current)
+        {
+            status.used = status.used.floor_sub(Micros::whole(1));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -2092,10 +2110,15 @@ async fn ask_of_turn(
                 path: threads::node_path(conn, root).await?,
                 provider: binding.provider_id,
                 model: turn.model.clone(),
-                tier: orch_model_contract::parameters::requested_tier_for_caps(
-                    &binding.protocol,
-                    &turn.params,
-                ),
+                tier: match &binding.transport {
+                    orch_db::queries::ask::DialogueTransport::Api { protocol, .. } => {
+                        orch_model_contract::parameters::requested_tier_for_caps(
+                            protocol,
+                            &turn.params,
+                        )
+                    }
+                    orch_db::queries::ask::DialogueTransport::Program(_) => None,
+                },
                 harness_kind: None,
                 person,
                 metering: None,
@@ -2120,6 +2143,7 @@ async fn ask_of_turn(
     let harness_kind = agent.map(|agent| agent.harness_kind);
     let work = orch_db::queries::capability_work::for_turn(conn, turn.id).await?;
     let place = work.as_ref().map_or(turn.thread_id, |work| work.node);
+    let person = work.as_ref().map_or(person, |work| work.person);
     let path = threads::node_path(conn, place).await?;
     Ok(Some((
         Ask {
@@ -2134,6 +2158,25 @@ async fn ask_of_turn(
         },
         work.map_or_else(|| "turn".into(), |work| work.purpose),
     )))
+}
+
+/// How many times the stop of a reached cap looks at the committed usage before it leaves the turns to the next
+/// report: after the grace, then after twice that, and so on, doubling each time: about three seconds in all with
+/// the grace a deployment ships with, so that a commit slowed by a loaded machine does not leave a turn running
+/// past its cap.
+const STOP_LOOKS: u32 = 7;
+
+/// The shortest wait between two such looks, whatever the grace is.
+const STOP_LOOK_FLOOR: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// What a look at a cap, made after the report that showed it reached, found.
+enum Reached {
+    /// The cap is gone or off: nothing to stop.
+    Gone,
+    /// It has room: the report that showed it reached is not committed yet, or is no longer true.
+    Room,
+    /// It has none: its turns were stopped.
+    NoRoom,
 }
 
 impl Engine {
@@ -2214,46 +2257,66 @@ impl Engine {
                 && each.cap.at_limit == at_limit::STOP
                 && !bypass_names(turn.limit_bypass.as_ref(), each.cap.id)
             {
-                self.stop_later(each.cap.id, each.person);
+                self.stop_later(each.cap.id, each.person, thread);
             }
         }
         Ok(())
     }
 
     /// Has the turns a cap covers stopped, once the transaction that showed it reached has committed.
-    fn stop_later(&self, cap: Id, person: Option<Id>) {
+    ///
+    /// The look that found the cap reached was made inside that transaction, which has not committed when the
+    /// look of its own begins, and may never commit: a conflict rolls it back and the report is applied again.
+    /// That look reads what has been committed. After the grace it may find room (the report is not visible
+    /// yet); then the thread's note that its caps were looked at is taken away, so that the report applied
+    /// again is looked at and not passed over as one looked at a moment ago, and the look is made again after
+    /// twice as long, up to `STOP_LOOKS` times. A stop that found room and gave up would leave the turn running
+    /// until a next report, and the next report may be minutes away.
+    fn stop_later(&self, cap: Id, person: Option<Id>, thread: Id) {
         if !lock(&self.inner.cap_stops).insert((cap, person)) {
             return;
         }
         let engine = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(engine.inner.config.post_commit_grace).await;
-            if let Err(error) = engine.stop_covered(cap, person).await {
-                tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; the next report looks again");
+            let mut wait = engine.inner.config.post_commit_grace;
+            for _ in 0..STOP_LOOKS {
+                tokio::time::sleep(wait).await;
+                match engine.stop_covered_if_reached(cap, person).await {
+                    Ok(Reached::NoRoom | Reached::Gone) => break,
+                    Ok(Reached::Room) => {
+                        engine.forget_cap_check(thread);
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; it looks again");
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                }
             }
             lock(&engine.inner.cap_stops).remove(&(cap, person));
         });
     }
 
     /// Ends every running turn a cap that is reached covers (for a cap counted per person, the person's),
-    /// except those it was let past.
-    pub(crate) async fn stop_covered(
+    /// except those it was let past, and says what it found: the cap gone or off, with room, or without room
+    /// (and its turns stopped).
+    async fn stop_covered_if_reached(
         &self,
         cap: Id,
         person: Option<Id>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Reached, EngineError> {
         let now = self.inner.clock.now();
         let (message, victims) = {
             let mut conn = self.inner.db.acquire().await?;
             let Some(cap) = rows::get(&mut conn, cap).await? else {
-                return Ok(());
+                return Ok(Reached::Gone);
             };
             if !cap.enabled {
-                return Ok(());
+                return Ok(Reached::Gone);
             }
             let standing = standing(&mut conn, &cap, person, now).await?;
             if standing.has_room() {
-                return Ok(());
+                return Ok(Reached::Room);
             }
             let message = describe(&mut conn, &standing).await?;
             let covered = rows::running(&mut conn, &cap, standing.person, now).await?;
@@ -2268,7 +2331,7 @@ impl Engine {
             self.stop_turn(turn.thread_id, turn.turn_id, &message)
                 .await?;
         }
-        Ok(())
+        Ok(Reached::NoRoom)
     }
 
     /// Ends a running turn because a cap was reached: its lease is closed, the harness is asked to stop, and

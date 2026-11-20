@@ -13,6 +13,7 @@
 //! still, and never for being slow.
 
 use crate::commands::{CommandKind, Transfer};
+pub use orch_settings_contract::transfers::TransferPolicy;
 use orch_types::{Hash, Json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,26 +41,15 @@ pub const STATUS_HASH_MISMATCH: u16 = 422;
 /// The code of that failure.
 pub const HASH_MISMATCH: &str = "hash_mismatch";
 
-/// The most bytes one request may carry.
-pub const MAX_CHUNK_BYTES: i64 = 4 * 1024 * 1024;
-/// The size of the first piece of a transfer, before anything is known
-/// about the link.
-pub const FIRST_CHUNK_BYTES: i64 = 256 * 1024;
-/// The smallest piece: below it the requests themselves cost more than
-/// what they carry.
-pub const MIN_CHUNK_BYTES: i64 = 64 * 1024;
-/// A piece is sized to this many seconds of what the link achieved, so
-/// that a cut loses about that much work and progress is seen to move.
-pub const CHUNK_SECONDS: i64 = 5;
-/// By how much a piece shrinks after a request stood still.
-pub const STALL_SHRINK: i64 = 2;
+/// Shipped maximum piece default; the receiver enforces its accepted policy.
+pub const MAX_CHUNK_BYTES: i64 = 16 * 1024 * 1024;
 /// How long a request may go without a byte moving before it is given
 /// up and the transfer picked up again from what has arrived.
 pub const STALL_SECS: u32 = 60;
 /// The most hashes one question about missing content may list.
 pub const MAX_MISSING_HASHES: usize = 1_000;
-/// The most transfers one machine runs at once.
-pub const MAX_TRANSFERS_PER_MACHINE: u32 = 4;
+/// Shipped request-count default, also used before the first policy reply.
+pub const MAX_TRANSFERS_PER_MACHINE: u32 = 5;
 
 /// The path of the content with `hash`.
 #[must_use]
@@ -94,10 +84,21 @@ pub struct PutQuery {
 /// How much of some content has arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct BlobProgress {
-    /// How many bytes have arrived, from the first.
+    /// Total distinct durable bytes, including noncontiguous intervals.
     pub received: i64,
     /// Whether that is all of it, and its hash was found right.
     pub complete: bool,
+}
+
+/// JSON resumption facts. Ranges stay out of bounded HTTP headers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TransferStatus {
+    /// Distinct received bytes and whole-content hash verification.
+    pub progress: BlobProgress,
+    /// Sorted, coalesced half-open intervals that survived a lost acknowledgement.
+    pub ranges: Vec<orch_api_contract::threads::UploadRange>,
+    /// Accepted policy of unfinished content, or current policy for a new transfer.
+    pub policy: orch_settings_contract::transfers::TransferPolicy,
 }
 
 impl BlobProgress {
@@ -138,8 +139,8 @@ pub struct MissingReply {
 /// Why a piece of an upload is not taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ChunkRefusal {
-    /// It does not begin where the last one ended.
-    #[error("the piece begins at another place than the {received} bytes that have arrived")]
+    /// The retry changes previously acknowledged bytes.
+    #[error("the retry conflicts with content already received ({received} bytes)")]
     Offset {
         /// How many bytes have arrived.
         received: i64,
@@ -155,57 +156,35 @@ pub enum ChunkRefusal {
     PastEnd,
 }
 
-/// Takes one piece of an upload of which `received` bytes have arrived:
-/// `len` bytes, announced by `query`. Returns how much has arrived with
-/// it, and whether that is all: the hash of the whole is then still to
-/// be checked.
-pub fn accept_chunk(
-    received: i64,
+/// Checks only the piece bounds. Arrival order and unique-byte coverage are the receiver's ledger.
+pub fn validate_piece(
     query: PutQuery,
     len: i64,
     max_blob_bytes: i64,
-) -> Result<BlobProgress, ChunkRefusal> {
+    max_piece_bytes: i64,
+) -> Result<orch_api_contract::threads::UploadRange, ChunkRefusal> {
     if query.size < 0 || query.size > max_blob_bytes {
         return Err(ChunkRefusal::BlobTooLarge);
     }
-    if query.offset != received {
-        return Err(ChunkRefusal::Offset { received });
-    }
-    if len > MAX_CHUNK_BYTES {
+    if len > max_piece_bytes {
         return Err(ChunkRefusal::ChunkTooLarge);
     }
-    let end = query
-        .offset
-        .checked_add(len)
-        .filter(|end| len >= 0 && *end <= query.size);
-    let end = end.ok_or(ChunkRefusal::PastEnd)?;
-    Ok(BlobProgress {
-        received: end,
-        complete: end == query.size,
+    if query.offset < 0
+        || len < 0
+        || query
+            .offset
+            .checked_add(len)
+            .is_none_or(|end| end > query.size)
+    {
+        return Err(ChunkRefusal::PastEnd);
+    }
+    Ok(orch_api_contract::threads::UploadRange {
+        start: query.offset,
+        len,
     })
 }
 
-/// How many bytes the next piece of a transfer has, when the pieces
-/// before it moved at `bytes_per_second`; `None` before any did.
-#[must_use]
-pub fn next_chunk_bytes(bytes_per_second: Option<i64>) -> i64 {
-    match bytes_per_second {
-        Some(rate) => rate
-            .saturating_mul(CHUNK_SECONDS)
-            .clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES),
-        None => FIRST_CHUNK_BYTES,
-    }
-}
-
-/// How many bytes the next piece has after one of `last` bytes stood
-/// still and was given up.
-#[must_use]
-pub fn chunk_bytes_after_stall(last: i64) -> i64 {
-    (last / STALL_SHRINK).clamp(MIN_CHUNK_BYTES, MAX_CHUNK_BYTES)
-}
-
-/// Whether content may be uploaded for an open command of `kind`.
-#[must_use]
+/// Whether an open command may upload content.
 pub fn takes_uploads(kind: CommandKind) -> bool {
     kind.transfer() == Transfer::Upload
 }
@@ -293,120 +272,82 @@ mod tests {
     }
 
     #[test]
-    fn an_upload_goes_on_exactly_where_it_stopped() {
-        let size = 600_000;
-        let first = accept_chunk(0, PutQuery { offset: 0, size }, 262_144, BLOB_LIMIT).unwrap();
+    fn pieces_are_bounded_but_can_arrive_in_any_order() {
+        let policy = TransferPolicy::default();
+        assert!(policy.valid());
+        let size = policy.max_piece_bytes * 2;
+        for offset in [policy.max_piece_bytes, 0] {
+            assert!(
+                validate_piece(
+                    PutQuery { offset, size },
+                    policy.max_piece_bytes,
+                    BLOB_LIMIT,
+                    policy.max_piece_bytes
+                )
+                .is_ok()
+            );
+        }
         assert_eq!(
-            first,
-            BlobProgress {
-                received: 262_144,
-                complete: false
-            }
-        );
-        let again = accept_chunk(
-            first.received,
-            PutQuery { offset: 0, size },
-            262_144,
-            BLOB_LIMIT,
-        );
-        assert_eq!(again, Err(ChunkRefusal::Offset { received: 262_144 }));
-        let ahead = accept_chunk(
-            first.received,
-            PutQuery {
-                offset: 300_000,
-                size,
-            },
-            1_000,
-            BLOB_LIMIT,
-        );
-        assert_eq!(ahead, Err(ChunkRefusal::Offset { received: 262_144 }));
-        let rest = accept_chunk(
-            first.received,
-            PutQuery {
-                offset: 262_144,
-                size,
-            },
-            337_856,
-            BLOB_LIMIT,
-        )
-        .unwrap();
-        assert_eq!(
-            rest,
-            BlobProgress {
-                received: size,
-                complete: true
-            }
-        );
-    }
-
-    #[test]
-    fn a_piece_is_refused_when_it_is_too_large_or_reaches_past_the_end() {
-        let query = PutQuery {
-            offset: 0,
-            size: 10_000_000,
-        };
-        assert_eq!(
-            accept_chunk(0, query, MAX_CHUNK_BYTES + 1, BLOB_LIMIT),
+            validate_piece(
+                PutQuery { offset: 0, size },
+                policy.max_piece_bytes + 1,
+                BLOB_LIMIT,
+                policy.max_piece_bytes
+            ),
             Err(ChunkRefusal::ChunkTooLarge)
         );
-        assert!(accept_chunk(0, query, MAX_CHUNK_BYTES, BLOB_LIMIT).is_ok());
-        let small = PutQuery {
-            offset: 0,
-            size: 100,
-        };
         assert_eq!(
-            accept_chunk(0, small, 101, BLOB_LIMIT),
+            validate_piece(
+                PutQuery { offset: size, size },
+                1,
+                BLOB_LIMIT,
+                policy.max_piece_bytes
+            ),
             Err(ChunkRefusal::PastEnd)
         );
-    }
-
-    #[test]
-    fn content_larger_than_may_be_stored_is_refused_before_a_byte_is_taken() {
-        let query = PutQuery {
-            offset: 0,
-            size: BLOB_LIMIT + 1,
-        };
         assert_eq!(
-            accept_chunk(0, query, 1_000, BLOB_LIMIT),
+            validate_piece(
+                PutQuery { offset: -1, size },
+                1,
+                BLOB_LIMIT,
+                policy.max_piece_bytes
+            ),
+            Err(ChunkRefusal::PastEnd)
+        );
+        assert_eq!(
+            validate_piece(
+                PutQuery {
+                    offset: 0,
+                    size: BLOB_LIMIT + 1
+                },
+                1,
+                BLOB_LIMIT,
+                policy.max_piece_bytes
+            ),
             Err(ChunkRefusal::BlobTooLarge)
         );
-    }
-
-    #[test]
-    fn empty_content_is_whole_with_its_first_request() {
-        let done = accept_chunk(0, PutQuery { offset: 0, size: 0 }, 0, BLOB_LIMIT).unwrap();
-        assert_eq!(
-            done,
-            BlobProgress {
-                received: 0,
-                complete: true
-            }
+        assert!(
+            validate_piece(
+                PutQuery { offset: 0, size: 0 },
+                0,
+                BLOB_LIMIT,
+                policy.max_piece_bytes
+            )
+            .is_ok()
         );
     }
 
     #[test]
-    fn a_piece_is_five_seconds_of_the_link_within_its_bounds() {
-        assert_eq!(next_chunk_bytes(None), FIRST_CHUNK_BYTES);
-        assert_eq!(next_chunk_bytes(Some(93_750)), 468_750, "750 kbit/s");
-        assert_eq!(
-            next_chunk_bytes(Some(1_000)),
-            MIN_CHUNK_BYTES,
-            "a thin line"
+    fn the_shared_window_counts_bandwidth_and_round_trips_within_its_ceiling() {
+        let policy = TransferPolicy::default();
+        assert_eq!(policy.piece_bytes(0.0, 0.7), policy.initial_piece_bytes);
+        assert!(policy.piece_bytes(8.0 * 1024.0 * 1024.0, 0.7) > 4 * 1024 * 1024);
+        assert!(
+            policy.piece_bytes(8.0 * 1024.0 * 1024.0, 0.001)
+                < policy.piece_bytes(8.0 * 1024.0 * 1024.0, 0.7)
         );
-        assert_eq!(
-            next_chunk_bytes(Some(50_000_000)),
-            MAX_CHUNK_BYTES,
-            "a fast one"
-        );
-    }
-
-    #[test]
-    fn a_piece_that_stood_still_is_followed_by_a_smaller_one() {
-        assert_eq!(
-            chunk_bytes_after_stall(MAX_CHUNK_BYTES),
-            MAX_CHUNK_BYTES / 2
-        );
-        assert_eq!(chunk_bytes_after_stall(MIN_CHUNK_BYTES), MIN_CHUNK_BYTES);
+        assert!(policy.piece_bytes(1e12, 0.7) * policy.requests <= policy.max_window_bytes);
+        assert_eq!(policy.piece_bytes(1.0, 0.7), policy.min_piece_bytes);
     }
 
     #[test]

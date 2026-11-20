@@ -125,7 +125,7 @@ impl Fixture {
             self.machine,
             self.server,
             new_id(),
-            (),
+            Default::default(),
             (),
         )
         .await
@@ -315,16 +315,24 @@ async fn native_machine_deletion_reloads_current_owner_after_the_actual_authorit
                 .await
                 .map_err(DbError::from)?;
             let _ = identified.send(pid);
-            effects::apply_owned_from_machine::<Delete>(&app, tx, machine, server, new_id(), (), ())
-                .await
+            effects::apply_owned_from_machine::<Delete>(
+                &app,
+                tx,
+                machine,
+                server,
+                new_id(),
+                Default::default(),
+                (),
+            )
+            .await
         });
         let backend = tokio::time::timeout(Duration::from_secs(30), backend).await??;
         trace.mark(format!(
-            "waiting for machines FOR SHARE; worker_pid={backend} blocker_pid={blocker}"
+            "waiting for machines FOR KEY SHARE; worker_pid={backend} blocker_pid={blocker}"
         ));
         tokio::time::timeout(Duration::from_secs(30),async {
             loop {
-                let waited:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid=$1 AND $2=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM machines%FOR SHARE%')").bind(backend).bind(blocker).fetch_one(&s.world.db.pool).await?;
+                let waited:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid=$1 AND $2=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM machines%FOR KEY SHARE%')").bind(backend).bind(blocker).fetch_one(&s.world.db.pool).await?;
                 if waited {break;}
                 tokio::task::yield_now().await;
             }

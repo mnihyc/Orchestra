@@ -100,6 +100,42 @@ impl DriverError {
 /// so its methods take `&self`.
 #[async_trait]
 pub trait EnvironmentDriver: Send + Sync + 'static {
+    /// Makes an idempotent bare capability unit with provider-only egress and disposable scratch.
+    /// The ordinary unit lifecycle inspects, stops and removes it; it has no connector enrollment.
+    async fn create_work(&self, _spec: &crate::work::WorkUnitSpec) -> Result<UnitRef, DriverError> {
+        Err(DriverError::Unsupported(
+            "this placement cannot run a confined capability program".into(),
+        ))
+    }
+
+    /// Removes only this work's owned preparation graph, including a partial creation with no returned unit.
+    async fn retire_work(&self, _work: orch_types::Id, _system: &str) -> Result<(), DriverError> {
+        Err(DriverError::Unsupported(
+            "isolated program preparation cleanup".into(),
+        ))
+    }
+
+    /// Prepares an unprivileged invocation without starting it. The node journals its identity first.
+    async fn prepare_work_process(
+        &self,
+        _unit: &UnitRef,
+        _process: &crate::work::WorkProcessSpec,
+    ) -> Result<std::sync::Arc<dyn crate::work::WorkProcess>, DriverError> {
+        Err(DriverError::Unsupported("isolated program streams".into()))
+    }
+
+    /// Reads one bounded regular result file from scratch, never a path in the provider or on the host.
+    async fn read_work_file(
+        &self,
+        _unit: &UnitRef,
+        _path: &str,
+        _max_bytes: u64,
+    ) -> Result<Vec<u8>, DriverError> {
+        Err(DriverError::Unsupported(
+            "isolated program result files".into(),
+        ))
+    }
+
     /// Lists only this installation's owned objects, their sizes and their complete dependencies.
     async fn resources(
         &self,
