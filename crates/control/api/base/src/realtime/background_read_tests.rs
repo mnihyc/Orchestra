@@ -7,9 +7,7 @@ use crate::support::failure_trace::FailureTrace;
 
 use super::ephemeral;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_token;
 
 use crate::middleware::authentication::token_hash;
 
@@ -282,7 +280,7 @@ fn rules(thread: Id, provider: Id, provider_read: bool) -> Value {
 
 async fn scoped_key(rig: &Rig, thread: Id, expires: Option<Time>) -> Proof<(Id, String)> {
     let id = new_id();
-    let token = new_token(API_TOKEN_PREFIX);
+    let token = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *rig.pool.acquire().await?,
         &identity::NewApiToken {
@@ -306,11 +304,12 @@ async fn deadline(kind: &str, expire: bool) -> Proof {
     let token = match kind {
         "session" => rig.token_for(rig.ada, chrono::Duration::seconds(2)).await,
         "legacy" => {
-            let token = new_token(API_TOKEN_PREFIX);
+            let issued_key_id = new_id();
+            let token = new_api_token(issued_key_id);
             identity::create_api_token(
                 &mut *rig.pool.acquire().await?,
                 &identity::NewApiToken {
-                    id: new_id(),
+                    id: issued_key_id,
                     user_id: rig.ada,
                     name: "Legacy background reader deadline",
                     token_hash: &token_hash(&token),
@@ -695,6 +694,7 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
         "prepare scene; seed={seed} expire_origin={expire_origin}"
     ));
     let (rig, thread, calls) = world().await?;
+    let held_at = rig.clock.now();
     let (user, token) = if expire_origin {
         (
             rig.ada,
@@ -720,6 +720,14 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
         .inner
         .ephemeral
         .test_background_seed(feed.clone(), data.clone());
+    // A coordinator pass can happen before this reader registers its interest.
+    // Drive that exact interleaving without spending time on a real tick.
+    rig.server
+        .app
+        .realtime
+        .inner
+        .ephemeral
+        .retain_active_lists(&HashSet::new());
     let mut pause = if seed {
         Some(Pause::arm(thread, Cut::SocketProjected))
     } else {
@@ -778,6 +786,11 @@ async fn socket_expiry(seed: bool, expire_origin: bool) -> Proof {
     trace.mark(format!(
         "native projection paused; epoch={epoch} native_calls={observed}"
     ));
+    assert_eq!(
+        rig.clock.now(),
+        held_at,
+        "native and socket preparation do not spend the credential's held lifetime"
+    );
     rig.let_time_pass(chrono::Duration::seconds(3));
     trace.mark("advanced the held clock by three seconds and released projection");
     pause.release();

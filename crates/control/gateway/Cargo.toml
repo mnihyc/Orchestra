@@ -37,6 +37,7 @@ tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+tower.workspace = true
 url.workspace = true
 
 [dev-dependencies]

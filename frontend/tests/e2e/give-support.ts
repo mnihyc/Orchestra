@@ -60,7 +60,8 @@ export async function stage(page: Page, who: string, typed: string = who.slice(0
 
 /** Opens Share from the thread's own header. */
 export async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Share thread', exact: true }).click();
   await expect(dialog(page)).toBeVisible();
 }
 

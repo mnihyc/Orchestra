@@ -1145,6 +1145,38 @@ async fn refresh_status(world: &World, cookies: &str) -> u16 {
 }
 
 #[tokio::test]
+async fn a_browser_renews_its_session_while_its_persons_own_write_is_open() {
+    let world = World::new().await;
+    let person = world.person("reader").await;
+    let signed = world.sign_in(&person).await;
+    let mut account = world.db.pool.begin().await.unwrap();
+    orch_db::queries::transaction_guard::lock_person(&mut account, person.id)
+        .await
+        .unwrap()
+        .unwrap();
+    // The lock is deliberately kept until renewal completes. This catches a lock dependency;
+    // five seconds leaves room for normal PostgreSQL work without releasing the blocker.
+    let renewed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        refresh(&world, &signed.browser()),
+    )
+    .await
+    .expect("renewal locks its own session, independently of the person's account write");
+    let token = renewed.ok().access_token;
+    account.rollback().await.unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(orch_api_contract::auth::MeGet, &[])
+            .token(&token)
+            .send()
+            .await
+            .status,
+        200
+    );
+}
+
+#[tokio::test]
 async fn a_reset_link_ends_after_half_an_hour_and_an_unknown_one_is_gone_like_a_used_one() {
     let world = World::new().await;
     world.mail_server().await;
@@ -1234,15 +1266,27 @@ async fn anonymous_cookie_discovery_is_quiet_and_a_real_cookie_keeps_its_existin
     assert!(anonymous.ok().is_none());
     let ada = world.person("ada").await;
     let signed = world.sign_in(&ada).await;
-    let restored = world
-        .app
-        .call(AuthSessionRestore, &[])
-        .header(CSRF_HEADER, "1")
-        .header("cookie", &signed.browser())
-        .send()
-        .await
-        .ok()
-        .unwrap();
+    let cookie = signed.browser();
+    let (restored, work) = support::Statements::queries(
+        world
+            .app
+            .call(AuthSessionRestore, &[])
+            .header(CSRF_HEADER, "1")
+            .header("cookie", &cookie)
+            .send(),
+    )
+    .await;
+    let lookups: usize = work
+        .statements
+        .iter()
+        .filter(|(sql, _)| sql.contains("refresh_hash"))
+        .map(|(_, reads)| reads.statements)
+        .sum();
+    assert_eq!(
+        lookups, 1,
+        "renewing the cookie looks up the session and its person together"
+    );
+    let restored = restored.ok().unwrap();
     assert_eq!(restored.user.user.id, ada.id);
     assert!(!restored.access_token.is_empty());
     // Explicit renewal keeps the original refusal and response contract.
@@ -1291,6 +1335,19 @@ async fn a_new_access_token_is_asked_for_with_the_session_cookie_and_the_header_
         (unknown.status, unknown.code),
         (401, ErrorCode::AuthInvalidToken)
     );
+    assert!(
+        serde_json::to_value(&unknown)
+            .unwrap()
+            .get("session_end")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&expired)
+            .unwrap()
+            .get("session_end")
+            .is_none(),
+        "an access token ending does not end its live session"
+    );
 
     let reply = refresh(&world, &signed.browser()).await;
     assert_eq!(reply.status, 200);
@@ -1324,9 +1381,22 @@ async fn a_session_lasts_thirty_days_from_its_last_use() {
         world.advance(Duration::days(29));
         assert_eq!(refresh_status(&world, &signed.browser()).await, 200);
     }
+    let ended_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE refresh_hash=$1")
+            .bind(hash(&signed.session))
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
     world.advance(Duration::days(31));
-    let ended = refresh(&world, &signed.browser()).await.problem();
+    let ended = refresh(&world, &signed.browser()).await;
+    assert_eq!(ended.headers.get("cache-control").unwrap(), "no-store");
+    let ended = ended.problem();
     assert_eq!(ended.code, ErrorCode::AuthInvalidToken);
+    assert_eq!(
+        serde_json::to_value(&ended).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(ended_at)}),
+        "the session's stored end survives a later observation"
+    );
 }
 
 #[tokio::test]
@@ -1340,6 +1410,11 @@ async fn a_suspended_person_is_not_given_a_new_access_token() {
         (refused.status, refused.code),
         (401, ErrorCode::AuthSuspended)
     );
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["session_end"],
+        json!({"cause":"account_unavailable"}),
+        "no suspension time is invented from a later account edit"
+    );
     let by_token = world
         .app
         .call(MeGet, &[])
@@ -1348,6 +1423,10 @@ async fn a_suspended_person_is_not_given_a_new_access_token() {
         .await
         .problem();
     assert_eq!(by_token.code, ErrorCode::AuthSuspended);
+    assert_eq!(
+        serde_json::to_value(&by_token).unwrap()["session_end"],
+        json!({"cause":"account_unavailable"})
+    );
 }
 
 #[tokio::test]
@@ -1377,7 +1456,12 @@ async fn signing_out_revokes_the_session_clears_its_cookie_and_leaves_the_mark_o
         .await
         .problem();
     assert_eq!(token.code, ErrorCode::AuthInvalidToken);
-    assert_eq!(refresh_status(&world, &signed.browser()).await, 401);
+    let ended = refresh(&world, &signed.browser()).await.problem();
+    assert_eq!(ended.status, 401);
+    assert_eq!(
+        serde_json::to_value(&ended).unwrap()["session_end"],
+        json!({"cause":"revoked","at_if_known":orch_types::Time::new(world.now())})
+    );
     // The browser is still one their person got in from.
     let known: i64 = sqlx::query_scalar("SELECT count(*) FROM known_devices WHERE mark_hash = $1")
         .bind(hash(&signed.device))
@@ -1467,5 +1551,96 @@ async fn setup_and_administrator_creation_support_accounts_without_personal_orga
     assert_eq!(
         absent, 0,
         "irrelevant home overrides are refused without partial creation"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_or_purged_session_does_not_claim_an_end_cause_or_reveal_an_account() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    world
+        .app
+        .call(AuthLogout, &[])
+        .header("cookie", &signed.browser())
+        .header(CSRF_HEADER, "1")
+        .send()
+        .await
+        .ok();
+    sqlx::query("DELETE FROM sessions WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for cookie in [signed.browser(), "orch_session=ors_unrecognized".to_owned()] {
+        let refused = refresh(&world, &cookie).await.problem();
+        assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+        assert!(
+            serde_json::to_value(refused)
+                .unwrap()
+                .get("session_end")
+                .is_none()
+        );
+    }
+    let refused = world
+        .app
+        .call(MeGet, &[])
+        .token("oat_unrecognized")
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+    assert!(
+        serde_json::to_value(refused)
+            .unwrap()
+            .get("session_end")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn revocation_after_idle_expiry_does_not_replace_the_recorded_earlier_end() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let earlier = world.now() - Duration::minutes(2);
+    sqlx::query("UPDATE sessions SET expires_at=$2,revoked_at=$3 WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .bind(earlier)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let refused = refresh(&world, &signed.browser()).await.problem();
+    assert_eq!(
+        serde_json::to_value(refused).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(earlier)})
+    );
+}
+
+#[tokio::test]
+async fn only_an_exact_retained_browser_bearer_can_report_its_sessions_recorded_end() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let end = world.now() - Duration::minutes(1);
+    sqlx::query("UPDATE sessions SET expires_at=$2 WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .bind(end)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let reply = world
+        .app
+        .call(MeGet, &[])
+        .token(signed.token())
+        .send()
+        .await;
+    assert_eq!(reply.headers.get("cache-control").unwrap(), "no-store");
+    let refused = reply.problem();
+    assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(end)})
     );
 }
