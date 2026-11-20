@@ -553,6 +553,37 @@ pub async fn thread_environment(
     .await?)
 }
 
+/// The same native environment defaults for a page of threads.
+pub async fn thread_environments(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<Vec<(Id, ThreadEnvironment)>, DbError> {
+    if threads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(Id, Id, String, Option<Json>)> = sqlx::query_as(
+        "SELECT th.node_id,e.id,e.placement,t.spec FROM threads th
+         JOIN environments e ON e.id=th.environment_id
+         LEFT JOIN env_templates t ON t.id=e.template_id WHERE th.node_id=ANY($1)",
+    )
+    .bind(threads)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(thread, environment_id, placement, template_spec)| {
+            (
+                thread,
+                ThreadEnvironment {
+                    environment_id,
+                    placement,
+                    template_spec,
+                },
+            )
+        })
+        .collect())
+}
+
 /// What the machine a connected environment is registered on lets an exec
 /// node there offer: the `exec.offers` of the local policy the machine last
 /// reported. None while it reported none, and for an environment on no
@@ -605,6 +636,48 @@ pub async fn thread_model_parameters(
             .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
     })
     .transpose()
+}
+
+/// Composed defaults of the selected models for a page of threads. Shared provider/model
+/// pairs read their named-group layers once, before being associated with each thread.
+pub async fn thread_model_parameters_many(
+    conn: &mut Conn,
+    requested: &[(Id, String)],
+) -> Result<Vec<(Id, Json)>, DbError> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted = Json::Array(
+        requested
+            .iter()
+            .map(|(thread, model)| serde_json::json!({"thread_id":thread,"model":model}))
+            .collect(),
+    );
+    let rows:Vec<(Id,Json,Vec<String>,Json)>=sqlx::query_as(
+        "WITH selected AS MATERIALIZED (
+            SELECT w.thread_id,th.provider_id,w.model FROM jsonb_to_recordset($1) AS w(thread_id uuid,model text)
+            JOIN threads th ON th.node_id=w.thread_id
+         ), listed AS MATERIALIZED (
+            SELECT pm.provider_id,pm.model_name,pm.parameters,pm.groups,provider_option_layers(pm.provider_id,pm.groups) AS layers
+            FROM provider_models pm JOIN (SELECT DISTINCT provider_id,model FROM selected) w
+              ON w.provider_id=pm.provider_id AND w.model=pm.model_name
+         ) SELECT s.thread_id,l.parameters,l.groups,l.layers FROM selected s
+           JOIN listed l ON l.provider_id=s.provider_id AND l.model_name=s.model")
+        .bind(wanted).fetch_all(conn).await?;
+    rows.into_iter()
+        .map(|(thread, parameters, groups, layers)| {
+            let value = orch_provider_contract::models::composed_model_parameters(
+                &parameters,
+                &groups,
+                &layers,
+                None,
+            )
+            .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+            serde_json::to_value(value)
+                .map(|value| (thread, value))
+                .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))
+        })
+        .collect()
 }
 
 /// Whether the system has a mail server of its own that is switched on.

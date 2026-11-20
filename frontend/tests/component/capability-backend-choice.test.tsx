@@ -26,8 +26,9 @@ vi.mock('@/api/client', async (load) => {
     throw new Error(`Unexpected GET ${path}`);
   } } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
+vi.mock('@/api/resources',async(load)=>({...await load<object>(),readProviders:()=>Promise.resolve([provider]),providersQuery:()=>({queryKey:['suggested-providers'],queryFn:()=>Promise.resolve([provider])})}));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
 
 const HOME = id(93, 11), PROVIDER = id(93, 12);
 const provider = planProvider({ id: PROVIDER, name: 'Picture plan', owner: userRef(me(1, 'ada', 'Ada')), org_id: HOME,
@@ -51,7 +52,7 @@ afterEach(async () => { cleanup(); await setLocale('en'); });
 
 it.each([
   ['en', ['Web search provider', 'Web search route', 'Page fetch provider', 'Page fetch route']],
-  ['zh-CN', ['网页搜索提供方', '网页搜索路径', '网页抓取提供方', '网页抓取路径']],
+  ['zh-CN', ['网络搜索提供方', '网络搜索路径', '网页抓取提供方', '网页抓取路径']],
 ] as const)('names both pairs in the shared web backend form in %s', async (locale, names) => {
   await setLocale(locale);
   show(<form><CapabilityBackendChoice settingKey="agents.web_search_backend" target={{ kind: 'node', id: HOME }}
@@ -124,4 +125,33 @@ it('preserves the other capability and opaque members in a shared backend value'
   const removed = changeBackend(next, 'agents.web_search_backend', 'page_fetch', null);
   expect(selectedBackend(removed, 'page_fetch')).toBeNull();
   expect(selectedBackend(removed, 'web_search')?.offering?.offering).toBe('search-new');
+});
+
+it.each(['en','zh-CN'] as const)('fills the only eligible setup in one act without writing while its choice is read (%s)',async(locale)=>{
+  await setLocale(locale);calls.choices.mockResolvedValue({items:[candidate(false,'Free model'),candidate(true)],next_cursor:null});
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  const use=await screen.findByRole('button',{name:i18n.t('settingsSuggestions.use',{name:'Picture plan · Image model'})});
+  expect(calls.changed).not.toHaveBeenCalled();
+  await user.click(use);
+  await waitFor(()=>expect(calls.changed).toHaveBeenCalledExactlyOnceWith(backend));
+  expect(screen.getByText(i18n.t('settingsSuggestions.source'))).toBeVisible();
+});
+
+it('offers no assumed setup when more than one eligible backend exists',async()=>{
+  calls.choices.mockResolvedValue({items:[candidate(true,'First model'),candidate(true,'Second model')],next_cursor:null});
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  await screen.findByRole('option',{name:'Picture plan'});
+  await waitFor(()=>expect(calls.choices).toHaveBeenCalled());
+  expect(screen.queryByText(i18n.t('settingsSuggestions.source'))).not.toBeInTheDocument();
+  expect(calls.changed).not.toHaveBeenCalled();
+});
+
+it('finishes backend pages before claiming that one setup is the only offered option',async()=>{
+  calls.choices.mockImplementation((query)=>Promise.resolve(query.cursor===undefined?{items:[candidate(true,'First')],next_cursor:'later'}:{items:[candidate(true,'Second')],next_cursor:null}));
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  await waitFor(()=>expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({cursor:'later'})));
+  expect(screen.queryByText(i18n.t('settingsSuggestions.source'))).not.toBeInTheDocument();expect(calls.changed).not.toHaveBeenCalled();
 });
