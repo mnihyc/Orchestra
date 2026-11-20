@@ -13,7 +13,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import type { TFunction } from 'i18next';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { adminSpec } from '@/ui/AdminAct';
 import { choiceOption } from '@/i18n/choices';
@@ -42,8 +42,7 @@ import { ColourDialog } from '@/features/navigation/Colour';
 import { depthWords } from '@/features/navigation/depth';
 import { useNamedPlace } from '@/features/navigation/namedPlace';
 import { ArchiveConsequences } from '@/features/project/ReviewConsequences';
-import { DeleteDocumentDialog, MoveDocumentDialog, RenameDocumentDialog } from '@/features/navigation/DocDialogs';
-import { RecentlyDeleted } from '@/features/navigation/RecentlyDeleted';
+import { RetentionFacts } from '@/features/project/RetentionFacts';
 import { type DocPlace, type PlaceRef, placePath, type SubtreeCounts, subtreeCounts } from '@/features/navigation/places';
 import type { Node, NodeDeletePlan, Role } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
@@ -64,8 +63,8 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { Textarea } from '@/ui/Textarea';
 import { useErrorText } from '@/ui/errorText';
 import { toast } from '@/ui/Toast';
-import { MoveDialog } from '@/features/org/Move';
-import { NewThreadDialog } from '@/features/start/BindingDialog';
+
+import { DeleteDocumentDialog, MoveDialog, MoveDocumentDialog, NewThreadDialog, RecentlyDeleted, RenameDocumentDialog } from './NodeDialogBody';
 
 /** What can be asked for: each is a dialog the host draws. */
 export type NodeDialog =
@@ -121,7 +120,14 @@ export function NodeDialogHost() {
   const current = useDialogState((state) => state.current);
   const open = useDialogState((state) => state.open);
   const hide = useDialogState((state) => state.hide);
+  const { t } = useTranslation();
   if (current === null) return null;
+  return <Suspense fallback={<Dialog open={open} onOpenChange={(next) => { if (!next) hide(); }} title={t('common.loading')}><SkeletonRows rows={3} /></Dialog>}>
+    <RequestedDialog current={current} open={open} hide={hide} />
+  </Suspense>;
+}
+
+function RequestedDialog({ current, open, hide }: { current: NodeDialog; open: boolean; hide: () => void }) {
   const shared = { open, onClose: hide };
   switch (current.type) {
     case 'new-org':
@@ -553,7 +559,7 @@ function ArchiveDialog({ place, open, onClose }: DialogProps & { place: PlaceRef
   const { t } = useTranslation();
   const named = useNamedPlace(place);
   const authority = useQuery({ ...nodeQuery(place.id), enabled: open });
-  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, staleTime: 0, retry: false });
+  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, retry: false });
   const archive = useMutation({
     mutationFn: () => {
       if (plan.data === undefined || plan.isError || plan.data.blockers.length > 0) return Promise.reject(new Error(t('placeReview.newReviewRequired')));
@@ -745,6 +751,7 @@ function DeleteDialog({ place, open, onClose }: DialogProps & { place: PlaceRef 
             })}
           </p>
         )}
+        <RetentionFacts retention={plan?.retention} />
         {planned.isError && replaced === null && <ErrorAlert error={planned.error} />}
         {isDepartment && node.data?.kind === 'org' && parent !== null && (
           <div className="flex flex-col gap-3 border-t border-border pt-3">

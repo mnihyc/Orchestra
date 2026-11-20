@@ -78,7 +78,7 @@ export function permissionDenial(t: TFunction, permission: string, place: string
       return t('access.refusal.edit', { place });
     case 'doc.create':
       return t('access.refusal.createDocument', { place });
-    case 'provider.use': case 'host.use': case 'agent.use': case 'template.use': case 'mount.use': case 'mcp.use': case 'environment.use':
+    case 'provider.use': case 'provider.relay': case 'host.use': case 'agent.use': case 'template.use': case 'mount.use': case 'mcp.use': case 'environment.use':
       return t('access.refusal.use', { place });
     case 'access.manage':
       return t('access.refusal.access', { place });

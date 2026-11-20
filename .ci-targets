@@ -1,0 +1,14 @@
+fmt
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- simultaneous::a_team_opening_ --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- ten_simultaneous_openings_finish_within_half_again_the_time_of_one --nocapture
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test thread_display
+test -p orch-api-core --test agent_schedules
+test -p orch-api-core --test schedule_operation_scopes
+test -p orch-api-core --test input_schedules
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test
+web build
