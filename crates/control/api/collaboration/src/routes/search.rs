@@ -77,6 +77,7 @@ const NAME_KINDS: &[&str] = &[
     "mount",
     "machine",
     "skill",
+    "pool",
 ];
 
 /// Binds the requests that find things and what was written in them.

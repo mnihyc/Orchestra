@@ -1,0 +1,11 @@
+test -p orch-db --lib --test migration_progress --test released_migrations --test commands_in_line --test machine_names --test database_watch --test provider_keeper --test commit_epochs --test usage_commit_order --test usage_commit_scale --test usage_ledger
+test -p orch-engine --lib --test turns --test source --test approvals --test forks --test preflight --test summary_targets --test model_parameters --test call_recovery --test provider_rejection --test search_projections --test source_uniform --test environments --test ingest --test history_scale --test orch_tools --test caps --test approval_review --test initial_files --test resource_summaries --test skills --test volume_carry --test provider_on_key --test provider_fact_reads
+test -p orch-settings --test matrix_inheritance --test resolution --test writes
+test -p orch-model-contract -p orch-testkit --test provider_ceiling --test database_budget --test harness_corpus
+test -p orch-xtask
+test -p orch-engine --test goals -- helper_limits::
+test -p orch-engine --test loss -- lost_provider
+test -p orch-summarizer-model --lib --test capabilities --test prompts
+web-e2e tests/e2e/workbench-grid.spec.ts --config=playwright.profile.config.ts --project=chromium --grep "streams a running turn without a task over 50 ms" --trace off
+test -p orch-api-core --test real_connector -- a_model_call_of_a_harness_on_another_machine_passes_the_forwarder_of_a_real_connector_and_is_one_row_of_the_ledger --exact
+test -p orch-api-core --test runtime_updates -- the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_another_processor --exact
