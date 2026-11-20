@@ -1089,12 +1089,22 @@ mod tests {
 
     #[async_trait]
     impl BlobStore for RangedOnlyStore {
-        async fn put(
+        fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+            {
+                static LIFETIMES: std::sync::OnceLock<orch_blob_contract::lifetime::Lifetimes> =
+                    std::sync::OnceLock::new();
+                LIFETIMES.get_or_init(orch_blob_contract::lifetime::Lifetimes::default)
+            }
+        }
+
+        async fn put_held(
             &self,
             _hash: &Hash,
             _size: Option<i64>,
             _content: ByteStream,
+            publication: &orch_blob_contract::lifetime::Publication,
         ) -> Result<Stored, BlobError> {
+            publication.check(self.lifetimes(), _hash)?;
             Err(BlobError::Io("the source is read only".to_owned()))
         }
 
@@ -1129,7 +1139,12 @@ mod tests {
             Ok((hash == &self.hash).then_some(self.size as i64))
         }
 
-        async fn delete(&self, _hash: &Hash) -> Result<bool, BlobError> {
+        async fn delete_held(
+            &self,
+            _hash: &Hash,
+            retirement: &orch_blob_contract::lifetime::Retirement,
+        ) -> Result<bool, BlobError> {
+            retirement.check(self.lifetimes(), _hash)?;
             Err(BlobError::Io("the source is read only".to_owned()))
         }
     }

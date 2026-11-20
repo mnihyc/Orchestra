@@ -220,6 +220,7 @@ impl Write {
         }
         let expected = match kind {
             "fs.write" => serde_json::to_value(FsWrite {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: self.destination.environment,
                 path: self.destination.path.clone(),
@@ -228,6 +229,7 @@ impl Write {
                 expected_hash: Some(ExpectedHash::Absent),
             })?,
             "fs.stat" => serde_json::to_value(FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.destination.environment,
                 mount: None,
                 path: self.destination.path.clone(),
@@ -244,7 +246,7 @@ impl Write {
             .execute(&mut *conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(self.destination.machine)
             .execute(conn)
             .await
@@ -377,6 +379,7 @@ impl Write {
         self.current_issue_callers(
             conn,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,
@@ -422,6 +425,7 @@ pub(crate) async fn same_file(
                 machine,
                 SerialKey::Environment(environment),
                 &FsStat {
+                    access: orch_link_contract::commands::FsAccess::roots(),
                     environment_id: environment,
                     mount: None,
                     path: path.into(),

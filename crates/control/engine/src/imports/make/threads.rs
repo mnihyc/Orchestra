@@ -489,6 +489,7 @@ impl Tally {
             ));
         }
         HistoryReport {
+            handoff: None,
             fidelity: Fidelity::Structured,
             items_total: self.total,
             by_kind: self.kinds,
@@ -536,6 +537,7 @@ fn merged(old: HistoryReport, new: HistoryReport) -> HistoryReport {
         }
     }
     HistoryReport {
+        handoff: None,
         fidelity: old.fidelity,
         items_total: old.items_total + new.items_total,
         by_kind,
