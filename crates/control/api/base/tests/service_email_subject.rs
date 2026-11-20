@@ -8,7 +8,7 @@ use chrono::Duration;
 use orch_api_contract::auth::{MeGet, MeUpdate};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{OrgServiceAccountCreate, OrgServiceAccountCreateBody};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity;
 use orch_types::new_id;
 use serde_json::json;
@@ -32,13 +32,14 @@ async fn a_legacy_service_key_cannot_attach_email_or_partially_edit_its_profile(
         .ok()
         .into_full()
         .unwrap();
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     let hash = token_hash(&token);
     let mut conn = world.conn().await;
     identity::create_api_token(
         &mut conn,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: service.user.id,
             name: "Existing legacy service key",
             token_hash: &hash,

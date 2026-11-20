@@ -13,12 +13,13 @@ import { useTranslation } from 'react-i18next';
 import { askEmailCode, metaQuery, resendConfirmation, signIn } from '@/api/auth';
 import { ApiError, type SignInProof } from '@/api/client';
 import { EmailCode } from '@/features/auth/EmailCode';
+import { type HumanCheck, HumanCheckNotice, HumanCheckWidget, useHumanCheck } from '@/features/auth/HumanCheck';
 import { IdentityProviders } from '@/features/auth/IdentityProviders';
 import { AuthCard } from '@/features/auth/Frame';
 import { IdentityCallback } from '@/features/auth/IdentityCallback';
 import { SessionEndedNotice } from '@/features/auth/SessionEnded';
 import { recoveryCodeUsed } from '@/features/auth/recoveryCode';
-import type { AuthLoginBody, Meta } from '@/generated/api-types';
+import type { AuthEmailCodeSendBody, AuthLoginBody, HumanCheckAct, Meta } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useForm } from '@/lib/forms';
 import { formatTimeOfDay } from '@/lib/time';
@@ -28,6 +29,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input, PasswordInput } from '@/ui/Input';
 import { linkButtonClasses, linkClasses } from '@/ui/link';
 import { Tooltip } from '@/ui/Tooltip';
+
+/** What this screen asks the human check for: signing in, a code by mail, and the confirmation link again. */
+const CHECKED: readonly HumanCheckAct[] = ['sign_in', 'email_code', 'resend'];
 
 /** The proofs that were right so far, kept in this screen's memory alone. */
 interface Proofs {
@@ -69,8 +73,34 @@ export function Login({ onward, callbackError }: LoginProps) {
   const [failures, setFailures] = useState(0);
   const [adminForm, setAdminForm] = useState(false);
 
-  const enter = useMutation({ mutationFn: (body: AuthLoginBody) => signIn(body) });
-  const code = useMutation({ mutationFn: askEmailCode });
+  const check = useHumanCheck(CHECKED);
+  /** A token for the try is being asked for: the widget runs unseen. */
+  const [taking, setTaking] = useState(false);
+  const enter = useMutation({ mutationFn: ({ body, token }: { body: AuthLoginBody; token: string | null }) => (token === null ? signIn(body) : signIn(body, token)) });
+  const code = useMutation({ mutationFn: ({ body, token }: { body: AuthEmailCodeSendBody; token: string | null }) => (token === null ? askEmailCode(body) : askEmailCode(body, token)) });
+
+  /** Asks for a code by mail with a token of its own: the check is asked for each request. */
+  const sendCode = (body: AuthEmailCodeSendBody, onSuccess: () => void) => {
+    void (async () => {
+      let token: string | null;
+      setTaking(true);
+      try {
+        token = await check.take('email_code');
+      } catch {
+        // The box is not ticked, or the service cannot be reached: the screen says so, and sends nothing.
+        return;
+      } finally {
+        setTaking(false);
+      }
+      code.mutate({ body, token }, {
+        onSuccess: () => {
+          check.spend(false);
+          onSuccess();
+        },
+        onError: () => check.spend(true),
+      });
+    })();
+  };
 
   const done = () => {
     if (onward === null) void router.navigate({ to: '/', replace: true });
@@ -79,37 +109,50 @@ export function Login({ onward, callbackError }: LoginProps) {
 
   /** Tries to sign in with what is at hand, and moves to the second step when the answer asks for one. */
   const attempt = (proofs: Proofs, more: Partial<Record<SignInProof, string>> = {}, onRefused?: () => void) => {
-    if (enter.isPending || code.isPending) return;
+    if (enter.isPending || code.isPending || taking) return;
     setRefused(null);
     code.reset();
-    enter.mutate(
-      { ...proofs, ...more },
-      {
-        onSuccess: () => {
-          done();
-          if (more.recovery_code !== undefined || proofs.recovery_code !== undefined) recoveryCodeUsed();
+    void (async () => {
+      let token: string | null;
+      setTaking(true);
+      try {
+        // Every try asks for it, the second step's too: a token serves one request.
+        token = await check.take('sign_in');
+      } catch {
+        return;
+      } finally {
+        setTaking(false);
+      }
+      enter.mutate(
+        { body: { ...proofs, ...more }, token },
+        {
+          onSuccess: () => {
+            check.spend(false);
+            done();
+            if (more.recovery_code !== undefined || proofs.recovery_code !== undefined) recoveryCodeUsed();
+          },
+          onError: (error) => {
+            check.spend(true);
+            const methods = error instanceof ApiError ? error.extra('auth.second_step_required')?.methods.filter((method) => method !== 'email_code' || meta?.mail === true) : undefined;
+            const using = methods === undefined ? null : firstOf(methods);
+            if (methods === undefined || using === null) {
+              setRefused(error);
+              setFailures((count) => count + 1);
+              onRefused?.();
+              return;
+            }
+            const right: Proofs = { ...proofs, ...more };
+            setStage({ at: 'second', proofs: right, methods, using, sentAt: null });
+            // Keep the verified proof while the separate request for a code is in flight. Where the check is a box
+            // that the first try used up, the code is asked for at the button, after the box is ticked again.
+            if (using === 'email_code' && right.password !== undefined) {
+              sendCode({ login: right.login, password: right.password }, () => setStage((current) => current.at === 'second' && current.proofs === right && current.using === 'email_code'
+                ? { ...current, sentAt: Date.now() } : current));
+            }
+          },
         },
-        onError: (error) => {
-          const methods = error instanceof ApiError ? error.extra('auth.second_step_required')?.methods.filter((method) => method !== 'email_code' || meta?.mail === true) : undefined;
-          const using = methods === undefined ? null : firstOf(methods);
-          if (methods === undefined || using === null) {
-            setRefused(error);
-            setFailures((count) => count + 1);
-            onRefused?.();
-            return;
-          }
-          const right: Proofs = { ...proofs, ...more };
-          setStage({ at: 'second', proofs: right, methods, using, sentAt: null });
-          // Keep the verified proof while the separate request for a code is in flight.
-          if (using === 'email_code' && right.password !== undefined) {
-            code.mutate({ login: right.login, password: right.password }, {
-              onSuccess: () => setStage((current) => current.at === 'second' && current.proofs === right && current.using === 'email_code'
-                ? { ...current, sentAt: Date.now() } : current),
-            });
-          }
-        },
-      },
-    );
+      );
+    })();
   };
 
   const restart = () => {
@@ -145,14 +188,15 @@ export function Login({ onward, callbackError }: LoginProps) {
           callbackError={callbackError}
           adminForm={adminForm}
           onAdminForm={() => setAdminForm(true)}
-          pending={enter.isPending}
+          pending={enter.isPending || taking}
           asking={code.isPending}
           refused={refused}
           codeError={code.error}
+          check={check}
           onSubmit={(login, password, onRefused) => attempt({ login, password }, {}, onRefused)}
           onMailCode={(login) => {
             setRefused(null);
-            code.mutate({ login }, { onSuccess: () => setStage({ at: 'code', login, sentAt: Date.now() }) });
+            sendCode({ login }, () => setStage({ at: 'code', login, sentAt: Date.now() }));
           }}
         />
       )}
@@ -161,20 +205,19 @@ export function Login({ onward, callbackError }: LoginProps) {
         <EmailCode
           sentence={t('auth.code.sent')}
           sentAt={stage.sentAt}
-          pending={enter.isPending}
+          pending={enter.isPending || taking}
           resending={code.isPending}
           canResend={meta.mail}
           failures={failures}
           fieldError={isWrongProof(refused) ? t('auth.code.wrong') : undefined}
-          refusal={<Refusal error={isWrongProof(refused) ? null : refused} meta={meta} way="email_code" />}
+          refusal={<Refusal error={isWrongProof(refused) ? null : refused} meta={meta} way="email_code" check={check} />}
           sendError={code.error}
+          check={check}
           onSubmit={(typed) => attempt({ login: stage.login }, { email_code: typed })}
           onResend={() => {
             setRefused(null);
-            code.mutate({ login: stage.login }, {
-              onSuccess: () => setStage((current) => current.at === 'code' && current.login === stage.login
-                ? { ...current, sentAt: Date.now() } : current),
-            });
+            sendCode({ login: stage.login }, () => setStage((current) => current.at === 'code' && current.login === stage.login
+              ? { ...current, sentAt: Date.now() } : current));
           }}
         >
           <button type="button" className={linkButtonClasses} onClick={restart}>
@@ -187,20 +230,19 @@ export function Login({ onward, callbackError }: LoginProps) {
         <SecondStep
           stage={stage}
           meta={meta}
-          pending={enter.isPending}
+          pending={enter.isPending || taking}
           asking={code.isPending}
           refused={refused}
           codeError={code.error}
           failures={failures}
+          check={check}
           onSubmit={(value) => attempt(stage.proofs, { [stage.using]: value })}
           onUse={(using) => {
             setRefused(null);
             if (using === 'email_code' && stage.proofs.password !== undefined) {
               setStage({ ...stage, using });
-              code.mutate({ login: stage.proofs.login, password: stage.proofs.password }, {
-                onSuccess: () => setStage((current) => current.at === 'second' && current.proofs === stage.proofs && current.using === 'email_code'
-                  ? { ...current, sentAt: Date.now() } : current),
-              });
+              sendCode({ login: stage.proofs.login, password: stage.proofs.password }, () => setStage((current) => current.at === 'second' && current.proofs === stage.proofs && current.using === 'email_code'
+                ? { ...current, sentAt: Date.now() } : current));
             } else {
               code.reset();
               setStage({ ...stage, using });
@@ -229,6 +271,8 @@ interface FirstStepProps {
   asking: boolean;
   refused: unknown;
   codeError: unknown;
+  /** The human check of this screen's tries. */
+  check: HumanCheck;
   /** Signs in. `onRefused` is called when the attempt was refused, to empty the password for a new one. */
   onSubmit: (login: string, password: string, onRefused: () => void) => void;
   onMailCode: (login: string) => void;
@@ -244,6 +288,7 @@ function FirstStep({
   asking,
   refused,
   codeError,
+  check,
   onSubmit,
   onMailCode,
 }: FirstStepProps) {
@@ -301,10 +346,12 @@ function FirstStep({
           <Link to="/recover" className={`${linkClasses} self-end text-sm`}>
             {t('auth.links.forgot')}
           </Link>
-          <Refusal error={wrong ? null : refused} meta={meta} way="password" login={form.values.login.trim()} />
-          <Button type="submit" variant="primary" block pending={pending} disabled={asking} reason={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}>
+          <Refusal error={wrong ? null : refused} meta={meta} way="password" login={form.values.login.trim()} check={check} />
+          <HumanCheckWidget check={check} act="sign_in" />
+          <Button type="submit" variant="primary" block pending={pending} disabled={asking || check.waiting('sign_in')} reason={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : check.waiting('sign_in') ? t('auth.humanCheck.waiting') : undefined}>
             {t('auth.login.submit')}
           </Button>
+          <HumanCheckNotice check={check} act="sign_in" />
         </form>
       )}
 
@@ -321,10 +368,10 @@ function FirstStep({
       {showForm && meta.mail && meta.email_code_login && (
         <>
         {codeError !== null && <ErrorAlert error={codeError} />}
-        <Tooltip content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}><span className="inline-flex self-start" tabIndex={asking || pending ? 0 : undefined}><button
+        <Tooltip content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : check.waiting('email_code') ? t('auth.humanCheck.waiting') : undefined}><span className="inline-flex self-start" tabIndex={asking || pending || check.waiting('email_code') ? 0 : undefined}><button
           type="button"
           className={`${linkButtonClasses} self-start text-sm`}
-          disabled={asking || pending}
+          disabled={asking || pending || check.waiting('email_code')}
           onClick={() => {
             const name = form.values.login.trim();
             if (name === '') {
@@ -377,19 +424,20 @@ interface SecondStepProps {
   refused: unknown;
   codeError: unknown;
   failures: number;
+  check: HumanCheck;
   onSubmit: (value: string) => void;
   onUse: (method: SignInProof) => void;
 }
 
-function SecondStep({ stage, meta, pending, asking, refused, codeError, failures, onSubmit, onUse }: SecondStepProps) {
+function SecondStep({ stage, meta, pending, asking, refused, codeError, failures, check, onSubmit, onUse }: SecondStepProps) {
   const { t } = useTranslation();
   const wrong = isWrongProof(refused);
-  const refusal = <Refusal error={wrong ? null : refused} meta={meta} way={stage.using} />;
+  const refusal = <Refusal error={wrong ? null : refused} meta={meta} way={stage.using} check={check} />;
   const others = stage.methods.filter((method) => method !== stage.using && (method !== 'email_code' || meta.mail));
   const account = <p className="text-sm wrap-anywhere text-text-muted">{t('auth.second.account', { account: stage.proofs.login })}</p>;
 
   const switches = others.map((method) => (
-    <Tooltip key={method} content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}><span className="inline-flex" tabIndex={asking || pending ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={asking || pending} onClick={() => onUse(method)}>
+    <Tooltip key={method} content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : method === 'email_code' && check.waiting('email_code') ? t('auth.humanCheck.waiting') : undefined}><span className="inline-flex" tabIndex={asking || pending ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={asking || pending || (method === 'email_code' && check.waiting('email_code'))} onClick={() => onUse(method)}>
       {t(`auth.second.use.${method}`)}
     </button></span></Tooltip>
   ));
@@ -406,6 +454,7 @@ function SecondStep({ stage, meta, pending, asking, refused, codeError, failures
         fieldError={wrong ? t('auth.code.wrong') : undefined}
         refusal={refusal}
         sendError={codeError}
+        check={check}
         onSubmit={onSubmit}
         onResend={() => onUse('email_code')}
       >
@@ -422,6 +471,7 @@ function SecondStep({ stage, meta, pending, asking, refused, codeError, failures
       wrong={wrong}
       failures={failures}
       refusal={refusal}
+      check={check}
       onSubmit={onSubmit}
     >
       {switches}
@@ -436,12 +486,13 @@ interface SecretStepProps {
   /** How many attempts were refused so far; each one selects what was typed, to be typed again. */
   failures: number;
   refusal: ReactNode;
+  check: HumanCheck;
   onSubmit: (value: string) => void;
   children?: ReactNode;
 }
 
 /** The second step that is typed from something the person has or knows: the authenticator's code, or the password. */
-function SecretStep({ kind, pending, wrong, failures, refusal, onSubmit, children }: SecretStepProps) {
+function SecretStep({ kind, pending, wrong, failures, refusal, check, onSubmit, children }: SecretStepProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState('');
   const [missing, setMissing] = useState(false);
@@ -498,9 +549,11 @@ function SecretStep({ kind, pending, wrong, failures, refusal, onSubmit, childre
         />
       )}
       {refusal}
-      <Button type="submit" variant="primary" block pending={pending}>
+      <HumanCheckWidget check={check} act="sign_in" />
+      <Button type="submit" variant="primary" block pending={pending} disabled={check.waiting('sign_in')} reason={check.waiting('sign_in') ? t('auth.humanCheck.waiting') : undefined}>
         {t('auth.login.submit')}
       </Button>
+      <HumanCheckNotice check={check} act="sign_in" />
       {children !== undefined && <div className="flex flex-col items-start gap-2 text-sm">{children}</div>}
     </form>
   );
@@ -515,14 +568,23 @@ interface RefusalProps {
   way: SignInProof;
   /** The name as typed, for what a refusal offers to do about it. */
   login?: string;
+  /** The human check, which the confirmation link asked for again needs. */
+  check: HumanCheck;
 }
 
 /** What a sign-in was refused with, where that is more than "wrong": which proof is closed and until when, and what else works. */
-function Refusal({ error, meta, way, login }: RefusalProps) {
+function Refusal({ error, meta, way, login, check }: RefusalProps) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const timeZone = useAppearance((state) => state.timeZone);
-  const again = useMutation({ mutationFn: resendConfirmation });
+  const again = useMutation({ mutationFn: async (name: string) => {
+    const token = await check.take('resend');
+    try {
+      await (token === null ? resendConfirmation(name) : resendConfirmation(name, token));
+    } finally {
+      check.spend(false);
+    }
+  } });
 
   if (error === null || error === undefined) return null;
   if (!(error instanceof ApiError)) return <ErrorAlert error={error} />;
@@ -560,7 +622,7 @@ function Refusal({ error, meta, way, login }: RefusalProps) {
             <Tooltip content={again.isPending ? t('ui.unavailable.sendingEmail') : undefined}><span className="inline-flex" tabIndex={again.isPending ? 0 : undefined}><button
               type="button"
               className={linkButtonClasses}
-              disabled={again.isPending}
+              disabled={again.isPending || check.waiting('resend')}
               onClick={() => again.mutate(login)}
             >
               {t('auth.verify.resend')}
