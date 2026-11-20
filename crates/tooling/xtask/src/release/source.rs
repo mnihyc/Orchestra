@@ -168,6 +168,20 @@ pub(super) fn problems(
     }
     let mut deploy = archive::walk(&root.join("deploy"), "deploy/", &package::skipped_in_deploy)?;
     deploy.extend(archive::walk(&root.join("docs"), "docs/", &|_| false)?);
+    // The table of the deployment files carries the release's own rows, and the manifest says what it says of them.
+    let (table, said) = super::deploy_files::amended(root, &manifest.tag)?;
+    deploy.retain(|entry| entry.path != super::deploy_files::TABLE);
+    deploy.push(table);
+    if manifest.deploy_files != Some(said) {
+        found.push("the deployment files the manifest names differ from the candidate's".into());
+    }
+    if fs::read(dir.join(super::manifest::UPDATER)).ok().as_deref()
+        != fs::read(root.join("deploy").join(super::manifest::UPDATER))
+            .ok()
+            .as_deref()
+    {
+        found.push("update.sh differs from the candidate's deploy/update.sh".into());
+    }
     for name in ["LICENSE", "NOTICE"] {
         deploy.push(archive::Entry::file(name, &root.join(name))?);
     }
@@ -191,7 +205,7 @@ pub(super) fn problems(
 
 #[cfg(test)]
 mod tests {
-    use super::super::manifest::{Asset, LinkProtocol, PROJECT, SCHEMA_VERSION};
+    use super::super::manifest::{Asset, DeployFiles, LinkProtocol, PROJECT, SCHEMA_VERSION};
     use super::*;
 
     fn fixture(root: &Path, out: &Path) -> Manifest {
@@ -212,6 +226,12 @@ mod tests {
             (
                 "deploy/nginx.conf",
                 b"location /openapi/ { proxy_pass $upstream$request_uri; }".as_slice(),
+            ),
+            ("deploy/compose.yml", b"name: orch\n".as_slice()),
+            ("deploy/update.sh", b"#!/bin/sh\n".as_slice()),
+            (
+                "deploy/FILE_SETS",
+                b"format 1\ngeneration 1\nminimum 1\nset main compose.yml nginx.conf\n".as_slice(),
             ),
         ] {
             fs::write(root.join(name), bytes).unwrap();
@@ -239,6 +259,10 @@ mod tests {
             }],
             images: vec![],
             harness_builds: vec![],
+            deploy_files: Some(DeployFiles {
+                generation: 1,
+                minimum: 1,
+            }),
         };
         write_archives(root, out, &manifest, false, false);
         manifest
@@ -288,6 +312,10 @@ mod tests {
                 }
             }
         }
+        let (table, _) = super::super::deploy_files::amended(root, &manifest.tag).unwrap();
+        deploy.retain(|entry| entry.path != super::super::deploy_files::TABLE);
+        deploy.push(table);
+        fs::copy(root.join("deploy/update.sh"), out.join("update.sh")).unwrap();
         for name in ["LICENSE", "NOTICE"] {
             deploy.push(archive::Entry::file(name, &root.join(name)).unwrap());
         }

@@ -47,6 +47,10 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
   if (row.fixture === 'thread-options-allowed' || row.fixture === 'thread-options-fixed') {
     await showWorkbenchView(page, 'Parameters');
     const parameters = page.getByTestId('parameters-panel');
+    for (const row of await parameters.locator('[data-provider-interface]').all()) {
+      const heading = row.locator(':scope > details > summary');
+      if (await heading.count() > 0 && await heading.locator('..').getAttribute('open') === null) await heading.click();
+    }
     await expect(parameters.getByRole('combobox', { name: words('webSearch.title'), exact: true })).toHaveValue(words('choiceCatalog.webSearch.live.name'));
     if (row.fixture === 'thread-options-fixed') {
       await expect(parameters.getByRole('textbox', { name: 'Verbosity', exact: true })).toBeDisabled();
@@ -59,13 +63,16 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
       await page.getByRole('menuitem', { name: words('models.list.edit'), exact: true }).click();
       const editor = page.getByRole('dialog', { name: words('models.editor.title'), exact: true });
       await expect(editor.getByRole('group', { name: words('webSearch.title'), exact: true }).getByRole('switch', { name: words('webSearch.modeSwitch').replace('{{mode}}', words('choiceCatalog.webSearch.live.name')), exact: true })).toBeChecked();
+      const heading = editor.locator('summary').filter({ hasText: words('providerOptions.schemaTitle') });
+      if (await heading.locator('..').getAttribute('open') === null) await heading.click();
       const raw = editor.locator('[data-option-schema-editor] details').filter({ hasText: words('providerFields.raw') });
       if (await raw.getAttribute('open') === null) await raw.locator('summary').click();
       await expect(editor.getByRole('textbox', { name: words('providerFields.raw'), exact: true })).toHaveValue(/"native"/u);
       await expect(editor.getByRole('textbox', { name: `${words('webSearch.price')} ${words('ui.field.optional')}`, exact: true })).toHaveValue('0.01');
     }
   } else if (row.fixture === 'agent-share-ladders' || row.fixture === 'agent-access-ladders') {
-    await page.locator('[data-thread-header]').getByRole('button', { name: words('thread.header.shareThread'), exact: true }).click();
+    await page.locator('[data-thread-header] [data-thread-more]').click();
+    await page.getByRole('menuitem', { name: words('thread.header.shareThread'), exact: true }).click();
     const access = page.getByRole('dialog').filter({ has: page.locator('[data-tutorial-target="permission-page"]') });
     await access.getByRole('tab', { name: words('access.tabs.agents'), exact: true }).click();
     const recorded = access.getByRole('list', { name: words('access.agents.shared'), exact: true });
@@ -106,16 +113,16 @@ export async function openLayoutRoute(page: Page, row: LayoutRoute): Promise<voi
     await expect(page.getByRole('list', { name: words('regionalGateways.attempted') })).toContainText('Europe gateway');
   }
   if (row.fixture?.startsWith('background-')) {
-    const header = page.locator('[data-thread-header]');
+    const header = page.locator('[data-thread-header]'), notes = page.locator('[data-thread-notes]');
     await expect(header).toBeVisible();
     if (row.fixture === 'background-finished') await expect(page.locator('[data-background-wake="admitted"]')).toContainText('Build web');
     else if (row.fixture === 'background-held') await expect(page.locator('[data-background-wake="held"]')).toContainText('Build web');
     else {
-      await expect(header.locator('[data-background-task]')).toHaveCount(1);
-      await expect(header.locator('[data-background-subagent]')).toHaveCount(1);
-      await expect(header.locator('[data-background-wake-notice]')).toBeVisible();
-      await expect(header.locator('[data-background-wake-notice]')).toContainText(words(row.fixture === 'background-off' ? 'backgroundWake.nextInput' : row.fixture === 'background-lost' ? 'backgroundWake.lost' : 'backgroundWake.willWake'));
-      if (row.fixture === 'background-lost') await expect(header.locator('[data-background-task]')).toHaveAttribute('data-background-state', 'lost');
+      await expect(notes.locator('[data-background-task]')).toHaveCount(1);
+      await expect(header.locator('[data-fold="agents"]')).toHaveCount(1);
+      await expect(notes.locator('[data-background-wake-notice]')).toBeVisible();
+      await expect(notes.locator('[data-background-wake-notice]')).toContainText(words(row.fixture === 'background-off' ? 'backgroundWake.nextInput' : row.fixture === 'background-lost' ? 'backgroundWake.lost' : 'backgroundWake.willWake'));
+      if (row.fixture === 'background-lost') await expect(notes.locator('[data-background-task]')).toHaveAttribute('data-background-state', 'lost');
     }
   }
 }
