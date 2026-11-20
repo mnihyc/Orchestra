@@ -5,8 +5,8 @@ new routes. It counts every `/api/v1/` HTTP request apart from the live socket: 
 route, none during sixty seconds idle or a focus/online signal, and one profile act without list reads.
 Another person's native rename must update its visible row without HTTP. Browser time is advanced for
 the idle interval; the budgets are counts and are never scaled with machine load. Its opt-in native
-fixtures and event projections live in `tests/doubles/request-feeds.ts`. The integrator executes this
-with the ordinary serialized Playwright batch; authors do not run it separately.
+fixtures and event projections live in `tests/doubles/request-feeds.ts`. It runs with the ordinary serialized
+Playwright batch.
 
 A conversation of five thousand items in a real browser: how soon it opens at its end, how many rows
 and elements the page holds however long the conversation is, how smoothly it scrolls from the first

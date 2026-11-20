@@ -8,6 +8,7 @@ use orch_link_contract::commands::{CommandKind, FsMkdir};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileMkdirInput {
+    access: orch_link_contract::commands::FsAccess,
     environment: Id,
     generation: i32,
     machine: Id,
@@ -19,6 +20,7 @@ impl FileMkdirInput {
     /// Capture the existing native door after its path validation.
     pub fn new(env: &rows::EnvironmentRow, machine: Id, thread: Option<Id>, path: String) -> Self {
         Self {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment: env.id,
             generation: env.generation,
             machine,
@@ -27,6 +29,13 @@ impl FileMkdirInput {
             path,
         }
     }
+    /// Only the current native producer supplies the scope captured by this actual operation.
+    #[must_use]
+    pub fn with_access(mut self, access: orch_link_contract::commands::FsAccess) -> Self {
+        self.access = access;
+        self
+    }
+
     /// The actual workspace Environment.
     pub fn environment(&self) -> Id {
         self.environment
@@ -50,6 +59,7 @@ impl FileMkdirInput {
     /// The canonical native body, carrying no authority.
     pub fn command(&self) -> FsMkdir {
         FsMkdir {
+            access: self.access,
             environment_id: self.environment,
             path: self.path.clone(),
         }
@@ -114,7 +124,20 @@ impl Source for FileMkdirSource {
         input: &'a FileMkdirInput,
         env: &'a Self::Value,
     ) -> BoxFuture<'a, Result<(), Error>> {
-        Box::pin(require_write(conn, principal, env, input.thread))
+        Box::pin(async move {
+            require_write(conn, principal, env, input.thread).await?;
+            let now = orch_authz::file_reach::effective(conn, principal, env.id, Policy::default())
+                .await?;
+            let covered =
+                |asked: Option<orch_access_contract::permissions::FileReach>,
+                 held: Option<orch_access_contract::permissions::FileReach>| {
+                    asked.is_none_or(|asked| held.is_some_and(|held| held >= asked))
+                };
+            if !covered(input.access.manage, now.manage) {
+                return Err(Error::Refused);
+            }
+            Ok(())
+        })
     }
     fn locks<'a>(
         conn: &'a mut Conn,
@@ -270,6 +293,7 @@ impl FileMkdirCommand {
         self.current_issue(
             conn,
             &NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

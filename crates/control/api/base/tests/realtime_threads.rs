@@ -1439,3 +1439,86 @@ async fn a_reader_that_takes_nothing_for_the_time_allowed_is_closed_with_4408_an
     follow(&mut again, &mut mirror, |view| completed(view) == 25).await;
     assert_eq!(mirror.text, rig.texts(thread).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_accepted_stop_reaches_another_person_and_api_process_before_the_busy_thread_row_is_free()
+ {
+    let rig = Rig::new().await;
+    let second = Server::over(
+        &rig.pool,
+        &rig.clock,
+        quick(&orch_config::ServerConfig::default()),
+    )
+    .await;
+    let thread = rig.thread("An accepted Stop is shared").await;
+    let started = rig.send(thread, "Work before Stop").await;
+    rig.begin_message(thread, &started, "working-before-stop")
+        .await;
+    let (bob, token) = rig.person("bobby").await;
+    rig.give(bob, "viewer").await;
+    let before = rig.rows(thread).await;
+    let mut local = Client::signed_in(rig.server.addr, &rig.token).await;
+    let mut other = Client::signed_in(second.addr, &token).await;
+    for client in [&mut local, &mut other] {
+        client.sub(1, &feed(thread), Some(before.seq)).await;
+        client.expect("subscribed").await;
+        client.expect("presence").await;
+    }
+    let mut holder = rig.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(3),
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/threads/{thread}/interrupt",
+                rig.server.addr
+            ))
+            .bearer_auth(&rig.token)
+            .json(&json!({"turn_id":started.turn_id}))
+            .send(),
+    )
+    .await
+    .expect("Stop is answered before the row is released")
+    .unwrap();
+    assert!(answer.status().is_success());
+    let answer: serde_json::Value = answer.json().await.unwrap();
+    for client in [&mut local, &mut other] {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(realtime_support::Heard::Frame(frame)) =
+                    client.hear_within(Duration::from_millis(200)).await
+                    && frame["op"] == "event"
+                    && frame["feed"] == feed(thread)
+                    && frame["data"]["pending"] == true
+                {
+                    assert_eq!(frame["data"]["requested_at"], answer["requested_at"]);
+                    assert!(frame["data"]["version"].as_i64().unwrap() > 0);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("another reader sees accepted Stop without an ordinary sequence change");
+    }
+    assert_eq!(rig.rows(thread).await.seq, before.seq);
+    holder.commit().await.unwrap();
+    rig.finish_turn(thread, &started, "working-before-stop", "Finished")
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(realtime_support::Heard::Frame(frame)) =
+                other.hear_within(Duration::from_millis(200)).await
+                && frame["op"] == "event"
+                && frame["feed"] == feed(thread)
+                && frame["data"]["pending"] == false
+            {
+                assert_eq!(frame["data"]["idle"], true);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("a reader learns that the stopped turn has left the thread idle from the Stop event");
+}

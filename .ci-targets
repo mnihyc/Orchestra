@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-engine --test background_stop --test ingest
+test -p orch-engine --test turns -- a_harness_that_does_not_answer_an_interrupt_is_forced_after_the_wait --exact
+test -p orch-api-core --lib
+test -p orch-api-core --test realtime_threads
+web typecheck
+web lint
+web test
