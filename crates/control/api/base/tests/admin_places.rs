@@ -306,6 +306,109 @@ async fn put(
 }
 
 #[tokio::test]
+async fn a_committed_https_setting_wakes_only_its_publisher_and_a_reset_restores_the_shipped_policy()
+ {
+    use orch_db::sequences::{self, Notice};
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = orch_config::ServerConfig::default();
+    config.storage.root = directory.path().to_string_lossy().into_owned();
+    let world = World::with(config).await;
+    let c = cast(&world).await;
+    let service = world.app.app.link.certificates();
+    let policy = directory.path().join("frontend-tls/transport.include");
+    service
+        .publish_frontend_transport(&world.app.app.config)
+        .await
+        .unwrap();
+    let shipped = std::fs::read_to_string(&policy).unwrap();
+    let before = sequences::personal_revision(&mut *world.conn().await, c.root.id())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut notices = sequences::listen(&world.app.app.db, &[sequences::EDGE_CHANNEL])
+        .await
+        .unwrap();
+    let mut value = orch_settings_contract::registry::get("edge.transport")
+        .unwrap()
+        .default_value()
+        .unwrap();
+    value["session_cache_mib"] = json!(64);
+    value["early_data"] = json!(false);
+    value["http3"] = json!(false);
+    put(&world, &c.root, "edge.transport", value, None)
+        .await
+        .ok();
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), notices.next())
+            .await
+            .unwrap()
+            .unwrap(),
+        Notice::Heard {
+            channel: sequences::EDGE_CHANNEL.into(),
+            payload: String::new()
+        }
+    );
+    assert_eq!(
+        sequences::personal_revision(&mut *world.conn().await, c.root.id())
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    service
+        .publish_frontend_transport(&world.app.app.config)
+        .await
+        .unwrap();
+    let changed = std::fs::read_to_string(&policy).unwrap();
+    assert!(changed.contains("shared:orch_edge_64:64m;"));
+    assert!(changed.contains("ssl_early_data off;"));
+    assert!(changed.contains("Alt-Svc 'clear'"));
+    world
+        .app
+        .call(AdminSettingDelete, &[&"edge.transport"])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    tokio::time::timeout(std::time::Duration::from_secs(10), notices.next())
+        .await
+        .unwrap()
+        .unwrap();
+    service
+        .publish_frontend_transport(&world.app.app.config)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(policy).unwrap(), shipped);
+}
+
+#[tokio::test]
+async fn changing_the_connection_warning_default_advances_the_live_metadata_cut() {
+    let world = World::new().await;
+    let c = cast(&world).await;
+    let before = orch_db::sequences::personal_revision(&mut *world.conn().await, c.root.id())
+        .await
+        .unwrap()
+        .unwrap();
+    put(
+        &world,
+        &c.root,
+        "interface.connection_quality",
+        json!({
+            "recent_samples":5,"usual_samples":40,"slow_increase_percent":150,"slow_extra_ms":300
+        }),
+        None,
+    )
+    .await
+    .ok();
+    let after = orch_db::sequences::personal_revision(&mut *world.conn().await, c.root.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.0, before.0);
+    assert!(after.2 > before.2);
+}
+
+#[tokio::test]
 async fn the_systems_settings_say_where_each_value_comes_from_and_a_written_one_is_the_systems() {
     let world = World::new().await;
     let c = cast(&world).await;
@@ -482,6 +585,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(48),
             locked: None,
             expected_revision: None,
@@ -505,6 +609,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(48),
             locked: None,
             expected_revision: None,

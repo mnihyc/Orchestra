@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web-e2e --project=chromium --workers=1 --retries=0 --trace=off tests/performance/thread-scale.spec.ts --grep "a returning reader sees the latest answer"
