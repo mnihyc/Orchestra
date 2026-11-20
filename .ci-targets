@@ -1,0 +1,4 @@
+test -p orch-api-core --test hosts
+test -p orch-api-core --test admin_system
+test -p orch-api-core --lib -- what_a_node_reports_of_its_drivers_and_storages
+test -p orch-api-resources --lib -- routes::resources::hosts

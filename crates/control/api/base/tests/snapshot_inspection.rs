@@ -12,7 +12,7 @@ use orch_api_contract::{
     documents::{DocumentDelete, DocumentGet, DocumentVersionList, DocumentVersionListQuery},
     nodes::DeletedInspectionQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::new_id;
 use serde_json::json;
@@ -31,7 +31,8 @@ async fn stored_snapshot_inspection_keeps_its_exact_retained_scope_and_audits_on
         .send()
         .await
         .ok();
-    let key = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let key = new_api_token(issued_key_id);
     let scope: KeyScope = serde_json::from_value(json!({"rules":[{
         "target":{"kind":"document","id":id,"reach":"self"},"allow":[
             {"operation":"DocumentGet.inspect_deleted","actions":["manage"]},
@@ -42,7 +43,7 @@ async fn stored_snapshot_inspection_keeps_its_exact_retained_scope_and_audits_on
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Retained snapshot",
             token_hash: &token_hash(&key),

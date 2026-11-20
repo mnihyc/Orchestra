@@ -38,6 +38,9 @@ use orch_access_contract::roles::AdminReach;
 
 use orch_access_contract::roles::PlaceRef;
 
+use orch_api_contract::environment::HostStorage;
+use orch_api_contract::resources::{HostDriver, UnitKind};
+
 use orch_api_contract::access::Entry;
 
 use orch_api_contract::access::ResourceAccess;
@@ -63,6 +66,74 @@ use std::collections::HashSet;
 pub fn parse<T: DeserializeOwned>(word: &str) -> ApiResult<T> {
     serde_json::from_value(Json::String(word.to_owned()))
         .map_err(|_| ApiError::internal(format!("{word:?} is not a value the API knows")))
+}
+
+/// The reported drivers with their names, supported pools and runtime classes.
+pub fn drivers_of(value: &Json) -> Vec<HostDriver> {
+    let Some(reported) = value.as_object() else {
+        return Vec::new();
+    };
+    reported
+        .iter()
+        .map(|(name, descriptor)| HostDriver {
+            availability: serde_json::from_value::<
+                orch_driver_contract::descriptor::DriverDescriptor,
+            >(descriptor.clone())
+            .map(|driver| driver.availability())
+            .unwrap_or_default(),
+            name: descriptor
+                .get("name")
+                .and_then(Json::as_str)
+                .unwrap_or(name)
+                .to_owned(),
+            title: descriptor
+                .get("title")
+                .and_then(Json::as_str)
+                .unwrap_or(name)
+                .to_owned(),
+            creates: descriptor
+                .get("spec_schemas")
+                .and_then(Json::as_object)
+                .map(|schemas| {
+                    schemas
+                        .keys()
+                        .filter_map(|pool| parse::<UnitKind>(pool).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            runtimes: descriptor
+                .get("runtimes")
+                .and_then(|classes| serde_json::from_value(classes.clone()).ok())
+                .unwrap_or_default(),
+            default_runtime: descriptor
+                .get("default_runtime")
+                .and_then(Json::as_str)
+                .map(str::to_owned),
+            runtime_classes: descriptor
+                .get("runtime_classes")
+                .and_then(Json::as_array)
+                .map(|classes| {
+                    classes
+                        .iter()
+                        .filter_map(|class| class.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// The storage descriptors a host reports with all the required fields.
+pub fn storages_of(value: &Json) -> Vec<HostStorage> {
+    value
+        .as_array()
+        .map(|reported| {
+            reported
+                .iter()
+                .filter_map(|storage| serde_json::from_value(storage.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 orch_api_base::api_family_callback! {

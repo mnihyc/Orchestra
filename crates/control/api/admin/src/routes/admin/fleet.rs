@@ -99,8 +99,6 @@ use orch_api_contract::admin_sources::Source;
 
 use orch_api_contract::environment::Amounts;
 
-use orch_api_contract::environment::HostStorage;
-
 use orch_api_contract::environment::TemplateRef;
 
 use orch_api_contract::environment::WhenFull;
@@ -109,7 +107,7 @@ use orch_api_contract::operation_sources::Declaration;
 
 use orch_api_contract::resources::Host;
 
-use orch_api_contract::resources::HostDriver;
+use orch_api_base::routes::resources::view::{drivers_of, storages_of};
 
 use orch_api_contract::resources::HostRef;
 
@@ -218,75 +216,6 @@ fn amounts(value: &Json) -> Amounts {
         memory_mb: whole(value, "memory_mb").unwrap_or(0),
         disk_gb: whole(value, "disk_gb").unwrap_or(0),
     }
-}
-
-/// The drivers a host reports, by name. What cannot be read as a driver is left out: the host is not
-/// wrong about itself, this is only what the API shows.
-fn drivers_of(value: &Json) -> Vec<HostDriver> {
-    let Some(reported) = value.as_object() else {
-        return Vec::new();
-    };
-    reported
-        .iter()
-        .map(|(name, descriptor)| HostDriver {
-            availability: serde_json::from_value::<
-                orch_driver_contract::descriptor::DriverDescriptor,
-            >(descriptor.clone())
-            .map(|driver| driver.availability())
-            .unwrap_or_default(),
-            name: descriptor
-                .get("name")
-                .and_then(Json::as_str)
-                .unwrap_or(name)
-                .to_owned(),
-            title: descriptor
-                .get("title")
-                .and_then(Json::as_str)
-                .unwrap_or(name)
-                .to_owned(),
-            creates: descriptor
-                .get("spec_schemas")
-                .and_then(Json::as_object)
-                .map(|schemas| {
-                    schemas
-                        .keys()
-                        .filter_map(|pool| parse::<UnitKind>(pool).ok())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            runtimes: descriptor
-                .get("runtimes")
-                .and_then(|classes| serde_json::from_value(classes.clone()).ok())
-                .unwrap_or_default(),
-            default_runtime: descriptor
-                .get("default_runtime")
-                .and_then(Json::as_str)
-                .map(str::to_owned),
-            runtime_classes: descriptor
-                .get("runtime_classes")
-                .and_then(Json::as_array)
-                .map(|classes| {
-                    classes
-                        .iter()
-                        .filter_map(|class| class.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
-        .collect()
-}
-
-/// The storages a host reports; one that cannot be read is left out.
-fn storages_of(value: &Json) -> Vec<HostStorage> {
-    value
-        .as_array()
-        .map(|reported| {
-            reported
-                .iter()
-                .filter_map(|storage| serde_json::from_value(storage.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Every host of the system, as the Admin of all of them reads them.

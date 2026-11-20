@@ -21,6 +21,7 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { Textarea } from '@/ui/Textarea';
 import { SkillRefusal } from './Refusal';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 type Way = 'upload' | 'directory' | 'git' | 'url' | 'new';
 
@@ -143,6 +144,7 @@ export function AddVersion({ skill, onClose, onMade }: { skill: Skill; onClose: 
   const [way, setWay] = useState<Exclude<Way, 'new'>>('upload');
   const fields = useSource(way);
   const abort = useRef(new AbortController());
+  const application=useApplicationImpact({object:{kind:'skill',id:skill.id},model_id:null},true,{skill_publication:true});
   const save = useMutation({
     mutationFn: async () => createSkillVersion(skill.id, await fields.source(abort.current.signal)),
     onSuccess: (version) => {
@@ -152,7 +154,7 @@ export function AddVersion({ skill, onClose, onMade }: { skill: Skill; onClose: 
       onClose();
     },
   });
-  return <EditDialog title={t('resourceDetails.skill.addVersion', { name: skill.name })} submitLabel={t('common.add')} changed valid={fields.ready} pending={save.isPending} error={null}
+  return <EditDialog title={t('resourceDetails.skill.addVersion', { name: skill.name })} submitLabel={t('common.add')} changed valid={fields.ready&&application.ready} pending={save.isPending} error={null}
     onSave={() => save.mutate()} onClose={() => { abort.current.abort(); onClose(); }}>
     <SegmentedControl<Exclude<Way, 'new'>> label={t('resourceDetails.skill.form.from')} value={way} onValueChange={(next) => { setWay(next); save.reset(); }} startsKeyboard segments={[
       { value: 'upload', label: t('resourceDetails.skill.form.upload') },
@@ -162,6 +164,7 @@ export function AddVersion({ skill, onClose, onMade }: { skill: Skill; onClose: 
     ]} />
     <Hint id="skills" popover className="self-start" />
     <SourceFields way={way} fields={fields} disabled={save.isPending} />
+    <ApplicationPreview read={application.read}/>
     {save.error !== null && <SkillRefusal error={save.error} />}
   </EditDialog>;
 }

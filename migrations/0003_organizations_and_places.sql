@@ -72,11 +72,23 @@ CREATE INDEX nodes_everything_parent_idx ON nodes USING btree (((parent_id)::tex
 
 CREATE INDEX nodes_name_trgm_idx ON nodes USING gin (name gin_trgm_ops) WHERE (deleted_at IS NULL);
 
+-- Match navigation's numeric base-letter ordering in its supported languages.
+CREATE COLLATION orch_navigation_en (provider=icu,locale='en-u-kn-true-ks-level1',deterministic=false);
+CREATE COLLATION orch_navigation_zh (provider=icu,locale='zh-u-kn-true-ks-level1',deterministic=false);
+CREATE INDEX nodes_navigation_newest_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),id DESC);
+CREATE INDEX nodes_navigation_name_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_name_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),name COLLATE orch_navigation_zh,id);
+CREATE INDEX nodes_navigation_changed_en_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_en,id);
+CREATE INDEX nodes_navigation_changed_zh_idx ON nodes (org_id,parent_id,(CASE kind WHEN 'org' THEN 0 WHEN 'project' THEN 1 WHEN 'topic' THEN 2 ELSE 3 END),(GREATEST(activity_at,updated_at,created_at)) DESC,tree_seq DESC,name COLLATE orch_navigation_zh,id);
+
 CREATE INDEX nodes_org_id_idx ON nodes USING btree (org_id, id);
+CREATE INDEX nodes_org_parent_id_idx ON nodes USING btree (org_id, parent_id, id);
 
 CREATE INDEX nodes_org_tree_idx ON nodes USING btree (org_id, tree_seq);
 
 CREATE INDEX nodes_parent_idx ON nodes USING btree (parent_id) WHERE (deleted_at IS NULL);
+
+CREATE INDEX nodes_place_parent_idx ON nodes USING btree (parent_id, id) WHERE (kind <> 'thread' AND deleted_at IS NULL);
 
 CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DESC)
     WHERE kind = 'thread' AND deleted_at IS NULL AND archived_at IS NULL;
@@ -84,6 +96,8 @@ CREATE INDEX nodes_summary_thread_activity_idx ON nodes (updated_at DESC, id DES
 CREATE INDEX nodes_path_idx ON nodes USING gin (path);
 
 CREATE INDEX nodes_places_idx ON nodes USING btree (id) WHERE ((kind <> 'thread'::text) AND (deleted_at IS NULL));
+
+CREATE INDEX nodes_deleted_idx ON nodes (id) WHERE deleted_at IS NOT NULL;
 
 CREATE INDEX related_node_folded_name_idx ON nodes USING btree (parent_id, orch_related_name_key(translate(orch_related_tree_name(name), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text))) WHERE (deleted_at IS NULL);
 
@@ -302,6 +316,9 @@ CREATE TABLE node_summary_state (
     last_seq bigint DEFAULT 0 NOT NULL,
     failures bigint DEFAULT 0 NOT NULL,
     reason text,
+    reason_code text,
+    retry_policy jsonb CHECK (retry_policy IS NULL OR jsonb_typeof(retry_policy) = 'object'),
+    automatic_fields jsonb CHECK (automatic_fields IS NULL OR jsonb_typeof(automatic_fields) = 'object'),
     run_id uuid,
     claimed_by uuid,
     claimed_until timestamp with time zone,
