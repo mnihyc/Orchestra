@@ -1,0 +1,10 @@
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- --skip simultaneous:: --nocapture --test-threads=1
+test -p orch-db --lib --test released_migrations --test migration_progress --test commit_epochs
+test -p orch-authz --lib --test kept_holders --test external_lifetime --test outside_creation --test thread_viewer_groups
+test -p orch-access-contract --lib
+test -p orch-api-core --test thread_opening_scopes --test retained_scopes --test threads_read --test thread_history_pages --test thread_continuation_reads --test thread_display --test threads_settings --test realtime_continuations
+test -p orch-api-core --test settings
+test -p orch-engine --test thread_display_reads
+clippy
+fmt

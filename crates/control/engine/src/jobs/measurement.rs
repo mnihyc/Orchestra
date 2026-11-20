@@ -23,6 +23,133 @@ pub use preparation::{
 };
 pub use recording::SavedMeasurements;
 
+/// One resolved system duration and the public origin captured with its use.
+#[derive(Clone, Copy)]
+pub(crate) struct CapturedDuration {
+    pub seconds: i64,
+    pub policy: orch_api_contract::workspace::JobWorkPolicy,
+}
+
+/// One snapshot resolves the fixed system keys together, without a query per fact.
+async fn timing_policies(
+    conn: &mut orch_db::Conn,
+    names: &[&str],
+) -> Result<Vec<CapturedDuration>, EngineError> {
+    use orch_api_contract::workspace::{JobWorkPolicy, JobWorkPolicyKey, WorkPolicyOrigin};
+    let defs = names
+        .iter()
+        .map(|name| {
+            orch_settings_contract::registry::get(name)
+                .ok_or_else(|| EngineError::unreadable("the work policy is unavailable"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = orch_settings::Snapshot::load(
+        conn,
+        orch_settings::Place::System,
+        orch_settings::Wanted::Keys(&defs),
+    )
+    .await?;
+    defs.into_iter()
+        .map(|def| {
+            let view = snapshot.view(def);
+            let seconds = view
+                .value()
+                .and_then(Json::as_i64)
+                .ok_or_else(|| EngineError::unreadable("the work policy is not a duration"))?;
+            let key: JobWorkPolicyKey = serde_json::from_value(json!(def.key))?;
+            let origin = match view.resolved.source.scope {
+                orch_settings_contract::SourceScope::Default => WorkPolicyOrigin::Default,
+                orch_settings_contract::SourceScope::System => WorkPolicyOrigin::System,
+                _ => {
+                    return Err(EngineError::unreadable(
+                        "the work policy has no system-scoped origin",
+                    ));
+                }
+            };
+            Ok(CapturedDuration {
+                seconds,
+                policy: JobWorkPolicy {
+                    key,
+                    origin,
+                    revision: if origin == WorkPolicyOrigin::System {
+                        view.own.map(|row| row.revision)
+                    } else {
+                        None
+                    },
+                },
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn policy_setting(
+    conn: &mut orch_db::Conn,
+    key: &str,
+) -> Result<CapturedDuration, EngineError> {
+    timing_policies(conn, &[key])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| EngineError::unreadable("the work policy is unavailable"))
+}
+
+fn instant(
+    at: chrono::DateTime<chrono::Utc>,
+    seconds: i64,
+) -> orch_api_contract::workspace::JobWaitTime {
+    use orch_api_contract::workspace::JobWaitTime;
+    Duration::try_seconds(seconds)
+        .and_then(|duration| at.checked_add_signed(duration))
+        .map_or(JobWaitTime::Unreported, |at| JobWaitTime::At {
+            at: Time::new(at),
+        })
+}
+
+/// One actual native reuse assessment, kept with the reference and the accepted job metadata.
+#[must_use]
+pub(crate) fn assessed_timing(
+    row: &rows::JobRow,
+    valid: CapturedDuration,
+    observer: Option<orch_api_contract::workspace::JobWorkPolicy>,
+    until: Option<Time>,
+    at: chrono::DateTime<chrono::Utc>,
+) -> orch_api_contract::forks::MeasurementTiming {
+    use orch_api_contract::workspace::JobWaitTime;
+    orch_api_contract::forks::MeasurementTiming {
+        cache_valid_until: if row.plan["command_kind"].as_str()
+            == Some(CommandKind::NodeMountFingerprint.as_str())
+        {
+            JobWaitTime::NotApplicable
+        } else {
+            row.finished_at.map_or(JobWaitTime::Unreported, |finished| {
+                instant(finished, valid.seconds)
+            })
+        },
+        observer_grace_until: if !row.is_open() || row.cancel_requested() {
+            JobWaitTime::NotApplicable
+        } else {
+            until.map_or(JobWaitTime::Unreported, |at| JobWaitTime::At { at })
+        },
+        cache_policy: Some(valid.policy),
+        observer_policy: observer,
+        assessed_at: Time::new(at),
+    }
+}
+
+/// Current job reads use retained native facts and never consult a newer duration setting.
+#[must_use]
+pub fn timing(row: &rows::JobRow) -> Option<orch_api_contract::forks::MeasurementTiming> {
+    if row.kind != KIND {
+        return None;
+    }
+    let mut value: orch_api_contract::forks::MeasurementTiming =
+        serde_json::from_value(row.plan.get("measurement_timing")?.clone()).ok()?;
+    if !row.is_open() || row.cancel_requested() {
+        value.observer_grace_until = orch_api_contract::workspace::JobWaitTime::NotApplicable;
+    }
+    Some(value)
+}
+
 /// A count changes no data and takes no environment lifecycle lock.
 pub const KIND: &str = "measurement";
 /// Counting has no known total until the last entry is visited.
@@ -129,7 +256,8 @@ impl Engine {
     ) -> Result<PreparedObservation, EngineError> {
         let identity = request.hash()?;
         let association = source.identity()?;
-        let count = self.measure_request(request, Some(source)).await?;
+        // Keep the nested source checks out of the inventory planner's future layout.
+        let count = Box::pin(self.measure_request(request, Some(source))).await?;
         Ok(PreparedObservation::new(identity, association, count))
     }
     /// Existing fork planning consumes the same source-aware supplier; its native Source stays one definition.
@@ -232,9 +360,24 @@ impl Engine {
             ));
         }
         let now = self.inner.clock.now();
-        let keepalive = setting(&mut tx, keys::MEASUREMENT_KEEPALIVE_SECS).await?;
-        let valid = setting(&mut tx, keys::MEASUREMENT_VALID_SECS).await?;
-        let timeout = setting(&mut tx, keys::MEASUREMENT_TIMEOUT_SECS).await?;
+        let policies: [CapturedDuration; 3] = timing_policies(
+            &mut tx,
+            &[
+                keys::MEASUREMENT_KEEPALIVE_SECS,
+                keys::MEASUREMENT_VALID_SECS,
+                keys::MEASUREMENT_TIMEOUT_SECS,
+            ],
+        )
+        .await?
+        .try_into()
+        .map_err(|_| EngineError::unreadable("the measurement policies are incomplete"))?;
+        let [keepalive_policy, valid_policy, timeout_policy] = policies;
+        let (keepalive, valid, timeout) = (
+            keepalive_policy.seconds,
+            valid_policy.seconds,
+            timeout_policy.seconds,
+        );
+        let observer_until = Time::new(now + Duration::seconds(keepalive));
         let existing: Option<Id> = sqlx::query_scalar(
             "SELECT id FROM jobs WHERE kind='measurement' AND plan->>'measurement_key'=$1
             AND ($3 OR (NOT (plan ? 'cancel') AND (state IN ('queued','running') OR
@@ -294,7 +437,7 @@ impl Engine {
             row
         } else {
             let mut plan = json!({"measurement_key":identity,"machine":machine,"command_kind":kind.as_str(),"body":body,"subject":subject,
-                "keep_until":now+Duration::seconds(keepalive),"timeout_secs":timeout,"measurement_optional_home":reuse_unsupported});
+                "keep_until":observer_until,"timeout_secs":timeout,"timeout_policy":timeout_policy.policy,"measurement_optional_home":reuse_unsupported});
             if let Some(current) = &accepted
                 && let Some(origin) = current.legacy_fork()
             {
@@ -331,6 +474,17 @@ impl Engine {
                 .await?
                 .ok_or_else(|| EngineError::unreadable("the count disappeared"))?
         };
+        let timing = assessed_timing(
+            &row,
+            valid_policy,
+            Some(keepalive_policy.policy),
+            Some(observer_until),
+            now,
+        );
+        // A completed job never borrows the newer assessment made for this consumer's plan.
+        if row.is_open() {
+            rows::merge_plan(&mut tx, row.id, &json!({"measurement_timing":timing}), now).await?;
+        }
         if let Some(current) = &accepted {
             current.check(self.inner.clock.as_ref())?;
         }
@@ -372,6 +526,7 @@ impl Engine {
         Ok(Count {
             origin,
             reference: Measurement {
+                timing: Some(timing),
                 job_id: row.id,
                 measured_at: row
                     .finished_at
@@ -397,6 +552,17 @@ impl Engine {
         .fetch_all(self.db().pool())
         .await
         .map_err(orch_db::DbError::from)?;
+        let grace = if ids.is_empty() {
+            None
+        } else {
+            Some(
+                policy_setting(
+                    &mut *self.db().acquire().await?,
+                    keys::MEASUREMENT_KEEPALIVE_SECS,
+                )
+                .await?,
+            )
+        };
         for id in ids {
             let mut tx = self.db().begin().await?;
             let mut asked = false;
@@ -405,11 +571,21 @@ impl Engine {
                 .filter(|row| row.is_open() && !row.cancel_requested())
             {
                 if self.inner.live.job_is_watched(id) {
-                    let seconds = setting(&mut tx, keys::MEASUREMENT_KEEPALIVE_SECS).await?;
+                    let Some(grace) = grace else {
+                        continue;
+                    };
+                    let until = Time::new(now + Duration::seconds(grace.seconds));
+                    let timing = timing(&row).map(|mut value| {
+                        value.observer_grace_until =
+                            orch_api_contract::workspace::JobWaitTime::At { at: until };
+                        value.observer_policy = Some(grace.policy);
+                        value.assessed_at = Time::new(now);
+                        value
+                    });
                     rows::merge_plan(
                         &mut tx,
                         id,
-                        &json!({"keep_until":now+Duration::seconds(seconds)}),
+                        &json!({"keep_until":until, "measurement_timing":timing}),
                         now,
                     )
                     .await?;

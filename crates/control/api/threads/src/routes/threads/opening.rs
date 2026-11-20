@@ -10,8 +10,6 @@ use crate::middleware::requests::ApiError;
 
 use crate::middleware::requests::ApiResult;
 
-use crate::registry::Answer;
-
 use crate::registry::Ctx;
 
 use crate::registry::Registry;
@@ -20,15 +18,11 @@ use crate::routes::access::page::NameBounds;
 
 use crate::routes::settings::readers;
 
-use crate::routes::settings::readers::PreparedSettings;
-
 use crate::routes::usage::caps;
 
 use crate::routes::usage::caps::PreparedReached;
 
 use futures::future::BoxFuture;
-
-use http::header::CACHE_CONTROL;
 
 use orch_access_contract::decisions::ObjectRef;
 
@@ -54,11 +48,7 @@ use orch_api_contract::threads::ThreadLimits;
 
 use orch_api_contract::threads::ThreadOpening;
 
-use orch_api_contract::threads::ThreadOpeningGet;
-
 use orch_api_contract::threads::ThreadOpeningGetQuery;
-
-use orch_api_contract::threads::ThreadOutlineGetQuery;
 
 use orch_api_contract::threads::ThreadSyncGetQuery;
 
@@ -83,12 +73,9 @@ use orch_types::Id;
 use std::collections::BTreeMap;
 
 use std::collections::BTreeSet;
+
 pub(super) fn mount(registry: &mut Registry) {
-    registry.on_snapshot_read_with_optional_operation(
-        ThreadOpeningGet,
-        native::selected::<Opening>,
-        opening,
-    );
+    registry.on_thread_opening::<Opening>();
 }
 
 fn available<T>(result: ApiResult<T>) -> ApiResult<Option<T>> {
@@ -175,11 +162,9 @@ struct Witness {
 
 struct Prepared {
     query: ThreadOpeningGetQuery,
-    settings: PreparedSettings,
     reached: Option<PreparedReached>,
     provider: Option<crate::routes::resources::providers::PreparedProjection>,
     bounds: NameBounds,
-    offer_modes: bool,
     pending: Option<crate::input_schedules::PreparedThreadPending>,
     witness: Witness,
 }
@@ -219,7 +204,17 @@ impl native::Selected for Opening {
             let projection = thread_continuations::projection(conn, id, query.continuation_id)
                 .await?
                 .ok_or_else(ApiError::not_found)?;
-            let settings = readers::prepare_settings(conn, &principal, id).await?;
+            // An ordinary browser renders names under its native permissions. Only
+            // prepared reads consume the additional facts for a source proof.
+            let select_sources =
+                !ctx.ordinary_browser_opening() || native::prepared_read(ctx, caller);
+            let mut name_ids = if select_sources {
+                readers::setting_source_nodes(conn, &principal, id).await?
+            } else {
+                readers::readable(conn, &principal, id).await?;
+                crate::routes::settings::placed(conn, id).await?;
+                BTreeSet::new()
+            };
             let draft = available(
                 authorization::require_projected(
                     conn,
@@ -237,18 +232,20 @@ impl native::Selected for Opening {
             // These are actual current native binding rows, before descriptor/model projection.
             let mut binding = Vec::new();
             let mut binding_available = true;
-            for (kind, resource) in [
-                (ObjectKind::Agent, row.agent_id),
-                (ObjectKind::Provider, row.provider_id),
-                (ObjectKind::Environment, row.environment_id),
-            ] {
-                if let Some(resource) = resource {
-                    match targets::page_object(conn, ObjectRef { kind, id: resource }).await {
-                        Ok(target) => binding.push(target),
-                        Err(error) if matches!(error.problem.status, 404 | 410) => {
-                            binding_available = false;
+            if select_sources {
+                for (kind, resource) in [
+                    (ObjectKind::Agent, row.agent_id),
+                    (ObjectKind::Provider, row.provider_id),
+                    (ObjectKind::Environment, row.environment_id),
+                ] {
+                    if let Some(resource) = resource {
+                        match targets::page_object(conn, ObjectRef { kind, id: resource }).await {
+                            Ok(target) => binding.push(target),
+                            Err(error) if matches!(error.problem.status, 404 | 410) => {
+                                binding_available = false;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -284,100 +281,101 @@ impl native::Selected for Opening {
 
             let mut reached =
                 Some(caps::prepare_reached_for_thread(ctx, conn, &principal, id, None).await?);
-            let prepared_caps = reached.as_ref().ok_or_else(ApiError::not_found)?;
-            let mut cap_sources = Vec::new();
-            for home in prepared_caps.homes() {
-                cap_sources.push(match home {
-                    Home::Node(node) => targets::node(conn, node).await?,
-                    Home::Provider { provider, .. } => {
-                        targets::page_object(
-                            conn,
-                            ObjectRef {
-                                kind: ObjectKind::Provider,
-                                id: provider,
-                            },
-                        )
-                        .await?
-                    }
-                    Home::System => targets::system(),
-                });
-            }
-            cap_sources.extend(
-                crate::routes::access::operations::group_targets(
-                    conn,
-                    &prepared_caps
-                        .names
-                        .groups
-                        .iter()
-                        .copied()
-                        .collect::<Vec<_>>(),
-                )
-                .await?,
-            );
-            if permitted(ctx, &base, caller, Source::OpeningControls, &cap_sources)? {
-                controls.extend(cap_sources);
-            } else {
-                // A limits pane is complete or unavailable; a key does not silently remove a cap.
-                reached = None;
-            }
-
-            let mut name_ids: BTreeSet<_> = settings.source_nodes().into_iter().collect();
-            if let Some(provider) = &provider {
-                name_ids.extend(provider.name_sources().nodes);
-            }
-            if let Some(reached) = &reached {
-                name_ids.extend(&reached.names.nodes);
-                for target in &controls {
-                    name_ids.extend(target.node_ancestors.iter().filter_map(|node| node.id));
-                }
-            }
-            let graph = orch_authz::engine::Graph::load(
-                conn,
-                &name_ids.iter().copied().collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(ApiError::internal)?;
-            let paths: BTreeSet<_> = name_ids
-                .iter()
-                .flat_map(|id| {
-                    graph
-                        .get(*id)
-                        .into_iter()
-                        .flat_map(|node| node.path.iter().copied())
-                })
-                .collect();
             let mut bounds = NameBounds {
                 limited: native::modern(caller),
                 ..Default::default()
             };
             let mut names = Vec::new();
-            for node in paths {
-                let Some(target) =
-                    orch_engine::operation_scope::targets::from_node_identity(&graph, node)
-                else {
-                    continue;
-                };
-                if !matches!(
-                    target.object.kind,
-                    KeyTargetKind::Object(
-                        ObjectKind::Org
-                            | ObjectKind::Project
-                            | ObjectKind::Topic
-                            | ObjectKind::Thread
-                            | ObjectKind::Document
-                    )
-                ) {
-                    continue;
+            if select_sources {
+                let prepared_caps = reached.as_ref().ok_or_else(ApiError::not_found)?;
+                let mut cap_sources = Vec::new();
+                for home in prepared_caps.homes() {
+                    cap_sources.push(match home {
+                        Home::Node(node) => targets::node(conn, node).await?,
+                        Home::Provider { provider, .. } => {
+                            targets::page_object(
+                                conn,
+                                ObjectRef {
+                                    kind: ObjectKind::Provider,
+                                    id: provider,
+                                },
+                            )
+                            .await?
+                        }
+                        Home::System => targets::system(),
+                    });
                 }
-                if permitted(
-                    ctx,
-                    &base,
-                    caller,
-                    Source::OpeningNames,
-                    std::slice::from_ref(&target),
-                )? {
-                    bounds.nodes.insert(node);
-                    names.push(target);
+                cap_sources.extend(
+                    crate::routes::access::operations::group_targets(
+                        conn,
+                        &prepared_caps
+                            .names
+                            .groups
+                            .iter()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?,
+                );
+                if permitted(ctx, &base, caller, Source::OpeningControls, &cap_sources)? {
+                    controls.extend(cap_sources);
+                } else {
+                    // A limits pane is complete or unavailable; a key does not silently remove a cap.
+                    reached = None;
+                }
+
+                if let Some(provider) = &provider {
+                    name_ids.extend(provider.name_sources().nodes);
+                }
+                if let Some(reached) = &reached {
+                    name_ids.extend(&reached.names.nodes);
+                    for target in &controls {
+                        name_ids.extend(target.node_ancestors.iter().filter_map(|node| node.id));
+                    }
+                }
+                let graph = orch_authz::engine::Graph::load(
+                    conn,
+                    &name_ids.iter().copied().collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(ApiError::internal)?;
+                let paths: BTreeSet<_> = name_ids
+                    .iter()
+                    .flat_map(|id| {
+                        graph
+                            .get(*id)
+                            .into_iter()
+                            .flat_map(|node| node.path.iter().copied())
+                    })
+                    .collect();
+                for node in paths {
+                    let Some(target) =
+                        orch_engine::operation_scope::targets::from_node_identity(&graph, node)
+                    else {
+                        continue;
+                    };
+                    if !matches!(
+                        target.object.kind,
+                        KeyTargetKind::Object(
+                            ObjectKind::Org
+                                | ObjectKind::Project
+                                | ObjectKind::Topic
+                                | ObjectKind::Thread
+                                | ObjectKind::Document
+                        )
+                    ) {
+                        continue;
+                    }
+                    if permitted(
+                        ctx,
+                        &base,
+                        caller,
+                        Source::OpeningNames,
+                        std::slice::from_ref(&target),
+                    )? {
+                        bounds.nodes.insert(node);
+                        names.push(target);
+                    }
                 }
             }
             let mut control_ids = controls
@@ -443,11 +441,9 @@ impl native::Selected for Opening {
             Ok((
                 Prepared {
                     query: query.clone(),
-                    settings,
                     reached,
                     provider,
                     bounds,
-                    offer_modes,
                     pending,
                     witness,
                 },
@@ -472,7 +468,16 @@ impl native::Selected for Opening {
     ) -> BoxFuture<'a, ApiResult<ThreadOpening>> {
         Box::pin(async move {
             let query = &value.query;
-            let sync = super::read::sync_in(
+            let configured = orch_settings::get::<u32>(
+                conn,
+                orch_settings::Place::Node(ctx.id("id")?),
+                orch_settings_contract::registry::keys::THREADS_OPENING_ITEMS,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or(40);
+            let limit = super::read::limit_of(query.limit, configured, u32::MAX)?;
+            let sync = super::read::sync_window_in(
                 ctx,
                 conn,
                 ThreadSyncGetQuery {
@@ -481,17 +486,7 @@ impl native::Selected for Opening {
                     projection_revision: query.projection_revision,
                     ..Default::default()
                 },
-            )
-            .await?;
-            let outline = super::read::outline_in(
-                ctx,
-                conn,
-                ThreadOutlineGetQuery {
-                    limit: query.limit,
-                    continuation_id: query.continuation_id,
-                    projection_revision: query.projection_revision,
-                    ..Default::default()
-                },
+                limit,
             )
             .await?;
             let draft = if value.witness.draft {
@@ -499,7 +494,26 @@ impl native::Selected for Opening {
             } else {
                 None
             };
-            let parameters = if value.witness.parameters {
+            let visible_turns: BTreeSet<_> = sync
+                .items
+                .iter()
+                .filter_map(|item| item.turn_id)
+                .chain(sync.thread.current_turn_id)
+                .collect();
+            let shown_models = sync
+                .turns
+                .iter()
+                .filter(|turn| visible_turns.contains(&turn.id))
+                .flat_map(|turn| {
+                    std::iter::once(turn.model.clone()).chain(
+                        turn.usage_detail
+                            .as_ref()
+                            .and_then(|detail| detail.effective_model.clone())
+                            .filter(|model| !model.is_empty()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut parameters = if value.witness.parameters {
                 available(
                     super::parameters::parameters_in(
                         ctx,
@@ -511,6 +525,7 @@ impl native::Selected for Opening {
                         } else {
                             super::parameters::ProviderView::Native
                         },
+                        super::parameters::ParameterProjection::FirstScreen(&shown_models),
                     )
                     .await,
                 )?
@@ -539,15 +554,14 @@ impl native::Selected for Opening {
                 }
                 None => None,
             };
-            let settings = readers::show_settings_with_controls(
-                ctx,
-                conn,
-                principal,
-                &value.settings,
-                &value.bounds,
-                value.offer_modes,
-            )
-            .await?;
+            if let Some(parameters) = &mut parameters {
+                for option in &mut parameters.model.options {
+                    option.option_constraints.clear();
+                    option.parameters.request_options = None;
+                    option.parameters.offered = None;
+                }
+                parameters.model.options_partial = true;
+            }
             let follows_active = sync
                 .projection
                 .as_ref()
@@ -564,7 +578,7 @@ impl native::Selected for Opening {
                             };
                             let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
                             orch_api_contract::nodes::OverviewPart::Failed {
-                                problem,
+                                problem: Box::new(problem),
                                 retry_after,
                             }
                         }
@@ -585,7 +599,7 @@ impl native::Selected for Opening {
                         )
                         .into_parts_for(&ctx.request_id);
                         orch_api_contract::nodes::OverviewPart::Failed {
-                            problem,
+                            problem: Box::new(problem),
                             retry_after,
                         }
                     }
@@ -594,12 +608,25 @@ impl native::Selected for Opening {
                 None
             };
             Ok(ThreadOpening {
+                screen: match super::parameters::screen_facts_in(conn, sync.thread.base.id).await {
+                    Ok(data) => orch_api_contract::nodes::OverviewPart::Ready { data },
+                    Err(error) => {
+                        let error = if native::modern(principal.caller()) {
+                            crate::middleware::authorization::problem_without_content(error)
+                        } else {
+                            error
+                        };
+                        let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
+                        orch_api_contract::nodes::OverviewPart::Failed {
+                            problem: Box::new(problem),
+                            retry_after,
+                        }
+                    }
+                },
                 sync,
                 draft,
                 parameters,
                 limits,
-                settings,
-                outline,
                 gateway,
                 pending_agent_schedules,
             })
@@ -616,15 +643,4 @@ impl native::Selected for Opening {
     ) -> BoxFuture<'a, ApiResult<bool>> {
         Box::pin(async move { Ok(opened.witness == fresh.witness) })
     }
-}
-
-async fn opening(
-    ctx: Ctx,
-    query: ThreadOpeningGetQuery,
-    (): (),
-) -> ApiResult<Answer<ThreadOpening>> {
-    Ok(
-        Answer::from(native::selected_read::<Opening>(ctx, query, ()).await?)
-            .header(CACHE_CONTROL, crate::sign_in::NOT_KEPT),
-    )
 }

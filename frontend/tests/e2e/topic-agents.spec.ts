@@ -24,7 +24,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(main.getByRole('heading', { name: 'Fix login', level: 1, exact: true })).toBeVisible();
     expect(reads.filter((path) => path.endsWith('/binding/options'))).toEqual([]);
     const optionsReply = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname.endsWith(`/nodes/${ACME.fixLogin}/binding/options`));
-    await main.getByRole('tab', { name: locale === 'en' ? 'Agents' : '代理', exact: true }).click();
+    await main.getByRole('tab', { name: locale === 'en' ? 'Agents' : '智能体', exact: true }).click();
     expect((await optionsReply).ok()).toBe(true);
     const panel = main.locator('[data-topic-agents]');
     await expect(panel).toBeVisible();
@@ -32,7 +32,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(codex).toHaveCount(1);
     await expect(codex).toHaveAttribute('href', `/resources/agents/${RUNS_ON.codex}`);
     await expect(panel.getByRole('link', { name: 'Claude Code', exact: true })).toHaveCount(0);
-    await expect(panel.getByText(locale === 'en' ? 'Default agent' : '默认代理', { exact: true })).toHaveCount(1);
+    await expect(panel.getByText(locale === 'en' ? 'Default agent' : '默认智能体', { exact: true })).toHaveCount(1);
     await expect(panel.getByText(locale === 'en' ? 'Default provider' : '默认提供方', { exact: true })).toHaveCount(1);
     await expect(panel.getByRole('link', { name: 'OpenAI key', exact: true })).toHaveAttribute('href', `/resources/providers/${RUNS_ON.openAiKey}`);
     await expect(panel.getByText('GPT-5.4', { exact: true })).toBeVisible();
