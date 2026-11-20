@@ -1,0 +1,4 @@
+test -p orch-api-core --test provider_managed
+test -p orch-api-core --test provider_creation_scopes
+test -p orch-api-core --test machine_registration
+test -p orch-api-core --test providers

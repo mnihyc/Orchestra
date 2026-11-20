@@ -165,7 +165,7 @@ for (const kind of scopes) it.each(locales)(`${kind} keeps sent rows visible dur
   expect(screen.getByRole('link', { name: message.title }).closest('.opacity-60')).not.toBeNull();
   calls.list.mockResolvedValue({ ...page, items: [summary(kind)] });
   await userEvent.click(retry); await waitFor(() => expect(calls.list).toHaveBeenCalledTimes(3));
-  expect(screen.getByRole('link', { name: message.title }).closest('.opacity-60')).toBeNull();
+  await waitFor(() => expect(screen.getByRole('link', { name: message.title }).closest('.opacity-60')).toBeNull());
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
 

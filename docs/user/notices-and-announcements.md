@@ -8,6 +8,8 @@ summary: Read Inbox notices, choose notification delivery and send announcements
 
 # Read notices and send announcements
 
+Your Inbox holds the notices addressed to you. An announcement is a message to the members of a place that can also wake agents. This page shows how to read the Inbox, send announcements and follow the result.
+
 ## Read your Inbox
 
 Inbox keeps what Orch told you. Choose All, Unread or Mentions, and group by
@@ -50,11 +52,9 @@ These choices affect agent work, so review the audience and delivery together.
 
 Agents also choose `wake_idle: true` explicitly for `announce` or a thread-targeted
 `send_message`; omission means false. A true request where the receiving topic
-forbids wake is refused and names `broadcast.wake_idle`. A send across several
+forbids wake is refused, and the refusal names the setting that forbids it. A send across several
 topics is refused as a whole if any receiving topic forbids the requested wake.
-The shipped hourly limits are 12 announcements (`broadcast.rate_per_hour`) and
-60 individual thread messages (`broadcast.thread_messages_per_hour`), separately
-for each sending thread. Zero forbids that kind of send. Follower-only milestones
+Each sending thread can send 12 announcements and 60 messages to single threads an hour. An administrator can change both limits (see the [settings reference](settings-reference.md)). A limit of zero forbids that kind of send. Follower-only milestones
 use neither limit.
 
 ## Follow the result
