@@ -212,6 +212,8 @@ impl Engine {
             (resolution, stored)
         };
         let plan = Plan {
+            fallback_origin: broadcast.fallback_origin.clone(),
+            fallback_source_node: broadcast.fallback_source_node,
             category: AnnouncementCategory::Notice,
             title: String::new(),
             body: with_files(&text, &carried),

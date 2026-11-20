@@ -58,13 +58,8 @@ pub const UNAVAILABLE: &str = "unavailable";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
-    /// The provider whose access is checked when the step acts.
-    pub provider_id: Id,
-    /// The model's routing name; empty when an exact capability route is selected instead.
-    pub model: String,
-    /// Exact service or delegated route from the common capability contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<crate::capabilities::BackendRef>,
+    /// The same exact resource or pool intent as the ordinary consuming control.
+    pub target: crate::pools::Target,
     /// An alternative agent profile where a different harness is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<Id>,
@@ -74,6 +69,68 @@ pub struct Candidate {
     /// Embedding dimensions, required to match the active generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
+}
+
+impl Candidate {
+    /// One explicitly named generation model, in the shared exact target shape.
+    pub fn model(provider: Id, model: impl Into<String>) -> Self {
+        Self {
+            target: crate::pools::Target::Single {
+                resource: crate::pools::Leaf::Model {
+                    backend: crate::capabilities::BackendRef {
+                        route: "generation.model".into(),
+                        offering: Some(crate::capabilities::OfferingRef {
+                            provider,
+                            offering: model.into(),
+                        }),
+                        config: empty_params(),
+                        ..Default::default()
+                    },
+                },
+            },
+            agent_id: None,
+            params: empty_params(),
+            dimensions: None,
+        }
+    }
+    /// An authored exact backend, before native current-source and Use checks.
+    pub fn backend(&self) -> Option<&crate::capabilities::BackendRef> {
+        match &self.target {
+            crate::pools::Target::Single {
+                resource: crate::pools::Leaf::Model { backend },
+            } => Some(backend),
+            _ => None,
+        }
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        use crate::pools::{Kind, Leaf, Target};
+        let kind = match &self.target {
+            Target::Single { resource } => resource.kind(),
+            Target::Pool { kind, .. } => *kind,
+        };
+        if !matches!(kind, Kind::Model | Kind::Provider) {
+            return Err("choose a model, provider or a pool of that kind".into());
+        }
+        self.target.validate(kind)?;
+        if !self.params.is_object() || self.dimensions == Some(0) {
+            return Err(
+                "a candidate needs object parameters and positive dimensions when supplied".into(),
+            );
+        }
+        if let Target::Single {
+            resource: Leaf::Model { backend },
+        } = &self.target
+            && backend.route != "generation.model"
+            && (self.agent_id.is_some() || self.dimensions.is_some())
+        {
+            return Err(
+                "a capability route does not select a thread profile or embedding dimensions"
+                    .into(),
+            );
+        }
+        requested_effort(&self.params).map_err(str::to_owned)?;
+        Ok(())
+    }
 }
 
 fn empty_params() -> Json {
@@ -291,25 +348,7 @@ pub fn validate(value: &Json) -> Result<Vec<Rule>, String> {
                     return Err("continue needs positive times".to_owned());
                 }
                 Step::Failover { candidate } => {
-                    if !candidate.params.is_object() || candidate.dimensions == Some(0) {
-                        return Err("a candidate needs object parameters and positive dimensions when supplied".into());
-                    }
-                    if let Some(route) = &candidate.route {
-                        if !candidate.model.is_empty()
-                            || candidate.agent_id.is_some()
-                            || candidate.dimensions.is_some()
-                            || route.route.trim().is_empty()
-                            || !route.offering.as_ref().is_some_and(|offering| {
-                                offering.provider == candidate.provider_id
-                                    && !offering.offering.trim().is_empty()
-                            })
-                        {
-                            return Err("a route candidate names one exact provider offering without model, profile or dimensions".into());
-                        }
-                    } else if candidate.model.trim().is_empty() {
-                        return Err("a model candidate names its routing model".into());
-                    }
-                    requested_effort(&candidate.params).map_err(str::to_owned)?;
+                    candidate.validate()?;
                 }
                 _ => {}
             }
@@ -318,15 +357,27 @@ pub fn validate(value: &Json) -> Result<Vec<Rule>, String> {
     Ok(rules)
 }
 
+/// Where neutral or documented protocol options name an effort.
+const EFFORT_PATHS: [&str; 5] = [
+    "/effort",
+    "/reasoning/effort",
+    "/reasoning_effort",
+    "/output_config/effort",
+    "/generation_config/thinking_level",
+];
+
+/// Whether the options name an effort at all, even to leave it to the model (`null`).
+#[must_use]
+pub fn names_effort(params: &Json) -> bool {
+    EFFORT_PATHS
+        .iter()
+        .any(|path| params.pointer(path).is_some())
+}
+
 /// The one effort requested by neutral or documented protocol options, checked before current use.
 pub fn requested_effort(params: &Json) -> Result<Option<&str>, &'static str> {
     let mut selected: Option<Option<&str>> = None;
-    for path in [
-        "/effort",
-        "/reasoning/effort",
-        "/reasoning_effort",
-        "/output_config/effort",
-    ] {
+    for path in EFFORT_PATHS {
         let Some(value) = params.pointer(path) else {
             continue;
         };
@@ -453,14 +504,31 @@ pub fn retry_delay(step: &Step, attempt: u32, vendor_secs: Option<i64>) -> i64 {
 /// Vectors may fail over only when their model identity and dimensions remain comparable.
 #[must_use]
 pub fn compatible_embedding(candidate: &Candidate, model: &str, dimensions: u32) -> bool {
-    candidate.route.is_none()
-        && candidate.model == model
-        && candidate.dimensions == Some(dimensions)
+    candidate.backend().is_some_and(|backend| {
+        backend.route == "generation.model"
+            && backend
+                .offering
+                .as_ref()
+                .is_some_and(|offering| offering.offering == model)
+    }) && candidate.dimensions == Some(dimensions)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_recovery_destination_uses_the_same_typed_target_as_a_single_resource_or_pool() {
+        let id = orch_types::new_id();
+        let rules = json!([{"id":"chosen-pool","when":{},"steps":[{"type":"failover","candidate":{"target":{"type":"pool","id":id,"kind":"model"},"params":{}}}]}]);
+        assert!(validate(&rules).is_ok());
+        let old = json!({"provider_id":id,"model":"an-old-shape","params":{}});
+        assert!(serde_json::from_value::<Candidate>(old).is_err());
+        let mut wrong = rules;
+        wrong[0]["steps"][0]["candidate"]["target"]["kind"] = json!("host");
+        assert!(validate(&wrong).is_err());
+    }
 
     #[test]
     fn an_access_rule_keeps_a_specific_credit_program_refusal_in_its_family() {
@@ -705,23 +773,21 @@ mod route_candidates {
         );
     }
     #[test]
-    fn a_route_candidate_is_exact_and_cannot_also_name_a_generation_model_or_another_account() {
+    fn a_route_candidate_keeps_one_canonical_account_offering_and_configuration() {
         let provider = orch_types::new_id();
-        let candidate = json!({"provider_id":provider,"model":"","route":{"route":"lookup.service-api","offering":{"provider":provider,"offering":"public-search"}},"params":{}});
+        let candidate = serde_json::json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"lookup.service-api","offering":{"provider":provider,"offering":"public-search"},"config":{"fixture":"retained"}}}},"params":{}});
         let rules = |candidate: Json| json!([{"id":"explicit-fallback","when":{"kind":"unavailable","purpose":"web_search"},"steps":[{"type":"failover","candidate":candidate},{"type":"wait","until":"person"}]}]);
         assert!(validate(&rules(candidate.clone())).is_ok());
         let mut ambiguous = candidate.clone();
         ambiguous["model"] = json!("another-model");
         assert!(validate(&rules(ambiguous)).is_err());
-        let mut mismatched = candidate.clone();
-        mismatched["route"]["offering"]["provider"] = json!(orch_types::new_id());
-        assert!(validate(&rules(mismatched)).is_err());
-        let mut inferred = candidate;
-        inferred["route"]["offering"] = Json::Null;
+        let mut inferred = candidate.clone();
+        inferred["target"]["resource"]["backend"]["offering"] = Json::Null;
         assert!(validate(&rules(inferred)).is_err());
-        let old = json!({"provider_id":provider,"model":"opaque","params":{}});
-        let old: Candidate = serde_json::from_value(old).unwrap();
-        assert!(old.route.is_none());
-        assert!(serde_json::to_value(old).unwrap().get("route").is_none());
+        let decoded: Candidate = serde_json::from_value(candidate.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["target"],
+            candidate["target"]
+        );
     }
 }
