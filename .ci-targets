@@ -1,0 +1,9 @@
+test -p orch-db --lib --test migration_progress --test released_migrations --test commands_in_line --test machine_names --test database_watch --test provider_keeper --test commit_epochs --test usage_commit_order --test usage_commit_scale --test usage_ledger
+test -p orch-engine --lib --test turns --test source --test approvals --test forks --test preflight --test summary_targets --test model_parameters --test call_recovery --test provider_rejection --test search_projections --test source_uniform --test environments --test ingest --test history_scale --test orch_tools --test caps --test approval_review --test initial_files --test resource_summaries --test skills --test volume_carry
+test -p orch-settings --test matrix_inheritance --test resolution --test writes
+test -p orch-model-contract --test provider_ceiling
+test -p orch-testkit --test database_budget --test harness_corpus
+test -p orch-xtask
+test -p orch-engine --test goals -- helper_limits::
+test -p orch-engine --test loss -- lost_provider
+test -p orch-summarizer-model --lib --test capabilities --test prompts

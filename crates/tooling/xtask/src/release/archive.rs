@@ -270,6 +270,30 @@ pub fn list_tar_gz(
     Ok((names, content))
 }
 
+/// The files of a gzip-compressed tar archive whose path begins with `prefix`, with their bytes.
+pub fn read_tar_gz_files(
+    path: &Path,
+    prefix: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>, ReleaseError> {
+    use std::io::Read;
+    let io = |source| ReleaseError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let mut archive = tar::Archive::new(GzDecoder::new(fs::File::open(path).map_err(io)?));
+    let mut files = std::collections::BTreeMap::new();
+    for entry in archive.entries().map_err(io)? {
+        let mut entry = entry.map_err(io)?;
+        let name = entry.path().map_err(io)?.to_string_lossy().into_owned();
+        if name.starts_with(prefix) && entry.header().entry_type().is_file() {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(io)?;
+            files.insert(name, bytes);
+        }
+    }
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

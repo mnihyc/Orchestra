@@ -39,7 +39,7 @@ describe('mounts in a plan', () => {
       bytes_to_upload: 0, bytes_to_download: 0, missing: { count: 0, bytes: 0, sample: [] }, path_map: { from: '/workspace', to: '/workspace' }, home: null, file_states: null,
       private_views: [{ mount: reference, measured: true, file_count: 1, total_bytes: 30, carried: true, left_because: null }] };
     expect(filesLines(files, 'en', t).find((line) => line.id === 'view-mount-1')?.text).toBe('Private changes in dataset go along');
-    expect(filesLines(files, 'en', t).find((line) => line.id === 'view-size-mount-1')?.text).toContain('1 files, 30 B');
+    expect(filesLines(files, 'en', t).find((line) => line.id === 'view-size-mount-1')?.text).toContain('1 file, 30 B');
     files.private_views[0] = { ...files.private_views[0]!, carried: false, left_because: 'other_mode' };
     expect(filesLines(files, 'en', t).find((line) => line.id === 'view-mount-1')).toMatchObject({ tone: 'warning', text: 'Private changes in dataset stay behind: the target attaches this mount in another mode' });
     files.private_views[0] = { ...files.private_views[0], measured: false, file_count: 0, total_bytes: 0 };
@@ -52,7 +52,7 @@ describe('mounts in a plan', () => {
       home: null, private_views: [], file_states: { roots: 2, objects: 3, total_bytes: 4096, journals: 1, complete: true } };
     expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'plain', text: 'Recorded file states always go along: 2 saved roots, 4 KiB' });
     files.file_states = { ...files.file_states!, complete: false };
-    expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'warning', text: 'The recorded file-state store could not be measured; this move cannot start' });
+    expect(filesLines(files, 'en', t).find((line) => line.id === 'file-states')).toMatchObject({ tone: 'warning', text: 'Orch could not measure the saved file history this move needs, so it cannot start. Try again in a moment.' });
   });
 
   it('says what a copy carries, where it lands and what the person still has to choose there', () => {

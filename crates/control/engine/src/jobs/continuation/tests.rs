@@ -91,6 +91,7 @@ impl crate::commands::Commands for RecoveredCommands {
     ) -> Result<Option<crate::commands::RetainedCommand>, crate::commands::CommandsError> {
         if id == self.expected.id {
             Ok(Some(crate::commands::RetainedCommand {
+                after: None,
                 machine: self.expected.machine,
                 kind: self.command.kind.clone(),
                 key: self.command.key.clone(),
@@ -108,6 +109,8 @@ impl crate::commands::Commands for RecoveredCommands {
             return self.inner.status(id).await;
         }
         Ok(self.server.entry(id).map(|entry| crate::commands::Info {
+            work_started_at: None,
+            completed_at: None,
             stage: if entry.result().is_some() {
                 crate::commands::Stage::Over
             } else {
@@ -344,6 +347,7 @@ impl Fixture {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: true,
                     harness_version: "1.0.0".into(),
                     descriptor: serde_json::from_value(described.clone()).map_err(|error| {
@@ -410,6 +414,7 @@ impl Fixture {
                 Ok(CommandResult::SessionPrefixOpen(NativePrefixOpened {
                     prefix: body.prefix.clone(),
                     session: orch_agent_contract::session::SessionOpened {
+                        mcp: None,
                         native_session_ref: native,
                         resumed: false,
                         import_report: None,
@@ -450,6 +455,7 @@ impl Fixture {
                 });
                 Ok(CommandResult::SessionContinuationResume(
                     SessionOpenResult {
+                        mcp: None,
                         native_session_ref: body.source.native_session_ref.clone(),
                         resumed: true,
                         import_report: None,
@@ -1402,10 +1408,14 @@ async fn an_actual_recovered_started_journal_refusal_never_authorizes_another_pr
         .await,
     )?;
     let command = orch_link_contract::commands::Cmd {
+        after: None,
         id: outgoing.id,
         kind: outgoing.kind.as_str().into(),
         key: Some(fixture.thread.to_string()),
-        deadline: recipe.deadline,
+        work: orch_link_contract::commands::Cmd::work_budget(
+            fixture.world.clock.time(),
+            recipe.deadline,
+        ),
         body: outgoing.body.clone(),
     };
     let directory = tempfile::tempdir()?;

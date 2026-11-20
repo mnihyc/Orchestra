@@ -8,6 +8,7 @@ import { applyChanges } from '@/api/acts';
 import { systemKey, systemQuery } from '@/api/admin';
 import { ApiError, client } from '@/api/client';
 import { AdminModeControl, useAdminMode, useManagementAvailable } from '@/features/access/AdminMode';
+import { PageHeader } from '@/shell/Page';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
 import { NoAccess } from '@/features/access/NoAccess';
 import { AllChats } from '@/features/chat/AllChats';
@@ -29,22 +30,22 @@ const calls = vi.hoisted(() => ({
   me: vi.fn<() => Promise<Pick<Me, 'is_system_admin'>>>(),
   chats: vi.fn<(root: string, filter: ChatListFilter) => Promise<{ items: Pick<Chat, 'id' | 'name'>[]; next_cursor: null }>>(),
 }));
-vi.mock('@/api/adminMode', () => ({
+vi.mock('@/api/adminMode', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   adminModeKey: ['admin-mode'],
   adminModeQuery: { queryKey: ['admin-mode'], queryFn: () => calls.read() },
   setAdminMode: (enabled: boolean) => calls.write(enabled),
 }));
-vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@/api/auth', async (loadOriginal) => ({ ...await loadOriginal<object>(), meQuery: { queryKey: ['me'], queryFn: () => calls.me() } }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   useRouter: () => ({ invalidate: () => Promise.resolve() }),
   useNavigate: () => vi.fn(),
   useLocation: (options?: { select: (location: { pathname: string }) => string }) => options?.select === undefined ? { pathname: '/resources/machines' } : options.select({ pathname: '/resources/machines' }),
   Link: ({ to, className, children }: { to: string; className?: string; children?: ReactNode }) => <a href={to} className={className}>{children}</a>,
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
 vi.mock('@/features/admin/Overview', () => ({ Overview: () => <p>System overview</p> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
-vi.mock('@/api/chats', () => ({ orgChatsQuery: (root: string, filter: ChatListFilter) => ({
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (of: { name: string | null; redacted?: boolean }) => of.redacted === true ? null : of.name }));
+vi.mock('@/api/chats', async (loadOriginal) => ({ ...await loadOriginal<object>(), orgChatsQuery: (root: string, filter: ChatListFilter) => ({
   queryKey: ['chats', root, filter], initialPageParam: null, queryFn: () => calls.chats(root, filter), getNextPageParam: () => undefined,
 }) }));
 vi.mock('@/features/chat/ChatRow', () => ({ ChatRow: ({ chat }: { chat: Pick<Chat, 'id' | 'name'> }) => <li><a href={`/chat/${chat.id}`}>{chat.name}</a></li> }));
@@ -90,6 +91,18 @@ afterEach(() => {
 });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the current admin mode once above a page reached as system admin in ${locale}`, async () => {
+    await setLocale(locale);
+    state = { available: true, as_admin: true };
+    draw(<><header><AdminModeControl /></header><main><PageHeader title="Orch" adminAccess={{ place: 'system', private: false }} /></main></>);
+    const label = i18n.t('adminReach.mode.label', { state: i18n.t('adminReach.mode.stateOn') });
+    expect(await screen.findByRole('switch', { name: label })).toBeChecked();
+    const page = screen.getByRole('main');
+    expect(within(page).getByRole('heading', { name: 'Orch' })).toBeVisible();
+    expect(page.querySelector('[data-as-admin-mark]')).toBeNull();
+    expect(page).not.toHaveTextContent(i18n.t('adminReach.mark.system'));
+  });
+
   it('explains the pending admin switch in '+locale, async () => {
     await setLocale(locale);
     let finish: () => void = () => { throw new Error('The mode write has not started'); };
@@ -225,8 +238,10 @@ describe('the one human-session admin mode', () => {
     draw(<AdminModeControl />);
     await user.click(await screen.findByRole('switch', { name: ADMIN_MODE_NAME }));
     await waitFor(() => expect(calls.write).toHaveBeenCalledOnce());
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
-    expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).toHaveAttribute('data-as-admin', 'false');
+      expect(screen.getByRole('switch', { name: ADMIN_MODE_NAME })).not.toBeChecked();
+    });
   });
 });
 
