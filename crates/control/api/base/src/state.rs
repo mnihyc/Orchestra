@@ -23,9 +23,12 @@ use orch_engine::Engine;
 use orch_types::Clock;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 /// What every request can reach.
 #[derive(Debug)]
 pub struct AppState {
+    /// The optional metrics listener's observed bind failure, shared only by this application.
+    pub metrics_listener_failed: Arc<AtomicBool>,
     /// The database.
     pub db: Db,
     /// The deployment's configuration.
@@ -51,6 +54,17 @@ pub struct AppState {
     /// The built-in sources of a key's facts the program registered: each vendor's reader by name, its
     /// declaration and the addresses it is the default for. The API knows no vendor but through it.
     pub builtin_sources: Arc<orch_provider_contract::builtins::BuiltinSources>,
+}
+
+/// Observations stay with the same application that opens the listener.
+impl AppState {
+    /// Opens the optional listener and records its result without changing how a bind fails.
+    pub async fn bind_metrics(&self, address: &str) -> std::io::Result<tokio::net::TcpListener> {
+        let listener = tokio::net::TcpListener::bind(address).await;
+        self.metrics_listener_failed
+            .store(listener.is_err(), Ordering::Relaxed);
+        listener
+    }
 }
 
 /// The shared state, as handlers hold it.

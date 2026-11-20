@@ -249,6 +249,7 @@ async fn exact_native_update_proposals_keep_a_real_private_source_and_cannot_fal
         .ok_or("private update authority missing")?;
     let serial = command.key.wire();
     let proposal = link::NewCommand {
+        content_transit: false,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),
