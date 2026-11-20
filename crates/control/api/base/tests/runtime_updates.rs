@@ -643,7 +643,32 @@ async fn the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_an
     orch_api_core::harness_channels::keep(&mut conn, &[other, selected.clone()], world.now())
         .await
         .unwrap();
+    let check_machine: Id = sqlx::query_scalar("SELECT machine_id FROM hosts WHERE id=$1")
+        .bind(team.host)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let tools = json!([{"name":selected.kind,"version":selected.version,"url":selected.url,"sha256":selected.sha256}]);
+    sqlx::query("INSERT INTO jobs (id,kind,environment_id,state,plan) VALUES ($1,'environment_provision',$2,'succeeded',$3)")
+        .bind(new_id()).bind(team.environment).bind(json!({"runtime":team.runtime,"tools":tools}))
+        .execute(&mut *conn).await.unwrap();
     drop(conn);
+    let installed = world
+        .app
+        .call(
+            orch_api_contract::admin::EnvironmentHarnessBuildList,
+            &[&team.environment],
+        )
+        .token(&team.c.admin.token)
+        .send()
+        .await
+        .ok();
+    let program = installed
+        .iter()
+        .find(|program| program.kind == selected.kind)
+        .unwrap();
+    assert_eq!(program.check_machine_id, Some(check_machine));
+    assert_eq!(program.build.as_ref().unwrap().sha256, selected.sha256);
     let plan = world
         .app
         .call(api::EnvironmentUpdatePreflight, &[&team.environment])
@@ -1132,6 +1157,7 @@ async fn movable(world: &World, team: &Team) -> Id {
         team.environment,
         &manifest.hash,
         world.now(),
+        None,
     )
     .await
     .unwrap();
