@@ -14,12 +14,20 @@ import type {
   ItemStatus,
   MarkerPayload,
   PlanStep,
+  RawCall,
   ReviewComment,
   ThreadInput,
   ToolPayload,
   Turn,
   UserRef,
 } from '@/generated/api-types';
+
+/** The call as its harness made it, which a tool call row keeps for the read that gives it apart (a thread's items do not carry it). */
+export function rawOf(row: Item): RawCall {
+  const raw = row.kind === 'tool_call' ? row.payload.raw : undefined;
+  if (raw === undefined || raw === null) throw new Error('The fixture is a tool call with its raw form');
+  return raw;
+}
 
 /** The moment rows are made at unless a test says another. */
 export const AT = '2026-10-01T10:00:00.000Z';
