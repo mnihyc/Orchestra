@@ -23,4 +23,4 @@ harness speaks this format is a matter of agent adapters, not of this package.
 | [usage](src/usage.rs) | Streaming usage observation. |
 | [models](src/models.rs) | Discovery as suggestions only: each model with the name that is sent and, where the endpoint's list has it, the name that is shown. |
 | [credentials](src/credentials.rs) | API-key credential form. |
-| [decimal](src/decimal.rs) | Exact decimal text from the numbers that bodies carry. |
+| [decimal](../../../crates/contracts/model/src/decimal.rs) | Exact decimal text from the numbers that bodies carry. |

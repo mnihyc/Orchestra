@@ -26,6 +26,7 @@ use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Method, Response};
 use orch_agent_contract::discovery::ModelSuggestion;
+use orch_agent_contract::parameters::ModelPurpose;
 use orch_agent_contract::parameters::{Offered, Rate};
 use serde_json::{Value, json};
 
@@ -91,6 +92,155 @@ fn rate(pricing: &Value) -> Option<Rate> {
     })
 }
 
+fn purpose(word: &str) -> Option<ModelPurpose> {
+    match word.to_ascii_lowercase().as_str() {
+        "llm" | "vlm" | "chat" | "completion" | "completions" | "generation"
+        | "text_generation" | "text-generation" | "generatecontent" => {
+            Some(ModelPurpose::Generation)
+        }
+        "embedding" | "embeddings" | "embed" => Some(ModelPurpose::Embedding),
+        "image" | "image_generation" | "text-to-image" => Some(ModelPurpose::ImageGeneration),
+        "transcription" | "speech-to-text" | "speech_to_text" => Some(ModelPurpose::Transcription),
+        "speech_generation" | "text-to-speech" | "tts" => Some(ModelPurpose::SpeechGeneration),
+        "rerank" | "reranking" | "reranker" => Some(ModelPurpose::Rerank),
+        "decision" => Some(ModelPurpose::Decision),
+        _ => None,
+    }
+}
+
+fn declared_purposes(value: &Value) -> Vec<ModelPurpose> {
+    let words: Vec<&str> = match value {
+        Value::String(word) => vec![word],
+        Value::Array(words) => words.iter().filter_map(Value::as_str).collect(),
+        Value::Object(capabilities) => capabilities
+            .iter()
+            .filter_map(|(word, support)| {
+                (support.as_bool() == Some(true)
+                    || support.get("supported").and_then(Value::as_bool) == Some(true))
+                .then_some(word.as_str())
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut found = Vec::new();
+    for word in words {
+        if let Some(purpose) = purpose(word)
+            && !found.contains(&purpose)
+        {
+            found.push(purpose);
+        }
+    }
+    found
+}
+
+/// Declared work only: a routing name and a price are never a capability assertion.
+fn reported_purposes(entry: &Value) -> Option<Vec<ModelPurpose>> {
+    for key in ["purposes", "type", "capabilities", "family"] {
+        if let Some(value) = entry.get(key) {
+            let found = declared_purposes(value);
+            if !found.is_empty() {
+                return Some(found);
+            }
+        }
+    }
+    for pointer in ["/details/family", "/details/families"] {
+        if let Some(value) = entry.pointer(pointer) {
+            let found = declared_purposes(value);
+            if !found.is_empty() {
+                return Some(found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for path in entry
+        .get("supported_endpoints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let path = path.trim_end_matches('/');
+        let purpose = if path.ends_with("/chat/completions") || path.ends_with("/responses") {
+            Some(ModelPurpose::Generation)
+        } else if path.ends_with("/images/generations") {
+            Some(ModelPurpose::ImageGeneration)
+        } else if path.ends_with("/audio/transcriptions") {
+            Some(ModelPurpose::Transcription)
+        } else if path.ends_with("/audio/speech") {
+            Some(ModelPurpose::SpeechGeneration)
+        } else if path.ends_with("/embeddings") {
+            Some(ModelPurpose::Embedding)
+        } else if path.ends_with("/rerank") {
+            Some(ModelPurpose::Rerank)
+        } else {
+            None
+        };
+        if let Some(purpose) = purpose
+            && !found.contains(&purpose)
+        {
+            found.push(purpose);
+        }
+    }
+    if !found.is_empty() {
+        return Some(found);
+    }
+    // An output modality describes what comes back. An image accepted as input does not make an image generator.
+    if let Some(outputs) = entry
+        .pointer("/architecture/output_modalities")
+        .and_then(Value::as_array)
+    {
+        let inputs = entry
+            .pointer("/architecture/input_modalities")
+            .and_then(Value::as_array);
+        let text_output = match inputs {
+            Some(inputs) if inputs.len() == 1 && inputs[0] == "audio" => {
+                Some(ModelPurpose::Transcription)
+            }
+            Some(inputs) if !inputs.iter().any(|input| input == "text") => None,
+            _ => Some(ModelPurpose::Generation),
+        };
+        for word in outputs.iter().filter_map(Value::as_str) {
+            let output = if word == "text" {
+                text_output
+            } else {
+                purpose(word)
+            };
+            if let Some(work) = output
+                && !found.contains(&work)
+            {
+                found.push(work);
+            }
+        }
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+fn family_purposes(entry: &Value) -> Option<Vec<ModelPurpose>> {
+    for path in ["/family", "/details/family", "/details/families"] {
+        let Some(value) = entry.pointer(path) else {
+            continue;
+        };
+        let mut purposes = Vec::new();
+        for name in value.as_str().into_iter().chain(
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        ) {
+            if let Some(work) = ModelPurpose::from_model_name(name)
+                && !purposes.contains(&work)
+            {
+                purposes.push(work);
+            }
+        }
+        if !purposes.is_empty() {
+            return Some(purposes);
+        }
+    }
+    None
+}
+
 /// The suggestion an entry makes, if it names a model.
 fn suggestion(entry: &Value) -> Option<ModelSuggestion> {
     let id = entry.get("id")?.as_str().filter(|id| !id.is_empty())?;
@@ -108,6 +258,19 @@ fn suggestion(entry: &Value) -> Option<ModelSuggestion> {
         context_max: Some(largest),
         ..Offered::default()
     });
+    if let Some((purposes, origin)) = reported_purposes(entry)
+        .map(|work| (work, "vendor"))
+        .or_else(|| family_purposes(entry).map(|work| (work, "catalogue")))
+    {
+        suggestion
+            .parameters
+            .offered
+            .get_or_insert_with(Offered::default)
+            .purposes = Some(purposes);
+        suggestion
+            .origins
+            .insert("/parameters/offered/purposes".into(), origin.into());
+    }
     suggestion.parameters.rate = entry.get("pricing").and_then(rate);
     suggestion
         .origins
@@ -206,6 +369,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_listing_can_identify_work_even_when_its_routing_name_is_opaque() {
+        let found = parse(br#"{ "data":[
+            {"id":"opaque","architecture":{"input_modalities":["text","image"],"output_modalities":["text"]}},
+            {"id":"local","details":{"family":"bge-m3"}},
+            {"id":"speech","supported_endpoints":["/v1/audio/transcriptions"],"architecture":{"output_modalities":["text"]}},
+            {"id":"audio-model","architecture":{"input_modalities":["audio"],"output_modalities":["text"]}},
+            {"id":"visual-reader","architecture":{"input_modalities":["image"],"output_modalities":["text"]}}
+        ]}"#);
+        let purposes: Vec<_> = found
+            .iter()
+            .map(|model| {
+                serde_json::to_value(&model.parameters).unwrap()["offered"]["purposes"].clone()
+            })
+            .collect();
+        assert_eq!(
+            purposes,
+            [
+                json!(["generation"]),
+                json!(["embedding"]),
+                json!(["transcription"]),
+                json!(["transcription"]),
+                Value::Null
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mixed_catalogue_keeps_each_models_reported_work_instead_of_guessing_from_its_name() {
+        let found = parse(
+            br#"{"data":[
+            {"id":"local-chat","type":"llm"},
+            {"id":"local-vector","type":"embeddings"},
+            {"id":"picture","supported_endpoints":["/v1/images/generations"]},
+            {"id":"speech","capabilities":["transcription"]},
+            {"id":"rank","type":"reranker"},
+            {"id":"embedding-in-a-chat-model-name","type":"llm"},
+            {"id":"unknown-embedding-name"}
+        ]}"#,
+        );
+        let purposes: Vec<_> = found
+            .iter()
+            .map(|model| {
+                serde_json::to_value(&model.parameters).unwrap()["offered"]["purposes"].clone()
+            })
+            .collect();
+        assert_eq!(
+            purposes,
+            vec![
+                json!(["generation"]),
+                json!(["embedding"]),
+                json!(["image_generation"]),
+                json!(["transcription"]),
+                json!(["rerank"]),
+                json!(["generation"]),
+                Value::Null,
+            ]
+        );
+        assert_eq!(
+            found[1]
+                .origins
+                .get("/parameters/offered/purposes")
+                .map(String::as_str),
+            Some("vendor")
+        );
+    }
+
+    #[test]
     fn only_actual_reported_names_context_and_prices_are_marked_as_vendor_values() {
         let found = parse(
             br#"{"data":[{"id":"fixture-model","name":"Reported model","context_length":200000,
@@ -297,6 +527,16 @@ mod tests {
         assert_eq!(rate.output_per_mtok, "1.2");
         assert_eq!(rate.cache_write_per_mtok.as_deref(), Some("0.25"));
         assert_eq!(rate.above, None, "tiers for long prompts are not read");
+    }
+
+    #[test]
+    fn a_model_price_written_with_an_exponent_keeps_all_its_digits() {
+        let found = parse(
+            br#"{"data":[{"id":"m","pricing":{"prompt":"1.234567890123456789e-7","completion":"2.5e-6"}}]}"#,
+        );
+        let rate = found[0].parameters.rate.as_ref().unwrap();
+        assert_eq!(rate.input_per_mtok, "0.1234567890123456789");
+        assert_eq!(rate.output_per_mtok, "2.5");
     }
 
     #[test]

@@ -14,7 +14,10 @@ import { i18n, setLocale } from '@/i18n';
 import { workspaceFile, workspaceGit } from '../doubles/workspace-file';
 import { AT, change } from '../doubles/thread-rows';
 import { snapshot } from '../unit/continuation-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+// Native actions and scopes do not depend on measuring shortened text in jsdom.
+skipOverflowFallback();
 
 const wire = vi.hoisted(() => ({ access: null as WorkspaceAccess | null, rows: [] as EnvironmentChange[], git: null as GitStatus | null, gitRead: vi.fn(), text: 'new\n', read: vi.fn(), file: vi.fn(), difference: vi.fn(), copy: vi.fn(), write: vi.fn<typeof Workspace.writeFile>(), stat: vi.fn<typeof Workspace.statFile>() }));
 vi.mock('@/features/inspector/parts', async (original) => ({ ...await original<object>(), ThreadViewFrame: ({ children }: { children: (access: WorkspaceAccess) => ReactNode }) => wire.access === null ? null : children(wire.access) }));
@@ -81,7 +84,7 @@ it.each(['en', 'zh-CN'] as const)('omits a Git scope for a reported non-reposito
   await screen.findByText('a.ts');
   await userEvent.click(screen.getByRole('combobox', { name: i18n.t('thread.changeScopes.label') }));
   await waitFor(() => expect(wire.gitRead).toHaveBeenCalledTimes(1));
-  expect(screen.queryByRole('option', { name: i18n.t('thread.changeScopes.git') })).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole('option', { name: i18n.t('thread.changeScopes.git') })).not.toBeInTheDocument());
   await userEvent.keyboard('{Escape}');
   const reason = await screen.findByRole('img', { name: i18n.t('inspector.git.needsRepository') });
   await userEvent.hover(reason); expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('inspector.git.needsRepository'));

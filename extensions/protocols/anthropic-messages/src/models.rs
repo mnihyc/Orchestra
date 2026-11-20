@@ -552,6 +552,16 @@ mod tests {
     }
 
     #[test]
+    fn a_model_price_written_with_an_exponent_keeps_all_its_digits() {
+        let found = parse(
+            br#"{"data":[{"id":"m","pricing":{"prompt":"1.234567890123456789e-7","completion":"2.5e-6"}}]}"#,
+        );
+        let rate = found[0].parameters.rate.as_ref().unwrap();
+        assert_eq!(rate.input_per_mtok, "0.1234567890123456789");
+        assert_eq!(rate.output_per_mtok, "2.5");
+    }
+
+    #[test]
     fn a_model_with_no_cache_price_charges_cached_tokens_as_input() {
         let found = parse(
             br#"{"data":[{"id":"m","pricing":{"prompt":"0.000003","completion":"0.000015"}}]}"#,

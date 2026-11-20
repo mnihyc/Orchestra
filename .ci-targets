@@ -1,0 +1,5 @@
+test -p orch-model-contract --lib
+test -p orch-protocol-anthropic-messages --lib
+test -p orch-protocol-anthropic-messages --test through_the_scripted_server
+test -p orch-protocol-openai-responses --lib
+test -p orch-protocol-openai-responses --test through_the_scripted_server
