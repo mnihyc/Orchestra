@@ -4,7 +4,7 @@ use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::resources::{
     CapabilityBackendCandidate, CapabilityBackendQuery, ProviderCapabilityBackendList,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_provider_contract::capabilities::{Capability, Mode, Route};
 use orch_types::{Id, new_id};
@@ -46,7 +46,7 @@ async fn scene() -> (World, resources::Company, Id) {
         .call(ProviderCreate, &[])
         .token(&firm.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Backend choices".into(),
             home_id: firm.acme,
             access: None,
@@ -81,7 +81,7 @@ async fn scene() -> (World, resources::Company, Id) {
 fn query(place: Id) -> CapabilityBackendQuery {
     CapabilityBackendQuery {
         capability: CAPABILITY.into(),
-        place,
+        place: Some(place),
         q: None,
         offering: None,
         page: PageQuery {
@@ -111,11 +111,12 @@ fn rule(kind: &str, id: Id) -> Json {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Capability backend read",
             token_hash: &token_hash(&secret),
@@ -252,4 +253,84 @@ async fn backend_choices_require_both_real_read_sources_and_never_turn_view_into
         !selected.items[0].eligible,
         "an old value is named but cannot be newly admitted"
     );
+}
+
+#[tokio::test]
+async fn a_summary_uses_the_shared_backend_choices_without_a_thread_tool_or_paid_request() {
+    let (world, firm, provider) = scene().await;
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,groups,enabled,source,created_by) VALUES($1,$2,'summary-small','Summary small',$3,ARRAY['text'],true,'manual',$4)")
+        .bind(new_id()).bind(provider).bind(json!({"context_window":10000})).bind(firm.boss.id()).execute(&mut *world.conn().await).await.unwrap();
+    let mut q = query(firm.acme);
+    q.capability = "summary".into();
+    q.offering = Some("summary-small".into());
+    q.page.limit = Some(20);
+    let offline = choices(&world, &firm.boss.token, provider, q.clone()).await;
+    assert!(
+        offline
+            .items
+            .iter()
+            .any(|row| row.backend.route == "summarizer-model.complete" && !row.eligible)
+    );
+    let mut conn = world.conn().await;
+    let keeper: Id = sqlx::query_scalar("SELECT key_machine_id FROM providers WHERE id=$1")
+        .bind(provider)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    orch_db::queries::resources::set_presence(&mut conn, keeper, true, None, world.now())
+        .await
+        .unwrap();
+    drop(conn);
+    let found = choices(&world, &firm.boss.token, provider, q).await;
+    let choice = found
+        .items
+        .iter()
+        .find(|choice| choice.backend.route == "summarizer-model.complete")
+        .expect("the installed model producer is a common backend choice");
+    assert!(
+        choice.eligible,
+        "the source grants model Use and its keeper is online: {:?}",
+        choice.reason
+    );
+    assert_eq!(choice.backend.offering.as_ref().unwrap().provider, provider);
+    assert_eq!(choice.offering_name, "Summary small");
+    assert!(choice.backend.config.is_null());
+    let paid:i64 = sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind IN ('provider.complete','provider.generate','turn.start','turn.start.fenced')").fetch_one(&mut *world.conn().await).await.unwrap();
+    assert_eq!(paid, 0, "browsing choices never starts model work");
+}
+
+#[tokio::test]
+async fn system_summary_choices_read_the_provider_without_inventing_a_source_node() {
+    let (world, firm, provider) = scene().await;
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,groups,enabled,source,created_by) VALUES($1,$2,'summary-global','Global summary model',$3,ARRAY['text'],true,'manual',$4)")
+        .bind(new_id()).bind(provider).bind(json!({"context_window":10000})).bind(firm.boss.id()).execute(&mut *world.conn().await).await.unwrap();
+    let mut q = query(firm.acme);
+    q.capability = "summary".into();
+    q.place = None;
+    q.offering = Some("summary-global".into());
+    let provider_read = key(&world, firm.boss.id(), vec![rule("provider", provider)]).await;
+    let page = choices(&world, &provider_read, provider, q.clone()).await;
+    let selected = page
+        .items
+        .iter()
+        .find(|row| row.backend.route == "summarizer-model.complete")
+        .expect("global defaults use the same installed model supplier");
+    assert_eq!(selected.offering_name, "Global summary model");
+    let mut scoped = q.clone();
+    scoped.place = Some(firm.acme);
+    let refused = world
+        .app
+        .call(ProviderCapabilityBackendList, &[&provider])
+        .token(&provider_read)
+        .query(&scoped)
+        .send()
+        .await;
+    assert_eq!(
+        refused.problem().code,
+        ErrorCode::AuthzDenied,
+        "a provider-only read cannot claim a source node"
+    );
+    let paid: i64 = sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind IN ('provider.complete','provider.generate','turn.start','turn.start.fenced')")
+        .fetch_one(&mut *world.conn().await).await.unwrap();
+    assert_eq!(paid, 0);
 }

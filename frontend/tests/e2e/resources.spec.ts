@@ -59,7 +59,7 @@ test('a machine chooses its roles and their handover, keeps Node separate, and i
   await expect(command).toContainText("--roles 'environment,agent'");
   await expect(command).not.toContainText('--delegate');
   for (const [name, description] of [
-    ['Environment', 'Work in folders on Linux'], ['Agent', 'Run agents here'],
+    ['Environment', 'Work in directories on Linux'], ['Agent', 'Run agents here'],
     ['Provider', 'Keep provider keys here'], ['Node', 'Let Orch make environments here'],
   ] as const) {
     await expect(dialog.getByRole('checkbox', { name, exact: true })).toHaveAccessibleDescription(description);
@@ -158,10 +158,10 @@ test('an agent profile and an environment are registered on a machine', async ({
   await page.getByRole('link', { name: 'ada-laptop' }).click();
   await page.getByRole('tab', { name: /Registered/ }).click();
 
-  await page.getByRole('button', { name: 'Register a profile…' }).click();
+  await page.getByRole('button', { name: 'Register an agent profile…' }).click();
   const profile = page.getByRole('dialog', { name: 'Register an agent profile from ada-laptop' });
   await profile.getByLabel(/^Name/).fill('Codex on the laptop');
-  await profile.getByRole('button', { name: 'Register profile' }).click();
+  await profile.getByRole('button', { name: 'Register agent profile' }).click();
   await expect(notice(page, 'Codex on the laptop was registered')).toBeVisible();
   // The new profile's page opens; the machine is one step back.
   await expect(page.getByRole('heading', { name: 'Codex on the laptop', level: 1 })).toBeVisible();
@@ -321,7 +321,7 @@ test('an environment that Orch made is started, kept awake and stopped, and the 
   await expect(dialog.getByRole('button', { name: 'Delete Sandbox' })).toHaveAttribute('aria-disabled', 'true');
   await dialog.getByLabel('Type Sandbox to confirm').fill('Sandbox');
   await dialog.getByRole('button', { name: 'Delete Sandbox' }).click();
-  await expect(dialog.getByText('It is refused while something still depends on it. Move those threads first.', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('It cannot be deleted while something still depends on it. Move any threads bound to it first.', { exact: true })).toBeVisible();
   await expect(page).toHaveURL(/\/resources\/environments\/[^/]+$/);
 });
 
@@ -383,7 +383,7 @@ test('a template is made, its recipe is changed, and a change made meanwhile by 
   await asPerson(PEOPLE.ada, 'PATCH', `/templates/${id}`, { expected_revision: 1, description: 'Changed elsewhere' });
   await page.getByLabel('Configuration (JSON)').fill('{ "image": "python:3.13-slim" }');
   await page.getByRole('button', { name: 'Save template' }).click();
-  await expect(page.getByText('Somebody changed this template first')).toBeVisible();
+  await expect(page.getByText('Somebody changed this template first. Discard your changes to see theirs.')).toBeVisible();
 
   // A refresh keeps the draft's original fence. Explicitly review before adopting the newer revision.
   await page.getByText('Review changes', { exact: true }).click();

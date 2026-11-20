@@ -1,6 +1,6 @@
 /** The project setting uses provider names and keeps native revision, lock, failure and Undo semantics. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -38,9 +38,9 @@ vi.mock('@/api/client', async (load) => {
   } } };
 });
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: ({ kind, onCreated }: { kind: string; onCreated?: (id: string) => void }) => {
   return <button type="button" data-create-kind={kind} onClick={() => {
     calls.create();
     if (calls.created !== null) { calls.list.mockResolvedValue([calls.created]); onCreated?.(calls.created.id); }
@@ -88,6 +88,49 @@ beforeEach(() => {
   });
 });
 afterEach(async () => { cleanup(); for (const cache of caches.splice(0)) cache.clear(); useAppearance.setState(appearance); await setLocale('en'); });
+
+it('names the different provider inheritance gives when its first choice is opened', async () => {
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: SECOND, source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  const cache = nativeNames();
+  draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, cache);
+  expect(calls.read).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent('Review AI'));
+  expect(first).toHaveTextContent('As Acme decides');
+  expect(calls.read.mock.calls.some(([id]) => id === SECOND)).toBe(true);
+  expect(putSetting).not.toHaveBeenCalled();
+});
+
+it('does not borrow a historical provider name while the inherited name is being authorized', async () => {
+  const denied = new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'No access', detail: 'No access', request_id: 'inherited-name' }, null);
+  calls.list.mockResolvedValue([rows[0]!]);
+  calls.read.mockImplementation((id) => id === SECOND ? Promise.reject(denied) : Promise.resolve(rows[0]!));
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: SECOND, source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  const cache = nativeNames();
+  cache.setQueryData(providerKey(SECOND), { ...rows[1]!, name: 'Historical private provider' });
+  const view = draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, cache);
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent(i18n.t('settings.compact.managed')));
+  expect(view.container).not.toHaveTextContent('Historical private provider');
+  expect(first).not.toHaveTextContent(SECOND);
+});
+
+it('keeps a failed inherited name plain so retry controls cannot also select the choice', async () => {
+  const unavailable = new ApiError({ type: 'orch:error:internal', code: 'internal', status: 500, title: 'Unavailable', detail: 'Unavailable', request_id: 'inherited-name' }, null);
+  calls.list.mockResolvedValue([rows[0]!]);
+  calls.read.mockImplementation((id) => id === SECOND ? Promise.reject(unavailable) : Promise.resolve(rows[0]!));
+  const setting: ResolvedSetting = { ...value(FIRST, true), inherited: { value: SECOND, source: { scope: 'org', node: { id: HOME, kind: 'org', name: 'Acme', redacted: false } } } };
+  vi.mocked(clearSetting).mockResolvedValue({ ...setting, own: null, value: SECOND });
+  draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>);
+  await userEvent.click(screen.getByRole('combobox', { name: definition().title }));
+  const first = screen.getAllByRole('option')[0]!;
+  await waitFor(() => expect(first).toHaveTextContent(i18n.t('places.providerDefault.unavailable')));
+  expect(within(first).queryByRole('button')).not.toBeInTheDocument();
+  await userEvent.click(first);
+  await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, 7));
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`commits one named choice at project scope and undoes its acknowledged revision (${locale}/${theme})`, async () => {

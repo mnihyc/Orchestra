@@ -1,0 +1,9 @@
+test -p orch-api-core --test harness_checks
+test -p orch-api-core --test threads_settings -- an_unchecked_or_failed_build_has_the_same_exact_auto_reason_in_the_chip_and_setting
+test -p orch-api-core --test connected_program_versions
+test -p orch-engine --test approval_review
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test

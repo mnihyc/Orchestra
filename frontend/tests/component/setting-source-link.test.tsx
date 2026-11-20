@@ -10,7 +10,7 @@ const server = vi.hoisted(() => ({ read: vi.fn<(id: string) => Promise<{ id: str
 vi.mock('@/api/nodes', async (load) => ({ ...await load<object>(), nodeQuery: (id: string) => ({
   queryKey: ['node', id], queryFn: () => server.read(id),
 }) }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => server.open }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => server.open }));
 const def = { key: 'agent.instructions', class: 'parameter' } as const;
 const target = { kind: 'node', id: 'web' } as const;
 const source = { scope: 'org', node: { id: 'org-id', kind: 'org', name: 'Research', redacted: false } } as const;
@@ -56,6 +56,20 @@ it('does not use even a cached address for a concealed source', () => {
   expect(screen.getByText('Set above')).toBeVisible();
   expect(view.container.querySelector('a[href*="secret"]')).toBeNull();
   expect(server.read).not.toHaveBeenCalled();
+});
+
+it('keeps a captured default labelled as default while its explicit editable place owns the destination', () => {
+  const client = new QueryClient();
+  client.setQueryData(['node', 'org-id'], { id: 'org-id', kind: 'org', name: 'Research', address: 'acme.research' });
+  const content = (defaultTarget: typeof source.node | undefined) => <QueryClientProvider client={client}>
+    <SourceSettingLink source={{ scope: 'default', node: null }} def={def} target={target} fallback="Web" defaultToSystem defaultTarget={defaultTarget} />
+  </QueryClientProvider>;
+  const view = show(content(undefined));
+  expect(screen.getByRole('link', { name: 'Default' })).toHaveAttribute('href', '/admin/settings?setting=agent.instructions');
+  view.rerender(content(source.node));
+  expect(screen.getByRole('link', { name: 'Default' })).toHaveAttribute('href', '/org/acme.research/settings/defaults?setting=agent.instructions');
+  expect(server.read).not.toHaveBeenCalled();
+  expect(server.open).not.toHaveBeenCalled();
 });
 
 it('does not open a source after the row that requested it has gone away', async () => {
