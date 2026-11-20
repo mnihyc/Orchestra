@@ -82,8 +82,9 @@ export function useTreeOrder(orgId: string | null, shown = true) {
   const { choice, order, orgDefault } = useMemo(() => {
     const kept = orderOf(settings.data?.find((setting) => setting.key === ORDER_SETTING)?.value);
     const mine = orgId === null ? { choice: 'default' as const, own: null } : choiceOf(state.data, orgId);
-    return { choice: mine.choice, order: effectiveOrder(mine.own, kept), orgDefault: kept };
-  }, [orgId, state.data, settings.data]);
+    const effective=effectiveOrder(mine.own,kept),reported=tree.ordering?.by;
+    return {choice:mine.choice,order:reported===undefined?effective:{...effective,by:reported},orgDefault:kept};
+  }, [orgId, state.data, settings.data,tree.ordering?.by]);
 
   const choose = useMutation({
     mutationFn: async (next: TreeOrder | null) => {
@@ -106,5 +107,6 @@ export function useTreeOrder(orgId: string | null, shown = true) {
     },
   });
 
-  return { choice, order, orgDefault: orgDefault ?? SHIPPED_ORDER, choose, saveForEveryone };
+  const revision=useMemo(()=>JSON.stringify([orgId===null?null:choiceOf(state.data,orgId),orgDefault]),[orgId,state.data,orgDefault]);
+  return { choice, order, revision,orgDefault: orgDefault ?? {by:tree.ordering?.by??SHIPPED_ORDER.by}, choose, saveForEveryone };
 }
