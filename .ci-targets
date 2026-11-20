@@ -1,0 +1,2 @@
+test -p orch-api --bin orch-api --test program -- --nocapture --test-threads=1
+test -p orch-api --test program -- --ignored --exact memory::the_api_stays_responsive_and_within_its_warm_memory_bound_for_eighty_nine_minutes --nocapture --test-threads=1

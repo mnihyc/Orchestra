@@ -72,7 +72,7 @@ async fn cascade(make: bool) -> Cascade {
             .bind(json!({"runtime":runtime,"created_spec":{"spec":definition,"resources":{},"tools":[]},"tools":[]}))
             .execute(&mut *conn).await.unwrap();
     }
-    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',$2::uuid::text,'runtime.template_id',$3::uuid::text) WHERE id=$1")
+    sqlx::query("UPDATE providers SET runtime_config=runtime_config||jsonb_build_object('runtime.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::uuid::text)),'runtime.template_id',$3::uuid::text) WHERE id=$1")
         .bind(team.provider).bind(team.host).bind(template).execute(&mut *conn).await.unwrap();
     sqlx::query("UPDATE hosts SET drivers=(SELECT drivers FROM hosts WHERE id=$2) WHERE id=$1")
         .bind(team.host)
