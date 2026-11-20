@@ -240,6 +240,8 @@ pub struct Reject {
 pub struct UpdatePermit {
     /// The server recommendation whose verified platform build may replace the executable.
     pub recommended: String,
+    /// Automatic grants still require the machine's current Auto policy.
+    pub automatic: bool,
 }
 
 /// The gateway's word that it ends a session that was ready.
@@ -365,6 +367,9 @@ pub struct MachineFactsHarness {
     pub path: String,
     /// The version found there.
     pub version: String,
+    /// SHA-256 of the executable at the locally selected path, once the connector has read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     /// Whether it runs as a daemon the connector attaches to.
     pub daemon: bool,
 }
@@ -429,6 +434,9 @@ pub struct MachineFactsRates {
 /// What a machine is and has, as its connector reports it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MachineFacts {
+    /// Most recently measured room on this choice's visible placement source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<orch_api_contract::environment::PlaceRoom>,
     /// The connector's metadata-only directory observation, before any scan it is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_directory: Option<orch_api_contract::storage::MachineDataInventory>,
@@ -540,7 +548,7 @@ mod tests {
         assert_eq!(auth.roles, [Role::Agent, Role::Environment]);
         let ready: Ready = round_trip(json!({
             "session_id": SESSION, "session_token": "t0k3n", "heartbeat_secs": 20,
-            "limits": { "max_frame_bytes": 262144, "tunnel_window_bytes": 1048576, "max_channels": 256 },
+            "limits": { "max_frame_bytes": 262144, "max_message_bytes": 16777216, "tunnel_window_bytes": 1048576, "max_channels": 256 },
             "cursors": { "machine": 12, "env:0199c1a0-0000-7000-8000-00000000000c": 43 },
             "versions": { "min": "0.1.0", "recommended": "0.1.3" }
         }));
