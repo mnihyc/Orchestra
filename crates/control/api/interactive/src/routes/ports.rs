@@ -215,8 +215,8 @@ orch_api_base::__api_bind_3dde7fe764!();
 
 pub(crate) fn entries(
     ctx: &Ctx,
-    env: Id,
-    port: u16,
+    public_url: &str,
+    (env, port): (Id, u16),
     methods: &[PortEntryMethod],
     transports: &[PortTransport],
     needs: PortEntryNeeds,
@@ -234,9 +234,9 @@ pub(crate) fn entries(
                 identity_methods:vec![PortIdentityMethod::HttpHeaders,PortIdentityMethod::PeerLookup],
             }),
             PortEntryMethod::Helper=>Some(PortEntry {
-                method:*method,transports:transports.to_vec(),address:Some(ctx.app.config.system.public_url.clone()),
+                method:*method,transports:transports.to_vec(),address:Some(public_url.to_owned()),
                 command:Some(if needs==PortEntryNeeds::Link {format!("orch-connector port forward --link-stdin --transport {transport}")}
-                    else {format!("orch-connector port forward --environment {env} --port {port} --transport {transport} --token-stdin --url {}", ctx.app.config.system.public_url.trim_end_matches('/'))}),
+                    else {format!("orch-connector port forward --environment {env} --port {port} --transport {transport} --token-stdin --url {}", crate::public_addresses::shell_word(public_url.trim_end_matches('/')))}),
                 needs,identity_methods:if program.proxy_protocol && transports.contains(&PortTransport::Tcp) {vec![PortIdentityMethod::ProxyV2Tcp,PortIdentityMethod::PeerLookup]} else {vec![PortIdentityMethod::PeerLookup]},
             }),
             PortEntryMethod::Browser|PortEntryMethod::Host=>None,
@@ -426,8 +426,11 @@ async fn opening_view_prepared(
         entry_methods: methods.clone(),
         entries: entries(
             ctx,
-            env.id,
-            port,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
+            (env.id, port),
             &methods,
             &transports,
             if kind == PortOpeningKind::Link {
@@ -450,6 +453,11 @@ async fn opening_view_prepared(
         admission,
         opened_at: Time::new(row.opened_at),
         until: row.until_at.map(Time::new),
+        refused_until: if state == PortOpeningState::Refused {
+            rows::refused_until(conn, row.id).await?.map(Time::new)
+        } else {
+            None
+        },
         state,
         reason,
         program,
@@ -681,6 +689,7 @@ async fn target_captured(
         }
     }
     Ok(PortTarget {
+        named_loopback: false,
         environment_id: env.id,
         port,
         address: address(ctx, env.id, port),
@@ -690,8 +699,11 @@ async fn target_captured(
         reason,
         own_entries: entries(
             ctx,
-            env.id,
-            port,
+            &crate::public_addresses::read(&ctx.app, conn)
+                .await?
+                .addresses
+                .public_url,
+            (env.id, port),
             &[PortEntryMethod::Browser, PortEntryMethod::Helper],
             &[PortTransport::Tcp, PortTransport::Udp],
             PortEntryNeeds::SignIn,
@@ -749,10 +761,14 @@ pub(crate) async fn list_view(
             openings.push(view);
         }
     }
+    let declared = core::named_listeners(conn, principal, env)
+        .await
+        .map_err(ApiError::internal)?;
     let mut ports = snapshot
         .listeners
         .iter()
         .map(|l| l.port)
+        .chain(declared.iter().copied())
         .chain(openings.iter().map(|o| o.port))
         .collect::<BTreeSet<_>>();
     if let Some(port) = query.port {
@@ -769,7 +785,9 @@ pub(crate) async fn list_view(
     let truncated = ports.len() > limit(query.limit);
     let mut targets = Vec::new();
     for port in ports.into_iter().take(limit(query.limit)) {
-        targets.push(target(ctx, conn, principal, env, port).await?);
+        let mut row = target(ctx, conn, principal, env, port).await?;
+        declare_personal_target(ctx, &mut row, declared.contains(&port));
+        targets.push(row);
     }
     let cursor = if truncated {
         targets.last().map(|t| t.port.to_string())
@@ -947,6 +965,26 @@ async fn policy_holders(
     Ok((scope, holders))
 }
 
+/// Personal declarations have TCP entries even before a socket has been observed.
+fn declare_personal_target(ctx: &Ctx, row: &mut PortTarget, declared: bool) {
+    row.named_loopback = declared;
+    if declared && row.listeners.is_empty() {
+        if row.state == PortTargetState::NotListening {
+            row.state = PortTargetState::Unavailable;
+            row.reason = None;
+        }
+        row.own_entries = entries(
+            ctx,
+            row.environment_id,
+            row.port,
+            &[PortEntryMethod::Browser, PortEntryMethod::Helper],
+            &[PortTransport::Tcp],
+            PortEntryNeeds::SignIn,
+            &row.program,
+        );
+    }
+}
+
 async fn get(ctx: Ctx, query: EnvironmentPortGetQuery, (): ()) -> ApiResult<PortTarget> {
     let id = ctx.id("id")?;
     let port = port(&ctx)?;
@@ -962,7 +1000,12 @@ async fn get(ctx: Ctx, query: EnvironmentPortGetQuery, (): ()) -> ApiResult<Port
     let principal = authorization::principal(&ctx, &mut conn).await?;
     require(&mut conn, &principal, id, Permission::PortsView).await?;
     let env = environment(&mut conn, id).await?;
-    target(&ctx, &mut conn, &principal, &env, port).await
+    let mut row = target(&ctx, &mut conn, &principal, &env, port).await?;
+    let declared = core::named_listeners(&mut conn, &principal, &env)
+        .await
+        .map_err(ApiError::internal)?;
+    declare_personal_target(&ctx, &mut row, declared.contains(&port));
+    Ok(row)
 }
 
 async fn program(
@@ -1516,7 +1559,14 @@ pub(crate) async fn may_use(
     } else {
         require(conn, principal, env.id, Permission::PortsView).await?;
     }
-    carried(conn, env, port, transport).await
+    carried(
+        conn,
+        env,
+        port,
+        transport,
+        opening.is_none().then_some(principal),
+    )
+    .await
 }
 orch_api_base::__api_bind_b89f1ee526!();
 
@@ -1528,15 +1578,25 @@ async fn carried(
     env: &EnvironmentFull,
     port: u16,
     transport: PortTransport,
+    personal: Option<&Principal>,
 ) -> ApiResult<()> {
     let policy = core::policies(conn, env.id)
         .await
         .map_err(ApiError::internal)?;
-    if !policy.enabled
-        || !core::local_enabled(conn, env)
+    let local = if core::local_enabled(conn, env)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        true
+    } else if let Some(reader) = personal.filter(|_| transport == PortTransport::Tcp) {
+        core::named_listeners(conn, reader, env)
             .await
             .map_err(ApiError::internal)?
-    {
+            .contains(&port)
+    } else {
+        false
+    };
+    if !policy.enabled || !local {
         return Err(ApiError::new(
             ErrorCode::PortsNotAllowed,
             "Ports is disabled by current home or local policy",
@@ -1546,6 +1606,12 @@ async fn carried(
         return Err(ApiError::new(
             ErrorCode::PortsUnavailable,
             "the environment is stopped or unavailable",
+        ));
+    }
+    if orch_db::queries::runtime_incarnations::environment_withdrawn(conn, env.id).await? {
+        return Err(ApiError::new(
+            ErrorCode::PortsUnavailable,
+            "the environment is stopping",
         ));
     }
     let supported = env
@@ -1616,7 +1682,7 @@ pub(crate) async fn may_use_link(
             "the link has lapsed, was closed or does not carry this transport",
         ));
     }
-    carried(conn, env, port, transport).await?;
+    carried(conn, env, port, transport, None).await?;
     Ok(PortCaller::Link {
         id: row.id,
         label: row.label.clone(),
