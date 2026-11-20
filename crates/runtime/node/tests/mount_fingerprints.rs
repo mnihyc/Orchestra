@@ -189,6 +189,7 @@ async fn a_fingerprint_reports_the_declared_command_and_joins_its_read_before_ca
             storage: None,
         },
         work: Some(WorkReport {
+            timeout_policy: None,
             files_total: None,
             bytes_total: None,
             job_id: job,

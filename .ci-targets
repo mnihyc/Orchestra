@@ -1,0 +1,8 @@
+clippy
+release-checks
+release-first-start
+fmt
+web typecheck
+web lint
+web build
+web test

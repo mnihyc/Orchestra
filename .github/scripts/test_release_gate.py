@@ -40,9 +40,9 @@ class ReleaseGateTests(unittest.TestCase):
                 status("v1.2.3", HEAD, [self.green(), self.green(id=8, conclusion=conclusion)])
         self.assertIsNone(status("v1.2.3", HEAD, [self.green(head_sha="b" * 40)]))
 
-    def test_ci_must_match_both_the_tag_and_its_commit(self):
+    def test_full_ci_must_qualify_the_tagged_commit(self):
         self.assertIsNone(status("v1.2.3", HEAD, []))
-        self.assertIsNone(status("v1.2.3", HEAD, [self.green(head_branch="main")]))
+        self.assertEqual(status("v1.2.3", HEAD, [self.green(head_branch="main")])["id"], 7)
         self.assertIsNone(status("v1.2.3", HEAD, [self.green(event="pull_request")]))
         self.assertEqual(status("v1.2.3", HEAD, [self.green()])["id"], 7)
 

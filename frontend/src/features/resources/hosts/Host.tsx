@@ -45,6 +45,9 @@ import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
 import type { Host, HostDriver, HostStorage, UnitKind, WhenFull } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
+import { useFormatContext } from '@/lib/appearance';
+import { formatPercent } from '@/lib/format';
+import { RelativeTime } from '@/ui/RelativeTime';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -199,6 +202,9 @@ export function Drivers({ host }: { host: Host }) {
 function Overview({ host }: { host: Host }) {
   const { t } = useTranslation();
   const words = useAmountWords();
+  const {locale}=useFormatContext();
+  const usage=host.usage;
+  const storage=host.storages.find((row)=>row.default) ?? (host.storages.length===1?host.storages[0]:undefined);
   return (
     <div className="flex flex-col gap-6">
       <Section id="host-about" title={t('hosts.overview.about')}>
@@ -228,9 +234,10 @@ function Overview({ host }: { host: Host }) {
             },
             { name: t('hosts.overview.mine'), value: t('hosts.list.environments', { count: host.mine }) },
             { name: t('hosts.overview.whenFull'), value: <WhenFullWords host={host} /> },
-            { name: t('hosts.capacity.cpu'), value: t('hosts.capacity.declared', { declared: words.cpu(host.declared.cpu_millis), capacity: host.capacity.cpu_millis > 0 ? words.cpu(host.capacity.cpu_millis) : '–' }) },
-            { name: t('hosts.capacity.memory'), value: t('hosts.capacity.declared', { declared: words.memory(host.declared.memory_mb), capacity: host.capacity.memory_mb > 0 ? words.memory(host.capacity.memory_mb) : '–' }) },
-            { name: t('hosts.capacity.disk'), value: t('hosts.capacity.declared', { declared: words.disk(host.declared.disk_gb), capacity: host.capacity.disk_gb > 0 ? words.disk(host.capacity.disk_gb) : '–' }) },
+            { name: t('hosts.capacity.cpu'), value: usage?.cpu_percent_milli===null || usage?.cpu_percent_milli===undefined || host.capacity.cpu_millis<=0 ? '–' : t('hosts.capacity.measuredCpu',{used:formatPercent(usage.cpu_percent_milli/100_000,locale),capacity:words.cpu(host.capacity.cpu_millis)}) },
+            { name: t('hosts.capacity.memory'), value: usage?.memory_used_mb===null || usage?.memory_used_mb===undefined || host.capacity.memory_mb<=0 ? '–' : t('hosts.capacity.measuredMemory',{used:words.memory(usage.memory_used_mb),free:words.memory(Math.max(0,host.capacity.memory_mb-usage.memory_used_mb)),capacity:words.memory(host.capacity.memory_mb)}) },
+            { name: t('hosts.capacity.disk'), value: storage===undefined || storage.capacity_gb<=0 ? '–' : t('hosts.capacity.measuredStorage',{name:storage.name,free:words.disk(storage.free_gb),capacity:words.disk(storage.capacity_gb)}) },
+            ...(usage===null || usage===undefined?[]:[{name:t('resourceFacts.observed'),value:<RelativeTime at={usage.observed_at}/>}]),
           ]}
         />
       </Section>
@@ -346,7 +353,7 @@ function HostSettings({ host, manage }: { host: Host; manage: boolean }) {
       {revert.error !== null && <ErrorAlert error={revert.error} />}
       {stale && (
         <InlineAlert tone="warning" title={t('hosts.settings.changed')}>
-          {t('hosts.settings.changedLead', { revision: host.revision })}
+          {t('hosts.settings.changedLead')}
           <SettingChanges rows={[{ name: t('hosts.settings.name'), current: host.name, draft: name }, { name: t('hosts.settings.labels'), current: host.labels, draft: wanted }]}
             disabled={busy || host.revision <= base.revision} onKeep={() => { setBase(host); save.reset(); }} />
         </InlineAlert>

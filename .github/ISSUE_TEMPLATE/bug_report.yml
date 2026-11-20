@@ -1,0 +1,53 @@
+name: Bug report
+description: Something does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting it. Please read the known issues of your release in [CHANGELOG.md](https://github.com/mnihyc/Orchestra/blob/main/CHANGELOG.md) first. Do not paste passwords, keys, tokens or reset links.
+  - type: checkboxes
+    attributes:
+      label: Before you send
+      options:
+        - label: This is a bug, not a question about how to use Orch (use the Question form for that).
+          required: true
+        - label: I read the known issues of my release.
+          required: true
+  - type: input
+    attributes:
+      label: Orch version
+      description: The output of `./update.sh status` in the deployment directory, or the version in Management.
+      placeholder: "installed: v0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: How Orch was installed
+      options:
+        - A fresh install
+        - Updated from an earlier release
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Host
+      description: Operating system, CPU architecture, Docker version and Compose version.
+      placeholder: "Debian 13, x86_64, Docker 28.1, Compose 2.35"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you did, what you saw, and what you expected to see.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: The shortest steps that show it, starting from a thread, a machine or a page.
+  - type: textarea
+    attributes:
+      label: Logs
+      description: The relevant lines of `docker compose logs --tail 200 api` (or the service that failed), with secrets removed.
+      render: text
