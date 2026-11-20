@@ -42,7 +42,7 @@ describe('the groups of one model', () => {
     show(<Groups start={['frontier']} />);
     const field = screen.getByLabelText('Put it in a group');
     await userEvent.type(field, 'Big Group{Enter}');
-    expect(screen.getByText(/A group is named by 1 to 40/)).toBeInTheDocument();
+    expect(screen.getByText(/A group name has 1 to 40/)).toBeInTheDocument();
     expect(screen.queryByText('Big Group')).not.toBeInTheDocument();
 
     await userEvent.clear(field);
@@ -157,11 +157,11 @@ describe('the speed of a thread', () => {
 describe('the access program of a thread', () => {
   it('reads None until somebody chooses a program, and names what a choice comes to', () => {
     const { unmount } = show(<AccessChoice state={access(SOL)} writable chooser={null} onChoose={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveTextContent('None');
+    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveDisplayValue('None');
     expect(screen.getByText('None: no access program is asked for.')).toBeInTheDocument();
     unmount();
     show(<AccessChoice state={access(SOL, { cyber_access_program: 'Daybreak Blue' })} writable chooser={null} onChoose={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveTextContent('Daybreak Blue');
+    expect(screen.getByRole('combobox', { name: 'Access' })).toHaveDisplayValue('Daybreak Blue');
     expect(screen.getByText('Daybreak Blue: this thread\'s turns ask for that access program.')).toBeInTheDocument();
   });
 });
