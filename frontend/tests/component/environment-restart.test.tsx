@@ -8,7 +8,7 @@ import { RestartEnvironmentDialog } from '@/features/resources/environments/Rest
 
 import { show } from './support';
 
-vi.mock('@/api/environments',()=>({restartEnvironment:vi.fn(()=>Promise.reject(new Error('The machine is unavailable.')))}));
+vi.mock('@/api/environments',async(original)=>({...await original<object>(),restartEnvironment:vi.fn(()=>Promise.reject(new Error('The machine is unavailable.')))}));
 
 describe('restarting an environment',()=>{
   beforeEach(()=>vi.clearAllMocks());
@@ -16,7 +16,7 @@ describe('restarting an environment',()=>{
     const user=userEvent.setup();
     show(<RestartEnvironmentDialog environment={{id:'environment',name:'Build'}} onClose={vi.fn()} />);
     expect(screen.getByRole('dialog',{name:'Restart Build'})).toBeVisible();
-    expect(screen.getByText(/Running turns, shells, browsers, displays and open port connections/)).toBeVisible();
+    expect(screen.getByText(/Running turns, terminals, browsers, displays and open port connections/)).toBeVisible();
     expect(screen.getByText(/Every file is kept, including installations and files outside the volumes/)).toBeVisible();
     expect(screen.getByText(/Queued inputs keep their authors and order/)).toBeVisible();
     expect(screen.getByRole('checkbox',{name:'Interrupt now'})).not.toBeChecked();

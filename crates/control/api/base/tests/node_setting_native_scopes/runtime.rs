@@ -139,6 +139,7 @@ async fn accepted_setting_or_clear_retains_its_exact_origin_through_the_actual_c
                         .call(NodeSettingSet, &[&node, &keys::ENV_RESOURCES])
                         .token(&token)
                         .body(&NodeSettingSetBody {
+                            model_choice: None,
                             value: json!({"memory_mb":512}),
                             locked: None,
                             expected_revision: None,

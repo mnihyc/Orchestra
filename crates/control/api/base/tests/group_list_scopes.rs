@@ -18,7 +18,7 @@ use orch_api_contract::directory::{
     Group, GroupHolderAdd, GroupMemberAdd, NodeGroupList, OrgGroupCreate, OrgGroupCreateBody,
     OrgGroupList, OrgGroupListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Caller, Principal};
 use orch_db::queries::{access, identity};
@@ -96,8 +96,8 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>, excluded: Option<Id>) -
         });
     }
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -117,11 +117,12 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>, excluded: Option<Id>) -
     Key { id, secret }
 }
 async fn legacy_key(world: &World, actor: Id) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Group legacy full-account control",
             token_hash: &token_hash(&secret),

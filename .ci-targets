@@ -1,0 +1,2 @@
+test -p orch-api-core --test thread_opening_scopes -- pending_agent_lines_are_native_opening_sources_and_never_borrow_schedule_get --exact --nocapture
+test -p orch-api-core --test everything_scale -- simultaneous::ten_simultaneous_openings_finish_within_half_again_the_time_of_one --exact --nocapture

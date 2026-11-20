@@ -9,7 +9,7 @@ import { i18n,setLocale } from '@/i18n';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router',()=>({Link:({children,target}:{children:ReactNode;target?:string})=><a href="/resources/providers/plan-provider?tab=key" target={target}>{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children,target}:{children:ReactNode;target?:string})=><a href="/resources/providers/plan-provider?tab=key" target={target}>{children}</a>}));
 vi.mock('@/features/resources/providers/AddProvider',()=>({AddProviderDialog:({onClose,onCreated}:ComponentProps<typeof AddProviderDialog>)=><div role="dialog"><button onClick={()=>{onCreated?.(planProvider());onClose();}}>Create the provider</button></div>}));
 afterEach(async()=>{await setLocale('en');});
 it.each(['en','zh-CN'] as const)('preserves the input and rereads choices only on its explicit act in %s',async(locale)=>{
