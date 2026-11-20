@@ -311,12 +311,13 @@ pub async fn people(
     subject::require_page(&mut conn, &principal, named.thing, policy).await?;
     let chip = parse_chip(&query.holder).ok_or_else(ApiError::not_found)?;
     let wanted = view::every_permission(std::slice::from_ref(&site));
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         &mut conn,
         &principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         &wanted,
     )
     .await

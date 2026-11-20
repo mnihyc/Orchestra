@@ -71,7 +71,8 @@ pub async fn among(
             permissions.push(permission);
         }
     }
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &permissions).await?;
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &permissions).await?;
     let mut grants = Vec::new();
     for resource in resources {
         if resource.deleted

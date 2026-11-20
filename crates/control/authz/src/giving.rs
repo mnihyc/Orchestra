@@ -76,6 +76,10 @@ pub(crate) fn entry_widens(before: &Entry, update: &CheckedUpdate) -> bool {
             Options::parse(Permission::ProviderUse, &before.options),
             Ok(Options::ProviderUse(before)) if after.within(&before)
         ),
+        Options::Files(after) => !matches!(
+            Options::parse(Permission::FilesView, &before.options),
+            Ok(Options::Files(before)) if after.within(&before)
+        ),
         after => !options_only_narrow(&before.options, &after.to_json()),
     }) || update
         .expires_at
@@ -737,7 +741,7 @@ pub async fn role_standing(
     policy: Policy,
 ) -> Result<RoleStanding, Error> {
     let (graph, site) = standing_in(conn, principal, place).await?;
-    let frame = Frame::load_with(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
@@ -761,7 +765,7 @@ pub async fn role_refusal(
     policy: Policy,
 ) -> Result<Refusal, Error> {
     let (graph, site) = standing_in(conn, principal, place).await?;
-    let frame = Frame::load_with(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,

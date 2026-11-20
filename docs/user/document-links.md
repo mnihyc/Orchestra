@@ -8,6 +8,8 @@ summary: Explore a document’s incoming references, outgoing references, relate
 
 # Document links
 
+Document links show what refers to a document, with the line around each mention, and what the document refers to. This page explains how to read the links, the graph and the tabs a document shows.
+
 ## Read links
 
 Open **Links** in a document's inspector. It has four tabs.

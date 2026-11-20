@@ -12,6 +12,7 @@ mod account_facts;
 mod audiences;
 mod kept;
 mod plain_roles;
+pub(crate) use kept::ordinary_candidate;
 
 pub(crate) use account_facts::{AccountFacts, FrameSubject};
 
