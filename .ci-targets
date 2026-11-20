@@ -1,0 +1,2 @@
+web typecheck
+web test -- tests/component/human-resource-facts.test.tsx tests/unit/acts.test.ts tests/component/port-display.test.tsx

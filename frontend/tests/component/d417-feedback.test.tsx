@@ -20,7 +20,7 @@ import {show} from './support';
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const providerRead=vi.hoisted(()=>vi.fn<()=>Promise<Provider[]>>());
 vi.mock('@/api/resources',async(original)=>({...await original<typeof ResourcesApi>(),providersQuery:()=>({queryKey:['d438-provider-origins'],queryFn:providerRead})}));
-vi.mock('@/features/navigation/placeLabels',()=>({useKnownPlaces:()=>new Map()}));
+vi.mock('@/features/navigation/placeLabels',async (loadOriginal) => ({ ...await loadOriginal<object>(),useKnownPlaces:()=>new Map()}));
 const first='2026-10-15T10:00:00.000Z',second='2026-10-15T10:01:00.000Z';
 beforeEach(()=>{providerRead.mockReset();providerRead.mockResolvedValue([]);});
 afterEach(async()=>{await setLocale('en');});
@@ -53,6 +53,19 @@ for (const language of ['en','zh-CN'] as const) describe('resource feedback in '
     expect(sourceLine(t,source)).toBe(t('source.prepare.existing',{directory:t('source.prepare.workspace')}));
     expect(sourceLine(t,source)).not.toContain('/');
   });
+  it('keeps the Auto verification cause in its blocked state line without calling it unsupported',()=>{
+    for(const [cause, translated] of language === 'en' ? [
+      ['Not proven on this machine yet.', 'Auto: Not proven on this machine yet.'],
+      ['Failed its check on this machine.', 'Auto: Failed its check on this machine.'],
+    ] : [
+      ['Not proven on this machine yet.', '自动：尚未在此机器上验证。'],
+      ['Failed its check on this machine.', '自动：未通过此机器上的检查。'],
+    ]) {
+      const line=blockedDetail(`Auto: ${cause}`,t);
+      expect(line).toBe(translated);
+      expect(line).not.toContain(t('threadConfinement.approvalUnsupported'));
+    }
+  });
   it('keeps the agent startup cause in a localized recovery and translates retained approval enum names',()=>{
     const cause='llm-pi-ai: provider "orch" has no compatible protocol';
     const shown=blockedDetail(`harness_unavailable: ${cause}`,t);
@@ -69,15 +82,18 @@ for (const language of ['en','zh-CN'] as const) describe('resource feedback in '
   it('names the selected approval mode in localized engine refusals and preserves unknown details',()=>{
     const english=i18n.getFixedT('en');
     for(const [name,mode] of [['Ask','ask'],['On request','on_request'],['Auto','auto'],['Bypass','bypass']] as const){
-      for(const key of ['approvalNotAllowed','approvalUnsupported'] as const){
-        const raw=`${name}: ${english(`threadConfinement.${key}`)}`;
-        expect(blockedDetail(raw,t)).toBe(`${t(`composer.mode.labels.${mode}`)}: ${t(`threadConfinement.${key}`)}`);
+      for(const key of ['approvalNotAllowedMode','approvalUnsupportedMode'] as const){
+        const raw=english(`threadConfinement.${key}`, { mode: name });
+        expect(blockedDetail(raw,t)).toBe(t(`threadConfinement.${key}`, { mode: t(`composer.mode.labels.${mode}`) }));
       }
     }
     for(const raw of [
       `Native: ${english('threadConfinement.approvalUnsupported')}`,
       `auto: ${english('threadConfinement.approvalUnsupported')}`,
       `Auto: ${english('threadConfinement.approvalUnsupported')} Vendor explanation.`,
+      english('threadConfinement.approvalUnsupportedMode', { mode: 'Native' }),
+      english('threadConfinement.approvalUnsupportedMode', { mode: 'auto' }),
+      `${english('threadConfinement.approvalUnsupportedMode', { mode: 'Auto' })} Vendor explanation.`,
       'Auto: the vendor supplied this exact detail',
     ])expect(blockedDetail(raw,t)).toBe(raw);
   });
@@ -103,7 +119,7 @@ it('tells equal provider names apart in the actual inline start picker and sends
   const project:Project={...root,kind:'project',id:'project',name:'Web',parent_id:root.id,topic_count:0,project_count:0};
   const a=provider('a'),b=provider('b');
   a.provider.name=b.provider.name='Scripted model';a.provider.address='acme.ada.scripted';b.provider.address='beta.grace.scripted';
-  const answer=options({providers:[a,b],defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locked:false}});
+  const answer=options({providers:[a,b],defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locks: { provider: false, agent: false, model: false, effort: false }}});
   providerRead.mockResolvedValue([
     planProvider({id:'a',name:'Scripted model',home:{id:'acme',kind:'org',name:'Acme',redacted:false},org_id:'acme'}),
     planProvider({id:'b',name:'Scripted model',home:{id:'beta',kind:'org',name:'Beta',redacted:false},org_id:'beta'}),
@@ -111,10 +127,16 @@ it('tells equal provider names apart in the actual inline start picker and sends
   const onPick=vi.fn();
   show(<MissingDefault place={placeOfNode(project)} node={project} options={answer} resolved={resolve(answer,NO_PICKS,{suggest:false})} picks={NO_PICKS}
     onPick={onPick} scopes={[]} keepAt={null} onKeepAt={vi.fn()} onChange={vi.fn()} />);
-  await userEvent.click(await screen.findByRole('combobox',{name:i18n.t('start.provider.title')}));
-  expect(screen.getByRole('option',{name:'Scripted model (Acme)'})).toBeVisible();
-  await userEvent.click(screen.getByRole('option',{name:'Scripted model (Beta)'}));
-  expect(onPick).toHaveBeenCalledWith({provider:'b',agent:null,model:null,effort:null,arrangement:null});
+  // The provider is the model's: its name is the heading of its models, and a model is the choice of its provider.
+  const modelChip=await screen.findByRole('button',{name:new RegExp('^'+i18n.t('start.model.model'))});
+  await waitFor(()=>expect(modelChip).toBeEnabled());
+  await userEvent.click(modelChip);
+  expect(await screen.findByText('Scripted model (Acme)')).toBeVisible();
+  expect(screen.getByText('Scripted model (Beta)')).toBeVisible();
+  const models=screen.getAllByRole('menuitemradio',{name:'M1'});
+  expect(models).toHaveLength(2);
+  await userEvent.click(models[1]!);
+  expect(onPick).toHaveBeenCalledWith({provider:'b',agent:null,model:'m1',effort:null,arrangement:null});
   expect(providerRead).toHaveBeenCalledTimes(1);
   expect(document.body).not.toHaveTextContent('acme.ada.scripted');
   expect(document.body).not.toHaveTextContent('beta.grace.scripted');
@@ -123,11 +145,11 @@ it('tells equal provider names apart in the actual inline start picker and sends
 it('does not read provider origins when the offered names are unique',async()=>{
   const root=org('org','acme','Acme',userRef(me(1,'ada','Ada')));
   const project:Project={...root,kind:'project',id:'project',name:'Web',parent_id:root.id,topic_count:0,project_count:0};
-  const answer=options({defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locked:false}});
+  const answer=options({defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locks: { provider: false, agent: false, model: false, effort: false }}});
   show(<MissingDefault place={placeOfNode(project)} node={project} options={answer} resolved={resolve(answer,NO_PICKS,{suggest:false})} picks={NO_PICKS}
     onPick={vi.fn()} scopes={[]} keepAt={null} onKeepAt={vi.fn()} onChange={vi.fn()} />);
-  await userEvent.click(screen.getByRole('combobox',{name:i18n.t('start.provider.title')}));
-  expect(screen.getByRole('option',{name:'Provider p1'})).toBeVisible();
+  await userEvent.click(screen.getByRole('button',{name:new RegExp('^'+i18n.t('start.model.model'))}));
+  expect(await screen.findByText('Provider p1')).toBeVisible();
   expect(providerRead).not.toHaveBeenCalled();
 });
 
@@ -138,30 +160,33 @@ for (const language of ['en','zh-CN'] as const) it('names the offered profile’
   const first=agent('a1');
   const named={harness:{kind:'research-agent',name:'Research assistant',names:{'zh-CN':'研究助理'}}};
   const offered={...first,agent:{...first.agent,...named,name:'Reviewer',harness_kind:'research-agent'}};
-  const answer=options({providers:[provider('p1',{agents:[offered,agent('a2')]})],defaults:{provider_id:'p1',agent_id:null,model_name:'m1',effort:null,locked:false}});
+  const answer=options({providers:[provider('p1',{agents:[offered,agent('a2')]})],defaults:{provider_id:'p1',agent_id:null,model_name:'m1',effort:null,locks: { provider: false, agent: false, model: false, effort: false }}});
   show(<MissingDefault place={placeOfNode(project)} node={project} options={answer} resolved={resolve(answer,NO_PICKS,{suggest:false})} picks={NO_PICKS}
     onPick={vi.fn()} scopes={[]} keepAt={null} onKeepAt={vi.fn()} onChange={vi.fn()} />);
-  await userEvent.click(screen.getByRole('combobox',{name:i18n.t('start.agent.title')}));
-  const option=screen.getByRole('option',{name:/Reviewer/});
-  expect(option).toHaveTextContent(language==='zh-CN'?'研究助理':'Research assistant');
-  expect(option).not.toHaveTextContent('research-agent');
+  await userEvent.click(screen.getByRole('button',{name:new RegExp('^'+i18n.t('composer.row.agentName'))}));
+  const option=await screen.findByRole('menuitemradio',{name:/Reviewer/});
+  expect(option).toBeVisible();
+  // The list names the agent; the harness's routing key is never shown.
+  expect(document.body).not.toHaveTextContent('research-agent');
 });
 
 it('keeps a colliding-name picker unavailable until readable origins arrive and offers Retry after refusal',async()=>{
   const root=org('org','acme','Acme',userRef(me(1,'ada','Ada')));
   const project:Project={...root,kind:'project',id:'project',name:'Web',parent_id:root.id,topic_count:0,project_count:0};
   const a=provider('a'),b=provider('b');a.provider.name=b.provider.name='Shared';
-  const answer=options({providers:[a,b],defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locked:false}});
+  const answer=options({providers:[a,b],defaults:{provider_id:null,agent_id:null,model_name:null,effort:null,locks: { provider: false, agent: false, model: false, effort: false }}});
   providerRead.mockRejectedValueOnce(new Error('Origin read refused'));
   const onPick=vi.fn();
   show(<MissingDefault place={placeOfNode(project)} node={project} options={answer} resolved={resolve(answer,NO_PICKS,{suggest:false})} picks={NO_PICKS}
     onPick={onPick} scopes={[]} keepAt={null} onKeepAt={vi.fn()} onChange={vi.fn()} />);
-  expect(await screen.findByRole('combobox',{name:i18n.t('startFlow.providerLocationsFailure')})).toBeDisabled();
+  const modelChip=await screen.findByRole('button',{name:new RegExp('^'+i18n.t('start.model.model'))});
+  expect(await screen.findByText(i18n.t('startFlow.providerLocationsFailure'))).toBeVisible();
+  expect(modelChip).toBeDisabled();
   providerRead.mockResolvedValue([
     planProvider({id:'a',name:'Shared',home:{id:'acme',kind:'org',name:'Acme',redacted:false}}),
     planProvider({id:'b',name:'Shared',home:{id:'beta',kind:'org',name:'Beta',redacted:false}}),
   ]);
   await userEvent.click(screen.getByRole('button',{name:i18n.t('common.tryAgain')}));
-  await waitFor(()=>expect(screen.getByRole('combobox',{name:i18n.t('start.provider.title')})).toBeEnabled());
+  await waitFor(()=>expect(modelChip).toBeEnabled());
   expect(providerRead).toHaveBeenCalledTimes(2);expect(onPick).not.toHaveBeenCalled();
 });
