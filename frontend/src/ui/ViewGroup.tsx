@@ -81,7 +81,7 @@ export function ViewGroup({
   className,
 }: ViewGroupProps) {
   const { t } = useTranslation();
-  const strip = useTabStripReveal(activeId, tabIds, tabElementId);
+  const strip = useTabStripReveal(activeId, tabIds, tabElementId, panelId);
   const menuDestination = useRef<string | null>(null);
   const [choosing, setChoosing] = useState(false);
   const [query, setQuery] = useState('');

@@ -138,6 +138,7 @@ pub fn convert(
 #[must_use]
 pub fn harness_status(status: &HarnessStatus) -> link::HarnessStatus {
     link::HarnessStatus {
+        home: status.home.clone(),
         status: serde_json::to_value(status.status)
             .ok()
             .and_then(|state| state.as_str().map(str::to_owned))
@@ -316,6 +317,7 @@ mod tests {
             }
         );
         let status = AdapterEvent::Status(HarnessStatus {
+            home: None,
             status: orch_agent_contract::facts::HarnessState::Error,
             detail: Some("it died".into()),
             harness_version: None,

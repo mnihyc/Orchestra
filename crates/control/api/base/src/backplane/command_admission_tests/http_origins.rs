@@ -184,10 +184,10 @@ impl HttpFixture {
         )
         .await?;
         let id = new_id();
-        let bearer = authentication::new_token(match mode {
-            Mode::Key => authentication::API_TOKEN_PREFIX,
-            Mode::Session(_) => authentication::ACCESS_TOKEN_PREFIX,
-        });
+        let bearer = match mode {
+            Mode::Key => authentication::new_api_token(id),
+            Mode::Session(_) => authentication::new_token(authentication::ACCESS_TOKEN_PREFIX),
+        };
         let digest = authentication::token_hash(&bearer);
         let session_end = transport.clock.now() + chrono::Duration::hours(1);
         match mode {
@@ -297,6 +297,7 @@ impl HttpFixture {
     }
     fn stored(&self) -> StoredCommand {
         StoredCommand {
+            content_transit: false,
             id: Some(self.command.id),
             machine: self.command.machine,
             kind: self.command.kind.as_str().into(),
