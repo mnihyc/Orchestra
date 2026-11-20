@@ -229,6 +229,15 @@ impl Engine {
     /// Runs pre-flight for a thread in a transaction of its own, and sees
     /// that what follows a started turn is taken up.
     pub async fn preflight(&self, thread: Id) -> Result<Outcome, EngineError> {
+        self.preflight_thread(thread, false).await
+    }
+
+    /// A background wake defers a thread that joined the cap queue before its row was locked.
+    pub(crate) async fn preflight_thread(
+        &self,
+        thread: Id,
+        defer_cap_waiters: bool,
+    ) -> Result<Outcome, EngineError> {
         let selected: bool = {
             let mut conn = self.db().acquire().await?;
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE thread_id=$1 AND state='pending' AND native_action IS NOT NULL)")
@@ -239,7 +248,8 @@ impl Engine {
         }
         let mut tx = self.inner.db.begin().await?;
         let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-        let outcome = self.preflight_in(&mut unit, thread).await?;
+        let outcome =
+            Box::pin(self.preflight_with_observation(&mut unit, thread, defer_cap_waiters)).await?;
         let finished = unit.finish().await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         for woken in finished.wakes {
@@ -249,12 +259,47 @@ impl Engine {
     }
 
     /// Pre-flight inside the transaction of a caller, which commits.
-    pub(crate) async fn preflight_in(
+    #[inline(never)]
+    pub(crate) fn preflight_in<'a, 'unit>(
+        &'a self,
+        unit: &'a mut Unit<'unit>,
+        thread_id: Id,
+    ) -> impl std::future::Future<Output = Result<Outcome, EngineError>> + Send + 'a {
+        // Input and tool writers retain one pointer while the checked queue facts are captured.
+        Box::pin(self.preflight_with_observation(unit, thread_id, false))
+    }
+
+    async fn preflight_with_observation(
         &self,
         unit: &mut Unit<'_>,
         thread_id: Id,
+        defer_cap_waiters: bool,
     ) -> Result<Outcome, EngineError> {
-        let outcome = Box::pin(self.preflight_inner(unit, thread_id)).await?;
+        let now = unit.now();
+        let Some(thread) =
+            Self::preflight_phase(|| threads::lock(&mut *unit.conn, thread_id)).await?
+        else {
+            return Ok(Outcome::Gone);
+        };
+        if defer_cap_waiters
+            && thread.state == thread_state::BLOCKED
+            && thread.blocked_reason.as_deref() == Some("quota_exceeded")
+        {
+            return Ok(Outcome::Blocked(Blocked {
+                reason: "quota_exceeded",
+                detail: thread.blocked_detail,
+            }));
+        }
+        let before = if matches!(
+            thread.state.as_str(),
+            thread_state::IDLE | thread_state::BLOCKED
+        ) {
+            threads::eligibility::basis(unit.conn, thread_id, now).await?
+        } else {
+            None
+        };
+        let mut eligibility = crate::queue_eligibility::Choice::Unreported;
+        let outcome = Box::pin(self.preflight_inner(unit, thread, &mut eligibility)).await?;
         // Preparation has not refused the parked native continuation. Its decision follows
         // when the retained input material is ready, before the adapter releases output.
         if !matches!(
@@ -268,19 +313,33 @@ impl Engine {
                 }
             }
         }
+        self.keep_queue_eligibility(unit, thread_id, before, eligibility, &outcome)
+            .await?;
         Ok(outcome)
     }
 
     async fn preflight_inner(
         &self,
         unit: &mut Unit<'_>,
-        thread_id: Id,
+        thread: ThreadRow,
+        eligibility: &mut crate::queue_eligibility::Choice,
     ) -> Result<Outcome, EngineError> {
-        let Some(thread) =
-            Self::preflight_phase(|| threads::lock(&mut *unit.conn, thread_id)).await?
-        else {
-            return Ok(Outcome::Gone);
+        let thread_id = thread.node_id;
+        // A Stop that is open is carried out before anything else: no turn is made behind its back.
+        let thread = if Self::preflight_phase(|| self.apply_open_stops_in(unit, thread_id))
+            .await?
+            .carried_out
+        {
+            match threads::thread(unit.conn, thread_id).await? {
+                Some(thread) => thread,
+                None => return Ok(Outcome::Gone),
+            }
+        } else {
+            thread
         };
+        if Self::preflight_phase(|| threads::stop_work_pending(unit.conn, thread_id)).await? {
+            return Ok(Outcome::Busy);
+        }
         if Self::preflight_phase(|| orch_db::queries::ask::get(unit.conn, thread_id, false))
             .await?
             .is_some()
@@ -645,7 +704,7 @@ impl Engine {
                         detail: Some(AUTHOR_LOST_ACCESS),
                         ..InputChange::default()
                     };
-                    Self::preflight_phase(|| {
+                    let changed = Self::preflight_phase(|| {
                         threads::change_input(
                             &mut *unit.conn,
                             input.id,
@@ -655,6 +714,17 @@ impl Engine {
                         )
                     })
                     .await?;
+                    if changed {
+                        let cancellation = serde_json::to_value(orch_api_contract::threads::InputCancellation {
+                            cause: orch_api_contract::threads::InputCancellationCause::AccessChanged,
+                            at: orch_types::Time::new(unit.now()),
+                            by: None,
+                        })?;
+                        Self::preflight_phase(|| {
+                            threads::record_input_cancellation(unit.conn, input.id, &cancellation)
+                        })
+                        .await?;
+                    }
                 }
             }
         }
@@ -676,6 +746,11 @@ impl Engine {
         let mut held_for: Option<String> = None;
         loop {
             let Some(mut input) = pending.iter().find(|input| !input.is_held()).cloned() else {
+                *eligibility = if pending.is_empty() {
+                    crate::queue_eligibility::Choice::Unreported
+                } else {
+                    crate::queue_eligibility::Choice::None
+                };
                 // What waits for a person (what a Stop held, files that cannot reach the agent) holds nobody
                 // else up and is not the thread's block; what waits for room in a cap, or for the owner, is.
                 let waiting: Vec<&InputRow> = pending
@@ -810,7 +885,8 @@ impl Engine {
             }
             // A terminal source failure keeps the same input without re-entering preparation on every wake.
             if crate::preparation::source_failed(&thread)? {
-                let blocked = Blocked::new("error", crate::preparation::SOURCE_FAILED);
+                let blocked =
+                    Blocked::new("source_failed", crate::preparation::SOURCE_FAILED_DETAIL);
                 Self::preflight_phase(|| self.block(unit, &thread, &blocked)).await?;
                 return Ok(Outcome::Blocked(blocked));
             }
@@ -832,6 +908,11 @@ impl Engine {
             let check = Self::preflight_phase(|| self.check_caps(unit, &input, &ask)).await?;
             match &check.verdict {
                 Verdict::Clear => {
+                    *eligibility = crate::queue_eligibility::Choice::Selected {
+                        input: input.id,
+                        author: input.author_id,
+                        authority: ask.person.or(Some(thread.owner_id)),
+                    };
                     // Files are written before anything opens for the turn, with the thread starting and no turn yet.
                     match Self::preflight_phase(|| self.files_gate(unit, &thread, &mut input))
                         .await?
@@ -887,6 +968,11 @@ impl Engine {
                     ));
                 }
                 Verdict::Blocked(detail) => {
+                    *eligibility = crate::queue_eligibility::Choice::Selected {
+                        input: input.id,
+                        author: input.author_id,
+                        authority: ask.person.or(Some(thread.owner_id)),
+                    };
                     if let Some(cap) = check.blocked_by {
                         self.note_waiting_for(thread_id, cap);
                     }
@@ -1043,6 +1129,7 @@ impl Engine {
         }
         let now = Time::new(unit.now());
         let ask = |person: Id| ProviderUse {
+            purpose: orch_access_contract::permissions::UsagePurpose::Turn,
             person,
             node: thread.node_id,
             provider: thread.provider_id.unwrap_or_else(Id::nil),
@@ -1470,7 +1557,7 @@ impl Engine {
         // A previous vendor family/spending refusal describes that failed turn;
         // it cannot decide whether the vendor admits this new request.
         // 8, 9, 10, 11 need the environment and the descriptor.
-        let descriptor = harnesses::descriptor_of(&agent)?;
+        let descriptor = harnesses::descriptor_for_thread(conn, &agent, &provider, thread).await?;
         if descriptor
             .as_ref()
             .is_some_and(|descriptor| descriptor.capabilities.prompt_cache_ttl)
@@ -1493,7 +1580,10 @@ impl Engine {
             if !descriptor.approval_modes.contains(&settings.approval_mode) {
                 return Ok(Err(Blocked::new(
                     "binding_invalid",
-                    crate::sessions::unsupported_approval_detail(settings.approval_mode),
+                    crate::sessions::unavailable_approval_detail(
+                        settings.approval_mode,
+                        descriptor,
+                    ),
                 )));
             }
         }
@@ -1607,7 +1697,10 @@ impl Engine {
         // lets a credential be used in is asked as well: it comes before every page.
         let machine_list = binding::machine_arrangements_of(conn, &provider).await?;
         let permission = binding::policy_with_machine(&facts, machine_list.clone()).permission;
-        let arrangement = match binding::choose_with_machine(&facts, machine_list, requested) {
+        // An environment that is being made has reported no executors yet: it is judged by what its
+        // template promises, as at the creation of the thread, and never refused for the lack of a report.
+        let place = binding::initial_place(conn, &facts).await?;
+        let arrangement = match binding::choose_placed(&facts, &place, machine_list, requested) {
             Ok(arrangement) => arrangement,
             Err(why) => {
                 // A role removed from an existing binding is an availability failure.
@@ -1663,10 +1756,9 @@ impl Engine {
                     settings,
                 )
                 .await?;
-            let declared = crate::harnesses::descriptor_of(&agent)?;
             if let Err(why) = crate::approval_review::reviewer_allowed_for(
                 settings.approval_mode,
-                declared.as_ref(),
+                Some(&descriptor),
                 &models,
                 path,
                 &model,
@@ -1790,6 +1882,7 @@ impl Engine {
             .provider_use(
                 &mut *unit.conn,
                 &ProviderUse {
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: thread.node_id,
                     provider: provider.id,
@@ -2201,6 +2294,7 @@ pub(crate) fn sessions_params(
     use orch_agent_contract::descriptor::Placement;
     use orch_agent_contract::parameters::{Eligibility, sendable};
     let _ = arrangement;
+    let features = descriptor.feature_values(&settings.features);
     // The options of the profile that hold back the end of a turn must fit under the time an unanswered interrupt is
     // given: the program declares which they are, and the engine knows the time.
     if let Some(delays) = declared_turn_end_delays(descriptor) {
@@ -2228,7 +2322,7 @@ pub(crate) fn sessions_params(
     let sent = sendable(
         &descriptor.parameters,
         &context,
-        &settings.features,
+        &features,
         &settings.params,
     );
     let params = Json::Object(sent.values.into_iter().collect());
@@ -2242,7 +2336,7 @@ pub(crate) fn sessions_params(
         bindings.validate(
             agent.profile.get("config").unwrap_or(&Json::Null),
             parameters,
-            &settings.features,
+            &features,
         )?
     } else {
         std::collections::BTreeMap::new()
@@ -2259,7 +2353,7 @@ pub(crate) fn sessions_params(
         object.remove(orch_agent_contract::parameters::MODEL_WINDOW_KEY);
         for def in &descriptor.parameters {
             if def.chooses_none()
-                && def.is_shown(&context, &settings.features)
+                && def.is_shown(&context, &features)
                 && !object.contains_key(&def.key)
             {
                 object.insert(def.key.clone(), Json::Null);
@@ -2300,6 +2394,7 @@ mod tests {
 
     fn environment(status: &str) -> EnvironmentRow {
         EnvironmentRow {
+            revision: 1,
             id: new_id(),
             name: "env".into(),
             owner_id: new_id(),
@@ -2410,6 +2505,7 @@ mod tests {
             sources: serde_json::json!({}),
             facts: Json::Null,
             revision: 1,
+            observation_revision: 0,
             deleted_at: None,
         }
     }

@@ -26,6 +26,7 @@ async fn command(
     let mut conn = db.acquire().await.unwrap();
     let id = new_id();
     let made = NewCommand {
+        content_transit: false,
         id,
         machine_id: machine,
         kind,
