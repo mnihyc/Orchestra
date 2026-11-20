@@ -42,6 +42,7 @@ import { ColourDialog } from '@/features/navigation/Colour';
 import { depthWords } from '@/features/navigation/depth';
 import { useNamedPlace } from '@/features/navigation/namedPlace';
 import { ArchiveConsequences } from '@/features/project/ReviewConsequences';
+import { RetentionFacts } from '@/features/project/RetentionFacts';
 import { DeleteDocumentDialog, MoveDocumentDialog, RenameDocumentDialog } from '@/features/navigation/DocDialogs';
 import { RecentlyDeleted } from '@/features/navigation/RecentlyDeleted';
 import { type DocPlace, type PlaceRef, placePath, type SubtreeCounts, subtreeCounts } from '@/features/navigation/places';
@@ -553,7 +554,7 @@ function ArchiveDialog({ place, open, onClose }: DialogProps & { place: PlaceRef
   const { t } = useTranslation();
   const named = useNamedPlace(place);
   const authority = useQuery({ ...nodeQuery(place.id), enabled: open });
-  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, staleTime: 0, retry: false });
+  const plan = useQuery({ queryKey: ['archive-plan', place.id], queryFn: () => previewArchive(place.id), enabled: open, retry: false });
   const archive = useMutation({
     mutationFn: () => {
       if (plan.data === undefined || plan.isError || plan.data.blockers.length > 0) return Promise.reject(new Error(t('placeReview.newReviewRequired')));
@@ -745,6 +746,7 @@ function DeleteDialog({ place, open, onClose }: DialogProps & { place: PlaceRef 
             })}
           </p>
         )}
+        <RetentionFacts retention={plan?.retention} />
         {planned.isError && replaced === null && <ErrorAlert error={planned.error} />}
         {isDepartment && node.data?.kind === 'org' && parent !== null && (
           <div className="flex flex-col gap-3 border-t border-border pt-3">
