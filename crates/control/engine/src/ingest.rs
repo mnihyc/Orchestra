@@ -21,8 +21,9 @@
 //! The streams of providers are applied in `providers` (a provider's status
 //! and facts, the requests a lease counted, the requests it refused).
 //!
-//! **Not done here.** Text is not masked for secrets (redaction is a later
-//! part's); `raw.frame` is kept for diagnosis, masked, by `raw_events`; `usage.updated` records the turn's and the
+//! Native presentation is masked before storage or live delivery. Private observations keep
+//! their original operands. `raw.frame` is kept for diagnosis, masked, by `raw_events`;
+//! `usage.updated` records the turn's and the
 //! thread's figures (the turn's never below what the forwarder counted for it)
 //! and writes no row of the usage ledger, since on the path `forwarded` the
 //! forwarder is the meter; once a delivery has been applied, the usage caps of
@@ -42,6 +43,7 @@ use crate::providers;
 use crate::turns::{InputAfter, TurnEnd, error_json, turn_error_json};
 use crate::unit::Unit;
 use crate::views;
+use orch_chat::redaction::Redactor;
 use orch_db::Conn;
 use orch_db::queries::resources::thread_engine as resources;
 use orch_db::queries::threads::{
@@ -53,12 +55,13 @@ use orch_link::streams::{DeliveredEvent, Delivery};
 use orch_link_contract::commands::SerialKey;
 use orch_link_contract::events::{
     DeltaField, EmittedItemKind, Event, ItemCompleted, ItemDelta, ItemStarted, ItemUpdated,
-    OrchToolCall, SessionLost, SessionOpened, SessionTitle, TurnCompleted, TurnOutcome, TurnPhase,
-    TurnPhaseKind, TurnStarted, UsageUpdated,
+    OrchToolCall, SessionLost, SessionOpened, SessionTitle, TurnCompleted, TurnLost, TurnOutcome,
+    TurnPhase, TurnPhaseKind, TurnStarted, UsageUpdated,
 };
 use orch_link_contract::streams::{ResetReason, Stream};
 use orch_types::{Id, Json, new_id};
 use serde_json::json;
+use std::sync::{Arc, OnceLock};
 
 /// How much of the end of a command's output an item keeps in its row: the
 /// last 16 KiB, which a screen shows at a glance. The whole is kept as a
@@ -66,6 +69,57 @@ use serde_json::json;
 pub const OUTPUT_INLINE_MAX_BYTES: usize = 16 * 1024;
 /// The longest title a harness may give a thread, in characters.
 pub const TITLE_MAX_CHARS: usize = 120;
+
+/// Prepares public metadata while preserving byte streams and the original identity of routing references.
+pub fn storable_event_body(kind: &str, body: &mut Json) -> u64 {
+    static MODEL_REQUEST: OnceLock<Json> = OnceLock::new();
+    static LEASE_USAGE: OnceLock<Json> = OnceLock::new();
+    let schema = match kind {
+        "model.request" => Some(MODEL_REQUEST.get_or_init(|| {
+            serde_json::to_value(schemars::schema_for!(
+                orch_link_contract::events::ModelRequest
+            ))
+            .unwrap_or_default()
+        })),
+        "lease.usage" => Some(LEASE_USAGE.get_or_init(|| {
+            serde_json::to_value(schemars::schema_for!(
+                orch_link_contract::events::LeaseUsage
+            ))
+            .unwrap_or_default()
+        })),
+        _ => None,
+    };
+    if let Some(schema) = schema {
+        return orch_types::storable::schema::normalize_public(schema, body);
+    }
+    let held: Vec<_> = match kind {
+        "item.started" => &["payload", "native_ref", "parent_native_ref", "stream"][..],
+        "item.updated" | "item.completed" => &["payload", "native_ref"][..],
+        "item.delta" => &["data", "native_ref"][..],
+        "raw.frame" => &["payload", "text"][..],
+        "approval.requested" => &["request", "title", "request_ref"][..],
+        "approval.closed" => &["request_ref"][..],
+        "session.opened" => &["native_session_ref"][..],
+        "turn.started" => &["native_turn_ref"][..],
+        "session.instructions" => &["sources"][..],
+        "provider.generation.delta" => &["text"][..],
+        _ => &[][..],
+    }
+    .iter()
+    .filter_map(|name| {
+        body.as_object_mut()
+            .and_then(|object| object.remove(*name))
+            .map(|value| ((*name).to_owned(), value))
+    })
+    .collect();
+    let count = orch_types::storable::normalize_json(body);
+    if let Some(object) = body.as_object_mut() {
+        for (name, value) in held {
+            object.insert(name, value);
+        }
+    }
+    count
+}
 
 // ---------------------------------------------------------------- making items
 
@@ -122,6 +176,14 @@ pub async fn add_item(
     unit: &mut Unit<'_>,
     spec: &ItemSpec<'_>,
 ) -> Result<Option<ItemRow>, EngineError> {
+    add_captured_item(unit, spec, None).await
+}
+
+async fn add_captured_item(
+    unit: &mut Unit<'_>,
+    spec: &ItemSpec<'_>,
+    capture: Option<(&Engine, &Redactor)>,
+) -> Result<Option<ItemRow>, EngineError> {
     // An item that is there already costs nothing: no number is spent.
     if let Some(native_ref) = spec.native_ref
         && threads::item_by_native_ref(&mut *unit.conn, spec.segment, native_ref)
@@ -130,19 +192,46 @@ pub async fn add_item(
     {
         return Ok(None);
     }
+    let payload = spec.payload;
+    let id = new_id();
+    let presented = match capture {
+        Some((engine, masker)) => {
+            engine
+                .native_payload(
+                    unit.conn,
+                    id,
+                    spec.kind,
+                    masker,
+                    payload,
+                    spec.status == "in_progress",
+                )
+                .await?
+        }
+        None => crate::redaction::NativePayload {
+            payload: payload.clone(),
+            private: None,
+        },
+    };
     let observed = if spec.kind == "error" {
-        observations::rerouted(unit, spec.thread, spec.segment, spec.turn, spec.payload).await?
+        observations::rerouted(
+            unit,
+            spec.thread,
+            spec.segment,
+            spec.turn,
+            &orch_types::storable::json(&presented.payload),
+        )
+        .await?
     } else {
         None
     };
-    let payload = observed.as_ref().unwrap_or(spec.payload);
+    let stored = observed.unwrap_or(presented.payload);
     let seq = unit.stamp(spec.thread).await?;
     let now = unit.now();
-    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, payload).await?;
+    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, &stored).await?;
     let row = threads::insert_item(
         &mut *unit.conn,
         &NewItem {
-            id: new_id(),
+            id,
             thread_id: spec.thread,
             segment_id: spec.segment,
             turn_id: spec.turn,
@@ -151,7 +240,7 @@ pub async fn add_item(
             kind: spec.kind,
             status: spec.status,
             author_id: spec.author,
-            payload,
+            payload: &stored,
             native_ref: spec.native_ref,
             search_text: search.as_deref(),
             at: now,
@@ -160,10 +249,25 @@ pub async fn add_item(
     )
     .await?;
     if let Some(row) = &row {
+        if presented.private.is_some() {
+            crate::redaction::presentation::keep_originals(
+                unit.conn,
+                row.id,
+                presented.private.as_deref(),
+            )
+            .await?;
+        }
+        if let Some((_, masker)) = capture {
+            let masker = crate::redaction::remember(unit.conn, row.id, masker).await?;
+            if spec.status == "in_progress" {
+                crate::redaction::seed(unit.conn, row.id, spec.segment, payload, &masker, None)
+                    .await?;
+            }
+        }
         if spec.status == "completed" {
-            observations::completed_item(unit, row, payload, None).await?;
+            observations::completed_item(unit, row, &row.payload, None).await?;
         } else {
-            observations::observed_item(unit, row, payload, None).await?;
+            observations::observed_item(unit, row, &row.payload, None).await?;
         }
     }
     if spec.kind == "tool_call"
@@ -305,6 +409,25 @@ pub async fn settle_user_message(
     };
     let seq = unit.stamp(thread).await?;
     let now = unit.now();
+    if let Some(input) = threads::input(&mut *unit.conn, input).await?
+        && input.delivered_at.is_some()
+        && let Some(receipt) = input.native_image_delivery
+    {
+        let mut payload = item.payload.clone();
+        payload["native_image_delivery"] = receipt;
+        threads::change_item(
+            &mut *unit.conn,
+            item.id,
+            &threads::ItemChange {
+                status: None,
+                payload: &payload,
+                search_text: None,
+                at: now,
+            },
+            seq,
+        )
+        .await?;
+    }
     threads::set_item_status(&mut *unit.conn, item.id, &["in_progress"], status, now, seq).await?;
     Ok(true)
 }
@@ -328,6 +451,7 @@ async fn write_user_message(
         return Ok(());
     }
     let mut payload = json!({
+        "native_image_delivery":input.delivered_at.and(input.native_image_delivery.as_ref()),
         "parts": crate::paste::metadata(&input.content), "input_id": input.id, "delivery": input.delivery, "source": input.source,
     });
     // The input of a goal's loop shows the goal's own words in its place: its turn, its limit, what it has used.
@@ -353,7 +477,7 @@ async fn write_user_message(
     let key = user_message_key(input.id);
     let model_input:Option<Id>=sqlx::query_scalar("SELECT id FROM model_inputs WHERE node_id=$1 AND input_id=$2 AND purpose='input' ORDER BY seq_created DESC LIMIT 1")
         .bind(thread).bind(input.id).fetch_optional(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-    add_item(
+    let made = add_item(
         unit,
         &ItemSpec {
             thread,
@@ -369,6 +493,16 @@ async fn write_user_message(
         },
     )
     .await?;
+    if let Some(item) = made
+        && input.text_replacements > 0
+    {
+        sqlx::query("UPDATE items SET text_replacements=text_replacements+$2 WHERE id=$1")
+            .bind(item.id)
+            .bind(input.text_replacements)
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+    }
     if let Some(model_input) = model_input {
         sqlx::query("UPDATE items SET model_input_id=$3 WHERE thread_id=$1 AND native_ref=$2")
             .bind(thread)
@@ -528,6 +662,82 @@ fn describe(event: &DeliveredEvent) -> String {
 }
 
 impl Engine {
+    /// Records a rejected report under the same machine/source authority as ordinary application.
+    pub async fn record_storage_gap(
+        &self,
+        conn: &mut Conn,
+        machine: Id,
+        stream: &Stream,
+        event: &DeliveredEvent,
+        code: &str,
+    ) -> Result<(), EngineError> {
+        if !orch_db::queries::machine_reports::owns(conn, machine, stream).await? {
+            return Ok(());
+        }
+        orch_db::queries::machine_streams::record_storage_gap(
+            conn,
+            machine,
+            &stream.to_string(),
+            event.seq,
+            code,
+            self.inner.clock.now(),
+        )
+        .await?;
+        let Stream::Session {
+            thread_id,
+            segment_id,
+        } = *stream
+        else {
+            return Ok(());
+        };
+        let Some(thread) = threads::lock(conn, thread_id).await? else {
+            return Ok(());
+        };
+        let Some(segment) = threads::segment(conn, segment_id)
+            .await?
+            .filter(|segment| segment.thread_id == thread_id)
+        else {
+            return Ok(());
+        };
+        let batch = Batch {
+            machine,
+            thread_id,
+            frames: crate::raw_events::Keeper::new(&thread, segment_id),
+            segment,
+            masking: None,
+        };
+        let mut unit = Unit::new(conn, self.inner.clock.now());
+        let checkpoint = unit.event_checkpoint();
+        sqlx::query("SAVEPOINT storage_gap_item")
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        if let Err(error) = self
+            .record_native_storage_gap(&mut unit, &batch, event, code)
+            .await
+        {
+            if error.data_code().is_none() {
+                return Err(error);
+            }
+            sqlx::query("ROLLBACK TO SAVEPOINT storage_gap_item")
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            unit.restore_event(checkpoint);
+            // The minimal receipt survives even when the item table itself refuses the gap row.
+            sqlx::query("UPDATE segments SET raw_text_gap=true WHERE id=$1")
+                .bind(segment_id)
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        }
+        sqlx::query("RELEASE SAVEPOINT storage_gap_item")
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        unit.finish().await?;
+        Ok(())
+    }
     /// Applies the events of one delivery, in their order, inside the
     /// transaction of the caller, which moves the stream's cursor in the same
     /// transaction and commits both. Streams the engine does not own are left
@@ -551,6 +761,13 @@ impl Engine {
         stream: &Stream,
         events: &[DeliveredEvent],
     ) -> Result<(), EngineError> {
+        let mut storable = events.to_vec();
+        for event in &mut storable {
+            if !matches!(stream, Stream::Session { .. }) {
+                storable_event_body(&event.kind, &mut event.body);
+            }
+        }
+        let events = storable.as_slice();
         // Direct callers obey the same order as the backplane: authority before any report effects.
         orch_db::queries::transaction_guard::lock_authority(conn).await?;
         // Ask the source before object locks, restores, tools or diagnostics, including nested host objects.
@@ -615,8 +832,11 @@ impl Engine {
                             .await?;
                         }
                         Ok(_) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, event = %describe(event), "an event of a harness does not read")
+                        Err(_) => {
+                            tracing::warn!(
+                                sequence = event.seq,
+                                "an event of a harness could not be read"
+                            )
                         }
                     }
                 }
@@ -691,32 +911,234 @@ impl Engine {
         {
             self.restore_in(unit, &thread).await?;
         }
+        let masker = Arc::new(
+            crate::redaction::load(unit.conn, &thread, Some(segment.environment_id)).await?,
+        );
         let mut batch = Batch {
             machine,
             thread_id,
             frames: crate::raw_events::Keeper::new(&thread, segment.id),
             segment,
+            masking: Some(masker),
         };
-        let mut decoded = Vec::with_capacity(events.len());
+        let mut storable = Vec::with_capacity(events.len());
+        let mut repairs = std::collections::BTreeMap::new();
         for event in events {
             match Event::decode(&event.kind, event.body.clone()) {
-                Ok(event_of) => decoded.push((event, event_of)),
-                Err(error) => {
-                    tracing::warn!(%error, event = %describe(event), "an event of a session does not read");
+                Ok(decoded) => {
+                    let presented =
+                        crate::redaction::presentation::event(&decoded, batch.masker()?)?;
+                    let mut body = presented.body().map_err(EngineError::unreadable)?;
+                    let count = storable_event_body(&event.kind, &mut body);
+                    if count > 0 {
+                        repairs.insert(event.seq, count);
+                    }
+                    storable.push(DeliveredEvent {
+                        body,
+                        ..event.clone()
+                    });
                 }
+                Err(_) => crate::redaction::presentation::unreadable_event(thread_id, event.seq),
+            }
+        }
+        let mut decoded = Vec::with_capacity(storable.len());
+        for event in &storable {
+            match Event::decode(&event.kind, event.body.clone()) {
+                Ok(event_of) => decoded.push((event, event_of)),
+                Err(_) => crate::redaction::presentation::unreadable_event(thread_id, event.seq),
             }
         }
         // Whatever else the session says reads its items with all the text they were told.
         let mut written = false;
-        for (event, decoded) in joined_deltas(decoded) {
+        let joined = if repairs.is_empty() {
+            joined_deltas(decoded)
+        } else {
+            decoded
+        };
+        for (event, decoded) in joined {
+            let repairs = repairs.get(&event.seq).copied().unwrap_or_default();
             if matches!(decoded, Event::ItemDelta(_)) {
                 written = false;
             } else if !written {
                 self.write_held_of(unit, thread_id).await?;
                 written = true;
             }
-            self.apply_one(unit, &mut batch, event, decoded).await?;
+            let before: Option<i64> = if repairs > 0 {
+                orch_db::sequences::current(unit.conn, thread_id).await?
+            } else {
+                None
+            };
+            let checkpoint = unit.event_checkpoint();
+            sqlx::query("SAVEPOINT native_event")
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            match self.apply_one(unit, &mut batch, event, decoded).await {
+                Ok(()) => {
+                    if let Some(before) = before {
+                        sqlx::query("UPDATE items SET text_replacements=text_replacements+$3 WHERE segment_id=$1 AND seq_updated>$4 AND (native_ref=$2 OR seq_created>$4)")
+                            .bind(batch.segment.id).bind(event.body.get("native_ref").and_then(Json::as_str).map(orch_types::storable::encode_key))
+                            .bind(i64::try_from(repairs).unwrap_or(i64::MAX)).bind(before).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                    }
+                    sqlx::query("RELEASE SAVEPOINT native_event")
+                        .execute(&mut *unit.conn)
+                        .await
+                        .map_err(orch_db::DbError::from)?;
+                }
+                Err(error) if error.data_code().is_some() => {
+                    let code = error.data_code().unwrap_or("22000").to_owned();
+                    sqlx::query("ROLLBACK TO SAVEPOINT native_event")
+                        .execute(&mut *unit.conn)
+                        .await
+                        .map_err(orch_db::DbError::from)?;
+                    sqlx::query("RELEASE SAVEPOINT native_event")
+                        .execute(&mut *unit.conn)
+                        .await
+                        .map_err(orch_db::DbError::from)?;
+                    unit.restore_event(checkpoint);
+                    self.record_native_storage_gap(unit, &batch, event, &code)
+                        .await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
+        if crate::redaction::has_closed(unit.conn, thread_id).await? {
+            self.write_held_of(unit, thread_id).await?;
+            crate::redaction::finish_closed(unit, thread_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn record_native_storage_gap(
+        &self,
+        unit: &mut Unit<'_>,
+        batch: &Batch,
+        event: &DeliveredEvent,
+        code: &str,
+    ) -> Result<(), EngineError> {
+        let at = unit.now();
+        orch_db::queries::machine_streams::record_storage_gap(
+            unit.conn,
+            batch.machine,
+            &Stream::Session {
+                thread_id: batch.thread_id,
+                segment_id: batch.segment.id,
+            }
+            .to_string(),
+            event.seq,
+            code,
+            at,
+        )
+        .await?;
+        let reference = event
+            .body
+            .get("native_ref")
+            .and_then(Json::as_str)
+            .map(str::to_owned);
+        let existing = if let Some(reference) = reference.as_deref() {
+            threads::item_by_native_ref(unit.conn, batch.segment.id, reference).await?
+        } else {
+            None
+        };
+        let item = if let Some(item) = existing {
+            item
+        } else {
+            let turn = event
+                .body
+                .get("turn_id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok());
+            let turn = match turn {
+                Some(turn) => self.turn_of(unit, batch, turn).await?.map(|turn| turn.id),
+                None => None,
+            };
+            let payload = json!({"code":"storage.data","message":"Part of the output could not be stored.","retryable":false});
+            let item = add_item(
+                unit,
+                &ItemSpec {
+                    thread: batch.thread_id,
+                    segment: batch.segment.id,
+                    turn,
+                    stream: "main",
+                    parent: None,
+                    kind: "error",
+                    status: "failed",
+                    author: None,
+                    payload: &payload,
+                    native_ref: reference.as_deref(),
+                },
+            )
+            .await?;
+            match item {
+                Some(item) => item,
+                None => return Ok(()),
+            }
+        };
+        self.record_item_storage_gap(unit, &item, code, Some(event.seq))
+            .await?;
+        if event.kind == "turn.completed"
+            && let Some(turn) = event
+                .body
+                .get("turn_id")
+                .and_then(Json::as_str)
+                .and_then(|value| value.parse::<Id>().ok())
+            && let Some(turn) = self.turn_of(unit, batch, turn).await?
+        {
+            sqlx::query("UPDATE turns SET native_end_confirmed=true WHERE id=$1 AND segment_id=$2")
+                .bind(turn.id)
+                .bind(batch.segment.id)
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+            if turn.is_active() {
+                let thread = self.thread_row(unit, batch.thread_id).await?;
+                self.end_turn(
+                    unit,
+                    &thread,
+                    &turn,
+                    TurnEnd {
+                        state: turn_state::FAILED,
+                        error: Some(error_json(
+                            "storage.data",
+                            "The native ending could not be stored.",
+                            false,
+                        )),
+                        input: InputAfter::Retry { retryable: false },
+                        then_block: None,
+                    },
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn record_item_storage_gap(
+        &self,
+        unit: &mut Unit<'_>,
+        item: &ItemRow,
+        code: &str,
+        event_seq: Option<i64>,
+    ) -> Result<(), EngineError> {
+        let seq = unit.stamp(item.thread_id).await?;
+        let gap = orch_api_contract::threads::ItemStorageGap {
+            sqlstate: code.to_owned(),
+            event_seq,
+            at: orch_types::Time::new(unit.now()),
+        };
+        sqlx::query("UPDATE items SET storage_gap=$2,status='failed',seq_updated=$3,updated_at=$4 WHERE id=$1")
+            .bind(item.id).bind(serde_json::to_value(gap)?).bind(seq).bind(unit.now())
+            .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        sqlx::query("DELETE FROM item_stream_parts WHERE item_id=$1")
+            .bind(item.id)
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        sqlx::query("DELETE FROM item_redaction_holds WHERE item_id=$1")
+            .bind(item.id)
+            .execute(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
         Ok(())
     }
 
@@ -729,16 +1151,43 @@ impl Engine {
     ) -> Result<(), EngineError> {
         match event {
             Event::SessionOpened(opened) => self.on_session_opened(unit, batch, &opened).await,
+            Event::SessionSandbox(report) => {
+                let value = serde_json::to_value(&report.resolution)?;
+                if let Some(turn) = report.turn_id {
+                    if let Some(turn) = self.turn_of(unit, batch, turn).await?
+                        && turn.sandbox_resolution.is_none()
+                    {
+                        let seq = unit.stamp(batch.thread_id).await?;
+                        sqlx::query("UPDATE turns SET sandbox_resolution=$2,seq_updated=$3 WHERE id=$1 AND sandbox_resolution IS NULL")
+                            .bind(turn.id).bind(value).bind(seq).execute(&mut *unit.conn).await
+                            .map_err(orch_db::DbError::from)?;
+                    }
+                } else {
+                    let seq = unit.stamp(batch.thread_id).await?;
+                    sqlx::query(
+                        "UPDATE segments SET sandbox_resolution=$2,seq_updated=$3 WHERE id=$1",
+                    )
+                    .bind(batch.segment.id)
+                    .bind(value)
+                    .bind(seq)
+                    .execute(&mut *unit.conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+                }
+                Ok(())
+            }
             Event::InstructionSources(sources) => {
                 self.record_instruction_sources(
                     unit,
                     batch.thread_id,
                     batch.segment.id,
                     &sources.sources,
+                    batch.masker()?,
                 )
                 .await
             }
             Event::SessionTitle(title) => self.on_session_title(unit, batch, &title).await,
+            Event::TurnLost(lost) => self.on_turn_lost(unit, batch, &lost).await,
             Event::SessionLost(lost) => self.on_session_lost(unit, batch, &lost).await,
             Event::BackgroundTasks(report) => {
                 if let Some(thread) = threads::thread(unit.conn, batch.thread_id).await? {
@@ -759,8 +1208,8 @@ impl Engine {
                     unit,
                     batch.thread_id,
                     batch.segment.id,
-                    batch.machine,
                     &requested,
+                    batch.masker()?,
                 )
                 .await
             }
@@ -775,7 +1224,8 @@ impl Engine {
             }
             Event::ModelRequest(report) => {
                 if let Err(error) = report.request.check() {
-                    tracing::warn!(%error,"an invalid model request observation was not counted");
+                    let _ = error;
+                    tracing::warn!("an invalid native model request observation was not counted");
                     return Ok(());
                 }
                 if let Some(turn) = self.turn_of(unit, batch, report.turn_id).await? {
@@ -809,7 +1259,7 @@ impl Engine {
             Event::OrchToolCall(call) => self.on_tool_call(batch, &call).await,
             Event::CredentialNeeded(need) => {
                 // A harness that runs on a copy of the credential says it lacks one (the part that keeps
-                // providers): the schedule issues another, and fails the turn if it asks too often.
+                // providers): the schedule issues another, coalescing requests while one is in flight.
                 let lease = threads::open_lease_of(&mut *unit.conn, batch.thread_id).await?;
                 match lease.filter(|lease| lease.mode == "shared") {
                     Some(lease) => lock(&self.inner.credentials).needs(lease.id, need.reason),
@@ -920,7 +1370,8 @@ impl Engine {
         if mode.as_deref() != Some("harness") {
             return Ok(());
         }
-        let name: String = title.title.trim().chars().take(TITLE_MAX_CHARS).collect();
+        let title = batch.masker()?.mask_native(title.title.trim(), false);
+        let name: String = title.chars().take(TITLE_MAX_CHARS).collect();
         if name.is_empty() {
             return Ok(());
         }
@@ -932,18 +1383,127 @@ impl Engine {
         Ok(())
     }
 
+    /// End only the admitted turn the connector lost. A repeated report may arrive
+    /// after somebody has already continued in the same segment.
+    async fn on_turn_lost(
+        &self,
+        unit: &mut Unit<'_>,
+        batch: &Batch,
+        lost: &TurnLost,
+    ) -> Result<(), EngineError> {
+        let thread = self.thread_row(unit, batch.thread_id).await?;
+        if thread.current_segment_id != Some(batch.segment.id)
+            || thread.current_turn_id != Some(lost.turn_id)
+        {
+            return Ok(());
+        }
+        let Some(turn) = threads::active_turn(unit.conn, batch.thread_id)
+            .await?
+            .filter(|t| t.id == lost.turn_id && t.segment_id == batch.segment.id)
+        else {
+            return Ok(());
+        };
+        self.record_session_loss(unit, batch, &lost.reason).await?;
+        // A start or steer may have reached the program. Keep the words for the
+        // reader without returning an unconfirmed delivery to the pending queue.
+        let id = thread.node_id;
+        let code = orch_link_contract::events::TurnErrorCode::TurnLost.as_str();
+        let seq = unit.stamp(id).await?;
+        for input in threads::delivering_inputs(unit.conn, id).await? {
+            if input.id == turn.input_id || input.turn_id == Some(turn.id) {
+                threads::change_input(
+                    unit.conn,
+                    input.id,
+                    &[input_state::DELIVERING],
+                    &threads::InputChange {
+                        state: input_state::FAILED,
+                        detail: Some(code),
+                        ..Default::default()
+                    },
+                    seq,
+                )
+                .await?;
+                settle_user_message(unit, id, input.id, "failed").await?;
+            }
+        }
+        // A lost start can precede every authored timeline item. Give its terminal
+        // footer a durable position in opening, paginated history and incremental reads.
+        let message = "Orch could not reattach to this turn. Its outcome is unknown.";
+        add_error_item(
+            unit,
+            id,
+            batch.segment.id,
+            Some(turn.id),
+            code,
+            message,
+            true,
+        )
+        .await?;
+        let mut error = error_json(code, message, true);
+        error["incomplete"] = json!(true);
+        self.end_turn(
+            unit,
+            &thread,
+            &turn,
+            TurnEnd {
+                state: turn_state::FAILED,
+                error: Some(error),
+                input: InputAfter::Keep,
+                then_block: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn record_session_loss(
+        &self,
+        unit: &mut Unit<'_>,
+        batch: &Batch,
+        detail: &str,
+    ) -> Result<String, EngineError> {
+        let reason = batch.masker()?.mask_native(detail, false);
+        sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
+            .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&reason)
+            .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        lock(&self.inner.sessions).closed(batch.segment.id);
+        Ok(reason)
+    }
+
     async fn on_session_lost(
         &self,
         unit: &mut Unit<'_>,
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
-        crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
-        // A per-conversation CLI can end while its adapter remains able to serve other conversations.
-        sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
-            .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
-            .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-        lock(&self.inner.sessions).closed(batch.segment.id);
+        if !lost.uncertain {
+            crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
+        }
+        let reason = self.record_session_loss(unit, batch, &lost.reason).await?;
+        if lost.uncertain {
+            let thread = self.thread_row(unit, batch.thread_id).await?;
+            if thread.current_segment_id == Some(batch.segment.id)
+                && threads::active_turn(unit.conn, batch.thread_id)
+                    .await?
+                    .is_some_and(|turn| turn.segment_id == batch.segment.id)
+            {
+                let seq = unit.stamp(batch.thread_id).await?;
+                crate::notifications::set_state(
+                    unit,
+                    batch.thread_id,
+                    &[
+                        thread_state::STARTING,
+                        thread_state::RUNNING,
+                        thread_state::WAITING_APPROVAL,
+                        thread_state::BLOCKED,
+                    ],
+                    &threads::StateChange::blocked("error", Some(&reason)),
+                    seq,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
         let thread = self.thread_row(unit, batch.thread_id).await?;
         let Some(turn) = threads::active_turn(&mut *unit.conn, batch.thread_id).await? else {
             if thread.current_segment_id == Some(batch.segment.id) {
@@ -953,7 +1513,7 @@ impl Engine {
                     batch.segment.id,
                     None,
                     "session_lost",
-                    &format!("The harness lost the session: {}", lost.reason),
+                    &format!("The harness lost the session: {}", reason),
                     true,
                 )
                 .await?;
@@ -963,7 +1523,7 @@ impl Engine {
         if turn.segment_id != batch.segment.id {
             return Ok(());
         }
-        let message = format!("The harness lost the session: {}", lost.reason);
+        let message = format!("The harness lost the session: {}", reason);
         let mut failure = error_json("session_lost", &message, true);
         // An unconfirmed start keeps its existing manual decision: the native process
         // may already have taken that prompt. A confirmed turn uses ordinary recovery.
@@ -1075,6 +1635,7 @@ impl Engine {
             crate::native_actions::invoked(unit, turn, input.id).await?;
             // Automatic first-input titles use the delivered words; no provider work runs here.
             if selected {
+                self.clear_provider_retry(unit, turn.input_id).await?;
                 crate::summaries::first_input(unit, thread_id).await?;
             }
             // What of where the agent is went with the turn's input is what it was given.
@@ -1126,33 +1687,39 @@ impl Engine {
             return Ok(());
         };
         if turn.is_active() {
-            return self
-                .begin_turn(
-                    unit,
-                    batch.thread_id,
-                    &turn,
-                    started.native_turn_ref.as_deref(),
-                )
-                .await;
+            self.begin_turn(
+                unit,
+                batch.thread_id,
+                &turn,
+                started.native_turn_ref.as_deref(),
+            )
+            .await?;
+            if turn.interrupted_by.is_some() {
+                self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
+            }
+            return Ok(());
         }
         // The engine gave this turn up (it was not accepted in time, or it
         // was interrupted before it began), and the harness runs it after all:
         // ask it to stop.
         tracing::warn!(thread = %batch.thread_id, turn = %turn.id, "a harness began a turn that is over; it is asked to stop");
-        self.stop_stray(batch, turn.id);
+        self.stop_stray(batch, turn.id, started.native_turn_ref.as_deref());
         Ok(())
     }
 
     /// Asks the harness to stop a turn it began after the engine gave it up. The command is a row written
     /// on a pooled connection: it is issued on a task of its own, never inside the transaction of the
     /// delivery that heard of the turn, which must wait for no other connection. The delivery does not
-    /// await this task. Its identifier is the turn's, so a second ask is the same
-    /// command, and one whose delivery was undone stops a turn that is over all the same.
-    fn stop_stray(&self, batch: &Batch, turn: Id) {
+    /// await this task. This native start has an identity distinct from an interrupt answered before the
+    /// program had a native turn to stop. Replayed reports reuse it, even if their delivery was undone.
+    fn stop_stray(&self, batch: &Batch, turn: Id, native: Option<&str>) {
         let command = crate::commands::Outgoing::new(
-            crate::ids::turn_interrupt(turn),
+            crate::ids::derived(
+                "turn.interrupt.after-start",
+                &[turn.as_bytes(), native.unwrap_or_default().as_bytes()],
+            ),
             batch.machine,
-            SerialKey::Thread(batch.thread_id),
+            SerialKey::None,
             &orch_link_contract::commands::TurnInterrupt {
                 thread_id: batch.thread_id,
                 turn_id: turn,
@@ -1410,6 +1977,20 @@ impl Engine {
             .execute(&mut *unit.conn)
             .await
             .map_err(orch_db::DbError::from)?;
+        let pool_health_at = unit.now();
+        crate::resource_choice::health::outcome(
+            unit.conn,
+            turn.id,
+            completed.status == TurnOutcome::Completed,
+            completed
+                .error
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?
+                .as_ref(),
+            pool_health_at,
+        )
+        .await?;
         if !turn.is_active() {
             if turn.state == turn_state::INTERRUPTED
                 && turn
@@ -1464,6 +2045,9 @@ impl Engine {
                 )),
             ),
         };
+        if let Some(value) = error.as_mut() {
+            *value = crate::redaction::presentation::error(value, batch.masker()?)?;
+        }
         if let Some(failure) = completed.error.as_ref()
             && completed.status == TurnOutcome::Failed
         {
@@ -1597,7 +2181,7 @@ impl Engine {
         } else {
             "in_progress"
         };
-        add_item(
+        add_captured_item(
             unit,
             &ItemSpec {
                 thread: batch.thread_id,
@@ -1611,47 +2195,82 @@ impl Engine {
                 payload: &payload,
                 native_ref: Some(&started.native_ref),
             },
+            Some((self, batch.masker()?)),
         )
         .await?;
         Ok(())
     }
 
-    /// A piece of an item's text: held, and handed to whoever has the thread open, until it is written to the
-    /// item ([`crate::streaming`]); with no interval to hold it for, written to the item at once.
+    /// A streamed stretch is retained in this cursor transaction before being handed to live readers.
+    /// Full item rows are coalesced later; zero interval writes the item immediately.
     async fn on_item_delta(
         &self,
         unit: &mut Unit<'_>,
         batch: &Batch,
         delta: &ItemDelta,
     ) -> Result<(), EngineError> {
+        if delta.offset < 0 || delta.len <= 0 || delta.offset.checked_add(delta.len).is_none() {
+            return Ok(());
+        }
         if self.inner.config.stream_flush.is_zero() {
-            return self.write_delta(unit, batch, delta).await;
+            self.write_held_of(unit, batch.thread_id).await?;
         }
-        let key = (batch.segment.id, delta.native_ref.clone());
-        if self.inner.growing.expects(&key, delta.field).is_none() {
-            let Some(item) = self.item_of(unit, batch, &delta.native_ref).await? else {
-                return Ok(());
-            };
-            if item.status != "in_progress" {
-                return Ok(());
-            }
-            let base = crate::streaming::length_of(&item.payload, delta.field);
-            self.inner.growing.begin(&key, &item, delta.field, base);
-        }
-        // A stretch that was taken in already is skipped; one that skips ahead waits for the completed item, which
-        // carries the whole.
-        let Some(held) = self.inner.growing.add(&key, delta) else {
+        let Some(item) = threads::stream_item(
+            unit.conn,
+            batch.segment.id,
+            &delta.native_ref,
+            crate::streaming::field_name(delta.field),
+        )
+        .await?
+        else {
             return Ok(());
         };
+        if item.status != "in_progress" {
+            return Ok(());
+        }
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let Some(delta) = crate::redaction::delta(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            delta,
+            &masker,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        if self.inner.config.stream_flush.is_zero() {
+            return self.write_delta(unit, batch, &delta).await;
+        }
+        if !crate::streaming::hold(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            item.visible_len,
+            &delta,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        if delta.field == DeltaField::Output
+            && (item.text_replacements > 0 || delta.data.contains('\0'))
+        {
+            return Ok(());
+        }
+        let mut shown = delta.data.clone();
+        orch_types::storable::normalize_text(&mut shown);
         self.inner.live.delta(&LiveDelta {
             thread_id: batch.thread_id,
-            item_id: held.item,
-            turn_id: held.turn,
-            stream: held.stream,
+            item_id: item.id,
+            turn_id: item.turn_id,
+            stream: item.stream,
             field: delta.field,
             offset: delta.offset,
             len: delta.len,
-            data: delta.data.clone(),
+            data: shown,
         });
         Ok(())
     }
@@ -1670,6 +2289,16 @@ impl Engine {
             return Ok(());
         }
         let mut payload = item.payload.clone();
+        if let Some(source) = threads::output_inline_source(unit.conn, item.id).await? {
+            payload["tool"]["output"]["inline"] =
+                Json::String(String::from_utf8(source).map_err(EngineError::unreadable)?);
+            if let Some(output) = payload
+                .pointer_mut("/tool/output")
+                .and_then(Json::as_object_mut)
+            {
+                output.remove("inline_source_len");
+            }
+        }
         let appended = match delta.field {
             DeltaField::Text | DeltaField::Summary => {
                 let member = if delta.field == DeltaField::Text {
@@ -1706,12 +2335,13 @@ impl Engine {
                     .and_then(Json::as_str)
                     .unwrap_or_default();
                 let joined = format!("{inline}{}", delta.data);
-                let kept = tail_of(&joined, OUTPUT_INLINE_MAX_BYTES).to_owned();
+                let kept =
+                    tail_of(&joined, crate::streaming::output_inline_bytes(&output)).to_owned();
                 let new_total = total + delta.len;
                 let blob = output.get("blob").cloned().unwrap_or(Json::Null);
                 let whole = i64::try_from(kept.len()).unwrap_or(i64::MAX) >= new_total;
                 payload["tool"]["output"] = json!({
-                    "inline": kept, "total_len": new_total, "truncated": !whole, "blob": blob,
+                    "inline": kept, "total_len": new_total, "truncated": !whole, "blob": blob, "retained":output.get("retained"), "inline_limit":output.get("inline_limit"),
                 });
                 true
             }
@@ -1721,7 +2351,7 @@ impl Engine {
         }
         let seq = unit.stamp(batch.thread_id).await?;
         let now = unit.now();
-        threads::change_item(
+        threads::change_streamed_item(
             &mut *unit.conn,
             item.id,
             &ItemChange {
@@ -1733,6 +2363,15 @@ impl Engine {
             seq,
         )
         .await?;
+        let replacements = delta.data.bytes().filter(|byte| *byte == 0).count();
+        if replacements > 0 {
+            sqlx::query("UPDATE items SET text_replacements=text_replacements+$2 WHERE id=$1")
+                .bind(item.id)
+                .bind(i64::try_from(replacements).unwrap_or(i64::MAX))
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        }
         if orch_db::queries::thread_history::selected_segment(
             unit.conn,
             batch.thread_id,
@@ -1742,6 +2381,13 @@ impl Engine {
         {
             threads::touch(&mut *unit.conn, batch.thread_id, now).await?;
         }
+        if delta.field == DeltaField::Output
+            && (item.text_replacements > 0 || delta.data.contains('\0'))
+        {
+            return Ok(());
+        }
+        let mut shown = delta.data.clone();
+        orch_types::storable::normalize_text(&mut shown);
         self.inner.live.delta(&LiveDelta {
             thread_id: batch.thread_id,
             item_id: item.id,
@@ -1750,7 +2396,7 @@ impl Engine {
             field: delta.field,
             offset: delta.offset,
             len: delta.len,
-            data: delta.data.clone(),
+            data: shown,
         });
         Ok(())
     }
@@ -1770,10 +2416,45 @@ impl Engine {
         {
             return Ok(());
         }
-        let mut payload = item.payload.clone();
+        let mut payload =
+            crate::redaction::presentation::originals(unit.conn, item.id, &item.payload).await?;
         merge(&mut payload, &updated.payload);
-        let payload = normalized(&item.kind, &payload);
-        if payload == item.payload {
+        let original = normalized(&item.kind, &payload);
+        let masker = crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+        let presented = self
+            .native_payload(
+                unit.conn,
+                item.id,
+                &item.kind,
+                &masker,
+                &original,
+                item.status == "in_progress",
+            )
+            .await?;
+        crate::redaction::presentation::keep_originals(
+            unit.conn,
+            item.id,
+            presented.private.as_deref(),
+        )
+        .await?;
+        let payload = presented.payload;
+        crate::redaction::seed(
+            unit.conn,
+            item.id,
+            batch.segment.id,
+            &original,
+            &masker,
+            Some(&updated.payload),
+        )
+        .await?;
+        observations::observed_item(
+            unit,
+            &item,
+            &orch_types::storable::json(&payload),
+            Some(&item.payload),
+        )
+        .await?;
+        if threads::storable_item_payload(&payload).0 == item.payload {
             return Ok(());
         }
         let seq = unit.stamp(batch.thread_id).await?;
@@ -1790,7 +2471,6 @@ impl Engine {
             seq,
         )
         .await?;
-        observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
         self.subagent_moved(unit, batch, &item, &payload).await
     }
 
@@ -1830,19 +2510,31 @@ impl Engine {
         };
         let complete_payload = serde_json::to_value(&completed.payload)?;
         // The completed item carries its whole text: what is held of it is written by this.
-        self.inner
-            .growing
-            .forget(&(batch.segment.id, completed.native_ref.clone()));
         let existing = self.item_of(unit, batch, &completed.native_ref).await?;
         let Some(kind) = existing
             .as_ref()
+            .filter(|item| {
+                !(item.storage_gap.is_some()
+                    && item.kind == "error"
+                    && item.payload["code"] == "storage.data")
+            })
             .map(|item| item.kind.clone())
             .or_else(|| infer_kind(&complete_payload).map(str::to_owned))
         else {
-            tracing::warn!(native_ref = %completed.native_ref, "a completed item of a kind that cannot be told");
+            tracing::warn!(thread = %batch.thread_id, "a completed item of a kind that cannot be told");
             return Ok(());
         };
         let mut payload = normalized(&kind, &complete_payload);
+        if kind == "marker" {
+            let observed_at = unit.now();
+            orch_db::queries::session_dependencies::observe_mcp(
+                unit.conn,
+                batch.segment.id,
+                &payload,
+                observed_at,
+            )
+            .await?;
+        }
         if let Some(tasks) = existing
             .as_ref()
             .and_then(|item| item.payload.get("background_tasks"))
@@ -1912,7 +2604,7 @@ impl Engine {
                 batch.segment.id,
                 &completed.native_ref,
                 existing.as_ref().and_then(|item| item.turn_id),
-                &payload,
+                &orch_types::storable::json(&payload),
             )
             .await?;
         }
@@ -1929,22 +2621,22 @@ impl Engine {
                 batch.segment.id,
                 source_turn,
                 &completed.native_ref,
-                &payload,
+                &orch_types::storable::json(&payload),
                 at,
             )
             .await?;
         }
-        if let Some(blob) = &completed.output_blob
-            && payload.pointer("/tool/output").is_some()
-        {
-            payload["tool"]["output"]["blob"] = json!(blob.hash);
-            payload["tool"]["output"]["truncated"] = json!(true);
-        }
         if kind == "error" {
+            payload = crate::redaction::presentation::item(&kind, &payload, batch.masker()?)?.value;
             let turn = existing.as_ref().and_then(|item| item.turn_id);
-            if let Some(observed) =
-                observations::rerouted(unit, batch.thread_id, batch.segment.id, turn, &payload)
-                    .await?
+            if let Some(observed) = observations::rerouted(
+                unit,
+                batch.thread_id,
+                batch.segment.id,
+                turn,
+                &orch_types::storable::json(&payload),
+            )
+            .await?
             {
                 payload = observed;
             }
@@ -1981,7 +2673,7 @@ impl Engine {
                 } else {
                     None
                 };
-                add_item(
+                add_captured_item(
                     unit,
                     &ItemSpec {
                         thread: batch.thread_id,
@@ -1995,21 +2687,40 @@ impl Engine {
                         payload: &payload,
                         native_ref: Some(&completed.native_ref),
                     },
+                    Some((self, batch.masker()?)),
                 )
                 .await?;
                 Ok(())
             }
             Some(item) => {
-                if item.status != "in_progress" && item.payload == payload {
+                let original = payload;
+                let masker =
+                    crate::redaction::remember(unit.conn, item.id, batch.masker()?).await?;
+                let presented = self
+                    .native_payload(unit.conn, item.id, &kind, &masker, &original, false)
+                    .await?;
+                crate::redaction::presentation::keep_originals(
+                    unit.conn,
+                    item.id,
+                    presented.private.as_deref(),
+                )
+                .await?;
+                let payload = presented.payload;
+                crate::redaction::clear(unit.conn, item.id).await?;
+                if item.status != "in_progress"
+                    && item.payload == threads::storable_item_payload(&payload).0
+                    && item.storage_gap.is_none()
+                {
                     return Ok(());
                 }
                 let seq = unit.stamp(batch.thread_id).await?;
                 let now = unit.now();
                 let search =
                     indexed_text(&mut *unit.conn, batch.thread_id, &kind, &payload).await?;
-                threads::change_item(
+                threads::change_item_kind(
                     &mut *unit.conn,
                     item.id,
+                    &kind,
                     &ItemChange {
                         status: Some(status),
                         payload: &payload,
@@ -2019,11 +2730,37 @@ impl Engine {
                     seq,
                 )
                 .await?;
-                if status == "completed" {
-                    observations::completed_item(unit, &item, &payload, Some(&item.payload))
-                        .await?;
+                if item.storage_gap.is_some() {
+                    sqlx::query("UPDATE items SET storage_gap=NULL WHERE id=$1")
+                        .bind(item.id)
+                        .execute(&mut *unit.conn)
+                        .await
+                        .map_err(orch_db::DbError::from)?;
+                }
+                let recovered = if item.kind != kind {
+                    let mut recovered = item.clone();
+                    recovered.kind = kind.clone();
+                    Some(recovered)
                 } else {
-                    observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
+                    None
+                };
+                let observed = recovered.as_ref().unwrap_or(&item);
+                if status == "completed" {
+                    observations::completed_item(
+                        unit,
+                        observed,
+                        &orch_types::storable::json(&payload),
+                        Some(&item.payload),
+                    )
+                    .await?;
+                } else {
+                    observations::observed_item(
+                        unit,
+                        observed,
+                        &orch_types::storable::json(&payload),
+                        Some(&item.payload),
+                    )
+                    .await?;
                 }
                 // Search: None also clears text that is now excluded; deltas still leave it alone.
                 crate::projections::keep_item_text(
@@ -2065,6 +2802,14 @@ struct Batch {
     segment: SegmentRow,
     /// Keeps the frames of the harness's own protocol that the delivery holds.
     frames: crate::raw_events::Keeper,
+    masking: Option<Arc<Redactor>>,
+}
+impl Batch {
+    fn masker(&self) -> Result<&Redactor, EngineError> {
+        self.masking
+            .as_deref()
+            .ok_or_else(|| EngineError::unreadable("native masking inputs have not been loaded"))
+    }
 }
 
 #[cfg(test)]

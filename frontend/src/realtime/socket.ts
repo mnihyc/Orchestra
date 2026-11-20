@@ -14,6 +14,7 @@ import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { ClientFrame, ServerFrame } from '@/generated/api-types';
 import { openingId } from '@/lib/opening';
 import { serverClock, type ServerClock } from '@/lib/serverClock';
+import { connectionQualitySettings, LinkHistory } from '@/realtime/connectionQuality';
 
 // ---------------------------------------------------------------- frames, as the protocol names them
 
@@ -46,6 +47,7 @@ function readyOf(frame: RawFrame): ReadyFrame {
     server_time: typeof frame.server_time === 'string' ? frame.server_time : '',
     access_expires_at: typeof frame.access_expires_at === 'string' ? frame.access_expires_at : null,
     heartbeat_secs: typeof frame.heartbeat_secs === 'number' ? frame.heartbeat_secs : 0,
+    max_client_frame_bytes: typeof frame.max_client_frame_bytes === 'number' ? frame.max_client_frame_bytes : 0,
     build: typeof frame.build === 'string' ? frame.build : '',
   };
 }
@@ -66,8 +68,6 @@ const BACKOFF_MOST_MS = 15_000;
 const BACKOFF_SPREAD = 0.2;
 /** A connection that held this long was a good one: the next pause begins small again. */
 const BACKOFF_FORGOTTEN_AFTER_MS = 30_000;
-/** How many round trips the measure is the middle one of, so that one late packet changes nothing. */
-const ROUND_TRIPS_KEPT = 3;
 
 /** The close codes of the protocol that mean more than "connect again". */
 const CLOSE_UNAUTHENTICATED = 4401;
@@ -90,14 +90,27 @@ export interface SocketStatus {
   lostAt: number | null;
   /** The middle one of the last few round trips, in milliseconds; `null` until one was measured. */
   roundTripMs: number | null;
+  /** This reader's calibrated usual from preceding actual ping replies. */
+  usualRoundTripMs: number | null;
+  /** The current measured line exceeds its own usual by the installation's thresholds. */
+  slow: boolean;
   /** The build the server says it is. */
   build: string | null;
   /** True once the server refused the protocol this page speaks: a newer build is deployed. */
   outdated: boolean;
 }
 
+/** One page routed within an admitted root metadata subscription. */
+export interface HierarchyPage { window:number; root:string; query:object }
+
+interface WantedSubscription {
+  feed:string;listener:FeedListener;accepted:boolean;sentWindows:Set<number>;
+}
+
 /** What a subscriber is told. */
 export interface FeedListener {
+  /** Current page intent; changed pages use new routing numbers so late answers cannot replace them. */
+  hierarchy?:()=>readonly HierarchyPage[];
   /** Immutable selectors captured with this exact subscription, including reconnects. */
   continuationId?: string;
   projectionRevision?: number;
@@ -116,6 +129,8 @@ export interface FeedListener {
 
 export interface Subscription {
   unsubscribe: () => void;
+  /** Reconcile page intent on the same admitted root, without replacing the subscription. */
+  updateViews?:()=>void;
 }
 
 /** The parts of a WebSocket this client uses, so that a test can stand in for one. */
@@ -144,6 +159,8 @@ export interface RealtimeOptions {
   random?: () => number;
   /** The same clock as the HTTP admission; isolated transports can supply their own. */
   clock?: ServerClock;
+  /** Current installation defaults; measurement does no settings request of its own. */
+  quality?: () => unknown;
 }
 
 const OPEN = 1;
@@ -181,6 +198,8 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
     phase: 'idle',
     lostAt: null,
     roundTripMs: null,
+    usualRoundTripMs: null,
+    slow: false,
     build: null,
     outdated: false,
   }));
@@ -191,22 +210,23 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
   let attempts = 0;
   let readySince = 0;
   let heartbeatMs = HEARTBEAT_MS;
+  let maxClientFrameBytes = 0;
   let lastHeard = 0;
   let pingN = 0;
   const pings = new Map<number, number>();
-  let roundTrips: number[] = [];
+  const quality = new LinkHistory();
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Every subscription that is wanted, by the id it has on the connection of the moment. */
-  const subs = new Map<number, { feed: string; listener: FeedListener }>();
+  const subs = new Map<number, WantedSubscription>();
   // Refusals carry subscription ids even when a hold is indistinguishable from ordinary access
   // denial. Remember those requests until their view leaves; only successful second-step proof
   // asks again, and the server still decides their current access. A closed feed stays closed.
-  const refused = new Set<{ feed: string; listener: FeedListener }>();
+  const refused = new Set<WantedSubscription>();
   // Capacity is temporary: hidden views can release a slot without reconnecting the socket.
   // Keep that wanted listener and its cursor, and retry only when a slot is actually released.
-  const waitingCapacity = new Set<{ feed: string; listener: FeedListener }>();
+  const waitingCapacity = new Set<WantedSubscription>();
 
   const send = (frame: ClientFrame): boolean => {
     if (socket?.readyState !== OPEN) return false;
@@ -216,6 +236,7 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
 
   const sendSub = (id: number, feed: string, listener: FeedListener) => {
     if (socket?.readyState !== OPEN) return;
+    const sub=subs.get(id);if(sub!==undefined){sub.accepted=false;sub.sentWindows.clear();}
     listener.onSubscribe?.(id);
     const since = listener.since();
     send({
@@ -230,6 +251,28 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
       ...(listener.subStreams === true ? { sub_streams: true } : {}),
     });
   };
+
+  function sendViews(id:number,sub:WantedSubscription):void {
+    if(!sub.accepted||maxClientFrameBytes<=0||socket?.readyState!==OPEN)return;
+    const pages=sub.listener.hierarchy?.()??[],wantedPages=new Set(pages.map((page)=>page.window));
+    for(const window of sub.sentWindows)if(!wantedPages.has(window)) {
+      send({op:'sub',id,feed:sub.feed,window:{kind:'remove',window}});sub.sentWindows.delete(window);
+    }
+    for(const page of pages) {
+      if(sub.sentWindows.has(page.window))continue;
+      const envelope={op:'sub' as const,id,feed:sub.feed,window:{kind:'query' as const,root:page.root,window:page.window,data:'',complete:false}};
+      const overhead=new TextEncoder().encode(JSON.stringify(envelope)).length;
+      // Three UTF-8 bytes occupy at most four unpadded base64 characters. The JSON envelope is included.
+      const size=Math.floor((maxClientFrameBytes-overhead)/4)*3;
+      if(size<1)return;
+      const bytes=new TextEncoder().encode(JSON.stringify(page.query));
+      for(let start=0;start<bytes.length;start+=size) {
+        const part=bytes.subarray(start,start+size);let binary='';for(const byte of part)binary+=String.fromCharCode(byte);
+        send({...envelope,window:{...envelope.window,data:btoa(binary).replaceAll('+','-').replaceAll('/','_').replace(/=+$/u,''),complete:start+size>=bytes.length}});
+      }
+      sub.sentWindows.add(page.window);
+    }
+  }
 
   function fillReleasedSlot(): void {
     if (status.getState().phase !== 'ready') return;
@@ -279,17 +322,19 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
   }
 
   function measured(sentAt: number): void {
-    roundTrips = [...roundTrips, now() - sentAt].slice(-ROUND_TRIPS_KEPT);
-    const sorted = [...roundTrips].sort((one, other) => one - other);
-    status.setState({ roundTripMs: sorted[Math.floor(sorted.length / 2)] ?? null });
+    const elapsed = now() - sentAt;
+    if (!Number.isFinite(elapsed) || elapsed < 0) return;
+    status.setState(quality.observe(elapsed, connectionQualitySettings(options.quality?.())));
   }
 
   function onReady(frame: ReadyFrame, authSentAt: number): void {
     readySince = now();
     (options.clock ?? serverClock).observe(frame.server_time, authSentAt, readySince);
     heartbeatMs = frame.heartbeat_secs > 0 ? frame.heartbeat_secs * 1_000 : HEARTBEAT_MS;
-    measured(authSentAt);
-    status.setState({ phase: 'ready', lostAt: null, build: frame.build });
+    maxClientFrameBytes=frame.max_client_frame_bytes;
+    // Authentication includes server-side admission work, not just the live link's response.
+    // A replacement transport starts its own ping samples too.
+    status.setState({ phase: 'ready', lostAt: null, build: frame.build, ...quality.reconnect() });
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(heartbeat, heartbeatMs);
     // Every feed that is wanted is subscribed again, from where it had come to.
@@ -338,6 +383,7 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
     }
     if (frame.op === 'error' && (frame.code === 'forbidden' || frame.code === 'not_found')) refused.add(sub);
     sub.listener.onFrame(frame);
+    if(frame.op==='subscribed'&&subs.get(frame.id)===sub){sub.accepted=true;sendViews(frame.id,sub);}
     if (frame.op === 'closed') fillReleasedSlot();
   }
 
@@ -427,18 +473,19 @@ export function createRealtimeSocket(options: RealtimeOptions): RealtimeSocket {
       const closing = socket;
       socket = null;
       closing?.close(1000);
-      roundTrips = [];
-      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null, build: null });
+      quality.clear();
+      status.setState({ phase: 'idle', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null });
     },
 
     subscribe(feed, listener) {
       listener = { ...listener, openingId: listener.openingId ?? openingId() };
       let id = nextSub;
       nextSub += 1;
-      const sub = { feed, listener };
+      const sub:WantedSubscription = { feed, listener,accepted:false,sentWindows:new Set() };
       subs.set(id, sub);
       if (status.getState().phase === 'ready') sendSub(id, feed, listener);
       return {
+        updateViews() { for(const [held,entry]of subs)if(entry===sub){sendViews(held,sub);return;} },
         unsubscribe() {
           refused.delete(sub);
           const wasWaiting = waitingCapacity.delete(sub);

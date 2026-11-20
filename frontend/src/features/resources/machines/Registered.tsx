@@ -2,13 +2,21 @@
  */
 import { Link } from '@tanstack/react-router';
 import { Plus } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
+import { useInfiniteQuery } from '@tanstack/react-query';
+import { machineChildrenQuery } from '@/api/resources';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { Pagination } from '@/ui/Pagination';
+import { ErrorState } from '@/ui/ErrorState';
+import { SkeletonRows } from '@/ui/Skeleton';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
 import { allowedRoots, readMachineFacts, registrableHarnesses } from '@/features/resources/machines/facts';
-import { DetailPages, DetailSections } from '@/features/resources/DetailSections';
-import { RegisterAgentDialog } from '@/features/resources/machines/RegisterAgent';
+import { DetailSections } from '@/features/resources/DetailSections';
+import { RegisterAgentDialog,RegisterInstalledSignInDialog } from '@/features/resources/machines/RegisterAgent';
 import { RegisterEnvironmentDialog } from '@/features/resources/machines/RegisterEnvironment';
 import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
 import type { Machine } from '@/generated/api-types';
@@ -20,13 +28,20 @@ import { PermissionGate } from '@/ui/PermissionGate';
 import { StatusDot } from '@/ui/StatusDot';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 
-type Registering = 'agent' | 'provider' | 'environment' | null;
+type Registering = 'agent' | 'provider' | 'environment' | 'subscription' | null;
 
-function Entries({ label, empty, children }: { label: string; empty: string; children: ReactNode[] }) {
-  if (children.length === 0) return <EmptyState compact title={empty} />;
-  return (
-    <DetailPages items={children}>{(page) => <ul aria-label={label} className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">{page}</ul>}</DetailPages>
-  );
+function Entries<Kind extends 'agents' | 'providers' | 'environments'>({ machine, collection, label, empty, children }: { machine: Machine; collection: Kind; label: string; empty: string; children: (rows: readonly Machine[Kind][number][]) => ReactNode }) {
+  const search = useCollectionSearch('machine-children:' + machine.id + ':' + collection);
+  const seed = machine[collection];
+  const version = useMemo(() => JSON.stringify(seed.map((row) => [row.id, row.name])), [seed]);
+  const paged = seed.length > 50 || search.q !== '';
+  const pages = useInfiniteQuery({ ...machineChildrenQuery(machine.id, collection, search.q, version), enabled: paged });
+  const rows = paged ? pages.data?.pages.flatMap((page) => page.items) ?? [] : seed;
+  return <div className="flex min-w-0 flex-col gap-3">
+    <CollectionSearch name={label} {...search} />
+    {paged && pages.isPending ? <SkeletonRows read={pages} rows={3} /> : paged && pages.isError && !pages.isFetchNextPageError ? <ErrorState compact error={pages.error} onRetry={() => void pages.refetch()} /> : rows.length === 0 ? <EmptyState compact title={empty} /> : <ScrollRegion kind="table" label={label} className="max-h-96 overflow-y-auto"><ul aria-label={label} className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface">{children(rows)}</ul></ScrollRegion>}
+    <Pagination hasMore={paged && pages.hasNextPage} loading={pages.isFetchingNextPage} error={paged && pages.isFetchNextPageError ? pages.error : null} onMore={() => void pages.fetchNextPage()} />
+  </div>;
 }
 
 const rowClasses = 'flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2';
@@ -58,8 +73,8 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         lead={t('machines.registered.agentsLead')}
         action={act('agent', t('machines.registered.registerAgent'), why ?? noHarness)}
       >
-        <Entries label={t('machines.registered.agents')} empty={t('machines.registered.noAgents')}>
-          {machine.agents.map((agent) => (
+        <Entries machine={machine} collection="agents" label={t('machines.registered.agents')} empty={t('machines.registered.noAgents')}>
+          {(rows) => rows.map((agent) => (
             <li key={agent.id} className={rowClasses}>
               <ResourceChip subject={{ kind: 'agent', agent }} asChild hint={false}>
               <Link to="/resources/agents/$id" params={{ id: agent.id }} className={nameClasses}>
@@ -77,10 +92,10 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         id="registered-providers"
         title={t('machines.registered.providers')}
         lead={t('machines.registered.providersLead')}
-        action={act('provider', t('machines.registered.registerProvider'), why)}
+        action={<div className="flex flex-wrap items-center gap-2">{act('provider', t('machines.registered.registerProvider'), why)}{act('subscription',t('machineSignup.useInstalled'),why)}</div>}
       >
-        <Entries label={t('machines.registered.providers')} empty={t('machines.registered.noProviders')}>
-          {machine.providers.map((provider) => (
+        <Entries machine={machine} collection="providers" label={t('machines.registered.providers')} empty={t('machines.registered.noProviders')}>
+          {(rows) => rows.map((provider) => (
             <li key={provider.id} className={rowClasses}>
               <ResourceChip subject={{ kind: 'provider', provider }} asChild>
               <Link to="/resources/providers/$id" params={{ id: provider.id }} className={nameClasses}>
@@ -104,8 +119,8 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         lead={t('machines.registered.environmentsLead')}
         action={act('environment', t('machines.registered.registerEnvironment'), why ?? noRoot)}
       >
-        <Entries label={t('machines.registered.environments')} empty={t('machines.registered.noEnvironments')}>
-          {machine.environments.map((environment) => (
+        <Entries machine={machine} collection="environments" label={t('machines.registered.environments')} empty={t('machines.registered.noEnvironments')}>
+          {(rows) => rows.map((environment) => (
             <li key={environment.id} className={rowClasses}>
               <ResourceChip subject={{ kind: 'environment', environment }} asChild>
               <Link to="/resources/environments/$id" params={{ id: environment.id }} className={nameClasses}>
@@ -119,6 +134,7 @@ export function RegisteredHere({ machine }: { machine: Machine }) {
         </Entries>
       </Section> }]} />
 
+      {registering==='subscription' && <RegisterInstalledSignInDialog machineId={machine.id} onClose={()=>setRegistering(null)}/>}
       {registering === 'agent' && <RegisterAgentDialog machine={machine} open onClose={() => setRegistering(null)} />}
       {registering === 'provider' && <AddProviderDialog initialRuntimeMachine={machine.id} onClose={() => setRegistering(null)} />}
       {registering === 'environment' && <RegisterEnvironmentDialog machine={machine} open onClose={() => setRegistering(null)} />}

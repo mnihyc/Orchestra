@@ -360,7 +360,7 @@ async fn prepare_native(
                 upstreams,
                 api_key,
                 secrets: Some(headers),
-                runtime_machine_id: None,
+                runtime_location: None,
                 key_machine_id: None,
                 access: None,
                 arrangements: None,
@@ -392,7 +392,7 @@ async fn prepare_native(
                 agent_id: agent,
                 config: Some(row.config),
                 sign_in: None,
-                runtime_machine_id: None,
+                runtime_location: None,
                 key_machine_id: None,
                 access: None,
                 arrangements: None,
@@ -582,6 +582,7 @@ impl native::Selected for Preview {
     type Query = DuplicateBody;
     type Value = Operands;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Role> =
         &declarations::PROVIDER_MOVE_PREVIEW;
     const WATCH_ORDINARY: bool = true;

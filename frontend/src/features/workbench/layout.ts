@@ -2,8 +2,7 @@
  *
  * Left and right bars hold containers of sections. The bottom holds a group of tabs; the main area
  * holds groups and splits. Each section or tab names a view and optionally its target. Hidden sections
- * keep their place, expansion and relative size. A version-one side-bar group is read into containers
- * in that same bar, preserving its selected section and every target and kept flag.
+ * keep their place, expansion and relative size. An unavailable view retains its saved target.
  *
  * Everything here is a value: a change takes a layout and returns another, and never touches the
  * one it was given. What is written to the device is this value with the version of its format; a
@@ -15,7 +14,7 @@ import { newActKey } from '@/lib/requests';
 import { migrateMainResult, type WorkspaceSource } from './contentAddress';
 import type { ScreenKind } from '@/routes/-access';
 
-/** Version four retains tab pins; older layouts migrate with their existing order and targets. */
+/** The current layout format retains tab pins and explicit view targets. */
 export const LAYOUT_VERSION = 4;
 
 export type BarId = 'left' | 'right' | 'bottom';
@@ -166,7 +165,7 @@ export function containerGroup(container: ViewContainer): Group {
   return { kind: 'group', id: container.id, tabs: container.sections.map((section) => section.tab), active: container.active };
 }
 
-export function barHasViews(layout: Layout, bar: BarId): boolean {
+export function barHasViews(layout: Pick<Layout, BarId>, bar: BarId): boolean {
   return bar === 'bottom' ? layout.bottom.group.tabs.length > 0 : layout[bar].containers.some((container) => container.sections.length > 0);
 }
 
@@ -249,6 +248,11 @@ export function findTab(layout: Layout, tabId: string): Place | null {
   return null;
 }
 
+/** Whether the tab is a side section that was closed by hiding: its view is kept, with what is typed in it, and nothing of it is shown. */
+export function tabHidden(layout: Layout, tabId: string): boolean {
+  return findTab(layout, tabId)?.section?.hidden === true;
+}
+
 export function findGroup(layout: Layout, groupId: string): { area: AreaId; group: Group } | null {
   return allGroups(layout).find(({ group }) => group.id === groupId) ?? null;
 }
@@ -270,22 +274,29 @@ export function findView(layout: Layout, view: string, of?: Record<string, strin
 // ---------------------------------------------------------------- changing
 
 export function mapGroups(layout: Layout, change: (group: Group, area: AreaId) => Group): Layout {
-  const inMain = (node: MainNode): MainNode =>
-    node.kind === 'group' ? change(node, 'main') : { ...node, children: node.children.map(inMain) };
-  const side = (area: SideBarId): SideBar => ({ ...layout[area], containers: layout[area].containers.map((container) => {
-    const group = change(containerGroup(container), area);
-    return { ...container, active: group.active, sections: group.tabs.map((tab) => {
-      const before = container.sections.find((section) => section.tab.id === tab.id);
-      return before === undefined ? { tab, open: true, hidden: false, size: 1 } : { ...before, tab };
-    }) };
-  }) });
-  return {
-    ...layout,
-    left: side('left'),
-    right: side('right'),
-    bottom: { ...layout.bottom, group: change(layout.bottom.group, 'bottom') },
-    main: inMain(layout.main),
+  const inMain = (node: MainNode): MainNode => {
+    if (node.kind === 'group') return change(node, 'main');
+    const children = node.children.map(inMain);
+    return children.every((child, index) => child === node.children[index]) ? node : { ...node, children };
   };
+  const side = (area: SideBarId): SideBar => {
+    const bar = layout[area];
+    const containers = bar.containers.map((container) => {
+      const before = containerGroup(container), group = change(before, area);
+      if (group === before) return container;
+      const sections = group.tabs === before.tabs ? container.sections : group.tabs.map((tab) => {
+        const section = container.sections.find((entry) => entry.tab.id === tab.id);
+        return section === undefined ? { tab, open: true, hidden: false, size: 1 } : section.tab === tab ? section : { ...section, tab };
+      });
+      return { ...container, active: group.active, sections };
+    });
+    return containers.every((entry, index) => entry === bar.containers[index]) ? bar : { ...bar, containers };
+  };
+  const main = inMain(layout.main), left = side('left'), right = side('right');
+  const group = change(layout.bottom.group, 'bottom');
+  const bottom = group === layout.bottom.group ? layout.bottom : { ...layout.bottom, group };
+  return main === layout.main && left === layout.left && right === layout.right && bottom === layout.bottom
+    ? layout : { ...layout, main, left, right, bottom };
 }
 
 /** Retargets an existing view without replacing its tab, section sizes or chosen position. */
@@ -372,7 +383,7 @@ export function normalize(layout: Layout): Layout {
 export function activate(layout: Layout, tabId: string): Layout {
   const place = findTab(layout, tabId);
   if (place === null) return layout;
-  const next = mapGroups(layout, (group) => (group.id === place.group.id ? { ...group, active: tabId } : group));
+  const next = place.group.active === tabId ? layout : mapGroups(layout, (group) => (group.id === place.group.id ? { ...group, active: tabId } : group));
   if ((place.area === 'left' || place.area === 'right') && place.container !== undefined) {
     return updateContainer(next, place.area, place.container.name, (container) => ({ ...container,
       sections: container.sections.map((section) => section.tab.id === tabId ? { ...section, open: true, hidden: false } : section),
@@ -642,6 +653,21 @@ export function selectContainer(layout: Layout, bar: SideBarId, name: string, to
   return { ...layout, [bar]: { ...current, active: name, open: toggle && current.active === name ? !current.open : true } };
 }
 
+/** After a close: a side bar whose shown container no longer shows any section moves to its next container that does,
+ * or closes, so a bar never shows only "All sections are hidden" (closing a popped-out Ask, the only section of its
+ * container, leaves no empty Ask tab behind). */
+export function leaveEmptyContainers(layout: Layout): Layout {
+  let next = layout;
+  for (const bar of ['left', 'right'] as const) {
+    const side = next[bar];
+    const current = side.containers.find((container) => container.name === side.active);
+    if (current === undefined || current.sections.some((section) => !section.hidden)) continue;
+    const other = side.containers.find((container) => container.sections.some((section) => !section.hidden));
+    next = { ...next, [bar]: other === undefined ? { ...side, open: false } : { ...side, active: other.name } };
+  }
+  return next;
+}
+
 /** Shows or hides a section without losing its place, size or expansion. */
 export function showSection(layout: Layout, tabId: string, shown: boolean): Layout {
   const place = findTab(layout, tabId);
@@ -739,11 +765,6 @@ export function carryKept(from: Layout, into: Layout, alsoKeep: ReadonlySet<stri
   return normalize(mapGroups(into, (group) => (group.id === first.id ? { ...group, tabs: [...group.tabs, ...kept] } : group)));
 }
 
-/** Drops the tabs whose view `offered` does not name: a view that this screen, or this build, does not have. */
-export function keepOffered(layout: Layout, offered: (view: string) => boolean): Layout {
-  return normalize(mapGroups(layout, (group) => ({ ...group, tabs: group.tabs.filter((tab) => offered(tab.view)) })));
-}
-
 // ---------------------------------------------------------------- writing and reading back
 
 export function serialize(layout: Layout): string {
@@ -837,17 +858,6 @@ function readSideBar(value: unknown): SideBar | null {
   return { open: value.open, size: value.size, containers, active: typeof value.active === 'string' ? value.active : null };
 }
 
-/** An old side bar keeps every tab in its chosen bar, with the chosen tab's container in front. */
-function migrateSideBar(value: unknown, screen?: ScreenKind): SideBar | null {
-  const old = readBar(value);
-  if (old === null) return null;
-  const containers = containersFrom(old.group.tabs, old.group.active ?? undefined, screen);
-  // The original group identity is retained for existing references to the selected group.
-  const front = containers.find((container) => container.sections.some((section) => section.tab.id === old.group.active)) ?? containers[0];
-  if (front !== undefined) front.id = old.group.id;
-  return { open: old.open, size: old.size, containers, active: front?.name ?? null };
-}
-
 /** How deep the main area's tree may be read. */
 const MAX_DEPTH = 8;
 
@@ -856,16 +866,16 @@ const MAX_DEPTH = 8;
  * format, whole and sound: another version, a part missing, a name used twice. A layout that reads
  * is put in order before it is returned.
  */
-export function parse(text: string, screen?: ScreenKind): Layout | null {
+export function parse(text: string): Layout | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
   } catch {
     return null;
   }
-  if (!isRecord(value) || ![LAYOUT_VERSION, 3, 2, 1].includes(value.version as number)) return null;
-  const left = value.version === 1 ? migrateSideBar(value.left, screen) : readSideBar(value.left);
-  const right = value.version === 1 ? migrateSideBar(value.right, screen) : readSideBar(value.right);
+  if (!isRecord(value) || value.version !== LAYOUT_VERSION) return null;
+  const left = readSideBar(value.left);
+  const right = readSideBar(value.right);
   const bottom = readBar(value.bottom);
   const main = readNode(value.main, 0);
   if (left === null || right === null || bottom === null || main === null) return null;

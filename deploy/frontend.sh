@@ -1,18 +1,20 @@
 #!/bin/sh
 # The same web edge serves HTTP and optional HTTPS; a renewed pair is adopted by graceful reload.
 set -eu
-# A short look adopts a new complete pair promptly; it does no network work.
-CERTIFICATE_LOOK_SECONDS=1
 main=/tmp/frontend-https.conf
 ports=/tmp/ports-https.conf
+policy=/etc/orch/frontend-tls/transport.include
 : > "$main"
 : > "$ports"
 if [ -n "${ORCH_FRONTEND_HTTPS_BIND:-}" ]; then
   test -r /etc/orch/frontend-tls/current/chain.pem
   test -r /etc/orch/frontend-tls/current/key.pem
+  test -r "$policy"
   for target in "$main" "$ports"; do
     if [ "$target" = "$main" ]; then
-      printf 'listen 443 ssl default_server;\n' > "$target"
+      # HTTP/2 for the application and its API (one connection carries the scripts and every read). A program's own address,
+      # in `ports`, keeps HTTP/1.1: its pages and sockets are the program's.
+      printf 'listen 443 ssl default_server;\ninclude /etc/orch/frontend-tls/transport.include;\n' > "$target"
     else
       printf 'listen 443 ssl;\n' > "$target"
     fi
@@ -22,16 +24,20 @@ ssl_certificate_key /etc/orch/frontend-tls/current/key.pem;
 ssl_protocols TLSv1.2 TLSv1.3;
 TLS
   done
-  # Each generation is a complete pair. Reload preserves existing sockets and uses the new pair for new ones.
+  # Complete certificate pairs and committed transport policies reload together; existing sockets finish normally.
   (
-    previous=$(readlink /etc/orch/frontend-tls/current)
-    while sleep "$CERTIFICATE_LOOK_SECONDS"; do
-      current=$(readlink /etc/orch/frontend-tls/current)
+    previous="$(readlink /etc/orch/frontend-tls/current):$(cksum "$policy")"
+    while :; do
+      interval=$(sed -n 's/^# reload_secs=//p' "$policy")
+      case "$interval" in ''|0|*[!0-9]*) echo 'The HTTPS policy has no positive reload interval.' >&2; exit 1;; esac
+      sleep "$interval"
+      current="$(readlink /etc/orch/frontend-tls/current):$(cksum "$policy")"
       if [ "$current" != "$previous" ]; then
-        nginx -s reload
-        previous=$current
+        if nginx -t && nginx -s reload; then previous=$current; fi
       fi
     done
   ) &
 fi
+# The content policy's room for a human check's service, which the web edge includes; empty where none is chosen.
+sh /etc/orch/frontend-csp.sh "${ORCH_FRONTEND_HUMAN_CHECK:-}" > /tmp/frontend-csp.conf
 exec nginx -g 'daemon off;'

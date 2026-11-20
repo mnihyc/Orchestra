@@ -1,68 +1,9 @@
-/** What the workbench keeps on a device, each under the person signed in: the arrangement of each kind of screen, each thing's open tabs, and text not yet saved, which is removed at sign-out and after a week; and the named arrangements that follow the person.
- *
- * So far: the arrangement of each kind of screen. It is the reader's own and suits the screen it was
- * made on, so it stays in this browser's storage and is never sent anywhere; it is kept under the
- * id of the person signed in, so that two people at one browser never meet each other's. An
- * arrangement that this build cannot read is dropped, and its reader is told once.
- *
- * Not yet: the tabs that belong to one thing (a thread's open files), text typed into a file and
- * not saved, and arrangements saved by name, which follow the person from device to device.
- */
-import { allTabs, addMainTab, type Layout, parse, readTab, serialize, type Tab } from '@/features/workbench/layout';
-import type { ScreenKind } from '@/routes/-access';
+/** The current per-person workspace: layout, open and recently closed tabs, and recoverable presentation. */
+import { allTabs, type Layout, parse, readTab, serialize, type Tab } from '@/features/workbench/layout';
 import type { Presentations } from './presentation';
 import { readStatus, type StatusArrangement } from '@/features/status-items/arrangement';
 import { readChipSizes, type ChipSizes } from '@/features/people/chipSizes';
-
-/** What is kept for one kind of screen: which shipped arrangement it began as, and how it stands now. */
-export interface Kept {
-  arrangement: string;
-  layout: Layout;
-}
-
-const key = (userId: string, screen: ScreenKind) => `orch.${userId}.workbench.${screen}`;
-
-/**
- * Reads what was kept for a kind of screen. `dropped` says that something was there and could not
- * be read, so that the reader can be told why their arrangement is the shipped one again.
- */
-export function loadKept(userId: string, screen: ScreenKind): { kept: Kept | null; dropped: boolean } {
-  let text: string | null;
-  try {
-    text = localStorage.getItem(key(userId, screen));
-  } catch {
-    return { kept: null, dropped: false };
-  }
-  if (text === null) return { kept: null, dropped: false };
-  try {
-    const value: unknown = JSON.parse(text);
-    if (typeof value === 'object' && value !== null) {
-      const { arrangement, layout } = value as Record<string, unknown>;
-      const read = typeof layout === 'string' ? parse(layout, screen) : null;
-      if (typeof arrangement === 'string' && read !== null) return { kept: { arrangement, layout: read }, dropped: false };
-    }
-  } catch {
-    // Not JSON at all: dropped like anything else that cannot be read.
-  }
-  forgetKept(userId, screen);
-  return { kept: null, dropped: true };
-}
-
-export function saveKept(userId: string, screen: ScreenKind, kept: Kept): void {
-  try {
-    localStorage.setItem(key(userId, screen), JSON.stringify({ arrangement: kept.arrangement, layout: serialize(kept.layout) }));
-  } catch {
-    // A device that keeps nothing still shows the workbench; it only forgets it.
-  }
-}
-
-export function forgetKept(userId: string, screen: ScreenKind): void {
-  try {
-    localStorage.removeItem(key(userId, screen));
-  } catch {
-    // Nothing was kept, then.
-  }
-}
+import { DEFAULT_INTERFACE_READING } from '@/lib/interfaceReading';
 
 /** Only presentation is stored here. Resource data, permissions and drafts keep their existing owners. */
 export interface ClosedTab {
@@ -72,7 +13,29 @@ export interface ClosedTab {
   title?: string;
 }
 
-export interface Workspace extends Kept {
+/** Hidden sections remain open; only distinct genuinely closed views use the extra model slots. */
+export function retainedClosedTabs(layout: Layout, closed: readonly ClosedTab[], count: number): ClosedTab[] {
+  const open = new Set(allTabs(layout).map((tab) => tab.id));
+  const recent = new Map<string, ClosedTab>();
+  for (const entry of closed) {
+    if (open.has(entry.tab.id)) continue;
+    recent.delete(entry.tab.id); recent.set(entry.tab.id, entry);
+  }
+  return count === 0 ? [] : [...recent.values()].slice(-count);
+}
+
+/** Keep one locator for Reopen when bodies are disabled; hidden open sections use no closed slot. */
+export function boundedClosedHistory(layout: Layout, closed: readonly ClosedTab[], count: number): ClosedTab[] {
+  const unique = new Map<string, ClosedTab>();
+  for (const entry of closed) { unique.delete(entry.tab.id); unique.set(entry.tab.id, entry); }
+  const entries = [...unique.values()];
+  const owners = new Set([...allTabs(layout).map((tab) => tab.id), ...retainedClosedTabs(layout, entries, Math.max(1, count)).map((entry) => entry.tab.id)]);
+  return entries.filter((entry) => owners.has(entry.tab.id));
+}
+
+export interface Workspace {
+  arrangement: string;
+  layout: Layout;
   chipSizes?: ChipSizes;
   statusItems?: StatusArrangement;
   focusedGroup: string | null;
@@ -82,16 +45,17 @@ export interface Workspace extends Kept {
   activeContent: string | null;
   focusMode: boolean;
   closedTabs: ClosedTab[];
+  /** Last confirmed native retention count; a delayed shell must not replace it with a guessed default. */
+  closedLimit?: number;
   presentations?: Presentations;
   titles?: Record<string, { title: string; path?: string }>;
 }
 
 const workspaceKey = (userId: string) => `orch.${userId}.workbench.workspace`;
-const kinds: readonly ScreenKind[] = ['page', 'org', 'project', 'topic', 'thread', 'document'];
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** Read one workspace. Legacy page-kind layouts contribute their explicitly targeted views once. */
-export function loadWorkspace(userId: string, initial: ScreenKind): { kept: Workspace | null; dropped: boolean } {
+/** Read only this release's workspace. Unknown view registrations retain their saved targets. */
+export function loadWorkspace(userId: string): { kept: Workspace | null; dropped: boolean } {
   let raw: string | null;
   try { raw = localStorage.getItem(workspaceKey(userId)); } catch { return { kept: null, dropped: false }; }
   if (raw !== null) {
@@ -102,44 +66,31 @@ export function loadWorkspace(userId: string, initial: ScreenKind): { kept: Work
         if (layout !== null) {
           const live = new Set(allTabs(layout).map((tab) => tab.id));
           const member = (id: unknown) => typeof id === 'string' && live.has(id) ? id : null;
-          const closedTabs: ClosedTab[] = [];
+          const closedLimit = typeof value.closedLimit === 'number' && Number.isSafeInteger(value.closedLimit) && value.closedLimit >= 0
+            ? value.closedLimit : DEFAULT_INTERFACE_READING.kept_closed_tabs;
+          const readClosed: ClosedTab[] = [];
           if (Array.isArray(value.closedTabs)) for (const entry of value.closedTabs) {
             if (!record(entry)) continue;
             const tab = readTab(entry.tab);
             if (tab === null || typeof entry.group !== 'string' || typeof entry.index !== 'number' || !Number.isInteger(entry.index) || entry.index < 0) continue;
-            closedTabs.push({ tab, group: entry.group, index: entry.index, ...(typeof entry.title === 'string' ? { title: entry.title } : {}) });
+            readClosed.push({ tab, group: entry.group, index: entry.index, ...(typeof entry.title === 'string' ? { title: entry.title } : {}) });
           }
+          const closedTabs = boundedClosedHistory(layout, readClosed, closedLimit);
+          const presentationOwners = new Set([...live, ...retainedClosedTabs(layout, closedTabs, closedLimit).map((entry) => entry.tab.id)]);
           const titles: NonNullable<Workspace['titles']> = {};
           if (record(value.titles)) for (const [id, name] of Object.entries(value.titles)) {
             if (live.has(id) && record(name) && typeof name.title === 'string') titles[id] = { title: name.title, ...(typeof name.path === 'string' ? { path: name.path } : {}) };
           }
           return { kept: { arrangement: value.arrangement, layout, focusedGroup: typeof value.focusedGroup === 'string' ? value.focusedGroup : null,
             focusedMainGroup: typeof value.focusedMainGroup === 'string' ? value.focusedMainGroup : null, focusedMainTab: Object.hasOwn(value, 'focusedMainTab') ? member(value.focusedMainTab) : member(value.activeContent),
-            focusedTab: member(value.focusedTab), activeContent: member(value.activeContent), focusMode: value.focusMode === true, closedTabs,
-            titles, chipSizes: readChipSizes(value.chipSizes), ...(value.statusItems === undefined ? {} : { statusItems: readStatus(value.statusItems) }), ...(record(value.presentations) ? { presentations: Object.fromEntries(Object.entries(value.presentations).filter((entry): entry is [string, Record<string, unknown>] => record(entry[1]))) } : {}) }, dropped: false };
+            focusedTab: member(value.focusedTab), activeContent: member(value.activeContent), focusMode: value.focusMode === true, closedTabs, closedLimit,
+            titles, chipSizes: readChipSizes(value.chipSizes), ...(value.statusItems === undefined ? {} : { statusItems: readStatus(value.statusItems) }), ...(record(value.presentations) ? { presentations: Object.fromEntries(Object.entries(value.presentations).filter((entry): entry is [string, Record<string, unknown>] => presentationOwners.has(entry[0]) && record(entry[1]))) } : {}) }, dropped: false };
         }
       }
     } catch { /* A malformed workspace does not expose another person's state. */ }
     return { kept: null, dropped: true };
   }
-  const first = loadKept(userId, initial);
-  let base = first.kept;
-  let dropped = first.dropped;
-  const legacy = kinds.filter((kind) => kind !== initial).map((kind) => loadKept(userId, kind));
-  base ??= legacy.find((entry) => entry.kept !== null)?.kept ?? null;
-  if (base === null) return { kept: null, dropped: dropped || legacy.some((entry) => entry.dropped) };
-  let layout = base.layout;
-  const live = new Set(allTabs(layout).map((tab) => tab.id));
-  for (const entry of legacy) {
-    dropped ||= entry.dropped;
-    if (entry.kept === null) continue;
-    for (const tab of allTabs(entry.kept.layout)) {
-      if (live.has(tab.id) || (tab.of === undefined && tab.scope?.mode !== 'fixed')) continue;
-      layout = addMainTab(layout, tab, null);
-      live.add(tab.id);
-    }
-  }
-  return { kept: { arrangement: base.arrangement, layout, focusedGroup: null, focusedTab: null, focusedMainGroup: null, focusedMainTab: null, activeContent: null, focusMode: false, closedTabs: [] }, dropped };
+  return { kept: null, dropped: false };
 }
 
 export function saveWorkspace(userId: string, workspace: Workspace): void {

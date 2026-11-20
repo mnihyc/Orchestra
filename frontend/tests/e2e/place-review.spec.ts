@@ -34,11 +34,11 @@ test('a phone review names the archive work, reports a partial refusal and lost 
   await dialog.getByRole('button', { name: 'Apply to 3 ready places' }).click();
   const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(result.getByText('Answer lost; outcome unknown', { exact: true })).toBeVisible();
-  await expect(result.getByText('Some rows did not succeed. Each result below stands on its own.', { exact: true })).toBeVisible();
+  await expect(result.getByText('Some places did not succeed. Each result below stands on its own.', { exact: true })).toBeVisible();
   const lost = result.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Migrate CI', exact: true }) });
   await lost.getByRole('button', { name: 'Read current state', exact: true }).click();
   await expect(lost).toContainText('Read only afterwards');
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await result.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(result.getByRole('heading', { name: 'Undo results' })).toBeVisible();
   expect(applied).toHaveLength(3);
   expect(undone).toEqual([ACME.fixLogin]);
@@ -73,7 +73,7 @@ test('a selected deletion keeps its own recovery group and the aggregate Undo re
   await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
   const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
-  await results.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await results.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(results.getByRole('heading', { name: 'Undo results', exact: true })).toBeVisible();
   await expect(results.getByText('Succeeded', { exact: true })).toHaveCount(2);
   await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();
@@ -95,7 +95,7 @@ test('a selected move shows its destination and consequences and Undo returns th
   await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
   const result = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
   await expect(result.getByText('Succeeded', { exact: true })).toBeVisible();
-  await result.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+  await result.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
   await expect(result.getByText('Undone', { exact: true })).toBeVisible();
   expect(confirmations).toEqual([
     { parent_id: ACME.evals, expected_revision: expect.any(Number), preflight_id: expect.any(String) },

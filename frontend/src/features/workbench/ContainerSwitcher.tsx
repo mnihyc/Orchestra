@@ -36,7 +36,8 @@ function ContainerTab({ item, active, onSelect, section }: { item: SwitcherItem;
 export function ContainerSwitcher({ containers, active, onSelect, section }: { containers: readonly ViewContainer[]; active: string; onSelect: (name: string) => void; section?: CarriedSection | undefined }) {
   const { t } = useTranslation();
   useContainers();
-  const items = containers.map((container) => {
+  // A container whose every section is hidden has no tab (closing a popped-out Ask leaves no empty Ask tab behind).
+  const items = containers.filter((container) => container.name === active || container.sections.some((section) => !section.hidden)).map((container) => {
     const definition = containerOf(container.name);
     const view = viewOf(container.sections[0]?.tab.view ?? '');
     const words = definition === undefined && view !== undefined ? viewChoice(view, t) : containerChoice(container.name, t);

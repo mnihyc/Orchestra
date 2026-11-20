@@ -1,17 +1,22 @@
-//! Harness and executor builds fetched on the server's word where the owner allows it, verified by hash.
-//!
-//! What is built so far is the finding of a harness's program where a runtime the system made keeps it. The
-//! node gives such a runtime a read-only directory of tools (`ORCH_TOOLS_DIR`) with a directory for each
-//! tool it was asked for, named as the harness kind is, holding the build as it was released: a program that
-//! brings what it needs, either as the one file of a self-contained build, or among the files of a directory
-//! that is the build. [`find_program`] looks for the program there, by the names the harness's adapter
-//! answers to, at the top of the tool's directory and in its `bin`, and [`installed`] lists the harnesses a
-//! runtime holds, each with the version its directory says it is. A machine a person connected keeps its
-//! harness wherever its owner installed it and lists it in the local policy; fetching a build there on the
-//! server's word, and checking it against its hash, is not built yet.
+//! Installed harness programs and the one verified build-cache interface used by hosts and connected machines.
 
 use crate::harnesses::AdapterRegistry;
 use std::path::{Path, PathBuf};
+
+/// A composed verified cache; its implementation also serves the host's tool preparation.
+#[async_trait::async_trait]
+pub trait BuildCache: Send + Sync {
+    /// Fetch the exact named artifact, checking current policy, cancellation and the supplied digest.
+    async fn ensure(
+        &self,
+        request: &orch_link_contract::commands::NodeToolEnsure,
+        services: &crate::roles::Services,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<PathBuf, orch_link_contract::commands::CommandError>;
+
+    /// Already verified programs, without contacting a server or downloading anything.
+    fn installed(&self, registry: &AdapterRegistry) -> Vec<Installed>;
+}
 
 /// The directory of a tool's programs, inside the tool's own directory.
 const BIN_DIR: &str = "bin";

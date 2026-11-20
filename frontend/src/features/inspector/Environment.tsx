@@ -39,6 +39,7 @@ import { InstructionSources } from './InstructionSources';
 import { ThreadViewFrame } from './parts';
 import { environmentStatusWord } from './words';
 import { EnvironmentPrograms, ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { SessionSkills } from './SessionSkills';
 
 const TONE: Record<Environment['status'], DotTone> = {
   none: 'off',
@@ -134,7 +135,7 @@ function EnvironmentPanel({ access }: { access: WorkspaceAccess }) {
       </Section>
       <AgentReach environment={environment} compact />
       <Section title={t('programVersions.running')}>{showsEnvironmentPrograms ? <EnvironmentPrograms id={environment.id} generation={environment.generation} compact /> : access.thread.binding?.program !== undefined && access.thread.binding.program !== null ? <ProgramBuild program={access.thread.binding.program} name={programNameIn(access.thread.binding.agent, i18n.resolvedLanguage ?? i18n.language) ?? undefined} /> : <span className="text-sm text-text-muted">{t('programVersions.noneObserved')}</span>}</Section>
-      <McpServers environment={environment} compact />
+      <McpServers environment={environment} threadId={access.thread.id} compact />
       <Section title={t('inspector.environment.lifecycle')}>
         {environment.placement === 'managed' && manages ? (
           <div className="flex flex-wrap gap-2">
@@ -174,6 +175,7 @@ function EnvironmentPanel({ access }: { access: WorkspaceAccess }) {
         </Section>
       )}
       <InstructionSources threadId={access.thread.id} />
+        <SessionSkills thread={access.thread} read={access.read}/>
     </ScrollArea>
   );
 }
