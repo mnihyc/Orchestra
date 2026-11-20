@@ -1,0 +1,4 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test call_recovery --test forks --test approval_review --test resource_summaries
+test -p orch-engine --test loss -- lost_provider
+test -p orch-engine --test measurement_jobs

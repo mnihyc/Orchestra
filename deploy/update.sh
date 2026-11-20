@@ -8,13 +8,17 @@
 #   ./update.sh rollback [--yes]
 #   ./update.sh recover
 #   ./update.sh status
+#   ./update.sh doctor
 #   ./update.sh prune [--yes]
 #   ./update.sh dumps remove <name> [--yes]
 #   ./update.sh uninstall [--purge] [--no-backup] [--plan|--yes]
 #
 # Readiness checks the operator's public_url from this host as well as the
 # services inside the stack. ORCH_READY_URL may select the reachable edge URL
-# when this host uses a different route to the same deployment.
+# when this host uses a different route to the same deployment. `doctor` runs
+# the same two checks once, at any time, and prints every line of both with the
+# address the edge check used; it changes nothing and exits non-zero when
+# either fails.
 #
 # A release is a directory of files with a version.json that lists them, each
 # with its size and BLAKE3 hash. --from DIR takes the files from a directory (a
@@ -26,10 +30,19 @@
 # catalogue), frontend (the built application) and cli (orchctl). Each lives in
 # runtime/<payload>/releases/<tag>-<hash>/, and runtime/<payload>/current and
 # runtime/<payload>/previous are links to the releases that run and that ran.
-# A link is replaced by one rename, so it is never half made. compose.yml,
-# nginx.conf, .env, config/orch.toml and existing secrets are kept by an update.
-# A missing port assertion key is added to an older complete secret set. The
-# password file's permissions are checked on every run.
+# A link is replaced by one rename, so it is never half made. .env, config/ and
+# existing secrets are the operator's and are never touched. A missing port
+# assertion key is added to an older complete secret set. The password file's
+# permissions are checked on every run.
+#
+# The other files of the release's orch-deploy bundle (compose.yml, nginx.conf,
+# frontend.sh, postgres/Dockerfile and the rest of this directory) follow the
+# release: an update writes them in its own transaction, after the dump and before
+# the start, and a rollback or a recover puts them back. A file that equals no
+# published version of it is an edit of the operator's: its set of files is kept and
+# the shipped files are written beside as <name>.new, which `status` lists until
+# they are gone. This script is replaced by the release's at the end of a
+# successful update and is never rolled back.
 #
 # An update, a rollback and a first start are transactions. runtime/update/journal
 # records each step before it is taken, so that `recover` can finish or undo
@@ -68,10 +81,14 @@ cd "$DEPLOY_DIR"
 JOURNAL="runtime/update/journal"
 STATE="runtime/update/state"
 BACKUPS="runtime/update-backups"
+DATA_DIR="./runtime/data"
+POSTGRES_DATA_DIR="./runtime/postgres/data"
 
 # --- Messages ----------------------------------------------------------------
 
 say() { printf '%s\n' "$*"; }
+# A count with its noun in the right number: 1 environment, 2 environments.
+noun() { if [ "$1" = 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %ss' "$1" "$2"; fi; }
 note() { printf 'update.sh: %s\n' "$*" >&2; }
 die() { printf 'update.sh: %s\n' "$*" >&2; exit 1; }
 stamp() { date -u +%Y%m%dT%H%M%SZ; }
@@ -82,7 +99,7 @@ need() { command -v "$1" > /dev/null 2>&1 || die "$1 is needed and is not instal
 
 check_host() {
   local tool
-  for tool in docker awk sed grep tar flock stat mv ln readlink sha256sum base64 mktemp sort cut head tr date id sleep fold wc du find cp chmod chown; do
+  for tool in docker awk sed grep tar flock stat mv ln readlink realpath sha256sum base64 mktemp sort cut head tr date id sleep fold wc du find cp chmod chown; do
     need "$tool"
   done
   mv --version 2> /dev/null | grep -q 'GNU coreutils' || die "GNU coreutils are needed (mv -T replaces a link in one step)"
@@ -185,6 +202,25 @@ load_facts() {
   if [ "$(id -u)" -ne 0 ] && [ "$SERVICE_UID" != "$(id -u)" ]; then
     die "ORCH_UID is $SERVICE_UID, but this user is $(id -u); run the updater as that user or as root so the services can write their directories"
   fi
+  # Ask Compose for its interpolation inputs so quoting, .env references and shell overrides agree.
+  local dirs name value
+  dirs="$(compose config --environment | sed -n '/^ORCH_DATA_DIR=/p; /^ORCH_POSTGRES_DATA_DIR=/p')" ||
+    die "Compose could not resolve the deployment data directories"
+  while IFS='=' read -r name value; do
+    case "$name" in
+      ORCH_DATA_DIR) DATA_DIR="${value:-./runtime/data}" ;;
+      ORCH_POSTGRES_DATA_DIR) POSTGRES_DATA_DIR="${value:-./runtime/postgres/data}" ;;
+    esac
+  done <<< "$dirs"
+  for value in "$DATA_DIR" "$POSTGRES_DATA_DIR"; do
+    case "$value" in /*|./*|../*) ;; *) die "data directories must be absolute paths or start with ./ or ../" ;; esac
+  done
+  DATA_DIR="$(realpath -m -- "$DATA_DIR")"
+  POSTGRES_DATA_DIR="$(realpath -m -- "$POSTGRES_DATA_DIR")"
+  case "$DEPLOY_DIR/" in "$DATA_DIR/"*|"$POSTGRES_DATA_DIR/"*) die "use dedicated data directories outside or below the deployment directory" ;; esac
+  if [ "$DATA_DIR" = / ] || [ "$POSTGRES_DATA_DIR" = / ] || [[ "$DATA_DIR/" == "$POSTGRES_DATA_DIR/"* || "$POSTGRES_DATA_DIR/" == "$DATA_DIR/"* ]]; then
+    die "server files and PostgreSQL need separate dedicated directories"
+  fi
 }
 
 # --- Directories -----------------------------------------------------------------
@@ -206,15 +242,25 @@ ensure_node_lock() {
   chmod 600 "$path"
 }
 
+# First start grants the bundled node's shipped facilities in its single machine policy.
+seed_node_policy() {
+  local path=runtime/node/config.toml initial=runtime/node/.config.toml.initial
+  if [ -e "$path" ] || [ -L "$path" ]; then return 0; fi
+  (umask 077; cat config/node.toml > "$initial") || die "the bundled node policy could not be prepared"
+  chmod 600 "$initial"
+  [ "$(id -u)" -ne 0 ] || chown "$SERVICE_UID:$SERVICE_GID" "$initial"
+  mv -- "$initial" "$path"
+}
+
 prepare_dirs() {
   local kind
   private_env
   make_dir 700 runtime
   make_dir 700 runtime/postgres
-  make_dir 700 runtime/postgres/data
-  make_dir 750 runtime/data
-  make_dir 755 runtime/data/update-status
-  make_dir 750 runtime/data/frontend-tls
+  make_dir 700 "$POSTGRES_DATA_DIR"
+  make_dir 750 "$DATA_DIR"
+  make_dir 755 "$DATA_DIR/update-status"
+  make_dir 750 "$DATA_DIR/frontend-tls"
   make_dir 700 runtime/node
   ensure_node_lock
   make_dir 700 runtime/update
@@ -383,9 +429,19 @@ fetch_release() {
       say "fetching $asset"
       curl -fSL --connect-timeout 30 --speed-time 30 --speed-limit 1 --retry 3 --continue-at - -o "$RELEASE_DIR/$asset" "$url" || die "cannot fetch $url"
     done
+    # The bundle of the deployment files is fetched when an update wants it and the release lists it.
+    asset="orch-deploy-$TAG.tar.gz"
+    if [ "${WANT_BUNDLE:-0}" = 1 ] && url="$(asset_field "$asset" download_url)"; then
+      case "$url" in http://* | https://*) ;; *) url="${manifest_url%/*}/$url" ;; esac
+      say "fetching $asset"
+      curl -fSL --connect-timeout 30 --speed-time 30 --speed-limit 1 --retry 3 --continue-at - -o "$RELEASE_DIR/$asset" "$url" || die "cannot fetch $url"
+    fi
   fi
   say "checking release $TAG against version.json"
   verify_release "$RELEASE_DIR"
+  # The bundle is the release's when the manifest lists it and it is here, and it has been checked above.
+  BUNDLE=""
+  if [ -f "$RELEASE_DIR/orch-deploy-$TAG.tar.gz" ] && asset_field "orch-deploy-$TAG.tar.gz" size > /dev/null; then BUNDLE="$RELEASE_DIR/orch-deploy-$TAG.tar.gz"; fi
 }
 
 # --- Unpacking -------------------------------------------------------------------------
@@ -535,6 +591,462 @@ state_save() {
   mv -T "$STATE.new" "$STATE"
 }
 
+# --- The deployment files --------------------------------------------------------------
+
+# The files of the orch-deploy bundle that are the product's (everything under deploy/ but config/) follow the release:
+# an update brings them in the same transaction as the payloads, a rollback and a recover put them back. What the
+# bundle holds, and what each published release shipped of it, is its FILE_SETS: the generation of the files, the
+# oldest generation the payloads of the release work with, the sets of files that must agree with each other, and the
+# SHA-256 of every file of every published release. A file that equals a published one is the product's; one that
+# equals none is the operator's edit, and it is kept: its set stays as it is and the shipped files are written beside
+# as <name>.new. Nothing here touches .env, config/ or runtime/.
+FILES_DIR="runtime/update/files"
+FILES_STATE="runtime/update/files.state"
+# The generation of the first release with a managed deployment file set.
+FILES_BASELINE=1
+
+sha_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# fstate_get KEY / fstate_set KEY VALUE / fstate_del KEY: what the updater remembers of the files (files.state):
+#   files_generation     the generation of the installed set, as the last update left it
+#   files_previous       the transaction whose saved files a rollback puts back
+#   kept.<file>          SHA-256:GENERATION of the shipped file that <file> was last kept against
+#   reviewed.<file>      the generation an edited <file> is taken to have: that of the shipped file whose .new was read
+fstate_get() {
+  [ -f "$FILES_STATE" ] || return 0
+  awk -F= -v key="$1" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$FILES_STATE"
+}
+fstate_set() {
+  local tmp="$FILES_STATE.new"
+  mkdir -p runtime/update
+  { [ ! -f "$FILES_STATE" ] || awk -F= -v key="$1" '$1 != key' "$FILES_STATE"; printf '%s=%s\n' "$1" "$2"; } > "$tmp"
+  mv -T "$tmp" "$FILES_STATE"
+}
+fstate_del() {
+  local tmp="$FILES_STATE.new"
+  [ -f "$FILES_STATE" ] || return 0
+  awk -F= -v key="$1" '$1 != key' "$FILES_STATE" > "$tmp"
+  mv -T "$tmp" "$FILES_STATE"
+}
+
+# write_file SOURCE TARGET: TARGET becomes the content of SOURCE in one rename, with SOURCE's mode and, where root
+# runs this, the owner of what it replaces (or of this directory).
+write_file() {
+  local source=$1 target=$2 tmp="$2.update-tmp"
+  mkdir -p "$(dirname "$target")"
+  cp -- "$source" "$tmp"
+  chmod --reference="$source" "$tmp"
+  if [ "$(id -u)" -eq 0 ]; then
+    if [ -e "$target" ]; then chown --reference="$target" "$tmp"; else chown --reference="$(dirname "$target")" "$tmp"; fi
+  fi
+  mv -T "$tmp" "$target"
+}
+
+# fs_load FILE: reads the FILE_SETS of a bundle into FS_GENERATION, FS_MINIMUM, FS_SET_OF (the set of a file), FS_MEMBERS
+# (the files of a set) and FS_ROWS, a file of "TAG GENERATION SHA256 PATH" lines.
+fs_load() {
+  local file=$1 kind first rest generation sha path format=""
+  FS_GENERATION=""; FS_MINIMUM=""; FS_ROWS="$WORK/files.rows"; : > "$FS_ROWS"
+  declare -gA FS_SET_OF=() FS_MEMBERS=()
+  while read -r kind first rest; do
+    case "$kind" in
+      '' | '#'*) ;;
+      format) format="$first" ;;
+      generation) FS_GENERATION="$first" ;;
+      minimum) FS_MINIMUM="$first" ;;
+      set)
+        for path in $rest; do FS_SET_OF[$path]="$first"; FS_MEMBERS[$first]+="$path "; done ;;
+      file)
+        read -r generation sha path <<< "$rest"
+        [[ "$generation" =~ ^[0-9]+$ && "$sha" =~ ^[0-9a-f]{64}$ && -n "$path" ]] || die "FILE_SETS holds a line that cannot be read: $kind $first $rest"
+        printf '%s %s %s %s\n' "$first" "$generation" "$sha" "$path" >> "$FS_ROWS" ;;
+      *) die "FILE_SETS holds a line of a kind this updater does not know: $kind" ;;
+    esac
+  done < "$file"
+  [ "$format" = 1 ] || die "FILE_SETS is of format ${format:-none}, and this updater reads format 1"
+  [[ "$FS_GENERATION" =~ ^[0-9]+$ && "$FS_MINIMUM" =~ ^[0-9]+$ ]] || die "FILE_SETS has no generation and minimum"
+  [ "$FS_MINIMUM" -le "$FS_GENERATION" ] || die "FILE_SETS asks for a minimum generation above its own"
+}
+
+# fs_gen_of PATH SHA: the newest generation in which a published release shipped PATH with that content; nothing when
+# none did, which is what an edited file is.
+fs_gen_of() {
+  awk -v path="$1" -v sha="$2" '$4 == path && $3 == sha { found = 1; if ($2 + 0 > best + 0) best = $2 } END { if (found) print best + 0 }' "$FS_ROWS"
+}
+
+# fs_newest_tag PATH SHA: the newest release that shipped PATH with that content, or nothing.
+fs_newest_tag() {
+  awk -v path="$1" -v sha="$2" '$4 == path && $3 == sha { print $1 }' "$FS_ROWS" | sort -V | tail -n 1
+}
+
+# compose_sources FILE: the places of this directory a Compose file binds, and the project it names; a release that moves
+# one of them would start the services on an empty directory.
+compose_sources() {
+  sed -n -E 's/^[[:space:]]*-[[:space:]]*"?([$][{]ORCH_(POSTGRES_)?DATA_DIR:-[^}]*[}][^:"]*):.*/\1/p' "$1" | sort -u
+  sed -n -E 's/^[[:space:]]*-[[:space:]]*"?((\.\/(runtime|config)\/|\$\{ORCH_HOME\}\/runtime\/)[^:"]*).*/\1/p' "$1" | sort -u
+  sed -n 's/^name:[[:space:]]*\([^[:space:]#]*\).*/name \1/p' "$1" | head -n 1
+}
+
+# compose_images FILE: the images a Compose file names.
+compose_images() { sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]#]*\).*/\1/p' "$1" | sort -u; }
+
+# files_guard_postgres: the PostgreSQL major of the new postgres/Dockerfile is the data directory's. A new Dockerfile
+# only takes effect at the next build, whenever that is, and a build of another major would not open this data directory.
+files_guard_postgres() {
+  local new_major old_major
+  new_major="$(sed -n 's/^ARG POSTGRES_IMAGE=postgres:\([0-9][0-9]*\).*/\1/p' "$FILES_STAGE/deploy/postgres/Dockerfile" | head -n 1)"
+  old_major="$(head -n 1 "$POSTGRES_DATA_DIR/PG_VERSION" 2> /dev/null || true)"
+  if [ -z "$new_major" ] || [ -z "$old_major" ]; then
+    GUARD_SAYS="the PostgreSQL major of the new postgres/Dockerfile (${new_major:-unreadable}) cannot be compared with the data directory's (${old_major:-unreadable}); compare them, then merge the .new files"
+    return 1
+  fi
+  if [ "$new_major" != "$old_major" ]; then
+    GUARD_SAYS="the new postgres/Dockerfile builds PostgreSQL $new_major and the data directory is PostgreSQL $old_major; this release needs a dump and restore into $new_major (see its notes), then merge the .new files"
+    return 1
+  fi
+}
+
+# files_guard_binds: the new compose.yml binds every directory of this installation that the one in use binds, and names the
+# same project.
+files_guard_binds() {
+  local moved
+  moved="$(comm -23 <(compose_sources compose.yml | sort -u) <(compose_sources "$FILES_STAGE/deploy/compose.yml" | sort -u) | tr '\n' ' ')"
+  if [ -n "${moved// /}" ]; then
+    GUARD_SAYS="the new compose.yml no longer binds ${moved% } (or names another project): see where this release keeps its data, then merge compose.yml.new"
+    return 1
+  fi
+}
+
+# files_guard_images: every image the new compose.yml names is on this host, pulled here if it is not, before anything is
+# stopped; a host that cannot fetch it must have it loaded.
+files_guard_images() {
+  local reference selected
+  while IFS= read -r reference; do
+    [ -n "$reference" ] || continue
+    if [ -n "${ORCH_OFFLINE_IMAGE_MAP:-}" ]; then
+      selected="$(local_image "$reference" 2> /dev/null)" || selected=""
+      if [ -z "$selected" ] || ! docker image inspect "$selected" > /dev/null 2>&1; then
+        GUARD_SAYS="the new compose.yml names the image $reference, which is not among the carried-in images; load it (the offline guide), then run the update again"
+        return 1
+      fi
+      continue
+    fi
+    if ! docker image inspect "$reference" > /dev/null 2>&1; then
+      say "  pulling $reference (the new compose.yml names it)"
+      if ! docker pull --quiet "$reference" > /dev/null 2>&1; then
+        GUARD_SAYS="the new compose.yml names the image $reference, which this host does not have and could not pull; pull or load it, then run the update again"
+        return 1
+      fi
+    fi
+  done < <(compose_images "$FILES_STAGE/deploy/compose.yml")
+}
+
+# files_in_list NAME LIST...: whether NAME is one of the words.
+files_in_list() { local name=$1 word; shift; for word; do [ "$word" != "$name" ] || return 0; done; return 1; }
+
+# decide_set NAME MEMBER...: what becomes of a set of files. Sets SET_ACTION (same, replace or keep), SET_GEN (the generation
+# the set has afterwards), SET_REASON and SET_DIFFER (the members that are not the new release's). The installed files are
+# compared one by one with what any published release shipped of each; one that equals none is an edit, and an edit keeps
+# the whole set.
+decide_set() {
+  local name=$1; shift
+  local member old new generation record reviewed recorded_generation minimum_generation=999999
+  local -a differ=() edited=()
+  SET_ACTION=same; SET_REASON=""; SET_DIFFER=()
+  for member; do
+    new="$(sha_of "$FILES_STAGE/deploy/$member")"
+    if [ -e "$member" ]; then old="$(sha_of "$member")"; else old=-; fi
+    SET_OLD[$member]="$old"; SET_NEW[$member]="$new"
+    if [ "$old" != "$new" ]; then differ+=("$member"); fi
+    if [ "$old" = - ]; then
+      generation=0
+    else
+      generation=""
+      if [ ! -L "$member" ]; then generation="$(fs_gen_of "$member" "$old")"; fi
+      if [ -z "$generation" ]; then
+        edited+=("$member")
+        # An edited file has the generation of the shipped one whose .new its owner has read and removed.
+        reviewed="$(fstate_get "reviewed.$member")"; reviewed="${reviewed:-$FILES_BASELINE}"
+        record="$(fstate_get "kept.$member")"
+        if [ -n "$record" ] && [ ! -e "$member.new" ]; then
+          recorded_generation="${record#*:}"
+          if [ "$recorded_generation" -gt "$reviewed" ]; then reviewed="$recorded_generation"; fi
+          fstate_set "reviewed.$member" "$reviewed"
+        fi
+        generation="$reviewed"
+      fi
+    fi
+    if [ "$generation" -lt "$minimum_generation" ]; then minimum_generation="$generation"; fi
+  done
+  SET_DIFFER=("${differ[@]}")
+  if [ "${#differ[@]}" -eq 0 ]; then
+    SET_GEN="$minimum_generation"
+    return 0
+  fi
+  if [ "${#edited[@]}" -gt 0 ]; then
+    SET_ACTION=keep; SET_GEN="$minimum_generation"; SET_REASON="edited here: ${edited[*]}"
+    return 0
+  fi
+  GUARD_SAYS=""
+  if [ "$name" = "$FILES_MAIN" ]; then
+    if files_in_list postgres/Dockerfile "${differ[@]}" && ! files_guard_postgres; then SET_REASON="$GUARD_SAYS"
+    elif files_in_list compose.yml "${differ[@]}" && ! files_guard_binds; then SET_REASON="$GUARD_SAYS"
+    elif files_in_list compose.yml "${differ[@]}" && ! files_guard_images; then SET_REASON="$GUARD_SAYS"
+    fi
+  fi
+  if [ -n "$SET_REASON" ]; then SET_ACTION=keep; SET_GEN="$minimum_generation"; return 0; fi
+  SET_ACTION=replace; SET_GEN="$FS_GENERATION"
+}
+
+# keep_set MEMBER...: the shipped file of each member that is not the installed one is written beside it as <name>.new,
+# unless it was kept against the same shipped file before: then its owner has read it, or will.
+keep_set() {
+  local member shipped record
+  for member; do
+    shipped="${SET_NEW[$member]}"
+    [ "${SET_OLD[$member]}" != "$shipped" ] || continue
+    record="$(fstate_get "kept.$member")"
+    if [ "${record%%:*}" = "$shipped" ]; then continue; fi
+    write_file "$FILES_STAGE/deploy/$member" "$member.new"
+    fstate_set "kept.$member" "$shipped:$FS_GENERATION"
+  done
+}
+
+# files_bundle: the release's bundle is unpacked, and its table read; FILES_HAVE is 1 when there is one to follow.
+files_bundle() {
+  FILES_HAVE=0
+  FILES_STAGE="$WORK/files"
+  [ -n "${BUNDLE:-}" ] || return 0
+  mkdir -p "$FILES_STAGE"
+  tar -xzf "$BUNDLE" -p --no-same-owner -C "$FILES_STAGE" deploy || die "the bundle of release $TAG could not be unpacked"
+  [ -f "$FILES_STAGE/deploy/FILE_SETS" ] || return 0
+  fs_load "$FILES_STAGE/deploy/FILE_SETS"
+  FILES_HAVE=1
+}
+
+# plan_files: before anything is stopped, decides what becomes of every file of the bundle. Sets FILES_REPLACE (the files that
+# will be written), FILES_GEN_AFTER (the generation of the set afterwards) and UPDATE_SH (what becomes of update.sh); writes
+# the .new files; and stops, with the files to merge named, when the set that will be in use is older than the release's
+# payloads work with. It writes nothing but .new files and the record of what was kept.
+plan_files() {
+  local minimum member set name shipped installed newest
+  local -a followed=() plan_lines=() block_names=()
+  FILES_REPLACE=(); FILES_GEN_AFTER=""; UPDATE_SH=none; FILES_MAIN=""
+  declare -gA SET_OLD=() SET_NEW=()
+  minimum="$(mget deploy_files.minimum)"; minimum="${minimum:-0}"
+  [[ "$minimum" =~ ^[0-9]+$ ]] || die "version.json has a deploy_files minimum that is not a number"
+  files_bundle
+  if [ "$FILES_HAVE" = 0 ]; then
+    FILES_GEN_AFTER="$(fstate_get files_generation)"; FILES_GEN_AFTER="${FILES_GEN_AFTER:-$FILES_BASELINE}"
+    if [ -z "${BUNDLE:-}" ]; then say "files: release $TAG comes without its orch-deploy bundle; the deployment files are left as they are"
+    else say "files: the bundle of release $TAG has no FILE_SETS; the deployment files are left as they are"; fi
+  else
+    [ "$FS_MINIMUM" = "$minimum" ] || die "version.json asks for deployment files of generation $minimum and the bundle says $FS_MINIMUM"
+    FILES_MAIN="main"
+    [ -n "${FS_MEMBERS[main]:-}" ] || die "FILE_SETS names no set called main"
+    while IFS= read -r member; do followed+=("$member"); done < <(cd "$FILES_STAGE/deploy" && find . -type f ! -path ./FILE_SETS ! -path './config/*' | sed 's|^\./||' | LC_ALL=C sort)
+    for member in ${FS_MEMBERS[main]}; do
+      [ -f "$FILES_STAGE/deploy/$member" ] || die "FILE_SETS names $member, which the bundle does not hold"
+    done
+    # The set the generation counts first, then each other file by itself; update.sh is the updater's own.
+    # shellcheck disable=SC2086 # the members of the set, split on purpose
+    decide_set main ${FS_MEMBERS[main]}
+    FILES_GEN_AFTER="$SET_GEN"
+    case "$SET_ACTION" in
+      replace)
+        for member in "${SET_DIFFER[@]}"; do
+          FILES_REPLACE+=("$member")
+          plan_lines+=("files: replacing $member (release $TAG's, generation $FS_GENERATION)")
+        done ;;
+      keep)
+        keep_set "${SET_DIFFER[@]}"
+        block_names=("${SET_DIFFER[@]/%/.new}")
+        for member in "${SET_DIFFER[@]}"; do
+          plan_lines+=("files: kept $member ($SET_REASON); the shipped one is $member.new")
+        done ;;
+    esac
+    for member in "${followed[@]}"; do
+      set="${FS_SET_OF[$member]:-$member}"
+      [ "$set" != main ] || continue
+      if [ "$member" = update.sh ]; then continue; fi
+      decide_set "$member" "$member"
+      case "$SET_ACTION" in
+        replace) FILES_REPLACE+=("$member"); plan_lines+=("files: replacing $member (release $TAG's)") ;;
+        keep) keep_set "$member"; plan_lines+=("files: kept $member ($SET_REASON); the shipped one is $member.new") ;;
+      esac
+    done
+    # update.sh is replaced last, and only when the one here is a published one that is older than this release's.
+    shipped="$(sha_of "$FILES_STAGE/deploy/update.sh")"; installed="$(sha_of update.sh)"
+    SET_OLD[update.sh]="$installed"; SET_NEW[update.sh]="$shipped"
+    if [ "$installed" != "$shipped" ]; then
+      newest=""
+      if [ ! -L update.sh ]; then newest="$(fs_newest_tag update.sh "$installed")"; fi
+      if [ -z "$newest" ]; then
+        keep_set update.sh
+        plan_lines+=("files: kept update.sh (it differs from every published version); the shipped one is update.sh.new")
+      elif [ "$(printf '%s\n%s\n' "$newest" "$TAG" | sort -V | tail -n 1)" = "$TAG" ]; then
+        UPDATE_SH=replace
+        plan_lines+=("files: update.sh is replaced when the update has finished")
+      fi
+    fi
+  fi
+  for name in "${plan_lines[@]}"; do say "$name"; done
+  if [ "$FILES_GEN_AFTER" -lt "$minimum" ]; then
+    if [ "$FILES_HAVE" = 0 ]; then
+      die "release $TAG works with deployment files of generation $minimum or newer, and these are generation $FILES_GEN_AFTER; its orch-deploy bundle is not with it. Give the update the release directory that holds orch-deploy-$TAG.tar.gz (--from), or merge that bundle's files by hand. Nothing was stopped"
+    fi
+    die "release $TAG works with deployment files of generation $minimum or newer, and these are generation $FILES_GEN_AFTER; merge ${block_names[*]:-the shipped files} and run the update again. Nothing was stopped"
+  fi
+}
+
+# files_notice: an update to the release that is installed does nothing; but the files it runs with may be older than its programs
+# work with (an updater that did not follow them brought it), and that is said.
+files_notice() {
+  local minimum generation
+  minimum="$(mget deploy_files.minimum)"
+  generation="$(fstate_get files_generation)"; generation="${generation:-$FILES_BASELINE}"
+  if [[ "$minimum" =~ ^[0-9]+$ ]] && [ "$generation" -lt "$minimum" ]; then
+    say "files: release $TAG works with deployment files of generation $minimum or newer, and these are generation $generation; take the files of its orch-deploy bundle, merging what you changed"
+  fi
+}
+
+# files_begin: the files of the plan are saved where a rollback and a recover find them, and the journal lists them, before the
+# first is written. SOURCE is the directory the new content comes from.
+files_begin() {
+  local source=$1 member store="$FILES_DIR/${J[id]}" old new
+  mkdir -p "$store/old" "$store/new"
+  : > "$store/list"
+  J[files]="${FILES_REPLACE[*]:-}"
+  J[files_gen]="$FILES_GEN_AFTER"
+  J[files_gen_before]="$(fstate_get files_generation)"
+  for member in "${FILES_REPLACE[@]}"; do
+    mkdir -p "$store/old/$(dirname "$member")" "$store/new/$(dirname "$member")"
+    old=-; new="${SET_NEW[$member]}"
+    if [ -e "$member" ]; then old="$(sha_of "$member")"; cp -p -- "$member" "$store/old/$member"; fi
+    if [ "$new" != - ]; then cp -p -- "$source/$member" "$store/new/$member"; fi
+    J["file_old.$member"]="$old"; J["file_new.$member"]="$new"
+    printf '%s %s %s\n' "$member" "$old" "$new" >> "$store/list"
+  done
+  J[update_sh]=none
+  if [ "${UPDATE_SH:-none}" = replace ]; then
+    J[update_sh]=replace; J[update_sh_old]="${SET_OLD[update.sh]}"
+    cp -p -- "$FILES_STAGE/deploy/update.sh" "$store/update.sh"
+  fi
+  if [ "$(id -u)" -eq 0 ]; then chown -R "$SERVICE_UID:$SERVICE_GID" "$store"; fi
+}
+
+# apply_files: the files of the journal are written, each in one rename; doing it twice does no harm.
+apply_files() {
+  local member store="$FILES_DIR/${J[id]}"
+  for member in ${J[files]:-}; do
+    if [ "${J[file_new.$member]}" = - ]; then rm -f -- "$member"; else write_file "$store/new/$member" "$member"; fi
+  done
+}
+
+# files_database_start: a changed compose.yml may change the database's container; it is made again, with the database kept, so
+# that it is what the Compose file in use says (a no-op when nothing about it changed).
+files_database_start() {
+  case " ${J[files]:-} " in *" compose.yml "*) database_start ;; esac
+}
+
+# restore_files: the files the journal lists go back to what they were, each only if it is still what the transaction wrote. One
+# that was edited since stays, and the command says so.
+restore_files() {
+  local member current store="$FILES_DIR/${J[id]}"
+  for member in ${J[files]:-}; do
+    current=-
+    if [ -e "$member" ]; then current="$(sha_of "$member")"; fi
+    if [ "$current" = "${J[file_new.$member]}" ]; then
+      if [ "${J[file_old.$member]}" = - ]; then rm -f -- "$member"; else write_file "$store/old/$member" "$member"; fi
+    elif [ "$current" != "${J[file_old.$member]}" ]; then
+      note "$member was left as it is: it is no longer what the transaction wrote"
+    fi
+  done
+}
+
+# plan_files_rollback: the files the last transaction replaced are put back where they still are what it wrote.
+plan_files_rollback() {
+  local previous member old new current
+  FILES_REPLACE=(); FILES_SOURCE=""; UPDATE_SH=none
+  declare -gA SET_OLD=() SET_NEW=()
+  FILES_GEN_AFTER="$(fstate_get files_generation)"
+  previous="$(fstate_get files_previous)"
+  [ -n "$previous" ] && [ -f "$FILES_DIR/$previous/list" ] || return 0
+  FILES_SOURCE="$FILES_DIR/$previous/old"
+  FILES_ALL_BACK=1
+  while read -r member old new; do
+    current=-
+    if [ -e "$member" ]; then current="$(sha_of "$member")"; fi
+    if [ "$current" = "$new" ]; then
+      FILES_REPLACE+=("$member"); SET_NEW[$member]="$old"
+    elif [ "$current" != "$old" ]; then
+      FILES_ALL_BACK=0
+      say "files: $member stays as it is: it is no longer what the last update wrote (the earlier one is in $FILES_SOURCE/$member)"
+    fi
+  done < "$FILES_DIR/$previous/list"
+  if [ "${FILES_ALL_BACK:-1}" = 1 ] && [ -f "$FILES_DIR/$previous/generation_before" ]; then FILES_GEN_AFTER="$(cat "$FILES_DIR/$previous/generation_before")"; fi
+  if [ "${#FILES_REPLACE[@]}" -gt 0 ]; then say "files: putting back ${FILES_REPLACE[*]}"; fi
+}
+
+# files_finish: the transaction is done: the generation and the saved files are recorded, the files of older transactions are
+# removed, and update.sh is replaced, as the last act.
+files_finish() {
+  local member name store="$FILES_DIR/${J[id]}" keep=""
+  if [ -n "${J[files_gen]:-}" ]; then fstate_set files_generation "${J[files_gen]}"; fi
+  if [ -n "${J[files]:-}" ]; then
+    printf '%s\n' "${J[files_gen_before]:-$FILES_BASELINE}" > "$store/generation_before"
+    fstate_set files_previous "${J[id]}"
+    keep="${J[id]}"
+  else
+    fstate_del files_previous
+  fi
+  for member in ${J[files]:-}; do
+    fstate_del "kept.$member"; fstate_del "reviewed.$member"
+  done
+  if [ -d "$FILES_DIR" ]; then
+    for name in "$FILES_DIR"/*; do
+      name="${name##*/}"
+      [[ "$name" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || continue
+      if [ "$name" = "${J[id]}" ]; then continue; fi
+      rm -rf -- "$DEPLOY_DIR/$FILES_DIR/${name:?}"
+    done
+  fi
+  if [ "${J[update_sh]:-none}" = replace ] && [ -f "$store/update.sh" ]; then
+    if [ "$(sha_of update.sh)" = "${J[update_sh_old]}" ]; then
+      write_file "$store/update.sh" update.sh
+      say "update.sh is now the one of release ${J[to_tag]}"
+    else
+      note "update.sh was changed while the update ran, and is left as it is; the shipped one is in $store/update.sh"
+      keep="${J[id]}"
+    fi
+  fi
+  if [ -z "$keep" ]; then rm -rf -- "$DEPLOY_DIR/$FILES_DIR/${J[id]:?}"; fi
+}
+
+# files_status: what `status` says of the deployment files.
+files_status() {
+  local generation key member
+  generation="$(fstate_get files_generation)"
+  say "deployment files: generation ${generation:-$FILES_BASELINE}$([ -n "$generation" ] || printf ' (assumed: no update has followed them yet)')"
+  [ -f "$FILES_STATE" ] || return 0
+  while IFS= read -r key; do
+    member="${key#kept.}"
+    if [ -e "$member.new" ]; then say "  kept: $member differs from the shipped file, which is $member.new; merge it and remove it"; fi
+  done < <(awk -F= '$1 ~ /^kept\./ { print $1 }' "$FILES_STATE")
+}
+
+# files_record_first_start: a first start leaves the files as they were unpacked; what the bundle says of them is recorded, so
+# that a later update that comes without a bundle can still tell what generation they are.
+files_record_first_start() {
+  local member generation="$FILES_BASELINE"
+  files_bundle
+  [ "$FILES_HAVE" = 1 ] || return 0
+  generation="$FS_GENERATION"
+  for member in ${FS_MEMBERS[main]:-}; do
+    if [ ! -e "$member" ] || [ "$(sha_of "$member")" != "$(sha_of "$FILES_STAGE/deploy/$member")" ]; then generation="$FILES_BASELINE"; fi
+  done
+  fstate_set files_generation "$generation"
+}
 # --- The stack ---------------------------------------------------------------------------
 
 # shellcheck disable=SC2086 # a list of service names, split on purpose
@@ -556,23 +1068,45 @@ database_start() {
   compose up -d --quiet-pull --wait postgres > /dev/null || die "the database did not become healthy; docker compose logs postgres"
 }
 
-# wait_ready TAG: the services and the operator's web edge serve the release.
-wait_ready() {
-  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output edge_url fails skip=()
-  edge_url="${ORCH_READY_URL:-$(env_get ORCH_READY_URL)}"
-  if [ -z "$edge_url" ]; then
-    edge_url="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
+# doctor_commands [VERSION]: the two checks the readiness of the stack is judged by, built once for the wait of an
+# update and for `doctor`. INNER_DOCTOR is orchctl doctor in the API's container (it expects the release VERSION when
+# one is given, and leaves the node out where the Compose file has none); EDGE_DOCTOR is the edge check from this host,
+# against EDGE_URL, which EDGE_SOURCE says the address of came from: ORCH_READY_URL (set in the environment or in
+# .env) or [system] public_url in config/orch.toml. Fails, with the reason, when no address is known.
+doctor_commands() {
+  local version="${1:-}" skip=() services
+  if [ -n "${ORCH_READY_URL:-}" ]; then
+    EDGE_URL="$ORCH_READY_URL"; EDGE_SOURCE="ORCH_READY_URL in the environment"
+  elif [ -n "$(env_get ORCH_READY_URL)" ]; then
+    EDGE_URL="$(env_get ORCH_READY_URL)"; EDGE_SOURCE="ORCH_READY_URL in .env"
+  else
+    EDGE_URL="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
+    EDGE_SOURCE="[system] public_url in config/orch.toml"
   fi
-  if [ -z "$edge_url" ]; then
+  if [ -z "$EDGE_URL" ]; then
     note "readiness needs [system] public_url or ORCH_READY_URL for the operator's web edge"
     return 1
   fi
-  compose config --services | grep -qx node || skip=(--skip node)
+  # The list is read whole before it is searched: grep -q leaves at its first match, and the writer of a pipe it
+  # leaves is killed, which under pipefail made the node look absent now and then.
+  services="$(compose config --services 2> /dev/null)" || services=""
+  grep -qx node <<< "$services" || skip=(--skip node)
+  INNER_DOCTOR=(compose exec -T api /opt/orchctl/orchctl doctor)
+  [ -z "$version" ] || INNER_DOCTOR+=(--expect-version "$version")
+  [ "${#skip[@]}" -eq 0 ] || INNER_DOCTOR+=("${skip[@]}")
+  EDGE_DOCTOR=(runtime/cli/current/orchctl doctor --url "$EDGE_URL"
+    --config config/orch.toml --secrets-dir config/secrets
+    --only "edge-page,edge-api,edge-link")
+}
+
+# wait_ready TAG: the services and the operator's web edge serve the release.
+wait_ready() {
+  local version="${1#v}" deadline=$((SECONDS + READY_TIMEOUT)) next=$((SECONDS + 15)) output edge_output fails
+  doctor_commands "$version" || return 1
+  local edge_url="$EDGE_URL"
   while :; do
-    if output="$(compose exec -T api /opt/orchctl/orchctl doctor --expect-version "$version" ${skip[@]+"${skip[@]}"} 2>&1)"; then
-      if edge_output="$(runtime/cli/current/orchctl doctor --url "$edge_url" \
-        --config config/orch.toml --secrets-dir config/secrets \
-        --only edge-page,edge-api,edge-link 2>&1)"; then
+    if output="$("${INNER_DOCTOR[@]}" 2>&1)"; then
+      if edge_output="$("${EDGE_DOCTOR[@]}" 2>&1)"; then
         # The edge doctor reports the API version it actually reached. It may
         # reach a stale upstream even while the internal API runs this release.
         if printf '%s\n' "$edge_output" | grep -Fq "release $version (build "; then
@@ -686,7 +1220,7 @@ warn_about_work() {
     die "could not inspect prerelease connector versions; no services were stopped"
   [[ "$prereleases" =~ ^[0-9]+$ ]] || die "the prerelease runtime count could not be read; no services were stopped"
   if [ "$environments" -gt 0 ] || [ "$providers" -gt 0 ]; then
-    lines+="$environments environments and $providers provider runtimes will need an update before they work again (release $TAG no longer accepts their connector).
+    lines+="$(noun "$environments" environment) and $(noun "$providers" "managed provider") will need an update before they work again (release $TAG no longer accepts their connector).
 "
   fi
   if [ "$prereleases" -gt 0 ]; then
@@ -744,6 +1278,8 @@ undo_with_database() {
   jset step restoring
   app_stop || true
   deactivate_payloads
+  restore_files
+  files_database_start
   restore_database "${J[leaving_dump]}"
   jset step restarting
   app_start
@@ -763,6 +1299,7 @@ finish_transaction() {
   journal_clear
   prune_releases
   publish_storage_metadata
+  files_finish
 }
 
 # Read the same registered system policy whether previewing or applying a cleanup.
@@ -861,6 +1398,10 @@ transact() {
   app_stop || die "services could not all be stopped; run ./update.sh recover to restart the previous release"
   jset step dumping
   take_dump "${J[leaving_dump]}"
+  # The files switch after the dump, which the installed compose.yml took, and before the start.
+  jset step filing
+  apply_files
+  files_database_start
   jset step activating
   activate_payloads
   if [ "${J[kind]}" = rollback ]; then
@@ -885,10 +1426,17 @@ transact() {
 cmd_update() {
   local selector=$1 kind
   require_installed
+  WANT_BUNDLE=1
   fetch_release "$selector"
-  [ "$TAG" != "$(state_get current_tag)" ] || { say "release $TAG is installed already; nothing to do"; return 0; }
+  if [ "$TAG" = "$(state_get current_tag)" ]; then
+    files_notice
+    say "release $TAG is installed already; nothing to do"
+    return 0
+  fi
   say "installing release $TAG over $(state_get current_tag)"
   for kind in $PAYLOADS; do unpack "$kind"; NEW_RELEASE[$kind]="$UNPACKED"; done
+  # What becomes of the deployment files is decided now, before anything is stopped.
+  plan_files
   ensure_images
   warn_about_work
   [ "$NEEDS_ANSWER" -eq 0 ] || confirm "Go on?"
@@ -898,6 +1446,7 @@ cmd_update() {
     J[${kind}_current_after]="${NEW_RELEASE[$kind]}"
     J[${kind}_previous_after]="${J[${kind}_current_before]}"
   done
+  files_begin "$FILES_STAGE/deploy"
   J[leaving_dump]="$BACKUPS/orch-$(stamp)-before-$TAG.dump"
   jset step staged
   transact
@@ -920,6 +1469,8 @@ Rolling back to release $back puts the database as it was when release $(state_g
 database is kept first, so that this can be undone: ./update.sh rollback again goes forward.
 EOF
   load_manifest_of_installed "$back"
+  # The files the last update replaced are put back where they are still what it wrote; update.sh is not rolled back.
+  plan_files_rollback
   warn_about_work
   confirm "Roll back to $back?"
   ensure_secrets "$DEPLOY_DIR/runtime/cli/current"
@@ -928,6 +1479,7 @@ EOF
     J[${kind}_current_after]="${J[${kind}_previous_before]}"
     J[${kind}_previous_after]="${J[${kind}_current_before]}"
   done
+  files_begin "${FILES_SOURCE:-/nonexistent}"
   J[leaving_dump]="$BACKUPS/orch-$(stamp)-before-rollback-from-$(state_get current_tag).dump"
   J[entering_dump]="$dump"
   jset step staged
@@ -972,6 +1524,26 @@ cmd_status() {
   say "installed: $(state_get current_tag || true) (previous: $(state_get previous_tag || true))"
   if journal_load; then say "an interrupted ${J[kind]} is recorded (step ${J[step]}): ./update.sh recover"; else say "no transaction is open"; fi
   compose ps 2> /dev/null || true
+  files_status
+}
+
+# cmd_doctor: the two readiness checks, once: no waiting, no retry and no release to expect; every line as it comes.
+# Both run whatever the first says, so that one failure does not hide the other. It writes nothing and changes nothing.
+cmd_doctor() {
+  local failed=0
+  doctor_commands || return 1
+  say "edge address: $EDGE_URL (from $EDGE_SOURCE)"
+  say "inside the stack: orchctl doctor in the API's container"
+  "${INNER_DOCTOR[@]}" 2>&1 || failed=1
+  say "from this host: edge-page, edge-api and edge-link against $EDGE_URL"
+  if [ -x runtime/cli/current/orchctl ]; then
+    "${EDGE_DOCTOR[@]}" 2>&1 || failed=1
+  else
+    say "FAIL  edge             runtime/cli/current/orchctl is not installed here, so the edge cannot be checked from this host"
+    failed=1
+  fi
+  if [ "$failed" = 0 ]; then say "doctor: every check passed"; else say "doctor: a check failed (see the lines above)"; fi
+  return "$failed"
 }
 
 cmd_recover() {
@@ -987,11 +1559,13 @@ cmd_recover() {
   require_installed allow-journal
   ensure_secrets "$DEPLOY_DIR/runtime/cli/current"
   case "$step" in
-    begin | staged | stopping | dumping | activating)
+    begin | staged | stopping | dumping | filing | activating)
       # No service has run the new release, and the database is as it was: the
-      # links go back, and the old release runs.
+      # links and the files go back, and the old release runs.
       note "the new release never ran; starting release $from as it was"
       deactivate_payloads
+      restore_files
+      files_database_start
       # A cut at begin can precede assignment of the dump name.
       if [ -n "${J[leaving_dump]:-}" ]; then rm -f -- "${J[leaving_dump]}.partial"; fi
       app_start
@@ -1029,6 +1603,8 @@ require_installed() {
     journal_load || true
     die "a ${J[kind]:-transaction} to ${J[to_tag]:-?} was interrupted (step ${J[step]:-?}); run ./update.sh recover first"
   fi
+  [ -s "$POSTGRES_DATA_DIR/PG_VERSION" ] || die "the installed PostgreSQL cluster is missing from $POSTGRES_DATA_DIR; check the mount and ORCH_POSTGRES_DATA_DIR before updating"
+  [ -d "$DATA_DIR/update-status" ] || die "the installed server files are missing from $DATA_DIR; check the mount and ORCH_DATA_DIR before updating"
   prepare_dirs
 }
 
@@ -1050,10 +1626,11 @@ cmd_first_start() {
   check_password
   if [ -L runtime/server/current ] && [ -f "$STATE" ]; then die "a release is installed already ($(state_get current_tag)); ./update.sh latest or vX.Y.Z updates it"; fi
   if [ -f "$JOURNAL" ]; then journal_load || true; [ "${J[kind]:-}" = first-start ] || die "a ${J[kind]:-transaction} was interrupted; run ./update.sh recover first"; fi
-  for file in compose.yml nginx.conf config/orch.toml; do [ -f "$file" ] || die "$file is missing"; done
+  for file in compose.yml nginx.conf config/orch.toml config/node.toml; do [ -f "$file" ] || die "$file is missing"; done
   prepare_dirs
+  seed_node_policy
   fetch_release "$selector"
-  J=(); J[id]="$(stamp)-$$"; J[kind]=first-start; J[from_tag]=; J[to_tag]="$TAG"; jset step begin
+  J=(); J[id]="$(stamp)-$$"; J[kind]="first-start"; J[from_tag]=""; J[to_tag]="$TAG"; jset step begin
   say "installing release $TAG"
   for kind in $PAYLOADS; do
     unpack "$kind"
@@ -1078,6 +1655,7 @@ cmd_first_start() {
   wait_ready "$TAG" || die "the stack did not become ready; docker compose logs shows why, and repeating the original ./update.sh first-start command takes it up again"
   state_save "$TAG" "" ""
   journal_clear
+  files_record_first_start
   publish_storage_metadata
   fingerprint="$(authority_fingerprint)"
   url="$(sed -n 's/^public_url[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' config/orch.toml | head -n 1)"
@@ -1154,9 +1732,9 @@ uninstall_backup() {
   make_dir 700 "$pair"
   BACKUP_DESTINATION="$pair" backup_command dump --out "/backups/$dump" --records-dir /installation \
     --release "$(state_get current_tag)" --cause manual || die "the final database backup failed; nothing was purged"
-  if [ -d runtime/data ]; then
+  if [ -d "$DATA_DIR" ]; then
     make_dir 700 "$pair/data"
-    cp -a -- runtime/data/. "$pair/data/" || die "the paired blob copy failed; nothing was purged"
+    cp -a -- "$DATA_DIR/." "$pair/data/" || die "the paired blob copy failed; nothing was purged"
   fi
   cp -a -- config "$pair/config" || die "the configuration backup failed; nothing was purged"
   cp -p -- .env "$pair/.env" || die "the environment backup failed; nothing was purged"
@@ -1167,7 +1745,7 @@ uninstall_backup() {
 }
 
 cmd_uninstall() {
-  local name project answer id object size runtime_identity config_identity secrets_identity node_arguments=()
+  local name project answer id object size runtime_identity config_identity secrets_identity data_path node_arguments=()
   load_facts
   [ -f "$STATE" ] || die "nothing is installed here"
   [ ! -f "$JOURNAL" ] || die "recover the interrupted update before uninstalling"
@@ -1197,6 +1775,10 @@ cmd_uninstall() {
   else
     uninstall_words "  Keep: runtime/ and config/secrets/" "  保留：runtime/ 和 config/secrets/"
   fi
+  for data_path in "$DATA_DIR" "$POSTGRES_DATA_DIR"; do
+    case "$data_path" in "$DEPLOY_DIR/runtime/"*) continue ;; esac
+    uninstall_words "  Keep: $data_path" "  保留：$data_path"
+  done
   # A file lock is coordination, not inventory: this never starts the node's session.
   ensure_node_lock
   uninstall_node "${node_arguments[@]}" --plan || die "the node's inventory could not be planned"
@@ -1229,10 +1811,12 @@ usage() {
       say '--purge 清理节点运行时对象后移除 runtime/ 和 config/secrets/。'
       say '默认先在 backups/ 保留数据库、内容、配置和节点身份副本；--no-backup 跳过。'
       say '执行卷不包含在最终备份中。已有配置和 .env 保留。'
+      say './update.sh doctor 只运行一次就绪检查（堆栈内和本机访问入口），逐行输出并说明入口地址的来源；任一失败即返回非零。'
       say './update.sh prune 预览未使用发布及大小；--yes 执行移除。'
       say './update.sh dumps remove <name> 移除已核实的转储、清单及配对内容副本。'
       ;;
     *)
+      say './update.sh doctor runs the readiness checks once (inside the stack and the edge from this host), prints every line and the address the edge check used and where it came from, and fails if either fails.'
       say './update.sh prune previews unused releases and their sizes; --yes applies.'
       say './update.sh dumps remove <name> removes a verified dump, manifest and paired blob copy.'
       ;;
@@ -1314,6 +1898,7 @@ main() {
     rollback) cmd_rollback ;;
     recover) load_facts; check_password; [ -f "$STATE" ] || [ -f "$JOURNAL" ] || { say "nothing is installed here"; exit 0; }; cmd_recover ;;
     status) cmd_status ;;
+    doctor) [ -z "$selector" ] || die "doctor takes no argument"; cmd_doctor ;;
     prune) [ -z "$selector" ] || die "prune takes no release name"; cmd_prune ;;
     dumps-remove) [ -n "$selector" ] || die "dumps remove needs the dump name"; cmd_dumps_remove "$selector" ;;
     uninstall) [ -z "$selector" ] || die "uninstall takes no release"; cmd_uninstall ;;
@@ -1321,4 +1906,4 @@ main() {
   esac
 }
 
-main "$@"
+[ "${BASH_SOURCE[0]}" != "$0" ] || { main "$@"; exit "$?"; }

@@ -5,6 +5,13 @@ WITH open_requests AS (
     WHERE c.kind IN ('provider.complete','provider.embed') AND c.state IN ('queued','sent','accepted')
       AND NOT EXISTS(SELECT 1 FROM summary_calls accepted WHERE accepted.id=c.id)
   UNION ALL
+  SELECT relay.id,relay.provider_id,relay.model_name,NULL::uuid,p.held_by_environment_id
+    FROM provider_relay_calls relay JOIN providers p ON p.id=relay.provider_id
+    JOIN command_transfers reader ON reader.command_id=relay.id AND reader.released_at IS NULL
+    LEFT JOIN commands c ON c.id=relay.id
+    WHERE relay.finished_at IS NULL AND relay.native_done_at IS NULL AND ($4::timestamptz IS NULL OR relay.deadline>$4)
+      AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
+  UNION ALL
   SELECT accepted.id,accepted.provider_id,accepted.model_name,
     COALESCE(accepted.agent_id,s.agent_id,t.agent_id,p.agent_id),
     COALESCE(accepted.environment_id,s.environment_id,t.environment_id,p.held_by_environment_id)
@@ -15,5 +22,7 @@ WITH open_requests AS (
     WHERE accepted.cancel_reason IS NULL AND (c.id IS NULL OR c.state IN ('queued','sent','accepted'))
 )
 SELECT DISTINCT id FROM open_requests
-WHERE (($1='provider' AND provider_id=$2) OR ($1='agent' AND agent_id=$2) OR ($1='environment' AND environment_id=$2))
+WHERE (($1='provider' AND provider_id=$2) OR ($1='agent' AND agent_id=$2) OR ($1='environment' AND environment_id=$2)
+    OR ($1='pool' AND EXISTS(SELECT 1 FROM pool_attempt_scopes a JOIN pool_choices choice ON choice.id=a.choice_id
+        WHERE a.attempt_id=open_requests.id AND choice.path @> jsonb_build_array(jsonb_build_object('pool_id',$2::uuid)))))
   AND ($3::uuid IS NULL OR model_name=(SELECT model_name FROM provider_models WHERE id=$3 AND provider_id=$2))

@@ -25,6 +25,126 @@ use serde_json::json;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+#[tokio::test]
+async fn a_provider_host_pool_keeps_one_choice_and_one_unit_across_replayed_scheduling_and_current_use_checks()
+-> TestResult {
+    let mut s = Fixture::pooled().await?;
+    let pool = s.pool.ok_or("host pool absent")?;
+    s.schedule().await?;
+    let runtime = s.runtime;
+    let first = s.job.row().await?.plan;
+    assert_eq!(first["pool_choice"], json!(s.job.id()));
+    s.schedule().await?;
+    assert_eq!(
+        s.runtime, runtime,
+        "a lost phase acknowledgement cannot make another unit"
+    );
+    assert_eq!(s.job.row().await?.plan["pool_choice"], first["pool_choice"]);
+    let mut conn = s.world.pool.acquire().await?;
+    let owner = jobs::job(&mut conn, s.job.id())
+        .await?
+        .ok_or("provider job absent")?;
+    let actor = principal(&mut conn, &owner, s.world.clock.as_ref())
+        .await?
+        .ok_or("current creator absent")?;
+    assert_eq!(
+        actor.caller().grant().and_then(TokenGrant::token),
+        Some(s.token)
+    );
+    let host: Id = serde_json::from_value(first["host"].clone())?;
+    for (kind, id, operation) in [
+        (ObjectKind::Host, host, "HostGet"),
+        (ObjectKind::Pool, pool, "PoolGet"),
+    ] {
+        let target = targets::page_object(&mut conn, ObjectRef { kind, id }).await?;
+        assert!(
+            !actor.caller().permits_facets(&[KeyFacet {
+                operation: operation.into(),
+                action: KeyAction::Read,
+                resource_kind: KeyTargetKind::Object(kind),
+                target,
+            }]),
+            "placement preserves the creator key without granting unrelated resource reads"
+        );
+    }
+    let choices: i64 = sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE id=$1")
+        .bind(s.job.id())
+        .fetch_one(&mut *conn)
+        .await?;
+    assert_eq!(
+        choices, 1,
+        "current-source checks do not reserve another member"
+    );
+    drop(conn);
+    let image = s.image()?;
+    s.reserve(&image).await?;
+    assert!(s.allows(&image).await?);
+    sqlx::query(
+        "UPDATE pools SET definition=jsonb_set(definition,'{enabled}','false') WHERE id=$1",
+    )
+    .bind(pool)
+    .execute(s.world.pool.pool())
+    .await?;
+    assert!(
+        !s.allows(&image).await?,
+        "the same first-wire source must repeat current pool authority"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn changing_a_template_cannot_reapprove_a_retained_pool_placement_command_for_different_work()
+-> TestResult {
+    let mut s = Fixture::pooled().await?;
+    s.schedule().await?;
+    let image = s.image()?;
+    s.reserve(&image).await?;
+    assert!(s.allows(&image).await?);
+    let authority = read(&s.job.row().await?)?.ok_or("creator absent")?;
+    sqlx::query("UPDATE env_templates SET spec=jsonb_set(spec,'{image}','\"changed-provider-image\"') WHERE id=$1")
+        .bind(authority.template)
+        .execute(s.world.pool.pool())
+        .await?;
+    assert!(
+        !s.allows(&image).await?,
+        "a current source check cannot judge the old command using a different template definition"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn losing_a_pool_creators_source_cannot_turn_its_retained_command_into_owner_policy()
+-> TestResult {
+    for before_factory in [false, true] {
+        let mut s = Fixture::pooled().await?;
+        s.schedule().await?;
+        let mut image = s.image()?;
+        s.reserve(&image).await?;
+        let unwrapped = image.clone();
+        crate::jobs::provider_provision::placement_pool::decorate(&s.job, &mut image, true)
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(s.placement_allows(&image).await?);
+        sqlx::query("UPDATE jobs SET plan=plan-$2::text WHERE id=$1")
+            .bind(s.job.id())
+            .bind(FIELD)
+            .execute(s.world.pool.pool())
+            .await?;
+        if before_factory {
+            image = unwrapped;
+            crate::jobs::provider_provision::placement_pool::decorate(&s.job, &mut image, true)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        assert!(
+            !s.placement_allows(&image).await?,
+            "the accepted creator source cannot become an owner Session after its original evidence disappears; before factory: {before_factory}"
+        );
+        assert_eq!(s.world.commands.issued_of("node.image.ensure"), 0);
+    }
+    Ok(())
+}
+
 struct Fixture {
     world: World,
     engine: Engine,
@@ -37,6 +157,7 @@ struct Fixture {
     placement_home: Id,
     source: Option<Id>,
     copy_keeper: Option<Added>,
+    pool: Option<Id>,
 }
 
 impl Fixture {
@@ -55,16 +176,20 @@ impl Fixture {
         Self::with_transfer(legacy, duplicate, false).await
     }
     async fn with_transfer(legacy: bool, duplicate: bool, physical: bool) -> TestResult<Self> {
-        Self::with_intent(legacy, duplicate, physical, false).await
+        Self::with_intent(legacy, duplicate, physical, false, false).await
     }
     async fn moving(physical: bool) -> TestResult<Self> {
-        Self::with_intent(false, true, physical, true).await
+        Self::with_intent(false, true, physical, true, false).await
+    }
+    async fn pooled() -> TestResult<Self> {
+        Self::with_intent(false, false, false, false, true).await
     }
     async fn with_intent(
         legacy: bool,
         duplicate: bool,
         physical: bool,
         moving: bool,
+        pooled: bool,
     ) -> TestResult<Self> {
         let world = World::on_a_key("synthetic-provider-creator-fixture").await;
         let host_machine = world
@@ -156,6 +281,7 @@ impl Fixture {
                     name: "Actual copied source",
                     owner_id: world.ada,
                     home_id: world.root,
+                    home_overridden: false,
                     upstreams: &json!([{"protocol":"openai-responses","base_url":"https://api.example.test/v1","options":{}}]),
                     protocols: &["openai-responses".into()],
                     machine_id: copy_keeper.as_ref().map(|keeper|keeper.id),
@@ -338,9 +464,44 @@ impl Fixture {
             )
             .await?;
         }
+        let pool = if pooled {
+            let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+                &mut tx,
+                "pool",
+                Some(world.ada),
+                Some(placement_home),
+                "Provider hosts",
+            )
+            .await?;
+            ownership::start_resource(
+                &mut tx,
+                ObjectRef {
+                    kind: ObjectKind::Pool,
+                    id: pool,
+                },
+                world.ada,
+                NewAccess::OnlyMe,
+                world.clock.time(),
+            )
+            .await?;
+            sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool)
+                .bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}})).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)").bind(pool).bind(new_id())
+                .bind(json!({"type":"single","resource":{"kind":"host","id":host}})).execute(&mut *tx).await?;
+            Some(pool)
+        } else {
+            None
+        };
+        let host_target = pool.map_or_else(
+            || orch_provider_contract::pools::Target::host(host),
+            |id| orch_provider_contract::pools::Target::Pool {
+                id,
+                kind: orch_provider_contract::pools::Kind::Host,
+            },
+        );
         sqlx::query("UPDATE providers SET machine_id=NULL,key_machine_id=NULL,status='needs_setup',runtime_config=$2 WHERE id=$1")
             .bind(world.provider)
-            .bind(json!({"runtime.template_id":template,"runtime.host_id":host}))
+            .bind(json!({"runtime.template_id":template,"runtime.host_id":host_target}))
             .execute(&mut *tx).await?;
         if physical {
             orch_db::queries::settings::delete_secret(
@@ -417,7 +578,7 @@ impl Fixture {
         // The retained birth comes first. Its exact ordinary scheduler candidate is then recorded;
         // no old or unrelated runtime is attached to establish the accepted creator origin.
         // The legacy case leaves that step to the actual schedule method under test.
-        if !legacy {
+        if !legacy && !pooled {
             provider_rows::insert_runtime(
                 &mut tx,
                 &provider_rows::NewRuntime {
@@ -476,6 +637,7 @@ impl Fixture {
             placement_home,
             source,
             copy_keeper,
+            pool,
         })
     }
 
@@ -618,6 +780,7 @@ impl Fixture {
         orch_db::queries::link::insert_command(
             &mut tx,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),
@@ -630,6 +793,34 @@ impl Fixture {
         .await?;
         tx.commit().await?;
         Ok(command)
+    }
+
+    async fn placement_allows(&self, command: &Outgoing) -> TestResult<bool> {
+        let authority = command
+            .authority
+            .as_ref()
+            .ok_or("the actual placement source is absent")?;
+        let serial = command.key.wire();
+        let proposed = orch_db::queries::link::NewCommand {
+            id: command.id,
+            machine_id: command.machine,
+            kind: command.kind.as_str(),
+            serial_key: serial.as_deref(),
+            body: &command.body,
+            deadline_at: self.world.clock.now() + chrono::Duration::minutes(1),
+        };
+        let mut tx = self.world.pool.begin().await?;
+        let allowed = authority
+            .current_issue_callers(
+                &mut tx,
+                &proposed,
+                self.world.clock.as_ref(),
+                self.engine.inner.access.as_ref(),
+            )
+            .await?
+            .is_some();
+        tx.rollback().await?;
+        Ok(allowed)
     }
 
     async fn allows(&self, command: &Outgoing) -> TestResult<bool> {
@@ -1863,10 +2054,12 @@ async fn a_provider_move_cannot_end_its_source_after_raw_closure_or_changed_revi
                     .await?;
             }
             "source" => {
-                sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
-                    .bind(source)
-                    .execute(s.world.pool.pool())
-                    .await?;
+                sqlx::query(
+                    "UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1",
+                )
+                .bind(source)
+                .execute(s.world.pool.pool())
+                .await?;
             }
             "scope" => {
                 let mut scope = s.policy.clone();
@@ -1993,6 +2186,7 @@ async fn a_subscription_move_startup_keeps_the_actual_move_and_rechecks_its_raw_
         .await?;
     let serial = command.key.wire();
     let queued = orch_db::queries::link::NewCommand {
+        content_transit: false,
         id: command.id,
         machine_id: command.machine,
         kind: command.kind.as_str(),
@@ -2111,6 +2305,7 @@ async fn owned_sign_in_return_needs_the_genuine_forward_receipt_and_cannot_reviv
     orch_db::queries::link::insert_command(
         &mut tx,
         &orch_db::queries::link::NewCommand {
+            content_transit: false,
             id: issued.id,
             machine_id: issued.machine,
             kind: issued.kind.as_str(),

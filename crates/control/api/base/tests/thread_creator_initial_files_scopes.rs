@@ -35,7 +35,7 @@ async fn a_new_environment_initial_copy_requires_the_creators_actual_source_read
         name: Some("Scoped initial copy".into()),
         home_node_id: Some(topic),
         template_id: Some(template),
-        host_id: Some(Some(host)),
+        host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
         files: Some(NewEnvironmentFiles::FromThread {
             from_thread: source.base.id,
             selection: Some(FileSelection::Selection {
@@ -242,7 +242,7 @@ async fn a_saved_blob_snapshot_uses_its_actual_thread_and_recorded_environment_r
         name: Some("Scoped saved snapshot target".into()),
         home_node_id: Some(topic),
         template_id: Some(template),
-        host_id: Some(Some(host)),
+        host_id: Some(Some(orch_provider_contract::pools::Target::host(host))),
         files: Some(NewEnvironmentFiles::Snapshot {
             snapshot_id: snapshot,
         }),
