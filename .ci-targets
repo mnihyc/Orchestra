@@ -1,0 +1,6 @@
+test -p orch-api-core --test settings
+test -p orch-api-core --test runtime_updates -- the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_another_processor --exact
+test -p orch-engine --test goals -- helper_limits::
+test -p orch-engine --test loss -- lost_provider
+test -p orch-summarizer-model --lib --test capabilities --test prompts
+test -p orch-xtask

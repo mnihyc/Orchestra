@@ -1108,6 +1108,9 @@ pub enum DiscussionResolvedFilter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDocumentListQuery {
+    /// A literal case-insensitive substring of the document title, applied before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Only ordinary page access, independent of native administrator reach; before paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub participating: Option<bool>,
@@ -1232,6 +1235,7 @@ pub struct DocumentOpsCreateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_seq: Option<Seq>,
     /// A client-generated UUID: a repeated pair of author and value returns what the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
     /// The operations, at most [`DOCUMENT_OPS_MAX`].
     pub ops: Vec<DocumentOp>,
@@ -1268,6 +1272,35 @@ crate::common::full_or_receipt! {
         /// The operation's acknowledgement without existing content.
         Receipt(DocumentOpsReceipt),
     }
+}
+
+/// The document's global retained boundary and current resolved allowances, independent of a page or author filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentHistoryRetention {
+    /// The oldest saved version still restorable; null means the measured history is empty.
+    pub global_oldest_restorable: Option<Time>,
+    /// The effective number of saved versions the place allows.
+    pub effective_version_allowance: i64,
+    /// The effective byte allowance for saved versions.
+    pub byte_allowance: i64,
+    /// Where the version allowance comes from, with its name projected for this reader.
+    pub version_source: crate::settings::SettingSource,
+    /// Where the byte allowance comes from, independently of the version allowance.
+    pub byte_source: crate::settings::SettingSource,
+    /// When the boundary and allowances were observed together.
+    pub measured_at: Time,
+}
+
+/// One page of writing, with the independently measured global retention facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentVersionListReply {
+    /// Entries of this page, including its open span when present.
+    pub items: Vec<DocumentVersion>,
+    /// The next page cursor; null at the end of this filtered list.
+    pub next_cursor: Option<String>,
+    /// Absent when the place's current retention cannot be resolved, never a zero allowance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<DocumentHistoryRetention>,
 }
 
 /// Which entries of a document's history are wanted.
@@ -1352,14 +1385,19 @@ pub struct DocumentFileGetQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentFileArchiveListQuery {
+    /// Continue the same immutable archive selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Match child names without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Inspect retained deleted content under this object's current restoration authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspect_deleted: Option<bool>,
     /// A directory within it to list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside: Option<String>,
-    /// How many entries at most, [`crate::workspace::ARCHIVE_LIST_LIMIT_DEFAULT`] when left out and
-    /// at most [`crate::workspace::ARCHIVE_LIST_LIMIT_MAX`].
+    /// Entries in this page; omitted uses the place's archive-row default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -1447,6 +1485,7 @@ pub struct DocumentDiscussionCreateBody {
     /// The first comment.
     pub content: Vec<Inline>,
     /// A client-generated UUID: a repeated request answers as the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1457,6 +1496,7 @@ pub struct DocumentCommentCreateBody {
     /// What it says.
     pub content: Vec<Inline>,
     /// A client-generated UUID: a repeated request answers as the first did.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1477,6 +1517,7 @@ pub struct DocumentCommentUpdateBody {
     pub content: Vec<Inline>,
     /// A client-generated UUID for this exact edit attempt. Paired with `expected_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: Option<String>,
     /// The comment revision when the draft was authored, never a newer revision
     /// silently adopted on retry. Paired with `client_id`. A stale unrecorded
@@ -1680,6 +1721,7 @@ pub struct NodeDocumentCopyBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<NewDocumentAccess>,
     /// Stable identity of this copy, reused after a lost answer.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1718,6 +1760,7 @@ pub struct DocumentImportRequest {
     /// The selected uploaded sources.
     pub files: Vec<DocumentImportRequestFile>,
     /// Stable identity of this import across retries.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1892,7 +1935,7 @@ pub struct ReferencePreviewQuery {
     /// A message of a chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<i64>,
-    /// A workspace-relative file path, required for an environment file.
+    /// A relative root path or explicit native address, checked against current file reach.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// A line of a text file.
@@ -2260,7 +2303,7 @@ crate::endpoints! {
             Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("reference_chats")),
         ]));
     /// Lists the entries of a document's history, newest first; the open span, when something changed since the last version was cut, comes first.
-    DocumentVersionList: GET "/documents/{id}/versions", Permission("doc.view"), query DocumentVersionListQuery, none, json Page<DocumentVersion>, 200,
+    DocumentVersionList: GET "/documents/{id}/versions", Permission("doc.view"), query DocumentVersionListQuery, none, json DocumentVersionListReply, 200,
         operation Op::variants(&[
             Variant {
                 name: "read",

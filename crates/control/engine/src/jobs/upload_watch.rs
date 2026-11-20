@@ -14,8 +14,8 @@
 //! plan, in the same write as the bytes the progress shows, so that a runner that takes the job over
 //! goes on showing from where it was and never finds bytes shown for an upload the plan does not name.
 //!
-//! **Resuming.** The record this reads is the system's own and lasts a day after the last piece
-//! (`STALE_UPLOAD_AGE` in the API). When a command is given up or fails while the machine is
+//! **Resuming.** The unfinished pieces keep the idle allowance accepted at the first piece;
+//! every accepted piece moves that captured expiry forward. When a command is given up or fails while the machine is
 //! putting up, the part that arrived stays, and a new command that puts up the same bytes goes on
 //! from there: the connector asks the system where it stands before it sends a piece. So the carry
 //! of a session that stopped half way, begun again while the session has not changed, sends only the

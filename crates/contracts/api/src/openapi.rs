@@ -107,6 +107,8 @@ fn render(
     let problem = generator.subschema_for::<Problem>();
     // A job's generic result carries these cleanup receipts outside a route reply schema.
     let _cleanup_outcome = generator.subschema_for::<crate::storage::CleanupOutcome>();
+    // Raw preview replies carry the same typed refusal facts as other file surfaces.
+    let _preview_allowance = generator.subschema_for::<crate::workspace::PreviewAllowance>();
     let mut operations: Vec<(Route, Value)> = Vec::new();
     for route in routes {
         let declared = crate::operations::for_route(route).unwrap_or_else(|error| {
@@ -221,7 +223,7 @@ fn render(
         "paths": paths,
         "components": {
             "schemas": definitions,
-            "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "description": if keys { "An account API key (opat_)." } else { "A browser access token on the browser HTTP surface." } } },
+            "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "description": if keys { "An account API key of the form opat_<key id>_<secret><checksum>. The ID is the listed lowercase hyphenated UUID. The secret is 32 random bytes in unpadded base64url. The final six characters encode CRC32/ISO-HDLC over all preceding ASCII bytes, most significant digit first and zero-padded, using 0-9, A-Z, a-z." } else { "A browser access token on the browser HTTP surface." } } },
         },
     })
 }

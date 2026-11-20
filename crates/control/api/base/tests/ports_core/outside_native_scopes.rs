@@ -4,7 +4,7 @@ use super::*;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity;
@@ -27,7 +27,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> (Id, String) {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -309,6 +309,7 @@ async fn outside_host_rows_need_the_actual_publisher_read_without_a_fabricated_h
     let root = manager.person.personal_org;
     port_policy(&world, "port_host", "ask").await;
     let ports = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "native-publisher.example.test".into(),

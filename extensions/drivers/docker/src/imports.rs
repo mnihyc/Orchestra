@@ -517,10 +517,10 @@ pub fn propose_from_inspection(
         &facts,
         host_architecture,
     );
-    if let Some(digest) = &digest {
+    if digest.is_some() {
         proposal.notes.push(note(
             NoteLevel::Info,
-            format!("the image is pinned to {digest}; clear the pin to follow the tag"),
+            "the image is pinned to the exact build this host holds; clear the pin to follow the tag",
         ));
     }
     proposal.notes.extend(reference_note(reference));
