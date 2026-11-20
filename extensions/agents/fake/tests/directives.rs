@@ -813,6 +813,7 @@ async fn a_refusal_of_a_tool_completes_the_call_as_failed_and_the_turn_goes_on()
             session.thread,
             "call_1",
             Err(orch_agent_contract::session::ToolError {
+                rate_limit: None,
                 code: "forbidden".to_owned(),
                 message: "this thread shares nothing".to_owned(),
             }),

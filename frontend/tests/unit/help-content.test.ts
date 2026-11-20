@@ -1,6 +1,7 @@
 // @vitest-environment node
 /** Shipped guidance refuses dead links, missing real controls and guides detached from the product. */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { readHelpContent } from '../../build/help-content';
 import { checkHelpContent } from '@/help/contentCheck';
 import { FILE_GUIDE } from '@/help/files';
@@ -8,6 +9,60 @@ import { guide as runtimeGuide } from '@/help/library';
 
 describe('the complete shipped help', () => {
   const content = readHelpContent();
+  const body = (id: string, language: 'en' | 'zh-CN') => {
+    const article = content.guide.articles.find((entry) => entry.id === id);
+    const text = language === 'en' ? article?.body : article?.translations?.[language]?.body;
+    if (text === undefined) throw new Error(`The ${language} article ${id} must ship.`);
+    return text;
+  };
+
+  it('qualifies directory support and external requests on the installation entry page', () => {
+    const readme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+    expect(readme).toContain('directory environments require a Linux connector');
+    expect(readme).toContain('Logs and metrics are kept locally');
+    expect(readme).toContain('Model requests and notifications go to the destinations you configure');
+    expect(readme).not.toContain('Nothing is sent to any third party');
+  });
+
+  it('describes the canonical node policy without advertising a retired configuration import', () => {
+    const deployment = readFileSync(new URL('../../../docs/operator/deployment.md', import.meta.url), 'utf8');
+    const hooks = readFileSync(new URL('../../../docs/operator/node-hooks.md', import.meta.url), 'utf8');
+    expect(deployment).toContain('no previous node configuration is imported');
+    expect(hooks).toContain('imports no values from the deployment file');
+    expect(deployment).not.toContain('imported once');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('explains explicit updates with Auto off and minimum-version recovery in %s', (language) => {
+    const updates = body('updates', language);
+    for (const text of language === 'en'
+      ? ['Explicit Update remains available while Auto is off', 'does not enable automatic updates', 'without a normal connection']
+      : ['关闭自动更新时仍可选择立即更新', '不会开启自动更新', '无需先建立普通连接']) expect(updates).toContain(text);
+    expect(updates).not.toContain(language === 'en' ? 'refuses a web request' : '拒绝网页请求');
+    const operator = readFileSync(new URL('../../../docs/operator/upgrades.md', import.meta.url), 'utf8');
+    expect(operator).toContain('Explicit web Update remains available with Auto off');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('explains model-add choices, separate options and a missing context window in %s', (language) => {
+    const provider = body('provider-details', language);
+    const add = body('add-a-provider', language);
+    for (const text of language === 'en'
+      ? ['Web search, cache lifetimes, reasoning modes, capacity tiers and request options need separate configuration', 'Larger contexts remain a per-thread choice', 'enter a window before saving']
+      : ['网页搜索、缓存时长、推理模式、容量档位和请求选项需要单独配置', '更大的上下文仍由每个会话选择', '保存前填写窗口大小']) expect(provider).toContain(text);
+    expect(add).toContain(language === 'en' ? 'an explicitly declared build' : '明确指定的构建');
+    expect(add).toContain(language === 'en' ? 'Managed provider containers have no local policy to configure' : '受管提供方容器没有可编辑的本机策略');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('states that very small Ask contexts can leave no room for a question in %s', (language) => {
+    const ask = body('ask', language);
+    expect(ask).toContain(language === 'en' ? 'a very small context can leave no room for any question' : '很小的上下文可能让任何问题都无法放入');
+    expect(ask).not.toContain(language === 'en' ? 'No pair of settings can make every question fail' : '任何一组设置都不会让所有问题都失败');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('describes separate conversations, continued summaries and workspace files in visible terms in %s', (language) => {
+    expect(body('running-thread-views', language)).toContain(language === 'en' ? 'A side thread has its own conversation' : '侧会话有自己的对话');
+    expect(body('summaries', language)).toContain(language === 'en' ? 'Search reads existing summaries' : '搜索读取已有摘要');
+    expect(body('settings-reference', language)).not.toContain(language === 'en' ? 'Working files storage' : '工作文件的存储');
+  });
   it('ships cleanup and zero guidance with the real headings used in both languages', () => {
     const cleanup = content.guide.articles.find((article) => article.id === 'storage-cleanup');
     expect(cleanup?.headings.map((heading) => heading.id)).toEqual(['unused-caches','kept-data','unused-releases','uninstall','storage-report','clean-up-kept-items','server-files']);

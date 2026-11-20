@@ -9,7 +9,7 @@ come from `ORCH_EXPECTED_CODEX_VERSION` and `ORCH_EXPECTED_CLAUDE_VERSION`.
 Each native test uses a networkless container. A mounted Unix socket relays
 only to the scripted model's loopback service. The harness has no Internet
 interface, uses a disposable home/workspace and a synthetic key, and its actual
-version and safe case evidence are retained. A missing image is an unrun check.
+version and safe case evidence are retained. A missing image means the check did not run.
 Status 0 means every recorded native case passed, 1 means a test failed, and
 2 means prerequisites or native evidence are incomplete.
 

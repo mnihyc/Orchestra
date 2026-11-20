@@ -1,5 +1,9 @@
-/** A successful setup on this device; native binding options revalidate it before reuse. */
-import { useViewChoice, writeViewChoice } from '@/lib/viewChoices';
+/** A successful setup kept by the server; native binding options revalidate it before reuse. */
+import { useQuery } from '@tanstack/react-query';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
+import { meStateQuery } from '@/api/personal';
+import { requestReader } from '@/lib/readAttempts';
 import type { Picks } from './choices';
 
 export interface LastSetup { place: string; picks: Picks }
@@ -20,11 +24,25 @@ export function readLastSetup(raw: string): LastSetup | null {
   } catch { return null; }
 }
 
-export function useLastSetup(): LastSetup | null {
-  const [raw] = useViewChoice<string>('thread', 'setup', '');
-  return readLastSetup(raw);
+/** Read facts belong to the same private server value used by the start controls. */
+export interface LastSetupObservation {
+  reader: string;
+  saved: Picks | undefined;
+  status: 'pending' | 'success' | 'error';
+  unavailable: boolean;
 }
 
-export function rememberSetup(user: string | null, setup: LastSetup): void {
-  writeViewChoice(user, 'thread', 'setup', JSON.stringify(setup));
+export function useLastSetup(): LastSetup | null {
+  return useLastSetupObservation()[0];
+}
+
+/** Opening the facts observes this same read and never reads browser storage. */
+export function useLastSetupObservation(): [LastSetup | null, LastSetupObservation?] {
+  const person = useStore(client.session, (state) => state.status === 'signed_in' ? state.userId : null);
+  const reader = useStore(client.session, (state) => requestReader(state.userId, state.readerVersion));
+  const state = useQuery({ ...meStateQuery, enabled: person !== null, staleTime: Infinity });
+  const saved = person === null ? undefined : state.data?.thread_setup;
+  const value = saved === undefined ? null : readLastSetup(JSON.stringify(saved));
+  return [value, person === null ? undefined : { reader, saved: value?.picks, status: state.status,
+    unavailable: saved !== undefined && value === null }];
 }
