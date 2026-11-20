@@ -1,0 +1,61 @@
+/** Static application entry point.
+ *
+ * Starts the things everything else stands on: how the page looks (so that nothing is drawn in the wrong theme), the
+ * session and the code of the screen the address names (asked for at once, beside the words, since they need neither words
+ * nor a first draw), the catalogue of its reader's language (so that nothing is drawn without its words), and then the
+ * application. What starts at the session's answer is said in `shell/startup.ts`.
+ */
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+
+import { App, router } from '@/app';
+import { client } from '@/api/client';
+import { pageHtmlReads } from '@/api/htmlReads';
+import { startI18n } from '@/i18n';
+import { adoptAppearance, startAppearance } from '@/lib/appearance';
+import { mark } from '@/lib/marks';
+import { KeptShellCover } from '@/shell/KeptShellCover';
+import { beginStartup } from '@/shell/startup';
+import { uncover } from '@/shell/keptShell';
+
+mark('start/application-script');
+const appearance = startAppearance();
+// A screen for somebody signed in stands in the workbench, whose code is a part of its own: it is asked for now, beside
+// the words, rather than after them. The screens before sign-in never fetch it.
+const [, , found] = router.getMatchedRoutes(location.pathname);
+const signedInScreen = (found?.options.staticData?.needs ?? 'signed_in') === 'signed_in';
+if (!signedInScreen) uncover();
+if (signedInScreen) {
+  const ready = pageHtmlReads()?.scriptsReady;
+  if (ready === undefined) void import('@/shell/Shell');
+  else void ready.then(() => import('@/shell/Shell'));
+}
+let readerLocale = appearance.locale;
+const stopLocale = client.onSession((event) => {
+  if (event.type === 'signed_in') { readerLocale = event.result.user.locale; adoptAppearance(event.result.user); }
+});
+beginStartup(router, location.href, signedInScreen);
+// Anonymous frame geometry can draw before the session; private names wait for its confirmed reader.
+if (signedInScreen) {
+  const cover = document.createElement('div');
+  document.body.append(cover);
+  createRoot(cover).render(<KeptShellCover />);
+}
+/** Wait for the reader and words inside startup, keeping module evaluation synchronous for screen packing. */
+async function renderApp(): Promise<void> {
+  if (signedInScreen) await client.restore().catch(() => undefined);
+  stopLocale();
+  await startI18n(readerLocale);
+  mark('start/words');
+
+  const root = document.getElementById('root');
+  if (root === null) throw new Error('The page has no element to draw the application in');
+
+  mark('start/render');
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}
+void renderApp();

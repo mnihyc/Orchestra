@@ -14,7 +14,7 @@ use orch_api_contract::{
     environment::{EnvironmentCreate, EnvironmentCreateResponse},
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     registry::Registry,
     testing::TestApp,
 };
@@ -41,7 +41,7 @@ async fn standalone_scope_provisions_the_real_unit_and_a_closed_origin_cannot_st
             orch_config::ServerConfig::default(),
         );
         let id = new_id();
-        let secret = new_token(API_TOKEN_PREFIX);
+        let secret = new_api_token(id);
         let scope = json!({"rules":[
             {"target":{"kind":"org","id":world.root,"reach":"self"},"resources":["environment"],"allow":[{"operation":"EnvironmentCreate","actions":["manage"]}]},
             {"target":{"kind":"template","id":template,"reach":"self"},"resources":["template"],"allow":[{"operation":"EnvironmentCreate","actions":["read"]}]},

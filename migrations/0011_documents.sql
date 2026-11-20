@@ -452,6 +452,7 @@ CREATE TABLE resource_summaries (
     options_updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
     text text,
     producer jsonb CHECK (producer IS NULL OR jsonb_typeof(producer) = 'object'),
+    result_facts jsonb CHECK (result_facts IS NULL OR jsonb_typeof(result_facts) = 'object'),
     source_snapshot jsonb CHECK (source_snapshot IS NULL OR jsonb_typeof(source_snapshot) = 'object'),
     source_refs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(source_refs) = 'array'),
     completed_request_id uuid,
@@ -483,6 +484,9 @@ CREATE INDEX resource_summaries_target_idx
 -- table nor a queued/running state grants Read, provider Use, or permission to publish.
 CREATE TABLE resource_summary_requests (
     id uuid PRIMARY KEY,
+    call_id uuid NOT NULL UNIQUE,
+    read_attempt bigint NOT NULL DEFAULT 0 CHECK (read_attempt >= 0),
+    model_admitted_at timestamptz,
     summary_id uuid NOT NULL REFERENCES resource_summaries(id) ON DELETE CASCADE,
     origin text NOT NULL CHECK (origin IN ('automatic','person')),
     requested_by uuid REFERENCES users(id) ON DELETE CASCADE,
@@ -492,6 +496,7 @@ CREATE TABLE resource_summary_requests (
     arguments jsonb NOT NULL CHECK (jsonb_typeof(arguments) = 'object'),
     accepted_source jsonb NOT NULL CHECK (jsonb_typeof(accepted_source) = 'object'),
     prepared jsonb CHECK (prepared IS NULL OR jsonb_typeof(prepared) = 'object'),
+    attempt_facts jsonb CHECK (attempt_facts IS NULL OR jsonb_typeof(attempt_facts) = 'object'),
     accepted_revision bigint NOT NULL CHECK (accepted_revision > 0),
     options_revision bigint NOT NULL,
     dirty_revision bigint NOT NULL,
@@ -525,6 +530,13 @@ CREATE UNIQUE INDEX resource_summary_requests_active_idx ON resource_summary_req
     WHERE state IN ('queued','running');
 CREATE INDEX resource_summary_requests_claim_idx ON resource_summary_requests(due_at,created_at,id)
     WHERE state IN ('queued','running');
+
+ALTER TABLE summary_calls ADD COLUMN resource_request_id uuid REFERENCES resource_summary_requests(id) ON DELETE SET NULL;
+ALTER TABLE summary_calls ADD COLUMN resource_call_id uuid;
+ALTER TABLE summary_calls ADD CONSTRAINT summary_calls_resource_owner_check
+    CHECK (resource_request_id IS NULL OR resource_call_id IS NOT NULL);
+CREATE INDEX summary_calls_resource_owner_idx ON summary_calls(resource_request_id,resource_call_id)
+    WHERE resource_request_id IS NOT NULL;
 
 -- Governors outlive their resource/job. Removing a source cannot turn a retained prompt
 -- into an ordinary node record; the body and its immutable marker share one transaction.

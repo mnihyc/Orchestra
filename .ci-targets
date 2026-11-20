@@ -1,0 +1,1 @@
+web test -- tests/component/setting-inherit.test.tsx tests/component/setting-own.test.tsx tests/component/setting-row.test.tsx tests/component/summary-targets-editor.test.tsx tests/component/settings-drafts.test.tsx tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts

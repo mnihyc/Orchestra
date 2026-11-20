@@ -358,7 +358,7 @@ async fn a_chat_with_its_files_is_an_archive_of_the_text_and_the_files_it_names(
     {
         let mut conn = room.world.conn().await;
         blobs
-            .register(&mut conn, meta, room.world.now())
+            .register(&mut conn, &meta, room.world.now())
             .await
             .unwrap();
         orch_db::queries::uploads::remember(&mut conn, room.ada.id(), &meta.hash, room.world.now())

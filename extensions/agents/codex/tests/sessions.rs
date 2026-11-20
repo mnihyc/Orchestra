@@ -443,8 +443,9 @@ async fn two_sessions_of_one_harness_run_turns_at_the_same_time_and_their_events
     };
     rig.boot().await;
     let (first, second) = (new_id(), new_id());
-    rig.open_new(first).await;
-    rig.open_new(second).await;
+    let main = rig.open_new(first).await;
+    let side = rig.open_new(second).await;
+    assert_ne!(main.native_session_ref, side.native_session_ref);
     rig.drain();
 
     // Both talk slowly, in small pieces, so that their streams overlap.
