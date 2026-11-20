@@ -21,7 +21,7 @@ use orch_api_contract::document_tree::{
 };
 use orch_api_contract::ownership::{NodeTransfer, ObjectTransfer};
 use orch_api_contract::resources::{CreateProvider, ProviderCreate, Upstream};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Id, Json, new_id};
@@ -48,8 +48,8 @@ async fn credential(world: &World, owner: Id, rules: Option<Vec<Json>>, lifetime
         assert!(scope.validate().is_empty());
         serde_json::to_value(scope).unwrap()
     });
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     let legacy_scopes = if scope.is_none() {
         vec!["*".to_owned()]
     } else {
@@ -142,7 +142,7 @@ impl Office {
                     .call(ProviderCreate, &[])
                     .token(&d.ada.token)
                     .body(&CreateProvider::Api {
-                        runtime_machine_id: None,
+                        runtime_location: None,
                         name: name.into(),
                         home_id: d.org,
                         access: None,
