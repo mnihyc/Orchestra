@@ -887,6 +887,7 @@ impl Reach {
                         machine,
                         SerialKey::None,
                         &FsStat {
+                            access: orch_link_contract::commands::FsAccess::roots(),
                             environment_id: environment,
                             mount: None,
                             path: path.clone(),

@@ -18,7 +18,7 @@ use orch_api_contract::notifications::{
     MePushSubscriptionDelete, MePushSubscriptionDeleteBody, MePushSubscriptionList,
     MePushSubscriptionRemove,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::Reply;
 use orch_db::queries::notifications::{channels, inbox, outbox, pages, people, routes};
@@ -63,7 +63,7 @@ async fn stored_key(world: &World, user: Id, scope: Option<serde_json::Value>) -
         vec!["*".to_owned()]
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let mut conn = world.conn().await;
     identity::create_api_token_scoped(

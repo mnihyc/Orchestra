@@ -100,6 +100,7 @@ pub struct JobRow {
     /// How far it has come.
     pub state: String,
     /// Why it failed, where it did.
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub error: Option<Json>,
     /// Who asked for it.
     pub created_by: Option<Id>,
