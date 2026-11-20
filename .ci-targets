@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web test -- tests/component/start-environment-options.test.tsx tests/component/start-flow.test.tsx tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

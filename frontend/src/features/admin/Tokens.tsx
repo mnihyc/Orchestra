@@ -1,4 +1,5 @@
 /** System and per-person credential views share the existing scope/activity readers. */
+import { CopyId } from '@/ui/CopyId';
 import { useInfiniteQuery, useMutation } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -66,7 +67,7 @@ function TokenReader({ person }: { person: string | undefined }) {
       const ownerShown = shown.has('owner'), scopeShown = shown.has('scope'), placeShown = shown.has('place');
       const showTimes = !shown.has('created') || !shown.has('used') || !shown.has('expires');
       return <div className="flex min-w-0 flex-col items-start gap-1">
-      <div className="flex max-w-full items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full" title={row.info.name} onClick={() => setReviewId(row.info.id)}><span className="truncate">{row.info.name}</span></Button>{row.admin_access && <AsAdminMark of="system" />}</div>
+      <div className="flex max-w-full items-center gap-1"><Button variant="ghost" size="sm" className="max-w-full" title={row.info.name} onClick={() => setReviewId(row.info.id)}><span className="truncate">{row.info.name}</span></Button><CopyId value={row.info.id} />{row.admin_access && <AsAdminMark of="system" />}</div>
       {!ownerShown && <UserChip user={row.owner} />}
       {!scopeShown && <ScopesCell token={row.info} compact />}
       {!placeShown && <TokenPlace node={row.info.node} />}

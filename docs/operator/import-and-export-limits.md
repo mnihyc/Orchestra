@@ -1,105 +1,74 @@
-# Import and export limits
+# Set import and export limits
 
-An import is the reverse of an export: it reads a zip, a tar (packed with gzip, bzip2, xz or zstd, or not), or loose files that a person
-uploaded, checks them, and creates documents, places, chats and threads as that person. Its
-limits are settings so an operator can raise or lower them without a release. Every number
-here is a default that an operator may change.
+Choose how large an import or an export may be, and how much memory and disk you give them. At the end the limits fit your hosts, and you know what an import refuses and what it keeps.
 
-## What bounds an import
+People import and export from the screens: see [Import and export](../user/import-and-export.md) and [Move a project between orgs or deployments](../user/move-a-project-between-orgs.md). This page is for the operator.
+
+An import reads a zip, a tar (plain or packed with gzip, bzip2, xz or zstd), or loose files that a person uploaded, checks them, and creates documents, places, chats and threads as that person. An export writes an Orch package that an import can read back. The limits are settings, so you can change them without a release.
+
+## Before you start
+
+You need to be a system administrator, or hold **Manage** on the organization or project whose limits you set. Every number below is a default that you may change.
+
+## 1. Choose the limits
 
 | Setting | Where it can be set | Default | What it bounds |
 |---|---|---|---|
-| `import.max_bytes` | system, org, project | none | the bytes of the source one import into that place may hold once expanded |
-| `import.max_items` | system, org, project | none | the places, folders, documents, chats and threads one import into that place may hold |
-| `export.max_bytes` | system, org, project | 2 GiB | the largest archive one export may come to |
-| `export.max_items` | system, org, project | 10000 | how many conversations, chats and documents one export may hold |
-| `[limits] imports_per_user` | `config/orch.toml` | 2 | imports of one person that run at once; a third answers 429 `rate_limited` |
+| `import.max_bytes` | system, organization, project | none | The bytes of the source that one import into that place may hold once expanded |
+| `import.max_items` | system, organization, project | none | The places, folders, documents, chats and threads that one import into that place may hold |
+| `export.max_bytes` | system, organization, project | 2 GiB | The largest archive one export may come to |
+| `export.max_items` | system, organization, project | 10,000 | How many threads, chats and documents one export may hold |
+| `[limits] imports_per_user` | `config/orch.toml` | 2 | Imports of one person that run at once; a third gets 429 `rate_limited` |
 
-A `none` import limit follows the export limit of the same place, so that whatever an export
-may hold, an import of that archive may bring back. Raising `export.max_bytes` therefore raises
-the import limit with it, unless `import.max_bytes` was set on purpose. An import that would
-pass a limit is not begun; the dry run says so (`import.too_large`, `import.too_many`) with the
-limit and the size asked for.
+1. In the settings of the system, organization or project, set the limits you want. Lock them only when needed.
+2. Check the result in the review of an import: it shows the limits in force and what blocks.
 
-The limits are read at the destination, where the import lands, not where the archive was
-made. A person with only a little rights over a place sees the limits of that place.
+A limit of `none` for an import follows the export limit of the same place, so whatever an export may hold, an import of that archive can bring back. Raising `export.max_bytes` raises the import limit with it unless you set `import.max_bytes` on purpose. The limits are read where the import lands, not where the archive was made, so a person with few permissions over a place sees that place's limits.
+
+An import that would pass a limit never begins. The dry run says so with `import.too_large` or `import.too_many` and shows the limit and the size asked for.
+
+## 2. Size the memory and the disk
+
+- **The plan.** What the dry run shows and the job works through is held in memory while the import is planned, about 3 KB for each thing. The default of 10,000 things is about 30 MiB. Allowing a million things allows about 3 GiB for the plan.
+- **Threads and chats.** The record of a thread or chat is copied to a scratch file, checked against the hash in the manifest, and read from there a page at a time (200 items or 4 MiB, whichever comes first). Memory does not grow with the history an import brings, and no single record has its own limit: `import.max_bytes` bounds the whole.
+- **A tar.** A tar has no index, so it is unpacked once into a scratch file of at most `import.max_bytes` (a tar that unpacks to more is refused), and its files are read from there by position. The copy is removed when the import lets go of the source. Unpacking an xz can use up to 256 MiB of memory, whatever the file's size.
+- **Zips inside a zip.** A zip that holds only other zips (a Notion export does) has each taken out into a scratch file and opened, together at most `import.max_bytes`. Their entries count against the same limit as one archive's. Several zips chosen together are read the same way without the copy.
+- **Scratch space.** Records being read and files being stored are copied to the `tmp/` directory of the storage root (the system's temporary directory where the engine has none). Each copy is removed when its object is made or the job ends.
+- **Undo and reports.** Undo counts what an import made with a few statements and takes it back in batches of 500 rows, each in its own transaction. Reports are read, shown and downloaded a page of rows at a time, so a report of a million rows costs one page of memory. A browser without direct file saving cannot download a report from the screen, but the report stays readable in pages.
 
 ## What an import protects
 
-- **Expansion.** The dry run reads the archive's directory and counts bytes before opening any
-  entry, and the job streams entries rather than unpacking to disk. An archive that claims more
-  than `import.max_bytes` once expanded, or that has more entries than `import.max_items` allows,
-  is refused with `import.too_large` or `import.too_many`. Entry names are checked: an absolute
-  path, a `..` segment, or a name the archive repeats is refused (`import.invalid`).
-- **Checksums.** A package's manifest lists the SHA-256 of every part; a part that does not match is
-  reported as damaged and the thing it belongs to is not made. The rest of the package comes.
-- **Rights.** Every object is made as the person who started the import, with the rights that person
-  holds at the time of each batch. A system administrator's rights are not borrowed.
-- **Idempotence.** Ids of what an import makes derive from the importer, the destination, the package
-  and the source id, and each is recorded in `import_origins`. Running the same import again
-  finds what the first made.
+- **Expansion.** The dry run reads the archive's directory and counts bytes before it opens an entry, and the job streams entries instead of unpacking to disk. An archive that claims more than `import.max_bytes` once expanded, or has more entries than `import.max_items` allows, is refused. An absolute path, a `..` segment or a repeated entry name is refused (`import.invalid`).
+- **Checksums.** A package's manifest lists the SHA-256 of every part. A part that does not match is reported as damaged and the thing it belongs to is not made; the rest of the package comes.
+- **Permissions.** Every object is made as the person who started the import, with the permissions that person holds at the time of each batch. A system administrator's permissions are not borrowed. Restoring a package's sharing needs access management at the destination and follows its locks.
+- **Repeats.** The ids of what an import makes derive from the importer, the destination, the package and the source id, and each is recorded in `import_origins`. Running the same import again finds what the first one made.
 
-## Memory and work
+## What is kept
 
-- **A conversation or a chat of any size.** The record of a thread or of a chat is copied to a scratch file
-  (checked against the hash the manifest gives it) and read from there a page at a time: two hundred items, or four
-  mebibytes of the record, whichever comes first. The memory of an import does not grow with the history it brings,
-  and no single record has a limit of its own; `import.max_bytes` bounds the whole.
-- **The plan.** What the dry run shows and the job works through is held in memory while an import is planned: about
-  three kilobytes for each thing. The default of 10,000 things is about 30 MiB; raising `import.max_items` raises it in
-  proportion, so an operator who allows a million things allows about 3 GiB for the plan.
-- **Undo import.** What an import made is counted by a few statements and taken back in batches of five hundred rows,
-  each batch in a transaction of its own; the chats and threads an import added to are taken one at a time, under what
-  the person may do in each at that moment. A job that stops goes on from what is still there.
-- **The report.** It is read, shown and downloaded a page of rows at a time; a report of a million rows costs a page of
-  memory.
-- **A tar.** A tar has no index to find a file by, so one (packed with gzip, bzip2, xz or zstd, or not) is unpacked once into a
-  scratch file, at most `import.max_bytes` of it (a tar that unpacks to more is refused), and its files are read from there
-  by position; the copy is removed when the import lets go of the source. The unpacking of an xz may use up to 256 MiB,
-  whatever the size of the file.
-- **Zips inside a zip.** A zip that holds nothing but other zips (a Notion export does) has each of them taken out into a scratch
-  file and opened, together at most `import.max_bytes`, and the entries of all of them count against the same claim as one archive's;
-  several zips chosen together are read the same way without the copy. They are removed when the import lets go of the source.
-- **Scratch space.** A record being read and a file being stored are copied to the `tmp/` directory of the storage root
-  (the system's directory for temporary files where the engine has none); each copy is removed when its object is made or the
-  job ends.
+- A failed or cancelled import keeps its partial results and report. The report lasts as long as its row in `imports`, and a person's list of reports is **Your imports**.
+- **Undo import** deletes what the import made in the usual way, by soft deletion first, so the retention settings of deleted things apply. The plan shows when the affected work can be brought back. Undo is unavailable when the affected work or its access cannot be checked.
+- `import_origins` rows follow the things they name and are removed with them when they are purged after the retention window.
+- An uploaded source is a normal upload and follows [Uploads and private drafts](uploads.md).
+- Import jobs appear in the system's job lists as kind `import`. If a worker stops in the middle of an import, another worker adopts the job and resumes from the last batch committed. The things of a finished batch are never made twice.
 
-## Storage and cleanup
+## Limits of an agent's document import
 
-The report of an import is kept as long as its row in `imports`; a person's list is **Your imports**.
-`import_origins` rows follow the things they name and are removed with them when they are purged
-after the retention window. **Undo import** deletes what the import made the usual way (soft deletion
-first), so the retention settings of deleted things apply to it. An uploaded source is a normal
-upload and follows [uploads](uploads.md).
+An agent that runs `edit_document import` reads a workspace directory or zip as a background job, planning included.
 
-Import jobs show in the job lists of the system as kind `import`. A worker that stops mid-import
-leaves the job to be adopted by another worker, which resumes from the batch it had last committed;
-the created things of a finished batch are never made twice.
+- The first call waits at most 20 seconds and then returns progress. The agent polls with the same path and file. `cancel: true` stops at a file boundary and keeps the documents already committed; `resume: true` checks access again and reuses their identities.
+- The job lives in one process. After a restart the agent repeats the original call, which plans again and skips documents that exist.
+- Two agent imports run at once, admitted before any source is read, so the 256 MiB converter sandboxes and archive buffers do not multiply with the number of agents. Further starts get a limit refusal and are not queued.
+- Receipts: at most 64, kept for ten minutes, each with at most 200 results and 1 MiB of diagnostics. Polling lists the latest 60 and reports how many results were left out. A completed receipt can be dropped earlier when the pool is full.
+- A plan has at most 100,000 paths and 16 MiB of path text. Split a larger directory into subdirectories.
+- An archive's declared and actual expanded bytes are both checked against `sharing.snapshot_max_bytes`. The document and file size settings still apply to each conversion and stored file. One file is converted at a time in a job.
+- An edit to one large document is all or nothing: a stale block or a limit refusal rolls back the complete edit, earlier chunks included.
 
+## If it does not work
 
-## Agent document imports
-
-`edit_document import` reads a workspace directory or zip as a background job, including its planning phase.
-The first call waits at most 20 seconds, then returns planning or import progress. Poll with the same path and file;
-`cancel: true` stops at a file boundary and keeps committed documents, and `resume: true` rechecks access and reuses
-those identities. The job is process-local; after a restart, repeat the original call to replan and skip existing documents.
-
-The engine admits two agent imports at once, before any source read, so the 256 MiB converter sandboxes and archive
-buffers cannot multiply with the number of agents. Further starts return a limit refusal without queuing. It retains
-at most 64 receipts for ten minutes, with at most 200 results and 1 MiB of diagnostics each; polling lists the latest
-60 and reports all omitted results. Completed receipts may be evicted earlier when the receipt pool fills.
-
-A plan has at most 100,000 paths and 16 MiB of path text; larger directories must be split into subdirectories.
-Archives check both declared and actual expanded bytes against `sharing.snapshot_max_bytes`. The existing document
-and file size settings still apply to each conversion and stored file. One file is converted at a time per job;
-its neighbour map is borrowed, and existing folders are found by an indexed name lookup.
-
-Orch Markdown layout comments use the same reader and a closed JSON schema. Each comment is bounded to
-256 KiB, four times the existing block allowance for caption markup, comment escaping and cell coordinates.
-Pairing is linear and permits at most 48 annotation/native-container layers for sixteen document levels.
-Invalid layout leaves ordinary content visible; restoration refuses to hide text inserted into a covered table cell.
-No block, file, author or history identities are stored in layout metadata.
-
-A large document edit keeps one live block skeleton for its transaction. Each later chunk reads only its named
-blocks and content-changing rows for exact byte totals. A stale block or a limit refusal rolls back the complete
-edit, including earlier chunks; splitting the validation never turns a partial edit into an accepted one.
+| You see | What to do |
+|---|---|
+| `import.too_large` or `import.too_many` in the dry run | Raise `import.max_bytes` or `import.max_items` (or `export.max_bytes` if the import follows it) at the destination, or import a smaller part |
+| `import.invalid` | The archive has an absolute path, a `..` segment or a repeated name. Make the archive again |
+| 429 `rate_limited` | The person already has `imports_per_user` imports running. Wait for one, or raise the limit in `config/orch.toml` |
+| A part is reported as damaged | The part does not match its manifest. Export again; the rest of the package still comes |
+| Undo is unavailable | The affected work, or the access to check it, is gone. Read the reason on the report |
