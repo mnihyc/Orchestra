@@ -9,7 +9,7 @@ import { articleInLanguage, makeGuide, readArticle } from '@/help/guide';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 const ask = vi.hoisted(() => vi.fn());
-vi.mock('@/features/ask/open', () => ({ openAskWithDraft: ask }));
+vi.mock('@/features/ask/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAskWithDraft: ask }));
 
 const source = makeGuide({ 'plan.md': '---\nsummary: Review the plan before moving work.\n---\n# Plan\n\nThe opening remains separate.\n\n## Next\n\nContinue here.' }, {}, {
   'zh-CN': { 'plan.md': '---\nsummary: 移动工作前先查看计划。\nheading_id.下一步: next\n---\n# 计划\n\n原有开头单独保留。\n\n## 下一步\n\n从这里继续。' },
@@ -76,6 +76,18 @@ it('keeps an article summary distinct from its same-named directory group', () =
   expect(button.getAttribute('aria-describedby')).not.toBe(heading.id);
   const ids = [...view.container.querySelectorAll('[id]')].map((element) => element.id);
   expect(new Set(ids).size).toBe(ids.length);
+});
+
+it('lands directly on the state a screen linked to and shows the label beside its meaning', async () => {
+  const article = readArticle('state-reference', '# State reference\n\n## Messages\n\n| Status | Meaning |\n| --- | --- |\n| [Sent](#state:ModelInputState.sent) | The program received your message. |');
+  const open = vi.fn();
+  const view = show(<ArticleView article={article} heading="state:ModelInputState.sent" onArticle={open} onScreen={vi.fn()} />);
+  const row = screen.getByRole('row', { name: 'Sent The program received your message.' });
+  expect(row).toHaveAttribute('id', 'state:ModelInputState.sent');
+  expect(vi.mocked(Element.prototype.scrollIntoView).mock.contexts).toContain(row);
+  expect(view.container).not.toHaveTextContent('ModelInputState');
+  await userEvent.click(screen.getByRole('link', { name: 'Sent' }));
+  expect(open).toHaveBeenCalledExactlyOnceWith('state-reference', 'state:ModelInputState.sent');
 });
 
 it('inserts one summary after a real title rather than the heading text in a code fence', () => {

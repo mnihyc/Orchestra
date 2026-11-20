@@ -157,7 +157,8 @@ pub async fn machine_subjects(
 }
 
 /// Current canonical identity for an already native-selected physical reference, including retained.
-/// This supplies no live read, private inspection or lifecycle authority.
+/// This supplies no live read, private inspection or lifecycle authority. A unit that a host runs
+/// is named by that host, as the neutral resolver names it.
 pub async fn machine_identities(
     conn: &mut Conn,
     machines: &[Id],
@@ -486,6 +487,10 @@ pub(crate) async fn schedule_destination(
 /// no broad union of IDs from an opaque row is accepted as a substitute.
 pub(crate) async fn object(conn: &mut Conn, object: KeyObjectRef) -> ApiResult<KeyResolvedTarget> {
     match (object.kind, object.id) {
+        // A machine reference is named by the page that governs it: its host when a host's node
+        // or a unit that a host runs, otherwise its own page. Only a person's own machine has a
+        // Machine page.
+        (KeyTargetKind::Object(ObjectKind::Machine), Some(id)) => machine_subject(conn, id).await,
         (KeyTargetKind::Object(kind), Some(id)) => page_object(conn, ObjectRef { kind, id }).await,
         (KeyTargetKind::Identity(KeyIdentityKind::Chat), Some(id)) => chat(conn, id).await,
         (KeyTargetKind::Identity(KeyIdentityKind::Group), Some(id)) => group(conn, id).await,

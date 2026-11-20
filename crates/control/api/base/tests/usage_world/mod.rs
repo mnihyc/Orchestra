@@ -67,7 +67,7 @@ pub async fn team(world: &World) -> Team {
         .call(ProviderCreate, &[])
         .token(&c.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Team key".to_owned(),
             home_id: c.acme,
             access: None,

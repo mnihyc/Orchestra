@@ -1166,3 +1166,44 @@ async fn the_people_behind_a_chip_are_listed_a_page_at_a_time_and_only_for_a_chi
         assert_eq!(refused.code, ErrorCode::NotFound, "{chip}");
     }
 }
+
+#[tokio::test]
+async fn reopening_share_after_a_recorded_deadline_omits_the_ended_contribution_without_erasing_its_record()
+ {
+    let world = World::new().await;
+    let s = setup(&world).await;
+    let mut gift = naming(s.dan.id(), AccessChoice::FullManage);
+    gift.name.as_mut().unwrap()[0].expires_at = Some(orch_types::Time::new(
+        world.now() + chrono::Duration::minutes(1),
+    ));
+    let before = change(&world, &s.boss, s.web, &gift).await.ok();
+    let grants=before.rows.iter().flat_map(|row|&row.entries).filter(|entry|matches!(&entry.holder,orch_api_contract::access::Holder::User{user} if user.id==s.dan.id())).collect::<Vec<_>>();
+    assert!(
+        !grants.is_empty(),
+        "the native page must first carry the live grant and its recorded expiry"
+    );
+    let end = grants[0].expires_at.unwrap();
+    assert!(end.get() > world.now());
+    let ids = grants.iter().map(|entry| entry.id).collect::<Vec<_>>();
+    world.advance(end.get() - world.now());
+    let reopened = page(&world, &s.boss, s.web).await;
+    assert!(
+        !reopened
+            .rows
+            .iter()
+            .flat_map(|row| &row.entries)
+            .any(|entry| ids.contains(&entry.id))
+    );
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM permission_entries WHERE id=ANY($1) AND removed_at IS NULL",
+    )
+    .bind(&ids)
+    .fetch_one(&mut *world.conn().await)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        i64::try_from(ids.len()).unwrap(),
+        "the read is active access, not an invented removal or cleanup history"
+    );
+}
