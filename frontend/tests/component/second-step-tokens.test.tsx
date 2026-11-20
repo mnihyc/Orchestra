@@ -12,7 +12,7 @@ import { proofIn } from '@/features/auth/freshProof';
 import { SecondStepGate } from '@/features/auth/SecondStepGate';
 import { presetScopes, TokenForm, TokenMade } from '@/features/settings/TokenForm';
 import type { ApiTokenCreateBody, Me, PermissionDef } from '@/generated/api-types';
-import { i18n } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
 
 import { show } from './support';
@@ -127,6 +127,20 @@ describe('a new token', () => {
     await waitFor(() => expect(made).toHaveBeenCalledOnce());
     // The initial ninety-day choice begins at submission, rather than at the earlier render.
     expect(made.mock.calls[0]?.[0].expires_at).toBe('2027-01-30T10:00:00.000Z');
+  });
+
+  it.each(['en', 'zh-CN'] as const)('shows the installed key API and an example with a placeholder in %s', async (locale) => {
+    const previous = i18n.language === 'zh-CN' ? 'zh-CN' : 'en';
+    await setLocale(locale);
+    const base = window.location.origin + '/openapi/v1';
+    const shown = show(<TokenMade name="Build reader" made={{ projection: 'receipt', token_id: 't', token: 'once-only-fixture', already_created: false, created_at: '2026-11-01T00:00:00Z', expires_at: null }} />);
+    try {
+      expect(screen.getByText(base, { exact: true })).toBeVisible();
+      const example = screen.getByText(/^curl /);
+      expect(example).toHaveTextContent('Authorization: Bearer $ORCH_KEY');
+      expect(example).toHaveTextContent(base + '/me');
+      expect(example).not.toHaveTextContent('once-only-fixture');
+    } finally { shown.unmount(); await setLocale(previous); }
   });
 
   it('says a creation answered again was made, and shows no secret', () => {

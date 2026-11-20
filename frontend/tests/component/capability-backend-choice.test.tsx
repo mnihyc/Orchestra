@@ -4,30 +4,39 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useState } from 'react';
 import type * as Client from '@/api/client';
-import { ApiError } from '@/api/client';
-import type { CapabilityBackendCandidate } from '@/generated/api-types';
+import { ApiError, client } from '@/api/client';
+import type { CapabilityBackendCandidate, Provider } from '@/generated/api-types';
 import { CapabilityBackendChoice, CapabilityBackendSummary } from '@/features/settings/CapabilityBackendChoice';
-import { changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
+import { backendIdentity, changeBackend, selectedBackend } from '@/features/settings/capabilityBackendValue';
+import { AskModelsEditor } from '@/features/settings/AskModelsEditor';
+import { SummarizerEditor } from '@/features/settings/SummarizerEditor';
 import { i18n, setLocale } from '@/i18n';
 import { id, me, userRef } from '../doubles/fixtures';
-import { inventoryRow } from '../doubles/everything-row';
+import { inventoryRow, resourceInventoryRow } from '../doubles/everything-row';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
 
-interface Query { capability?: string; place?: string; offering?: string; cursor?: string; q?: string }
+interface Query { capability?: string; place?: string; offering?: string; cursor?: string; q?: string; resource_rows?: boolean }
 interface Options { params?: { path?: { id?: string }; query?: Query } }
-const calls = vi.hoisted(() => ({ choices: vi.fn<(query: Query) => Promise<{ items: CapabilityBackendCandidate[]; next_cursor: string | null }>>(), changed: vi.fn() }));
+const calls = vi.hoisted(() => ({ inventory: vi.fn<(query?: Query) => Provider[]>(), choices: vi.fn<(query: Query) => Promise<{ items: CapabilityBackendCandidate[]; next_cursor: string | null }>>(), changed: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
   return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => {
-    if (path === '/everything') return { data: { items: [provider].map((provider) => inventoryRow({ id: provider.id, name: provider.name, kind: 'provider', parent_id: 'resources', resource: { kind: 'provider', value: provider } })), next_cursor: null }, response: new Response() };
+    if (path === '/me/model-recents') return { data: { recent_count: 3, recent: [{ provider_id: PROVIDER, model_name: 'recent-model' }] }, response: new Response() };
+    if (path === '/everything') {
+      const providers = calls.inventory(options?.params?.query);
+      const compact = options?.params?.query?.resource_rows === true;
+      const makeRow = compact ? resourceInventoryRow : inventoryRow;
+      return { data: { items: providers.map((provider) => makeRow({ id: provider.id, name: provider.name, kind: 'provider', parent_id: 'resources', resource: { kind: 'provider', value: provider } })), next_cursor: null }, response: new Response() };
+    }
     if (path === '/providers/{id}') return { data: provider, response: new Response() };
     if (path === '/providers/{id}/capability-backends') return { data: await calls.choices(options?.params?.query ?? {}), response: new Response() };
     throw new Error(`Unexpected GET ${path}`);
   } } };
 });
-vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map() }));
-vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: () => null }));
+vi.mock('@/api/resources',async(load)=>({...await load<object>(),readProviders:()=>Promise.resolve([provider]),providersQuery:()=>({queryKey:['suggested-providers'],queryFn:()=>Promise.resolve([provider])})}));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKnownPlaces: () => new Map() }));
+vi.mock('@/features/resources/ResourceCreation', async (loadOriginal) => ({ ...await loadOriginal<object>(), ResourceCreateButton: () => null }));
 
 const HOME = id(93, 11), PROVIDER = id(93, 12);
 const provider = planProvider({ id: PROVIDER, name: 'Picture plan', owner: userRef(me(1, 'ada', 'Ada')), org_id: HOME,
@@ -45,19 +54,53 @@ function Draw({ initial = null }: { initial?: unknown }) {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  calls.inventory.mockReturnValue([provider]);
   calls.choices.mockImplementation((query) => Promise.resolve({ items: query.offering === undefined ? [candidate(false, 'Free model'), candidate(true)] : [candidate(true)], next_cursor: null }));
 });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
+it('keeps two placements of the same model as distinct choices', () => {
+  const first = { ...backend, config: { environment_id: 'first', options: { a: 1, b: 2 } } };
+  const reordered = { config: { options: { b: 2, a: 1 }, environment_id: 'first' }, offering: { offering: 'native-model', provider: PROVIDER }, route: backend.route };
+  expect(backendIdentity(first)).toBe(backendIdentity(reordered));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...backend, config: { environment_id: 'second', options: { a: 1, b: 2 } } }));
+  expect(backendIdentity(first)).not.toBe(backendIdentity({ ...first, route: 'image_generation.service-model' }));
+});
+
+it('keeps the exact stored placement when the same model is chosen again', async () => {
+  const stored = { ...backend, config: { environment_id: HOME, helper_topic_id: id(93, 13) } };
+  show(<Draw initial={stored} />);
+  const user = userEvent.setup();
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  const name = i18n.t('capabilityBackend.delegated', { program: 'Codex on ChatGPT' });
+  await waitFor(() => expect(route).toHaveValue(`${name} · Image model`));
+  await user.click(route);
+  await user.click(await screen.findByRole('option', { name: /Image model/ }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored);
+});
+
 it.each([
   ['en', ['Web search provider', 'Web search route', 'Page fetch provider', 'Page fetch route']],
-  ['zh-CN', ['网页搜索提供方', '网页搜索路径', '网页抓取提供方', '网页抓取路径']],
+  ['zh-CN', ['网络搜索提供方', '网络搜索路径', '网页抓取提供方', '网页抓取路径']],
 ] as const)('names both pairs in the shared web backend form in %s', async (locale, names) => {
   await setLocale(locale);
   show(<form><CapabilityBackendChoice settingKey="agents.web_search_backend" target={{ kind: 'node', id: HOME }}
     shape={{ type: 'json' }} value={null} label="Web search backend" onChange={calls.changed} /></form>);
   expect(screen.getAllByRole('combobox')).toHaveLength(names.length);
   for (const name of names) expect(screen.getByRole('combobox', { name })).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('explains a placement without a restricted proxy in %s', async (locale) => {
+  await setLocale(locale);
+  const unavailable = { ...candidate(false), reason: 'program_unit_network_unavailable', reason_text: {} };
+  calls.choices.mockResolvedValue({ items: [unavailable], next_cursor: null });
+  show(<Draw initial={backend} />);
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') }));
+  const option = await screen.findByRole('option', { name: /Image model/ });
+  expect(option).toHaveAttribute('aria-disabled', 'true');
+  expect(within(option).getByText(locale === 'en' ? 'This placement needs a restricted provider proxy and an isolated network' : '此位置需要受限的提供方代理和隔离网络')).toBeVisible();
+  expect(calls.changed).not.toHaveBeenCalled();
 });
 
 it.each(['en', 'zh-CN'] as const)('saves only the complete eligible route and exposes the disabled reason in %s', async (locale) => {
@@ -124,4 +167,135 @@ it('preserves the other capability and opaque members in a shared backend value'
   const removed = changeBackend(next, 'agents.web_search_backend', 'page_fetch', null);
   expect(selectedBackend(removed, 'page_fetch')).toBeNull();
   expect(selectedBackend(removed, 'web_search')?.offering?.offering).toBe('search-new');
+});
+
+it.each(['en','zh-CN'] as const)('fills the only eligible setup in one act without writing while its choice is read (%s)',async(locale)=>{
+  await setLocale(locale);calls.choices.mockResolvedValue({items:[candidate(false,'Free model'),candidate(true)],next_cursor:null});
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  const use=await screen.findByRole('button',{name:i18n.t('settingsSuggestions.use',{name:'Picture plan · Image model'})});
+  expect(calls.changed).not.toHaveBeenCalled();
+  await user.click(use);
+  await waitFor(()=>expect(calls.changed).toHaveBeenCalledExactlyOnceWith(backend));
+  expect(screen.getByText(i18n.t('settingsSuggestions.source'))).toBeVisible();
+});
+
+it('offers no assumed setup when more than one eligible backend exists',async()=>{
+  calls.choices.mockResolvedValue({items:[candidate(true,'First model'),candidate(true,'Second model')],next_cursor:null});
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  await screen.findByRole('option',{name:'Picture plan'});
+  await waitFor(()=>expect(calls.choices).toHaveBeenCalled());
+  expect(screen.queryByText(i18n.t('settingsSuggestions.source'))).not.toBeInTheDocument();
+  expect(calls.changed).not.toHaveBeenCalled();
+});
+
+it('finishes backend pages before claiming that one setup is the only offered option',async()=>{
+  calls.choices.mockImplementation((query)=>Promise.resolve(query.cursor===undefined?{items:[candidate(true,'First')],next_cursor:'later'}:{items:[candidate(true,'Second')],next_cursor:null}));
+  show(<Draw/>);const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox',{name:i18n.t('capabilityBackend.provider')}));
+  await waitFor(()=>expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({cursor:'later'})));
+  expect(screen.queryByText(i18n.t('settingsSuggestions.source'))).not.toBeInTheDocument();expect(calls.changed).not.toHaveBeenCalled();
+});
+
+function SummaryDraw({ stored, global = false }: { stored: unknown; global?: boolean }) {
+  const [value, setValue] = useState(stored);
+  return <SummarizerEditor target={global ? { kind: 'system' } : { kind: 'node', id: HOME }} shape={{ type: 'json' }} value={value} label="Summarizer"
+    onChange={(next) => { calls.changed(next); setValue(next); }} />;
+}
+it.each(['en', 'zh-CN'] as const)('offers the most recent eligible summary with the lists closed and reuses the loaded choices (%s)', async (locale) => {
+  await setLocale(locale);
+  const session = client.session.getState();
+  client.session.setState({ status: 'signed_in', userId: 'summary-reader' });
+  try {
+    calls.inventory.mockReturnValue([{ ...provider, id: id(93, 14), name: 'Another provider' }, provider]);
+    const recent = { ...candidate(true, 'recent-model'), backend: { route: 'summary.delegation', offering: { provider: PROVIDER, offering: 'recent-model' }, config: { environment_id: HOME } } };
+    calls.choices.mockResolvedValue({ items: [candidate(true), recent], next_cursor: null });
+    show(<SummaryDraw stored={{ kind: 'model' }} />);
+    const user = userEvent.setup();
+    const use = i18n.t('settingsSuggestions.use', { name: 'Picture plan · recent-model' });
+    expect(await screen.findByRole('button', { name: use })).toBeVisible();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(calls.inventory).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ resource_rows: true }));
+    expect(calls.changed).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('combobox', { name: i18n.t('capabilityBackend.provider') }));
+    await user.click(screen.getByRole('option', { name: 'Picture plan' }));
+    await user.click(screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') }));
+    expect(screen.getByRole('option', { name: /recent-model/ })).toBeVisible();
+    await user.keyboard('{Escape}');
+    expect(calls.inventory).toHaveBeenCalledTimes(1);
+    expect(calls.choices.mock.calls.map(([query]) => query.offering ?? 'all').sort()).toEqual(['all', 'recent-model']);
+    expect(calls.changed).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: use }));
+    expect(calls.changed).toHaveBeenCalledExactlyOnceWith({ kind: 'model', backend: recent.backend });
+  } finally {
+    cleanup();
+    client.session.setState(session);
+  }
+});
+
+it('checks the exact recent offering on a paged list and leaves an ambiguous placement to the person', async () => {
+  const session = client.session.getState();
+  client.session.setState({ status: 'signed_in', userId: 'summary-reader' });
+  try {
+    const first = candidate(true, 'recent-model');
+    const second = { ...first, backend: { ...first.backend, config: { environment_id: HOME } } };
+    calls.choices.mockImplementation(async (query) => query.offering === undefined
+      ? { items: [first], next_cursor: 'more' }
+      : { items: [first, second], next_cursor: null });
+    show(<SummaryDraw stored={{ kind: 'model' }} />);
+    await waitFor(() => expect(calls.choices).toHaveBeenCalledWith({ capability: 'summary', place: HOME, offering: 'recent-model' }));
+    expect(screen.queryByRole('button', { name: /Use .*recent-model/ })).not.toBeInTheDocument();
+    expect(calls.changed).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    client.session.setState(session);
+  }
+});
+
+it.each(['en', 'zh-CN'] as const)('keeps a summary subscription and placement in the same backend control in %s', async (locale) => {
+  await setLocale(locale);
+  const selected = { ...backend, route: 'summary.delegation', config: { environment_id: HOME, helper_topic_id: id(93, 13) } };
+  const row = { ...candidate(true), backend: { ...selected, config: null }, offering_name: 'Text model' };
+  calls.choices.mockResolvedValue({ items: [row], next_cursor: null });
+  const stored = { kind: 'model', backend: selected, answer_max_output_tokens: 240, prompts: { title: 'Keep the chosen wording.' } };
+  show(<SummaryDraw stored={stored} />);
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  const program = locale === 'en' ? 'Codex on ChatGPT' : 'Codex（ChatGPT 登录）';
+  await waitFor(() => expect(route).toHaveValue(`${i18n.t('capabilityBackend.delegated', { program })} · Text model`));
+  await userEvent.click(route);
+  await userEvent.click(await screen.findByRole('option', { name: /Text model/ }));
+  await waitFor(() => expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored));
+  expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({ capability: 'summary', place: HOME }));
+  expect(screen.getByRole('spinbutton', { name: i18n.t('settingsEditors.summarizer.answerTokens') })).toHaveValue(240);
+  expect(screen.getByText(i18n.t('settingsEditors.summarizer.instructions'))).toBeVisible();
+});
+
+it.each(['en', 'zh-CN'] as const)('uses the same subscription choice for a system summary default without a source node in %s', async (locale) => {
+  await setLocale(locale);
+  const selected = { ...backend, route: 'summary.delegation' };
+  calls.choices.mockResolvedValue({ items: [{ ...candidate(true), backend: selected, offering_name: 'Global text model' }], next_cursor: null });
+  const stored = { kind: 'model', backend: selected };
+  show(<SummaryDraw stored={stored} global />);
+  const route = screen.getByRole('combobox', { name: i18n.t('capabilityBackend.route') });
+  await waitFor(() => expect(route).toHaveValue(`${i18n.t('capabilityBackend.delegated', { program: locale === 'en' ? 'Codex on ChatGPT' : 'Codex（ChatGPT 登录）' })} · Global text model`));
+  await userEvent.click(route);
+  await userEvent.click(await screen.findByRole('option', { name: /Global text model/ }));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith(stored);
+  expect(calls.choices).toHaveBeenCalledWith({ capability: 'summary', offering: 'native-model' });
+  expect(calls.choices).toHaveBeenCalledWith(expect.objectContaining({ capability: 'summary', q: '' }));
+});
+
+it.each(['en', 'zh-CN'] as const)('chooses an Ask subscription with its saved placement from the common supplier in %s', async (locale) => {
+  await setLocale(locale);
+  const saved = { ...backend, route: 'ask.delegation', config: { environment_id: HOME } };
+  const result = { ...candidate(true), backend: { ...saved, config: null }, offering_name: 'Team dialogue' };
+  calls.choices.mockResolvedValue({ items: [result], next_cursor: null });
+  show(<AskModelsEditor target={{ kind: 'system' }} label="Ask models" value={[{ backend: saved }]} onChange={calls.changed} />);
+  await waitFor(() => expect(calls.choices).toHaveBeenCalledWith({ capability: 'ask', offering: 'native-model' }));
+  expect(calls.choices.mock.calls.every(([query]) => query.offering !== undefined)).toBe(true);
+  const user=userEvent.setup();
+  await user.click(screen.getByRole('combobox', {name:i18n.t('capabilityBackend.route')}));
+  await user.click(await screen.findByRole('option', {name:/Team dialogue/}));
+  expect(calls.changed).toHaveBeenCalledExactlyOnceWith([{backend:saved}]);
 });

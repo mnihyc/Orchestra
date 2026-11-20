@@ -8,7 +8,7 @@ summary: Choose the destination for pasted text, uploaded files, attachments and
 
 # Paste and upload
 
-The place under the pointer is the destination. A drop line names that place and,
+Paste and drop put text and files where you point: into a message, a document, the workspace of an environment or a chat. The place under the pointer is the destination. A drop line names that place and,
 when the browser supplies a count, the number of files. File names appear after
 the drop. Drop an item already in Orch to insert a reference rather than another copy.
 
