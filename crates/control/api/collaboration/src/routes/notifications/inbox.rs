@@ -156,7 +156,45 @@ pub(super) fn kinds_asked(asked: Option<&str>) -> ApiResult<Vec<String>> {
 }
 
 /// The caller's notifications, newest first, of the kinds and since the moment asked for.
-pub async fn list(ctx: Ctx, query: NotificationListQuery, (): ()) -> ApiResult<Page<Notification>> {
+pub async fn list(
+    ctx: Ctx,
+    query: NotificationListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::notifications::NotificationPage> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let policy = orch_settings::retention::inbox(&mut conn, ctx.now)
+        .await
+        .map_err(ApiError::internal)?;
+    let oldest = inbox::oldest_retained(&mut conn, principal.user()).await?;
+    let retention = orch_api_contract::notifications::NotificationRetention {
+        days: policy.days,
+        source: orch_api_contract::settings::SettingSource {
+            scope: if policy.configured {
+                orch_api_contract::settings::SettingScope::System
+            } else {
+                orch_api_contract::settings::SettingScope::Default
+            },
+            node: None,
+        },
+        expires_before: Time::new(policy.expires_before),
+        actual_oldest_retained: oldest.map(Time::new),
+        measured_at: Time::new(ctx.now),
+    };
+    drop(conn);
+    let page = list_page(ctx, query, ()).await?;
+    Ok(orch_api_contract::notifications::NotificationPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        retention: Some(retention),
+    })
+}
+
+async fn list_page(
+    ctx: Ctx,
+    query: NotificationListQuery,
+    (): (),
+) -> ApiResult<Page<Notification>> {
     if query.group_by == Some(NotificationGrouping::Place) {
         return super::grouping::list_by_place(ctx, query).await;
     }

@@ -66,9 +66,9 @@ pub struct NodeSettings {
     pub driver_configurations: std::collections::BTreeMap<String, orch_types::Json>,
     /// What the system is called, which is the value of `orch.system` until the node is given another.
     pub system_name: String,
-    /// The operator's ceiling for host ports (`[ports]`), which no page of the host can widen.
+    /// Host-port ceilings supplied by the effective machine policy.
     pub ports: orch_config::server::Ports,
-    /// The previous configuration file, read only for the one-time local-policy import.
+    /// The configuration file used to resolve driver-relative files and installation paths.
     pub config_file: Option<PathBuf>,
     /// Initial hooks for a standalone node; a running connector supplies its live machine policy.
     pub hooks: crate::hooks::HookSettings,
@@ -103,26 +103,20 @@ impl NodeSettings {
             image_check_every: Duration::from_secs(
                 node.image_check_hours.saturating_mul(SECS_PER_HOUR),
             ),
-            storages: node
-                .storage
-                .iter()
-                .map(|storage| StorageSetting {
-                    name: storage.name.clone(),
-                    path: PathBuf::from(&storage.path),
-                    default: storage.default,
-                })
-                .collect(),
+            storages: Vec::new(),
             docker: node.docker.clone(),
             host: node.host.clone(),
             driver_configurations: std::collections::BTreeMap::new(),
             system_name: config.system.name.clone(),
-            ports: config.ports.clone(),
+            ports: orch_config::server::Ports::default(),
             config_file: None,
-            hooks: crate::hooks::HookSettings::from_policy(&node.hooks),
+            hooks: crate::hooks::HookSettings::from_policy(
+                &orch_link_contract::policy::MachineHooks::default(),
+            ),
         }
     }
 
-    /// The initial imported ceiling. Running roles read their live PolicyStore instead.
+    /// The configured ceiling. Running roles read their live PolicyStore.
     #[must_use]
     pub fn ports_now(&self) -> orch_config::server::Ports {
         self.ports.clone()
@@ -200,15 +194,13 @@ mod tests {
         config.node.data_dir = "/srv/node".to_owned();
         config.node.image_check_hours = 2;
         config.node.stop_grace_secs = 7;
-        config.node.storage = vec![orch_config::server::NodeStorage {
-            name: "fast".to_owned(),
-            path: "/mnt/fast".to_owned(),
-            default: true,
-        }];
         let settings = NodeSettings::from_config(&config);
         assert_eq!(settings.image_check_every, Duration::from_secs(7_200));
         assert_eq!(settings.stop_grace, Duration::from_secs(7));
-        assert_eq!(settings.storages[0].path, PathBuf::from("/mnt/fast"));
+        assert!(
+            settings.storages.is_empty(),
+            "storages come from the canonical machine policy"
+        );
         assert_eq!(
             settings.connector_dir(),
             PathBuf::from("/srv/node/tools/orch-connector/current")
