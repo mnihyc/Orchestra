@@ -21,8 +21,8 @@ use orch_types::Id;
 /// entry of a page begins or stops counting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stamp {
-    database: i64,
-    snapshot: String,
+    pub(super) database: i64,
+    pub(super) snapshot: String,
     /// The latest moment, at or before the one asked about, at which a role or an entry stopped counting.
     from: Option<DateTime<Utc>>,
     /// The first moment after the one asked about at which a role or an entry stops counting.
@@ -116,8 +116,6 @@ pub struct Held {
 #[derive(sqlx::FromRow)]
 struct Row {
     holds: bool,
-    groups: Vec<Id>,
-    viewers: Vec<Id>,
     kinds: Vec<String>,
     ids: Vec<Id>,
     roles: Vec<String>,
@@ -143,26 +141,16 @@ pub async fn holder_sets(
     kept: Option<&Stamp>,
 ) -> Result<Option<HolderSets>, DbError> {
     let row: Row = sqlx::query_as(
-        "WITH kept AS MATERIALIZED (
-             SELECT $4::text IS NOT NULL
-                AND COALESCE((SELECT oid::int8 FROM pg_database WHERE datname = current_database()) = $5, false)
-                AND pg_snapshot_xmin($4::pg_snapshot) > COALESCE((SELECT floor FROM access_changes_floor WHERE id), '0'::xid8)
-                AND pg_snapshot_xmax($4::pg_snapshot) <= pg_snapshot_xmax(pg_current_snapshot())
-                AND NOT EXISTS (SELECT 1 FROM pg_snapshot_xip(pg_current_snapshot()) AS running(xid)
-                                 WHERE pg_visible_in_snapshot(running.xid, $4::pg_snapshot))
-                AND NOT EXISTS (SELECT 1 FROM access_changes c WHERE c.xid >= pg_snapshot_xmax($4::pg_snapshot))
-                AND NOT EXISTS (SELECT 1 FROM access_changes c
-                                 WHERE c.xid = ANY (ARRAY(SELECT pg_snapshot_xip($4::pg_snapshot)))) AS holds
-         ), held AS MATERIALIZED (
+        concat!("WITH kept AS MATERIALIZED (
+             ",include_str!("stamp_holds.sql")," AS holds
+         ), held AS (
              -- Not worked out at all where the kept sets hold: a filter of the whole scan, decided once.
              SELECT kind, id, role FROM access_holders($1, $2, $3) WHERE NOT (SELECT holds FROM kept)
          )
          SELECT (SELECT holds FROM kept) AS holds,
-                COALESCE((SELECT array_agg(id ORDER BY id) FROM held WHERE kind = 'group'), '{}') AS groups,
-                COALESCE((SELECT array_agg(id ORDER BY id) FROM held WHERE kind = 'visible'), '{}') AS viewers,
-                COALESCE((SELECT array_agg(kind ORDER BY kind, id) FROM held), '{}') AS kinds,
-                COALESCE((SELECT array_agg(id ORDER BY kind, id) FROM held), '{}') AS ids,
-                COALESCE((SELECT array_agg(role ORDER BY kind, id) FROM held), '{}') AS roles,
+                COALESCE(array_agg(kind ORDER BY kind, id), '{}') AS kinds,
+                COALESCE(array_agg(id ORDER BY kind, id), '{}') AS ids,
+                COALESCE(array_agg(role ORDER BY kind, id), '{}') AS roles,
                 (SELECT oid::int8 FROM pg_database WHERE datname = current_database()) AS database,
                 pg_current_snapshot()::text AS snapshot,
                 -- Kept unless this transaction has changed a row the sets come from (its triggers have recorded that
@@ -185,7 +173,8 @@ pub async fn holder_sets(
                     WHERE removed_at IS NULL AND expires_at IS NOT NULL AND expires_at > $2),
                   (SELECT min(expires_at) FROM permission_entries
                     WHERE removed_at IS NULL AND expires_at IS NOT NULL AND object_kind IN ('system','node')
-                      AND expires_at > $2)) AS valid_until",
+                      AND expires_at > $2)) AS valid_until
+           FROM held"),
     )
     .bind(user)
     .bind(at)
@@ -197,9 +186,20 @@ pub async fn holder_sets(
     if row.holds {
         return Ok(None);
     }
+    // The aligned arrays are already ordered by kind and ID. Projecting these
+    // two subsets here keeps the database from sorting and sending their IDs twice.
+    let mut groups = Vec::new();
+    let mut viewers = Vec::new();
+    for (kind, &id) in row.kinds.iter().zip(&row.ids) {
+        match kind.as_str() {
+            "group" => groups.push(id),
+            "visible" => viewers.push(id),
+            _ => {}
+        }
+    }
     Ok(Some(HolderSets {
-        groups: row.groups,
-        viewers: row.viewers,
+        groups,
+        viewers,
         held: Held {
             kinds: row.kinds,
             ids: row.ids,

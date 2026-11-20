@@ -33,6 +33,10 @@ use crate::sign_in::accounts::Details;
 
 use crate::sign_in::accounts::How;
 
+use crate::sign_in::human_check;
+
+use crate::sign_in::human_check::Act;
+
 use crate::sign_in::mail;
 
 use crate::sign_in::mail::Addressee;
@@ -220,6 +224,8 @@ async fn register(
         }
         _ => {}
     }
+    // Before anything is made or hashed: an account is the act a program would repeat without end.
+    human_check::require(&ctx, Act::Register).await?;
 
     // A personal link is for one address, which the link reached, and which
     // therefore counts as confirmed.
@@ -412,6 +418,9 @@ async fn login(
     (): (),
     body: orch_api_contract::auth::AuthLoginBody,
 ) -> ApiResult<Answer<AuthResult>> {
+    // Every call asks for it, the second step's too: it carries the password again, and one that did not
+    // ask would be a password guess with no check. It is asked before the name is looked at.
+    Box::pin(human_check::require(&ctx, Act::SignIn)).await?;
     // The proof and session futures include policy and notification branches;
     // keep them out of the routing and authority wrappers' inline state.
     Ok(Box::pin(sign_in_login::login(&ctx, &body)).await?.answer())
@@ -424,6 +433,7 @@ async fn email_code(
     (): (),
     body: orch_api_contract::auth::AuthEmailCodeSendBody,
 ) -> ApiResult<()> {
+    human_check::require(&ctx, Act::EmailCode).await?;
     sign_in_login::send_code(&ctx, &body).await
 }
 
@@ -467,31 +477,47 @@ async fn refresh(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<AuthResult>> 
     let auth = &ctx.app.config.auth;
     let mut tx = ctx.app.db.begin().await?;
     let hash = token_hash(&value);
-    let session = identity::session_by_refresh_hash(&mut tx, &hash, ctx.now)
+    // Retained cookie proof identifies only this request's prior session. The live
+    // session resolver and the guarded renewal below remain the grant check.
+    let proof = identity::session_proof_by_refresh_hash(&mut tx, &hash)
         .await?
         .ok_or_else(invalid)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, session.user_id)
+    let user = identity::user_by_id(&mut tx, proof.user_id)
         .await?
         .ok_or_else(invalid)?;
     ctx.now = ctx.app.clock.now();
-    let session = identity::session_by_refresh_hash(&mut tx, &hash, ctx.now)
-        .await?
-        .ok_or_else(invalid)?;
+    let session = match identity::session_by_refresh_hash(&mut tx, &hash, ctx.now).await? {
+        Some(session) => session,
+        None => {
+            let mut error = invalid();
+            if let Some(proof) = identity::session_proof_by_refresh_hash(&mut tx, &hash).await?
+                && let Some(fact) =
+                    crate::middleware::authentication::recorded_session_end(&proof, ctx.now)
+            {
+                error = error.session_ended(fact);
+            }
+            return Err(error);
+        }
+    };
     if user.suspended() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSuspended,
-            "this user is suspended",
-        ));
+        return Err(
+            ApiError::new(ErrorCode::AuthSuspended, "this user is suspended")
+                .session_ended(crate::middleware::authentication::unavailable_session()),
+        );
     }
     let life = session_life(auth);
-    identity::slide_session(&mut tx, session.id, ctx.now, ctx.now + life).await?;
+    if !identity::renew_session(&mut tx, session.id, ctx.now, ctx.now + life).await? {
+        return Err(invalid());
+    }
     let access = new_token(crate::middleware::authentication::ACCESS_TOKEN_PREFIX);
     let access_expires_at = ctx.now + access_life(auth);
     identity::add_access_token(&mut tx, &token_hash(&access), session.id, access_expires_at)
         .await?;
-    identity::touch_last_seen(&mut tx, user.id, ctx.now).await?;
-    let me = people::me(&mut tx, &user, ctx.now).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    let mut conn = ctx.app.db.acquire().await?;
+    // Profile projection and last-seen bookkeeping hold no renewal lock.
+    identity::touch_last_seen(&mut conn, user.id, ctx.now).await?;
+    let me = people::me(&mut conn, &user, ctx.now).await?;
     Ok(Answer::from(AuthResult {
         access_token: access,
         access_expires_at: Time::new(access_expires_at),
@@ -509,7 +535,7 @@ async fn logout(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
         let mut tx = ctx.app.db.begin().await?;
         if let Some(session) =
             identity::session_by_refresh_hash(&mut tx, &token_hash(value), ctx.now).await?
-            && orch_db::queries::transaction_guard::lock_person(&mut tx, session.user_id)
+            && orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, session.user_id)
                 .await?
                 .is_some()
             && identity::session_by_refresh_hash(&mut tx, &token_hash(value), ctx.app.clock.now())
@@ -538,6 +564,7 @@ async fn logout(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
 /// is, if there is one. It answers `202` whatever the address, after the same
 /// work.
 async fn recovery(ctx: Ctx, (): (), body: AuthRecoveryStartBody) -> ApiResult<()> {
+    human_check::require(&ctx, Act::Recovery).await?;
     let limits = Limits::of(&ctx.app.config.auth);
     let mut conn = ctx.app.db.acquire().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "recovery").await?;
@@ -637,7 +664,7 @@ async fn recovery_confirm(
     let person = identity::email_token_owner(&mut tx, &hash, Purpose::Reset.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, person)
+    let user = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, person)
         .await?
         .ok_or_else(gone)?;
     ctx.now = ctx.app.clock.now();
@@ -704,7 +731,7 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
     let person = identity::email_token_owner(&mut tx, &hash, Purpose::Verify.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, person)
+    let user = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, person)
         .await?
         .ok_or_else(gone)?;
     ctx.now = ctx.app.clock.now();
@@ -759,6 +786,7 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
 /// confirmed, if there is one. It answers `202` whatever the name, after the
 /// same work.
 async fn verify_resend(ctx: Ctx, (): (), body: AuthEmailVerifyResendBody) -> ApiResult<()> {
+    human_check::require(&ctx, Act::Resend).await?;
     let limits = Limits::of(&ctx.app.config.auth);
     let mut conn = ctx.app.db.acquire().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "verify").await?;

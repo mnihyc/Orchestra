@@ -276,7 +276,7 @@ pub async fn login(ctx: &Ctx, body: &AuthLoginBody) -> ApiResult<Opened> {
 
     // In: what was used is spent, and the session opened, together.
     let mut tx = ctx.app.db.begin().await?;
-    let current = orch_db::queries::transaction_guard::lock_person(&mut tx, user.id)
+    let current = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, user.id)
         .await?
         .ok_or_else(invalid_credentials)?;
     // Proofs are expensive and are checked before this short transaction. A
@@ -320,7 +320,7 @@ pub async fn login(ctx: &Ctx, body: &AuthLoginBody) -> ApiResult<Opened> {
     {
         return Err(second_step_invalid());
     }
-    let opened = open_session(ctx, &mut tx, user, json!({ "proofs": right })).await?;
+    let opened = Box::pin(open_session(ctx, &mut tx, user, json!({ "proofs": right }))).await?;
     if recovered {
         super::recovery_codes::grant_management(&mut tx, user, opened.session, ctx.now).await?;
     }

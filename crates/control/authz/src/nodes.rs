@@ -147,13 +147,14 @@ async fn decide(
     if !caller.reaches(site.path.as_deref()) {
         return Ok(Decision::Refused(Refusal::of(first, object, Vec::new())));
     }
-    let frame = Frame::load(
+    let frame = Frame::load_with_participation(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
         permissions,
+        &[],
     )
     .await?;
     let mut through: Vec<Through> = Vec::new();
@@ -174,13 +175,14 @@ async fn decide(
         }
         let graph = frame.graph().clone();
         let everything = every_permission([site.kind]);
-        let frame = Frame::load(
+        let frame = Frame::load_with_participation(
             conn,
             principal,
             policy,
             graph,
             std::slice::from_ref(&site),
             &everything,
+            &[],
         )
         .await?;
         let refusal = missing::refusal(conn, &frame, &site, required, &lacking).await?;
@@ -470,7 +472,8 @@ pub async fn effective_many(
         return Ok(Vec::new());
     }
     let everything = every_permission(sites.iter().map(|site| site.kind));
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    let frame =
+        Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &everything).await?;
     Ok(sites
         .iter()
         .map(|site| Effective {
@@ -501,12 +504,13 @@ pub async fn is_restricted(
         .and_then(|kind| NodePermission::View.on(kind))
         .into_iter()
         .collect::<Vec<_>>();
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         policy,
         graph,
         std::slice::from_ref(&site),
+        &[],
         &view,
     )
     .await?;
@@ -539,7 +543,7 @@ pub async fn restricted_below(
             views.push(view);
         }
     }
-    let frame = Frame::load(conn, principal, policy, graph, &sites, &views).await?;
+    let frame = Frame::for_permissions(conn, principal, policy, graph, &sites, &[], &views).await?;
     Ok(sites
         .iter()
         .filter(|site| frame.restricted_below(site, place))

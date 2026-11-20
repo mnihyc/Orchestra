@@ -106,7 +106,7 @@ pub async fn resolve_rows(
     };
     let permissions: Vec<Permission> = rows.iter().map(|(permission, _)| *permission).collect();
     let pages: Vec<PageRef> = places.iter().copied().map(PageRef::defaults_of).collect();
-    let frame = Frame::load_with(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
@@ -161,7 +161,7 @@ pub async fn names_caller(
         .chain(permission.held_through())
         .filter(|row| *row != Permission::AccessOwn)
         .collect::<Vec<_>>();
-    let frame = Frame::load_with(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),

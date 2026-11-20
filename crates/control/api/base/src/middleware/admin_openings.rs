@@ -283,12 +283,13 @@ pub(crate) async fn private_place(
             .map_err(ApiError::internal)?;
         (graph, site)
     };
-    let frame = Frame::load(
+    let frame = Frame::for_permissions(
         conn,
         principal,
         Policy::default(),
         graph,
         std::slice::from_ref(&site),
+        &[],
         &[view_permission(site.kind)],
     )
     .await

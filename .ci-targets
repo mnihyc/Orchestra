@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --test personal -- --nocapture --test-threads=1
+test -p orch-api-core --test transaction_guards --test accounts --test session_others --test account_key_proofs -- --nocapture
+test -p orch-db --lib --test approval_settlement --test participation_summaries
+test -p orch-authz --lib --test kept_holders
+test -p orch-api-core --test everything_scale -- --nocapture --test-threads=1
+test -p orch-api-core --test access --test access_previews --test access_everything --test retained_scopes --test threads_read

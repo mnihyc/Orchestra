@@ -355,13 +355,16 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                 .build()
                 .unwrap();
             runtime.block_on(Box::pin(async {
+                eprintln!("small-stack stage fixture");
                 let world = World::new().await;
+                eprintln!("small-stack stage setup");
                 let setup = setup(&world, "root").await;
                 assert_eq!(setup.status, 200);
                 let setup_cookie = cookie(&setup.headers, "orch_session").unwrap();
                 let administrator = setup.ok().user.user.id;
 
                 // This is the first request after setup and carries no session.
+                eprintln!("small-stack stage login");
                 let signed_in = world.password_login("root", PASSWORD, STRANGER, "").await;
                 assert_eq!(signed_in.status, 200);
                 let session = cookie(&signed_in.headers, "orch_session").unwrap();
@@ -370,13 +373,16 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                 assert_eq!(result.user.user.id, administrator);
                 assert!(result.user.is_system_admin);
 
+                eprintln!("small-stack stage admin-mode read");
                 assert!(!world.app.call(orch_api_contract::auth::MeAdminModeGet, &[])
                     .token(&result.access_token).send().await.ok().as_admin);
+                eprintln!("small-stack stage admin-mode write");
                 world.app.call(orch_api_contract::auth::MeAdminModeSet, &[]).token(&result.access_token)
                     .body(&orch_api_contract::auth::AdminModeSetBody { as_admin: true }).send().await.ok();
 
                 // The first content write also renders its new org and creates General.
                 // This used to carry the full thread-rendering and private-page futures inline.
+                eprintln!("small-stack stage org creation");
                 let org = world.app.call(OrgCreate, &[]).token(&result.access_token)
                     .body(&OrgCreateBody { name: "Acme".to_owned(), slug: "acme".to_owned() })
                     .send().await.ok().into_full().expect("ordinary created organization content");
@@ -387,6 +393,7 @@ fn the_first_password_sign_in_after_setup_works_on_a_two_mib_stack() {
                     .bind(org.base.id).fetch_one(&world.db.pool).await.unwrap();
                 assert_eq!(general, 1, "a successful org starts with its General project");
 
+                eprintln!("small-stack stage profile");
                 let me = world.app.call(MeGet, &[]).token(&result.access_token)
                     .send().await.ok();
                 assert_eq!(me.user.id, administrator);
@@ -1145,6 +1152,38 @@ async fn refresh_status(world: &World, cookies: &str) -> u16 {
 }
 
 #[tokio::test]
+async fn a_browser_renews_its_session_while_its_persons_own_write_is_open() {
+    let world = World::new().await;
+    let person = world.person("reader").await;
+    let signed = world.sign_in(&person).await;
+    let mut account = world.db.pool.begin().await.unwrap();
+    orch_db::queries::transaction_guard::lock_person(&mut account, person.id)
+        .await
+        .unwrap()
+        .unwrap();
+    // The lock is deliberately kept until renewal completes. This catches a lock dependency;
+    // five seconds leaves room for normal PostgreSQL work without releasing the blocker.
+    let renewed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        refresh(&world, &signed.browser()),
+    )
+    .await
+    .expect("renewal locks its own session, independently of the person's account write");
+    let token = renewed.ok().access_token;
+    account.rollback().await.unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(orch_api_contract::auth::MeGet, &[])
+            .token(&token)
+            .send()
+            .await
+            .status,
+        200
+    );
+}
+
+#[tokio::test]
 async fn a_reset_link_ends_after_half_an_hour_and_an_unknown_one_is_gone_like_a_used_one() {
     let world = World::new().await;
     world.mail_server().await;
@@ -1291,6 +1330,19 @@ async fn a_new_access_token_is_asked_for_with_the_session_cookie_and_the_header_
         (unknown.status, unknown.code),
         (401, ErrorCode::AuthInvalidToken)
     );
+    assert!(
+        serde_json::to_value(&unknown)
+            .unwrap()
+            .get("session_end")
+            .is_none()
+    );
+    assert!(
+        serde_json::to_value(&expired)
+            .unwrap()
+            .get("session_end")
+            .is_none(),
+        "an access token ending does not end its live session"
+    );
 
     let reply = refresh(&world, &signed.browser()).await;
     assert_eq!(reply.status, 200);
@@ -1324,9 +1376,22 @@ async fn a_session_lasts_thirty_days_from_its_last_use() {
         world.advance(Duration::days(29));
         assert_eq!(refresh_status(&world, &signed.browser()).await, 200);
     }
+    let ended_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE refresh_hash=$1")
+            .bind(hash(&signed.session))
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
     world.advance(Duration::days(31));
-    let ended = refresh(&world, &signed.browser()).await.problem();
+    let ended = refresh(&world, &signed.browser()).await;
+    assert_eq!(ended.headers.get("cache-control").unwrap(), "no-store");
+    let ended = ended.problem();
     assert_eq!(ended.code, ErrorCode::AuthInvalidToken);
+    assert_eq!(
+        serde_json::to_value(&ended).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(ended_at)}),
+        "the session's stored end survives a later observation"
+    );
 }
 
 #[tokio::test]
@@ -1340,6 +1405,11 @@ async fn a_suspended_person_is_not_given_a_new_access_token() {
         (refused.status, refused.code),
         (401, ErrorCode::AuthSuspended)
     );
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["session_end"],
+        json!({"cause":"account_unavailable"}),
+        "no suspension time is invented from a later account edit"
+    );
     let by_token = world
         .app
         .call(MeGet, &[])
@@ -1348,6 +1418,10 @@ async fn a_suspended_person_is_not_given_a_new_access_token() {
         .await
         .problem();
     assert_eq!(by_token.code, ErrorCode::AuthSuspended);
+    assert_eq!(
+        serde_json::to_value(&by_token).unwrap()["session_end"],
+        json!({"cause":"account_unavailable"})
+    );
 }
 
 #[tokio::test]
@@ -1377,7 +1451,12 @@ async fn signing_out_revokes_the_session_clears_its_cookie_and_leaves_the_mark_o
         .await
         .problem();
     assert_eq!(token.code, ErrorCode::AuthInvalidToken);
-    assert_eq!(refresh_status(&world, &signed.browser()).await, 401);
+    let ended = refresh(&world, &signed.browser()).await.problem();
+    assert_eq!(ended.status, 401);
+    assert_eq!(
+        serde_json::to_value(&ended).unwrap()["session_end"],
+        json!({"cause":"revoked","at_if_known":orch_types::Time::new(world.now())})
+    );
     // The browser is still one their person got in from.
     let known: i64 = sqlx::query_scalar("SELECT count(*) FROM known_devices WHERE mark_hash = $1")
         .bind(hash(&signed.device))
@@ -1467,5 +1546,107 @@ async fn setup_and_administrator_creation_support_accounts_without_personal_orga
     assert_eq!(
         absent, 0,
         "irrelevant home overrides are refused without partial creation"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_or_purged_session_does_not_claim_an_end_cause_or_reveal_an_account() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    world
+        .app
+        .call(AuthLogout, &[])
+        .header("cookie", &signed.browser())
+        .header(CSRF_HEADER, "1")
+        .send()
+        .await
+        .ok();
+    sqlx::query("DELETE FROM sessions WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for cookie in [signed.browser(), "orch_session=ors_unrecognized".to_owned()] {
+        let refused = refresh(&world, &cookie).await.problem();
+        assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+        assert!(
+            serde_json::to_value(refused)
+                .unwrap()
+                .get("session_end")
+                .is_none()
+        );
+    }
+    let refused = world
+        .app
+        .call(MeGet, &[])
+        .token("oat_unrecognized")
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+    assert!(
+        serde_json::to_value(refused)
+            .unwrap()
+            .get("session_end")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn revocation_after_idle_expiry_does_not_replace_the_recorded_earlier_end() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let earlier = world.now() - Duration::minutes(2);
+    sqlx::query("UPDATE sessions SET expires_at=$2,revoked_at=$3 WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .bind(earlier)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let refused = refresh(&world, &signed.browser()).await.problem();
+    assert_eq!(
+        serde_json::to_value(refused).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(earlier)})
+    );
+}
+
+#[tokio::test]
+async fn only_an_exact_retained_browser_bearer_can_report_its_sessions_recorded_end() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let end = world.now() - Duration::minutes(1);
+    sqlx::query("UPDATE sessions SET expires_at=$2 WHERE refresh_hash=$1")
+        .bind(hash(&signed.session))
+        .bind(end)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let reply = world
+        .app
+        .call(MeGet, &[])
+        .token(signed.token())
+        .send()
+        .await;
+    assert_eq!(reply.headers.get("cache-control").unwrap(), "no-store");
+    let opening = world
+        .app
+        .call(
+            orch_api_contract::threads::ThreadOpeningGet,
+            &[&orch_types::new_id()],
+        )
+        .token(signed.token())
+        .send()
+        .await
+        .problem();
+    let refused = reply.problem();
+    assert_eq!(opening.session_end, refused.session_end);
+    assert_eq!(refused.code, ErrorCode::AuthInvalidToken);
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap()["session_end"],
+        json!({"cause":"expired","at_if_known":orch_types::Time::new(end)})
     );
 }

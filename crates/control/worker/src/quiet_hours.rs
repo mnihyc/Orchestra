@@ -6,10 +6,8 @@
 //! midnight (from 22:00 to 07:00). What would have gone waits, and goes out as
 //! one message when the window ends; the Inbox is not affected.
 //!
-//! A window whose two ends are the same minute is empty. A time zone that is
-//! not known is taken for UTC, so that a person with a name the system cannot
-//! read is still kept from being woken at an hour they chose, in the
-//! zone the system does know.
+//! A window whose two ends are the same minute is empty. An unrecognized zone
+//! remains an explicit problem; outward work waits until the window can be evaluated.
 
 use chrono::{DateTime, Duration, LocalResult, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
@@ -22,10 +20,35 @@ pub const MINUTES_PER_DAY: i32 = 24 * 60;
 /// any zone in use is an hour or less, and this is more than that.
 const LONGEST_GAP_MINUTES: i64 = 120;
 
-/// The zone named, or UTC where the name is not one.
-#[must_use]
-pub fn zone_of(name: &str) -> Tz {
-    name.parse::<Tz>().unwrap_or(Tz::UTC)
+/// A saved zone cannot be evaluated by this worker.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("The saved time zone {name} is not recognized; quiet hours are waiting.")]
+pub struct InvalidZone {
+    /// The saved name, retained rather than replaced with another zone.
+    pub name: String,
+}
+
+/// The named zone, retaining a parsing problem when it is not recognized.
+pub fn zone_of(name: &str) -> Result<Tz, InvalidZone> {
+    name.parse::<Tz>().map_err(|_| InvalidZone {
+        name: name.to_owned(),
+    })
+}
+
+/// Evaluates a quiet window only when its zone is known.
+pub fn held_until(
+    timezone: &str,
+    window: Option<(i32, i32)>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, InvalidZone> {
+    if window.is_none_or(|(start, end)| {
+        start == end
+            || !(0..MINUTES_PER_DAY).contains(&start)
+            || !(0..MINUTES_PER_DAY).contains(&end)
+    }) {
+        return Ok(None);
+    }
+    Ok(held_in_zone(zone_of(timezone)?, window, now))
 }
 
 /// When the window that `now` is in ends, or none if `now` is not in one.
@@ -34,11 +57,7 @@ pub fn zone_of(name: &str) -> Tz {
 /// Where the minute the window ends at does not exist on that day, because
 /// the clocks went forward over it, it ends where they came out.
 #[must_use]
-pub fn held_until(
-    timezone: &str,
-    window: Option<(i32, i32)>,
-    now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+fn held_in_zone(zone: Tz, window: Option<(i32, i32)>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let (start, end) = window?;
     if !(0..MINUTES_PER_DAY).contains(&start)
         || !(0..MINUTES_PER_DAY).contains(&end)
@@ -46,7 +65,6 @@ pub fn held_until(
     {
         return None;
     }
-    let zone = zone_of(timezone);
     let local = now.with_timezone(&zone);
     let minute = i32::try_from(local.hour() * 60 + local.minute()).ok()?;
     let wraps = start > end;
@@ -84,9 +102,12 @@ pub fn held_until(
 }
 
 /// Whether `now` is in the window.
-#[must_use]
-pub fn is_quiet(timezone: &str, window: Option<(i32, i32)>, now: DateTime<Utc>) -> bool {
-    held_until(timezone, window, now).is_some()
+pub fn is_quiet(
+    timezone: &str,
+    window: Option<(i32, i32)>,
+    now: DateTime<Utc>,
+) -> Result<bool, InvalidZone> {
+    held_until(timezone, window, now).map(|held| held.is_some())
 }
 
 /// How many times a pause and a quiet window can hand the hold to each other before it is
@@ -97,24 +118,23 @@ const HOLD_HANDOVERS: usize = 4;
 /// When everything outward that is held at `now` may go: the first moment at which neither the
 /// quiet window nor a pause still ahead holds, or none where neither holds `now`. A pause that has
 /// passed holds nothing.
-#[must_use]
 pub fn outward_held_until(
     timezone: &str,
     window: Option<(i32, i32)>,
     pause_until: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> Option<DateTime<Utc>> {
+) -> Result<Option<DateTime<Utc>>, InvalidZone> {
     let mut at = now;
     for _ in 0..HOLD_HANDOVERS {
         let paused = pause_until.filter(|until| *until > at);
-        let quiet = held_until(timezone, window, at);
+        let quiet = held_until(timezone, window, at)?;
         match (paused, quiet) {
             (None, None) => break,
             (Some(until), None) | (None, Some(until)) => at = until,
             (Some(pause), Some(quiet)) => at = pause.max(quiet),
         }
     }
-    (at > now).then_some(at)
+    Ok((at > now).then_some(at))
 }
 
 #[cfg(test)]
@@ -127,6 +147,25 @@ mod tests {
     }
 
     const NIGHT: Option<(i32, i32)> = Some((22 * 60, 7 * 60));
+
+    fn held_until(
+        zone: &str,
+        window: Option<(i32, i32)>,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        super::held_until(zone, window, now).unwrap()
+    }
+    fn outward_held_until(
+        zone: &str,
+        window: Option<(i32, i32)>,
+        pause: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        super::outward_held_until(zone, window, pause, now).unwrap()
+    }
+    fn is_quiet(zone: &str, window: Option<(i32, i32)>, now: DateTime<Utc>) -> bool {
+        super::is_quiet(zone, window, now).unwrap()
+    }
 
     #[test]
     fn a_window_that_reaches_past_midnight_holds_until_the_morning_in_the_persons_own_zone() {
@@ -202,13 +241,16 @@ mod tests {
     }
 
     #[test]
-    fn a_zone_the_system_does_not_know_is_taken_for_utc() {
-        assert!(is_quiet(
-            "Mars/Olympus_Mons",
-            NIGHT,
-            utc(2026, 10, 11, 23, 0)
-        ));
-        assert_eq!(zone_of("nonsense"), Tz::UTC);
+    fn an_unrecognized_zone_keeps_its_problem_instead_of_becoming_utc() {
+        let now = utc(2026, 10, 11, 12, 0);
+        assert_eq!(
+            super::held_until("Mars/Olympus_Mons", NIGHT, now)
+                .unwrap_err()
+                .name,
+            "Mars/Olympus_Mons"
+        );
+        assert!(super::outward_held_until("Mars/Olympus_Mons", NIGHT, None, now).is_err());
+        assert!(zone_of("nonsense").is_err());
     }
 
     #[test]
