@@ -1,0 +1,11 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture
+test -p orch-api-core --test accounts -- anonymous_cookie_discovery
+test -p orch-api-core --test bound
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test -- tests/unit/first-wave.test.ts tests/unit/client.test.ts tests/unit/start-up-wave.test.ts tests/component/thread-audience-banner.test.tsx tests/component/area-navigation.test.tsx tests/component/finder-loading.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts
+web build
