@@ -152,7 +152,7 @@ async fn set_build(ctx: Ctx, (): (), body: HarnessBuild) -> ApiResult<HarnessBui
 
 async fn check_build(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramBuildCheckReply> {
     Ok(ProgramBuildCheckReply {
-        queued: super::catalogue::queue_check(ctx).await?,
+        queued: super::catalogue::queue_check(ctx, Default::default()).await?,
     })
 }
 
@@ -193,7 +193,8 @@ pub(super) async fn exact_builds(
         .as_ref()
         .map_or_else(|| Programs::builtin().clone(), registry);
     let expected = expected(&programs, kind);
-    let shipped = json!(super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await);
+    let shipped =
+        json!(crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await);
     let selection = BuildSelection {
         kind,
         shipped: &shipped,
@@ -457,7 +458,7 @@ async fn list(ctx: Ctx, query: AdminProgramListQuery, (): ()) -> ApiResult<Page<
     let more = found.len() > size;
     found.truncate(size);
     let found: Vec<_> = found.into_iter().map(normalized).collect();
-    let shipped = super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await;
+    let shipped = crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await;
     let trust = crate::harness_channels::trusts_mirror(&mut conn).await?;
     let platforms = rows::platforms(
         &mut conn,
@@ -557,7 +558,7 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramDetail> {
         .ok_or_else(ApiError::not_found)?;
     let row = normalized(row);
     let programs = registry(&row);
-    let shipped = super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await;
+    let shipped = crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await;
     let trust = crate::harness_channels::trusts_mirror(&mut conn).await?;
     let platforms = rows::platforms(
         &mut conn,
@@ -729,7 +730,8 @@ async fn builds(
     let row = normalized(row);
     let programs = registry(&row);
     let expected = expected(&programs, kind);
-    let shipped = json!(super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await);
+    let shipped =
+        json!(crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await);
     let word = |v: Json| v.as_str().map(str::to_owned);
     let os = query.os.and_then(|v| word(json!(v)));
     let arch = query.arch.and_then(|v| word(json!(v)));

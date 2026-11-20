@@ -5,6 +5,7 @@
  * as the card in a conversation; what they asked for, waiting and answered; and what was decided. A toggle
  * lists everything the person could decide, which takes in what was sent to people nearer the thing.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { ShieldCheck } from 'lucide-react';
 import { APPROVAL_TABS, type ApprovalsTab } from '@/features/approvals/tabs';
 import { useTranslation } from 'react-i18next';
@@ -71,7 +72,7 @@ export function Approvals({ tab, onTab, all, kind, onKind }: ApprovalsProps) {
             size="sm"
             label={t('approvals.kindFilter')}
             value={kind ?? 'all'}
-            onValueChange={(next) => onKind(next === 'all' ? null : next)}
+            onValueChange={carryDeviceChoice((next: ApprovalKind | 'all') => onKind(next === 'all' ? null : next), onKind)}
             options={[
               { value: 'all', ...choiceOption(t, 'approvalKind.all') },
               { value: 'harness', ...choiceOption(t, 'approvalKind.harness') },
