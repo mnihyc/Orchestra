@@ -1,6 +1,6 @@
 /** The VNC view: a display drawn by the viewer on a socket the view opens with a ticket, told to send nothing while watching, given a socket to work in only after "Work in it", the copied sentence on a display Orch did not open, and Close in its own words for each kind. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,10 +8,11 @@ import { DisplaysPanel } from '@/features/vnc/Displays';
 import type { RfbConstructor, RfbLike } from '@/features/vnc/Viewer';
 import type { Display, Environment, EnvironmentDisplays } from '@/generated/api-types';
 import { show } from './support';
+import { client } from '@/api/client';
 
 const made = vi.hoisted(() => ({ tickets: [] as boolean[], viewers: [] as { viewOnly: boolean; channel: unknown }[], sockets: [] as { url: string; protocol: string }[], list: null as EnvironmentDisplays | null }));
 
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/api/displays', () => ({
   displayKeys: { list: (id: string) => ['test-displays', id] },
   displaysQuery: (id: string) => ({ queryKey: ['test-displays', id], queryFn: () => Promise.resolve(made.list) }),
@@ -136,4 +137,24 @@ describe('closing says what happens to each kind', () => {
     expect(await screen.findByText('No display server was found in Main')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Look again' })).toBeInTheDocument();
   });
+});
+
+it('inspects retained closed displays without opening a new viewer or drive ticket', async () => {
+  const originalSession = client.session.getState();
+  act(() => client.session.setState({ status: 'signed_in', userId: 'retained-viewer' }));
+  try {
+  if (made.list === null) throw new Error('The display list is required');
+  made.list = { ...made.list, displays: [display('Live', {}), ...Array.from({ length: 12 }, (_, n) => display(`Retained ${n}`, {
+    state: 'closed', close_reason: 'environment_stopped', opened_at: '2026-10-14T10:00:00.000Z', last_used_at: '2026-10-14T10:00:00.000Z', closed_at: '2026-10-14T10:00:00.000Z' }))] };
+  draw(['vnc.view']);
+  await screen.findByRole('list', { name: 'Displays' });
+  await userEvent.click(screen.getByRole('combobox', { name: 'State' }));
+  await userEvent.click(screen.getByRole('option', { name: 'Closed' }));
+  const before = made.tickets.length;
+  await userEvent.type(screen.getByRole('searchbox', { name: 'Search retained work' }), 'Retained 11');
+  expect(screen.getByText('Retained 11')).toBeVisible();
+  expect(screen.queryByText('Retained 10')).not.toBeInTheDocument();
+  expect(made.tickets).toHaveLength(before);
+  expect(screen.queryByRole('button', { name: 'Work in it' })).not.toBeInTheDocument();
+  } finally { act(() => client.session.setState(originalSession)); }
 });

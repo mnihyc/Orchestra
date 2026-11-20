@@ -1,0 +1,6 @@
+test -p orch-db --lib
+test -p orch-engine --lib
+test -p orch-engine --test caps --test forks --test initial_files --test volume_carry
+test -p orch-human-check-contract -p orch-human-check --lib
+test -p orch-human-check --test edge_policy
+test -p orch-api-base -p orch-api-environments --lib

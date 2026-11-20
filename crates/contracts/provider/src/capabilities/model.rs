@@ -613,6 +613,9 @@ pub struct ProviderView {
 /// Same route result supplies dispatch planning, the inspector and the derived matrix.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Resolution {
+    /// The actual generation interface conversion, captured with this resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<crate::models::ProtocolTranslation>,
     /// Capability id.
     pub capability: String,
     /// Human capability name.

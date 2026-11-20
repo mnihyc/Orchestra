@@ -20,6 +20,7 @@ import { TaskGuideLink } from '@/features/help/TaskGuideLink';
 import { HomePicker,useHomeChoices } from '@/features/resources/HomePicker';
 import { NewAccess } from '@/features/resources/NewAccess';
 import { CONNECTOR_ROLES, EnrollmentRoles, type ConnectorRole } from '@/features/resources/machines/EnrollmentRoles';
+import { RegisterInstalledSignInDialog } from '@/features/resources/machines/RegisterAgent';
 import { OS_NAMES } from '@/features/resources/machines/facts';
 import { newActKey } from '@/lib/requests';
 import { MINUTE_MS, useNow } from '@/lib/time';
@@ -71,8 +72,8 @@ export function commandFor(token: EnrollmentToken, os: MachineOs,options?:Instal
 }
 
 type Selection =
-  | { kind: 'connector'; home: string; roles: ConnectorRole[]; delegate: ConnectorRole[]; dedicated: boolean }
-  | { kind: 'node'; home: string; access:NewResourceAccess; delegate_policy: boolean };
+  | { kind: 'connector'; name: string; home: string; roles: ConnectorRole[]; delegate: ConnectorRole[]; dedicated: boolean }
+  | { kind: 'node'; name: string; home: string; access:NewResourceAccess; delegate_policy: boolean };
 
 interface Made {
   kind: Selection['kind'];
@@ -87,9 +88,11 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const queryClient = useQueryClient();
   const opened = useRef(false);
   const now = useNow();
+  const [name, setName] = useState('');
   const [roles, setRoles] = useState<ConnectorRole[]>(['environment', 'agent']);
   const [delegated, setDelegated] = useState<ConnectorRole[]>([]);
   const [node, setNode] = useState(initialKind==='node');
+  const [purpose,setPurpose]=useState<'machine'|'subscription'>('machine');
   const [nodeDelegated, setNodeDelegated] = useState(false);
   const [dedicated, setDedicated] = useState(false);
   const [home, setHome] = useState('');
@@ -102,19 +105,19 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const info=useQuery(machineEnrollmentInfoQuery);
   const instanceValid=node || instance==='' || /^[a-zA-Z0-9_-]+$/u.test(instance);
   const selection = useMemo<Selection>(() => node
-    ? { kind: 'node', home, access,delegate_policy: nodeDelegated }
-    : { kind: 'connector', home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
+    ? { kind: 'node', name: name.trim(), home, access,delegate_policy: nodeDelegated }
+    : { kind: 'connector', name: name.trim(), home, roles: CONNECTOR_ROLES.filter((role) => roles.includes(role)),
         delegate: CONNECTOR_ROLES.filter((role) => roles.includes(role) && delegated.includes(role)), dedicated },
-  [node, home,access, nodeDelegated, roles, delegated, dedicated]);
+  [node, name, home,access, nodeDelegated, roles, delegated, dedicated]);
   const stamp = JSON.stringify(selection);
-  const valid = selection.kind === 'node' ? selection.home !== '' : selection.roles.length > 0;
+  const valid = selection.kind === 'node' ? selection.home !== '' : selection.roles.length > 0 && (purpose!=='subscription' || selection.roles.includes('agent'));
 
   const make = useMutation({
     gcTime:0,
     mutationFn: async (selected: Selection): Promise<Made> => {
       const token = selected.kind === 'node'
-        ? await createHostToken({ home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
-        : await createMachineToken(newActKey(), { roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
+        ? await createHostToken({ ...(selected.name === '' ? {} : { name_hint: selected.name }), home_id: selected.home, access:selected.access, delegate_policy: selected.delegate_policy }, newActKey())
+        : await createMachineToken(newActKey(), { ...(selected.name === '' ? {} : { name_hint: selected.name }), roles: selected.roles, delegate: selected.delegate, dedicated: selected.dedicated,
             ...(selected.home === '' ? {} : { home_id: selected.home }) });
       return { kind: selected.kind, stamp: JSON.stringify(selected), token };
     },
@@ -139,6 +142,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const expired = expiresAt !== null && expiresAt <= now;
   const arrived = host ?? machine;
   const connected = host?.machine.online ?? machine?.online ?? false;
+  const registering=purpose==='subscription' && machine?.online===true?machine.id:null;
   const minutesLeft = expiresAt === null || expiresAt <= now ? 0 : Math.max(1, Math.floor((expiresAt - now) / MINUTE_MS));
   const failure = make.isError && JSON.stringify(make.variables) === stamp ? make.error : undefined;
 
@@ -148,9 +152,10 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
     if (host !== undefined) queryClient.setQueryData(hostKey(host.id), host);
     else if (machine !== undefined) queryClient.setQueryData(machineKey(machine.id), machine);
     toast({ tone: 'success', title: t(host === undefined ? 'machines.add.connected' : 'hosts.add.connected') });
+    if(machine!==undefined && purpose==='subscription')return;
     onClose();
     void navigate({ to: host === undefined ? '/resources/machines/$id' : '/resources/hosts/$id', params: { id: arrived.id } });
-  }, [arrived, connected, host, machine, navigate, onClose, queryClient, t]);
+  }, [arrived, connected, host, machine, navigate, onClose, queryClient, t,purpose]);
 
   const mayShow=info.data?.secure===true && !info.isError && valid && instanceValid;
   const install={foreground,instance,node,gateway};
@@ -159,12 +164,16 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const bin=os==='windows'?'%LOCALAPPDATA%\\Orch':'~/.local/bin';
   // Keep the act that opened the dialog; role choices change the installer, not its name.
   const title = t(initialKind === 'node' ? 'hosts.add.title' : 'machines.add.title');
+  if(registering!==null)return <RegisterInstalledSignInDialog machineId={registering} initialHome={home} onClose={()=>{onClose();void navigate({to:'/resources/machines/$id',params:{id:registering}});}}
+    onDone={(_agent,provider)=>{onClose();void navigate({to:'/resources/providers/$id',params:{id:provider.id}});}}/>;
   return <Dialog open onOpenChange={(next) => !next && !make.isPending && onClose()} size="lg"
     title={title}
     footer={<><TaskGuideLink guide="connect-a-machine" heading={t('machineInstallation.connectHeading')} /><Button variant="secondary" onClick={onClose}>
       {t('common.close')}
     </Button>{arrived===undefined && (made===undefined || expired) && <Button action="show" variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
     <div className="flex flex-col gap-4 py-2" data-tutorial-target="machine-enrollment">
+      {arrived === undefined && <Input label={t('resources.edit.name')} optional placeholder={t('machines.add.nameDefault')} value={name} disabled={make.isPending}
+        onChange={(event) => setName(event.target.value)} autoComplete="off" />}
       {info.isPending && <SkeletonRows read={info} rows={1}/>}
       {info.isError && <ErrorState compact error={info.error} retrying={info.isRefetching} onRetry={()=>void info.refetch()}/>}
       {progress.isError && <ErrorState compact error={progress.error} retrying={progress.isRefetching} onRetry={()=>void progress.refetch()}/>}
@@ -178,6 +187,12 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
         <p role="status" className="flex items-center gap-2 text-sm text-text-muted"><LoaderCircle className="animate-spin" aria-hidden/>{t('machines.add.waiting')}</p>
       </>}
       {arrived === undefined && <>
+        {!node && <Select label={t('machineSignup.purpose')} value={purpose} onValueChange={(value)=>{
+          const next=value==='subscription'?'subscription':'machine';setPurpose(next);
+          if(next==='subscription'){setRoles(['environment','agent','provider']);setDelegated(['agent']);}
+          else {setRoles(['environment','agent']);setDelegated([]);}
+        }} options={[{value:'machine',label:t('machineSignup.connect')},{value:'subscription',label:t('machineSignup.useInstalled')}]}/>}
+
         <p className="text-sm wrap-anywhere text-text-muted">{t(node?'machineInstallation.nodeSummary':'machineInstallation.connectorSummary',{data,bin})}</p>
         <Select label={t('machineInstallation.runMode')} value={foreground?'foreground':'service'} onValueChange={(value)=>setForeground(value==='foreground')}
           options={[{value:'service',name:t(node?'machineInstallation.systemService.name':'machineInstallation.userService.name'),description:t(node?'machineInstallation.systemService.description':'machineInstallation.userService.description')},
