@@ -40,7 +40,7 @@ async fn a_static_owner_copy_is_sealed_to_its_actual_new_provider_and_issues_and
     let command = new_id();
     let header = "synthetic-owned-header";
     let body:ProviderStart=serde_json::from_value(json!({
-        "provider_id":source.rig.provider,"protocols":[RESPONSES],"upstreams":[{"protocol":RESPONSES,"base_url":source.mock.responses_base_url(),"options":{"secret_headers":["x-owned-header"]}}],
+        "provider_id":source.rig.provider,"upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols":[RESPONSES],"upstreams":[{"protocol":RESPONSES,"base_url":source.mock.responses_base_url(),"options":{"secret_headers":["x-owned-header"]}}],
         "credential":source.sealed_key_for(command,&source.key),"secrets":{"x-owned-header":source.sealed_key_for(command,header)}
     })).unwrap();
     let started = source
@@ -129,7 +129,7 @@ async fn a_static_owner_copy_is_sealed_to_its_actual_new_provider_and_issues_and
             .is_empty(),
         "an owner copy cannot be borrowed as a turn lease"
     );
-    let start:ProviderStart=serde_json::from_value(json!({"provider_id":target.provider,"protocols":[RESPONSES],"upstreams":[{"protocol":RESPONSES,"base_url":source.mock.responses_base_url(),"options":{"secret_headers":["x-owned-header"]}}],"credential":null,"secrets":{}})).unwrap();
+    let start:ProviderStart=serde_json::from_value(json!({"provider_id":target.provider,"upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols":[RESPONSES],"upstreams":[{"protocol":RESPONSES,"base_url":source.mock.responses_base_url(),"options":{"secret_headers":["x-owned-header"]}}],"credential":null,"secrets":{}})).unwrap();
     target.succeed(&key, &start).await;
     target.kill().await;
     source.rig.kill().await;

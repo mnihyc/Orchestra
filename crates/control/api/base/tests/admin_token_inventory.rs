@@ -14,7 +14,7 @@ use orch_api_contract::{
     common::ErrorCode,
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken};
@@ -31,7 +31,7 @@ async fn token(
     node: Option<Id>,
 ) -> (Id, String) {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

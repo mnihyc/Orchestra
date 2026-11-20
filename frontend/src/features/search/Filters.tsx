@@ -7,19 +7,24 @@ import { ITEM_KINDS } from '@/api/search';
 import { dayOfMoment, momentOfDay } from '@/features/search/dates';
 import { NamePicker } from '@/features/search/NamePicker';
 import { Hint } from '@/features/help/Hint';
-import { includes, readParams, tabOf, type SearchParams, withKind } from '@/features/search/params';
+import { includes, narrowing, readParams, tabOf, type SearchParams, withKind } from '@/features/search/params';
 import type { FilterValues, PersonFilter } from '@/features/search/filterValues';
 import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { useViewChoice } from '@/lib/viewChoices';
 import { Checkbox } from '@/ui/Checkbox';
 import { DateField } from '@/ui/DateField';
 import { Select } from '@/ui/Select';
 import { cx } from '@/ui/cx';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
+import { useDeviceChoiceGroups } from '@/ui/DeviceChoiceFacts';
+import { FactDisclosure, FactDisclosureBody } from '@/ui/FactDisclosure';
 
 export interface FiltersProps {
   params: SearchParams;
   onParams: (next: SearchParams) => void;
   values: FilterValues;
+  inlineFacts?: boolean;
 }
 
 const GROUPS = ['where', 'who', 'when', 'what', 'for_me', 'advanced', 'conversation_kinds'] as const;
@@ -37,10 +42,17 @@ function groupsOf(value: string): Set<Group> {
   return new Set(GROUPS.filter((group) => group !== 'conversation_kinds'));
 }
 
-export function Filters({ params, onParams, values }: FiltersProps) {
+export function Filters({ params, onParams, values, inlineFacts = false }: FiltersProps) {
   const { t } = useTranslation();
   const timeZone = useAppearance((state) => state.timeZone);
-  const [stored, keep] = useViewChoice<string>('search', 'filter-groups', DEFAULT_GROUPS);
+  const locale = useAppearance((state) => state.locale);
+  const [stored, keep, groupObservation] = useViewChoice<string>('search', 'filter-groups', DEFAULT_GROUPS);
+  const filterFacts = useDeviceChoiceGroups(deviceChoiceOf(onParams), <>{t(`search.tabs.${tabOf(params)}`)} · {t('clientFacts.device.currentFilters', { count: narrowing(params), number: formatNumber(narrowing(params), locale) })}</>);
+  const groupNames = { where: t('search.filters.whereGroup'), who: t('search.filters.whoGroup'), when: t('search.filters.whenGroup'), what: t('search.filters.whatGroup'), for_me: t('search.filters.forMeGroup'), advanced: t('search.filters.advancedGroup'), conversation_kinds: t('search.filters.conversationKinds') };
+  const groupWords = (value: string) => [...groupsOf(value)].map((id) => groupNames[id]).join(' · ');
+  const groupFacts = useDeviceChoiceGroups(groupObservation, groupWords(stored), typeof groupObservation?.saved === 'string' ? groupWords(groupObservation.saved) : undefined);
+  const groups = [...filterFacts.groups.map((group) => ({ ...group, key: 'search-values', title: t('search.filters.title') })), ...groupFacts.groups.map((group) => ({ ...group, key: 'search-groups', title: t('clientFacts.device.openGroups') }))];
+  const fragment = filterFacts.fragment ?? groupFacts.fragment;
   const open = groupsOf(stored);
   const set = (change: Partial<SearchParams>) => onParams(readParams({ ...params, ...change }));
   const group = (id: Group, label: string, children: ReactNode) => <details key={id} open={open.has(id)}
@@ -128,5 +140,6 @@ export function Filters({ params, onParams, values }: FiltersProps) {
     </>)}
     {group('advanced', t('search.filters.advancedGroup'), <Checkbox label={t('search.filters.regex')}
       checked={params.regex === 'true'} onCheckedChange={(on) => set({ regex: on ? 'true' : undefined })} />)}
+    {inlineFacts ? <>{fragment !== undefined && <span className="text-sm text-text-muted">{fragment}</span>}<FactDisclosureBody groups={groups} /></> : <FactDisclosure fragment={fragment} groups={groups} />}
   </div>;
 }
