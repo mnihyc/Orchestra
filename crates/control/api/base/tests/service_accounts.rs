@@ -258,7 +258,15 @@ async fn a_token_is_shown_once_acts_by_the_roles_of_the_identity_and_is_listed_w
         "a secret is not kept by caches"
     );
     let created = created.ok();
-    assert!(created.token.as_deref().unwrap().starts_with("opat_"));
+    let prefix = format!("opat_{}_", created.info.id);
+    let tail = created
+        .token
+        .as_deref()
+        .unwrap()
+        .strip_prefix(&prefix)
+        .expect("service key ID");
+    assert_ne!(created.info.id, bot.user.id);
+    assert_eq!(tail.len(), 43 + 6);
     assert_eq!(created.info.name, "deploy");
     assert_eq!(created.info.scopes, vec!["*".to_owned()]);
     assert!(created.info.node.is_none() && created.info.expires_at.is_none());
@@ -281,6 +289,10 @@ async fn a_token_is_shown_once_acts_by_the_roles_of_the_identity_and_is_listed_w
     let listed = tokens(&world, &s.boss, bot.user.id).await.ok();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, created.info.id);
+    let audited: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM audit_log WHERE action='auth.token_created' AND details->>'token'=$1 AND details->>'user'=$2)",
+    ).bind(created.info.id.to_string()).bind(bot.user.id.to_string()).fetch_one(&world.db.pool).await.unwrap();
+    assert!(audited);
     assert!(listed[0].last_used_at.is_some(), "it was used just now");
     assert!(
         !serde_json::to_string(&listed)

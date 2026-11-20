@@ -1,12 +1,9 @@
-# Build counters
+# Build numbers
 
-`build-numbers/` reserves one counter for each shipped component: server,
-connector, frontend and CLI. Only the CLI is currently wired to the working
-Rust build-identity helper. Local builds advance that counter; CI reads the
-committed value. See [Contributing](../CONTRIBUTING.md) for isolated
-development counters.
+`build-numbers/` holds one counter for each component that ships on its own: `server.txt`, `connector.txt`, `frontend.txt` and `cli.txt`. Each file holds one positive integer, which becomes the build number in the identity of that component's executable.
 
-Nothing else lives here. Packaging, manifest hashes, release validation and
-the build identity of components Cargo does not build belong to
-`crates/tooling/xtask/src/release/` and `.github/workflows/release.yml`, and
-are placeholders; no artifacts are published by this scaffold.
+- A local build advances the counter and takes the new value.
+- A build in GitHub Actions takes the committed value as it is, so every job of one workflow run agrees on the number.
+- To build without moving the tracked counters, set `ORCH_BUILD_NUMBER_DIR` to another directory. [CONTRIBUTING.md](../CONTRIBUTING.md#development-checks) shows how.
+
+The counters are read by `crates/tooling/build-support`, which every program calls from its `build.rs`. Packaging, manifest checksums and release validation are in `crates/tooling/xtask/src/release/` and `.github/workflows/release.yml`.

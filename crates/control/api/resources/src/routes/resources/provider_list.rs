@@ -110,6 +110,12 @@ async fn in_query_scope(
                 .is_some_and(|home| inside.contains(&home))
         });
     }
+    if let Some(environment) = query.connection_environment_id {
+        let ids: Vec<_> = seen.iter().map(|row| row.resource.id).collect();
+        let connected =
+            orch_db::queries::provider_connections::among(conn, &ids, environment).await?;
+        seen.retain(|row| connected.contains(&row.resource.id));
+    }
     Ok(seen)
 }
 
