@@ -2230,6 +2230,7 @@ impl Engine {
                 });
             }
         }
+        let mut publications = Vec::new();
         for each in embedded {
             if !used.contains(&each.id) {
                 continue;
@@ -2242,7 +2243,7 @@ impl Engine {
             };
             let hash = orch_types::Hash::of(&each.bytes);
             let size = i64::try_from(each.bytes.len()).unwrap_or(i64::MAX);
-            store
+            let publication = store
                 .put(
                     &hash,
                     Some(size),
@@ -2252,6 +2253,7 @@ impl Engine {
                 )
                 .await
                 .map_err(|error| EngineError::unreadable(error.to_string()))?;
+            publications.push(publication);
             candidates.push(Candidate {
                 id: each.id,
                 name: each.name.clone(),
