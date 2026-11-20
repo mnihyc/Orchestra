@@ -1,0 +1,3 @@
+test -p orch-worker-core --test routes --test upkeep
+test -p orch-api-core --test forks -- moving_routes::a_late_native_thread_delete_failure_rolls_back_the_copy_ready_and_export --exact --nocapture
+test -p orch-api-core --test forks -- moving_routes::thread_move_notify_choice_is_reviewed_and_survives_source_ending --exact --nocapture

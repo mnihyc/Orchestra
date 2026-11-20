@@ -1,4 +1,4 @@
-//! The declared peer's three actual file blobs and production-format manifest.
+//! The declared peer's file blobs, actual note bytes and production-format manifest.
 //! This is a controlled blob supplier; it does not claim a real envhost copy.
 
 use super::*;
@@ -26,33 +26,82 @@ pub(super) async fn uploaded(
     };
     let matcher = orch_engine::selection::Matcher::new(selection)
         .map_err(|_| refusal("the scripted snapshot selection is invalid"))?;
-    // These cases select a whole directory or src/**. A native snapshot may use
-    // that narrower common directory; the ordinary rebase supplier handles it.
-    let first = selection.include.first().map_or("", String::as_str);
-    let prefix = first
+    // The declared workspace files stay below the first selection; notes may be a sibling selection.
+    let prefixes: Vec<String> = selection
+        .include
+        .iter()
+        .map(|pattern| {
+            pattern
+                .split('/')
+                .take_while(|part| !part.contains(['*', '?']))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    let primary = prefixes.first().map_or("", String::as_str);
+    let mut common = primary
         .split('/')
-        .take_while(|part| !part.contains(['*', '?']))
         .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
+        .collect::<Vec<_>>();
+    for prefix in prefixes.iter().skip(1) {
+        let shared = common
+            .iter()
+            .copied()
+            .zip(prefix.split('/').filter(|part| !part.is_empty()))
+            .take_while(|(left, right)| left == right)
+            .count();
+        common.truncate(shared);
+    }
+    let prefix = common.join("/");
+    let below = |base: &str, name: &str| {
+        if base.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{base}/{name}")
+        }
+    };
+    let is_notes = |base: &str| base == ".orch/memory" || base.ends_with("/.orch/memory");
     let now = clock.now();
     let mut entries = Vec::new();
     let mut registered = Vec::new();
     let mut uploaded_bytes = 0;
-    for (name, bytes) in [
-        ("a.txt", b"source-a0\n".as_slice()),
-        ("b.txt", b"source-b0\n".as_slice()),
-        ("c.txt", b"source-c0\n".as_slice()),
-    ] {
-        let path = if prefix.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{prefix}/{name}")
-        };
+    let mut fixture_files = if is_notes(primary) {
+        Vec::new()
+    } else {
+        vec![
+            (below(primary, "a.txt"), b"source-a0\n".to_vec()),
+            (below(primary, "b.txt"), b"source-b0\n".to_vec()),
+            (below(primary, "c.txt"), b"source-c0\n".to_vec()),
+        ]
+    };
+    let mut notes = prefixes
+        .iter()
+        .filter(|base| is_notes(base))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if notes.is_empty() {
+        notes.insert(below(primary, ".orch/memory"));
+    }
+    if let Some(root) = physical_root {
+        for directory in notes {
+            let path = below(&directory, "MEMORY.md");
+            if let Ok(bytes) = std::fs::read(std::path::Path::new(root).join(&path)) {
+                fixture_files.push((path, bytes));
+            }
+        }
+    }
+    for (path, bytes) in fixture_files {
         if !matcher.matches(&path) {
             continue;
         }
-        let hash = Hash::of(bytes);
+        let name = if prefix.is_empty() {
+            path.as_str()
+        } else {
+            path.strip_prefix(&format!("{prefix}/"))
+                .ok_or_else(|| refusal("the scripted files leave their common source directory"))?
+        };
+        let hash = Hash::of(&bytes);
         let size =
             i64::try_from(bytes.len()).map_err(|_| refusal("the scripted file is too large"))?;
         let prior = store
@@ -66,7 +115,7 @@ pub(super) async fn uploaded(
             .put(
                 &hash,
                 Some(size),
-                orch_blob_contract::store::stream_of(vec![bytes.to_vec().into()]),
+                orch_blob_contract::store::stream_of(vec![bytes.into()]),
             )
             .await
             .map_err(|_| refusal("the scripted file upload failed"))?;

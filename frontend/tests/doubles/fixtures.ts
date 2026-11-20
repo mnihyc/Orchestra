@@ -64,6 +64,8 @@ export const LATER_AT = '2026-10-01T09:30:00.000Z';
 export function meta(overrides: Partial<Meta> = {}): Meta {
   return {
     name: 'Orch (double)',
+    interface_defaults: { kept_closed_tabs: 10, progress_delay_ms: 200, catch_up_above_items: 20, read_freshness_ms: { directory: 60_000, lookup: 15_000, report: 60_000, status: 5_000 },
+      connection_quality: { recent_samples: 3, usual_samples: 20, slow_increase_percent: 100, slow_extra_ms: 200 } },
     // No configured public address: link helpers retain the browser address in use.
     public_url: '',
     alternate_urls: [],
@@ -78,6 +80,7 @@ export function meta(overrides: Partial<Meta> = {}): Meta {
     local_login: true,
     email_code_login: true,
     identity_providers: [],
+    human_check: null,
     locales: ['en', 'zh-CN'],
     banner: null,
     push_public_key: null,
