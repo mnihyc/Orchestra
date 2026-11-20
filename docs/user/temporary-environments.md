@@ -8,6 +8,8 @@ summary: Create a temporary environment and keep or export its work before delet
 
 # Temporary environments
 
+A temporary environment is removed by itself after a deadline, unless you keep it. This page shows how to make one, watch its deadline, and keep or export it before it goes.
+
 ## Create a temporary environment
 
 For a quick experiment, switch on **Temporary** in **Add environment**.

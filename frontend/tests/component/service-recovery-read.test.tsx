@@ -19,7 +19,7 @@ vi.mock('@/api/calls', async (load) => {
   const api = await load<typeof CallsApi>();
   return { ...api, callRecoveryQuery: (id: string) => ({ ...api.callRecoveryQuery(id), queryFn: () => calls.read() }), controlCallRecovery: calls.control };
 });
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const appearance = useAppearance.getState();
 beforeEach(() => { calls.read.mockReset(); calls.control.mockReset().mockResolvedValue({ recovery: null }); });
