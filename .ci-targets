@@ -1,0 +1,3 @@
+test -p orch-api --bin orch-api --test program -- --nocapture --test-threads=1
+test -p orch-api-core --test forwarded_edge --test api_surface_sockets --test realtime_fixture_lifecycle --test realtime_socket -- --nocapture --test-threads=1
+clippy
