@@ -22,20 +22,21 @@ use serde_json::{Value, json};
 /// within ordinary place bounds while these fixtures keep their clock fixed.
 async fn operation_key(desk: &Desk, rules: Value) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let stored = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let now = desk.world.now();
     let mut conn = desk.world.conn().await;
     create_api_token_scoped(
         &mut conn,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: desk.ada.id(),
             name: "Reference label source control",
             token_hash: &hash,

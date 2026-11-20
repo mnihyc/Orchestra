@@ -4,7 +4,7 @@ use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::resources::{
     CapabilityBackendCandidate, CapabilityBackendQuery, ProviderCapabilityBackendList,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_provider_contract::capabilities::{Capability, Mode, Route};
 use orch_types::{Id, new_id};
@@ -46,7 +46,7 @@ async fn scene() -> (World, resources::Company, Id) {
         .call(ProviderCreate, &[])
         .token(&firm.boss.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Backend choices".into(),
             home_id: firm.acme,
             access: None,
@@ -111,11 +111,12 @@ fn rule(kind: &str, id: Id) -> Json {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Capability backend read",
             token_hash: &token_hash(&secret),

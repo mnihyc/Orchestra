@@ -4,7 +4,6 @@ on:
   push:
     # A branch under ci-t/ runs only its targeted checks (ci-targeted.yml).
     branches: ['**', '!ci-t/**']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 

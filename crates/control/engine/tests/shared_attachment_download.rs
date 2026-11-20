@@ -66,13 +66,19 @@ impl ObservedStore {
 
 #[async_trait]
 impl BlobStore for ObservedStore {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.local.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.local.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.local.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
@@ -108,8 +114,13 @@ impl BlobStore for ObservedStore {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.local.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.local.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.local.delete_held(hash, retirement).await
     }
 }
 
