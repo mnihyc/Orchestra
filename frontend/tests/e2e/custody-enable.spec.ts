@@ -8,7 +8,7 @@ import {resourceFixture as fixture,resourceLive as live,type Fixture} from './cu
 
 function impact(source:Fixture):ResourceImpact {
   const empty={count:0,threads:0,visible:[],hidden:0,since:null};
-  return {target:source.target,name:source.name,stopping:false,facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[],dependents_complete:true,uses:null},
+  return {target:source.target,name:source.name,stopping:false,applications:[],application_complete:true,facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[],dependents_complete:true,uses:null},
     activity:{running:empty,stopped:empty,waiting:{count:6,threads:4,hidden:3,since:'2026-03-03T00:00:00Z',visible:[{object:{kind:'thread',id:'019a0000-0000-7000-8000-000000000042'},name:'Waiting work',relation:'binding',until:null}]}}};
 }
 
@@ -34,7 +34,7 @@ for(const kind of ['provider','model','agent','environment'] as const)for(const 
     else await page.getByRole('button',{name:new RegExp(`^${caption('@resources.act.enable',locale)}`,'u')}).first().click();
     const dialog=page.getByRole('alertdialog',{name:caption('@resourceImpact.enableTitle',locale).replace('{{name}}',source.name),exact:true});
     const waiting=dialog.getByRole('checkbox',{name:caption('@resourceImpact.runWaiting',locale),exact:true});await expect(waiting).not.toBeChecked();expect(accepted).toBe(0);
-    const count=dialog.getByRole('button',{name:locale==='en'?'6 messages in 4 threads':'4 个讨论串中的 6 条消息',exact:true});await count.click();
+    const count=dialog.getByRole('button',{name:locale==='en'?'6 messages in 4 threads':'4 个会话中的 6 条消息',exact:true});await count.click();
     await expect(page.getByText('Waiting work',{exact:true})).toBeVisible();await expect(page.getByText(caption('@resourceImpact.moreThreads_other',locale).replace('{{number}}','3'),{exact:true})).toBeVisible();
     await page.keyboard.press('Escape');await expect(dialog).toBeVisible();if(runWaiting)await waiting.check();
     expect(await dialog.evaluate((element)=>element.scrollWidth<=element.clientWidth)).toBe(true);
