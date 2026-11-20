@@ -100,15 +100,25 @@ async fn serve_one(
     let Some(person) = people::recipient(conn, route.user_id).await? else {
         return Ok(0);
     };
-    if quiet_hours::outward_held_until(
+    match quiet_hours::outward_held_until(
         &person.timezone,
         person.quiet_window(),
         person.pause_until,
         now,
-    )
-    .is_some()
-    {
-        return Ok(0);
+    ) {
+        Ok(Some(_)) => {
+            routes::clear_quiet_problem(conn, route.id).await?;
+            routes::set_held(conn, route.id, true).await?;
+            return Ok(0);
+        }
+        Ok(None) => {
+            routes::clear_quiet_problem(conn, route.id).await?;
+        }
+        Err(problem) => {
+            let _ = routes::record_failure(conn, route.id, None, &serde_json::json!({"code":"invalid_timezone","message":problem.to_string(),"timezone":problem.name}), now).await?;
+            routes::set_held(conn, route.id, true).await?;
+            return Ok(0);
+        }
     }
     if let (Some(minutes), Some(last)) = (route.min_interval_minutes, route.last_sent_at)
         && now < last + Duration::minutes(i64::from(minutes))

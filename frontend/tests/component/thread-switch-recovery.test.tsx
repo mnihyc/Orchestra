@@ -22,18 +22,18 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   <a className={className} href={`${to.replace('$id', params?.id ?? '')}${search === undefined ? '' : `?tab=${search.tab}`}`}>{children}</a> }));
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useThreadFeed: () => undefined, useOrgTreeFeed: () => undefined }));
 vi.mock('@/shell/screen', async (load) => ({ ...await load<typeof Screen>(), useScreenHeading: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/features/inbox/Counters', () => ({ useReadWhenOpened: () => undefined }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
-vi.mock('@/features/navigation/favorites', () => ({ StarButton: () => <button>Star</button> }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/features/inbox/Counters', async (loadOriginal) => ({ ...await loadOriginal<object>(), useReadWhenOpened: () => undefined }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.change }));
+vi.mock('@/features/navigation/favorites', async (loadOriginal) => ({ ...await loadOriginal<object>(), StarButton: () => <button>Star</button> }));
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => <button>Notifications</button> }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ useNodeMenu: () => [] }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeMenu: () => [] }));
 vi.mock('@/features/thread/forkNow', () => ({ useForkNow: () => ({ pending: false, start: vi.fn() }) }));
 vi.mock('@/features/running/live', () => ({ useRunning: () => ({ roster: null, closed: false, error: null }) }));
 vi.mock('@/features/timeline/preferences', () => ({ useTimelinePreferences: () => ({ detail: 'steps', hideHistory: false, setDetail: vi.fn(), setHideHistory: vi.fn() }) }));
 vi.mock('@/features/composer/Composer', () => ({ Composer: () => <textarea aria-label="Thread draft" /> }));
 vi.mock('@/features/composer/QueueTray', () => ({ QueueTray: () => null }));
-vi.mock('@/features/schedules/Schedules', () => ({ PendingAgentSchedules: () => null }));
+vi.mock('@/features/schedules/PendingAgentSchedules', () => ({ PendingAgentSchedules: () => null }));
 vi.mock('@/features/thread/ConnectionBanner', () => ({ ConnectionBanner: () => null }));
 vi.mock('@/features/thread/LockBanner', () => ({ LockBanner: () => <p>Native lock progress</p> }));
 vi.mock('@/features/thread/CallRecovery', () => ({ ThreadCallRecovery: () => <p>Native call recovery</p> }));
@@ -83,9 +83,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 
   it(`keeps the header's existing action state in a historical view without a recovery banner (${locale})`, async () => {
-    await setLocale(locale); draw({}, true);
+    await setLocale(locale); const thread = draw({}, true);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    expect(within(screen.getByRole('banner')).getByRole('button', { name: i18n.t('change.menu.switch') })).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+    expect(screen.getByRole('menuitem', { name: i18n.t('change.menu.switch') })).toHaveAttribute('aria-disabled', 'true');
   });
 
   it(`does not offer a manager's Switch to a thread reader (${locale})`, async () => {
@@ -95,16 +96,18 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
-it.each(['idle', 'locked', 'second step', 'call recovery', 'history removal'] as const)('retains the existing ordinary owner for %s', (state) => {
+it.each(['idle', 'locked', 'second step', 'call recovery', 'history removal'] as const)('retains the existing ordinary owner for %s', async (state) => {
   const blocked: Thread['blocked'] = { reason: 'binding_invalid', detail, sandbox: null };
   const more: Partial<Thread> = state === 'idle' ? { state: 'idle', blocked: null }
     : state === 'locked' ? { lock: { id: 'held-job', kind: 'thread_switch', phase: 'switching', percent: 30, state: 'running' } }
       : { blocked: { ...blocked, detail: state === 'second step' ? 'second_step_required' : state === 'call recovery' ? 'call_recovery' : i18n.getFixedT('en')('agentHistory.removingDetail') } };
-  draw(more);
-  const button = within(screen.getByRole('banner')).queryByRole('button', { name: i18n.t('change.menu.switch') });
-  if (state === 'locked') expect(button).not.toBeInTheDocument();
-  else expect(button).toBeVisible();
-  expect(screen.queryByRole('alert')?.querySelector('button') ?? null).toBeNull();
+  const thread = draw(more);
+  await userEvent.click(within(screen.getByRole('banner')).getByRole('button', { name: actionName('actions', thread.name) }));
+  const item = screen.queryByRole('menuitem', { name: i18n.t('change.menu.switch') });
+  if (state === 'locked') expect(item).not.toBeInTheDocument();
+  else expect(item).toBeVisible();
+  // None of these is a mismatch: no recovery banner offers its own Switch.
+  expect(screen.queryByRole('button', { name: i18n.t('change.banner.switchProfile') })).not.toBeInTheDocument();
 });
 
 it('keeps an opaque second-step-looking detail on another reason in its existing recovery', () => {
