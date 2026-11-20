@@ -74,7 +74,7 @@ function planOf(more: Partial<ExportPlan> = {}): ExportPlan {
     node: { id: 'web', kind: 'project', name: 'Web', redacted: false },
     counts: { places: 3, conversations: 10, chats: 2, documents: 5, files: 0 },
     bytes: 180 * MIB,
-    limits: { max_bytes: 2 * GIB, max_items: 10_000, keep_hours: 24 },
+    limits: { max_bytes: 2 * GIB, max_file_bytes: GIB / 4, max_items: 10_000, keep_hours: 24 },
     left_out: [],
     blockers: [],
     ...more,
@@ -98,13 +98,13 @@ describe('the plan of an archive', () => {
   });
 
   it('says by how many things the number passes what the place allows', () => {
-    const reading = readPlan(planOf({ limits: { max_bytes: 2 * GIB, max_items: 10, keep_hours: 24 } }));
+    const reading = readPlan(planOf({ limits: { max_bytes: 2 * GIB, max_file_bytes: GIB / 4, max_items: 10, keep_hours: 24 } }));
     expect(reading.state).toBe('too-large');
     expect(reading.overItems).toBe(7);
   });
 
   it('tells a place that allows none from an archive that is only too large', () => {
-    expect(readPlan(planOf({ limits: { max_bytes: 0, max_items: 10_000, keep_hours: 24 }, bytes: 1 })).state).toBe('none-allowed');
+    expect(readPlan(planOf({ limits: { max_bytes: 0, max_file_bytes: GIB / 4, max_items: 10_000, keep_hours: 24 }, bytes: 1 })).state).toBe('none-allowed');
   });
 
   it('tells that there is nothing the caller may take away', () => {

@@ -42,7 +42,7 @@ it.each(['en', 'zh-CN'] as const)('marks exactly one current section for topic/p
     const selected = nav.querySelectorAll('[aria-current="page"]');
     expect(selected).toHaveLength(1);
     expect(selected[0]).toHaveTextContent(sectionLabel(section, i18n.t));
-    expect(within(nav).getByRole('combobox', { name: label })).toHaveValue(sectionLabel(section, i18n.t));
+    expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
   };
   await assertCurrent('Topic sections', 'defaults');
   await act(async () => { await router.navigate({ to: '/topic/$topicId', params: { topicId: 'login' }, search: { tab: 'settings', section: 'general' } }); });

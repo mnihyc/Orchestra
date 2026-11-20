@@ -74,7 +74,7 @@ test('machines: the list, the dialog that adds one, a machine with its tabs, and
   await everyTab(page, [/^Registered here/, 'Policy']);
   await page.getByRole('tab', { name: /^Registered here/ }).click();
 
-  await page.getByRole('button', { name: 'Register a profile…' }).click();
+  await page.getByRole('button', { name: 'Register an agent profile…' }).click();
   const profileRegistration = page.getByRole('dialog', { name: 'Register an agent profile from ada-laptop' });
   await expect(profileRegistration).toBeVisible();
   await expectAccessibleInBothThemes(page);

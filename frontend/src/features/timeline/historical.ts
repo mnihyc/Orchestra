@@ -7,8 +7,8 @@ export function recordedItem(item: Pick<Item, 'before_orch' | 'segment_id'>, seg
   return item.before_orch || segments.some((segment) => segment.id === item.segment_id && segment.ended_at !== null);
 }
 
-export function useRecordedItem(threadId: string, item: Pick<Item, 'before_orch' | 'segment_id' | 'continuation_id'>): boolean {
+export function useRecordedItem(threadId: string, item: Pick<Item, 'before_orch' | 'segment_id' | 'continuation_id' | 'turn_id'>): boolean {
   const { inspection } = useTimelineContext();
-  return useThreadPart(threadId, (view) => inspection !== undefined || recordedItem(item, view.segments) || view.read?.projection !== undefined
+  return useThreadPart(threadId, (view) => inspection !== undefined || (item.turn_id !== null && view.turns.get(item.turn_id)?.error?.code === 'turn_lost') || recordedItem(item, view.segments) || view.read?.projection !== undefined
     && view.read.projection !== null && (threadReadOnly(view) || item.continuation_id !== view.read.projection.viewed_continuation_id));
 }
