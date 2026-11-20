@@ -149,7 +149,7 @@ pub async fn of_many(
                  AND NOT (e.status='moving' AND e.machine_id IS NOT NULL AND r.generation>e.generation)
                ORDER BY r.created_at DESC LIMIT 1) r ON true
            LEFT JOIN nodes home ON home.id=e.home_node_id
-           LEFT JOIN LATERAL (SELECT s.value #>> '{}' AS host_id,s.locked FROM settings s
+           LEFT JOIN LATERAL (SELECT CASE WHEN s.value->>'type'='single' AND s.value#>>'{resource,kind}'='host' THEN s.value#>>'{resource,id}' END AS host_id,s.locked FROM settings s
                WHERE s.key='env.host_id' AND (s.node_id IS NULL OR s.node_id=ANY(home.path))
                ORDER BY s.locked DESC,
                    CASE WHEN s.locked THEN COALESCE(array_position(home.path,s.node_id),0) END ASC,
@@ -159,7 +159,7 @@ pub async fn of_many(
            LEFT JOIN LATERAL (SELECT target.* FROM hosts target
                WHERE CASE WHEN r.id IS NOT NULL THEN target.id=r.host_id ELSE
                    target.id::text=COALESCE(planned.host_id,CASE WHEN scoped.locked THEN scoped.host_id
-                        WHEN e.config ? 'env.host_id' THEN e.config->>'env.host_id' ELSE scoped.host_id END) END
+                        WHEN e.config ? 'env.host_id' THEN CASE WHEN e.config->'env.host_id'->>'type'='single' AND e.config#>>'{env.host_id,resource,kind}'='host' THEN e.config#>>'{env.host_id,resource,id}' END ELSE scoped.host_id END) END
                ORDER BY target.schedulable DESC,target.id LIMIT 1) h ON true
            LEFT JOIN LATERAL (SELECT target.drivers -> t.driver AS descriptor FROM hosts target
                WHERE r.id IS NULL AND e.template_id IS NOT NULL AND h.id IS NULL
