@@ -38,6 +38,18 @@ class TargetedJobs(unittest.TestCase):
         self.assertTrue(all(call.args[1][0] not in {"cargo", ci_targeted.sys.executable} for call in web))
         self.assertEqual(sum(label == "npm ci" for label in web_labels), 1)
 
+    def test_release_checks_can_run_without_publishing_a_tag(self):
+        targets = "release-checks\nrelease-first-start\n"
+        result, checks, fixtures = self.invoke(targets, "rust")
+        self.assertEqual(result, 0)
+        self.assertFalse(fixtures)
+        self.assertEqual([call.args[1][-1] for call in checks], [
+            "test_release_*.py", ".github/scripts/workflow_lint.py",
+            "scripts/smoke/update-doctor/run.sh", "scripts/smoke/update-files/run.sh",
+            "scripts/smoke/first-start/run.sh",
+        ])
+        self.assertEqual(self.invoke(targets, "web"), (0, [], []))
+
     def test_group_with_no_selected_work_succeeds_without_starting_any_tool(self):
         for targets, group in (("web typecheck\n", "rust"), ("fmt\n", "web")):
             result, calls, fixtures = self.invoke(targets, group)

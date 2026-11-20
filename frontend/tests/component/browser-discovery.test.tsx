@@ -26,22 +26,22 @@ vi.mock('@/api/environments', async (load) => {
   const actual = await load<typeof EnvironmentApi>();
   return { ...actual, environmentQuery: (id: string) => ({ queryKey: actual.environmentKey(id), queryFn: () => Promise.resolve(environment), staleTime: Infinity }) };
 });
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn(),
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn(),
   Link: ({ children, className }: { children: ReactNode; className?: string }) => <a href="#environment" className={className}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: () => ({ unsubscribe: () => undefined }) } }));
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/McpServers', () => ({ McpServers: () => <p>Tools ready</p> }));
 vi.mock('@/features/resources/environments/Doors', () => ({ EnvironmentDoor: () => <p>Terminal ready</p> }));
 vi.mock('@/features/ports/Ports', () => ({ PortsPanel: () => <p>Ports ready</p> }));
-vi.mock('@/features/vnc/View', () => ({ DisplaysTab: () => <p>Display ready</p> }));
+vi.mock('@/features/vnc/View', async (loadOriginal) => ({ ...await loadOriginal<object>(), DisplaysTab: () => <p>Display ready</p> }));
 // A deliberately failing picture proves the real panel boundary independently of malformed API data.
 vi.mock('@/features/browser/Front', () => ({ Front: () => {
   if (wire.state.broken) throw new Error('The browser picture failed to render');
   return <p>Browser picture</p>;
 } }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 
 const caches = new Set<QueryClient>();
@@ -78,8 +78,8 @@ afterEach(async () => {
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   const missingPrograms = locale === 'en'
-    ? 'The browser response is missing its program information.'
-    : '浏览器响应中缺少程序信息。';
+    ? 'Orch could not read which browsers this environment has. Try again in a moment.'
+    : 'Orch 无法读取这个环境有哪些浏览器。请稍后重试。';
   for (const missing of ['support', 'programs'] as const) {
     it(`keeps missing ${missing} recoverable inside the actual browser tab (${locale}/${theme})`, async () => {
       await setLocale(locale);

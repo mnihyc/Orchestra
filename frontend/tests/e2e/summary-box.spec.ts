@@ -28,7 +28,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     } : {
       previous: '审阅已就绪', updated: '审阅已通过，接下来发布',
       complete: '完成刷新', fail: '刷新失败', noSummarizer: '显示未设置摘要器', written: '人工帮助摘要',
-      help: '准备所属位置、模型和环境，再与同事和代理开始协作。',
+      help: '准备所属位置、模型和环境，再与同事和智能体开始协作。',
     };
     const frame = page.locator('[data-summary-preview]');
     const box = frame.locator('section');

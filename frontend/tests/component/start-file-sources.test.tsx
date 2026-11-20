@@ -10,7 +10,10 @@ import type { PlaceRef } from '@/features/navigation/places';
 import type { NameHit, NewEnvironment, Snapshot, SnapshotPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { environment, options } from '../unit/start-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+// These cases prove source choices and paging; shortened text needs browser layout.
+skipOverflowFallback();
 
 const io = vi.hoisted(() => ({ names: vi.fn<() => Promise<NameHit[]>>(), snapshots: vi.fn<(id: string, cursor: string | null) => Promise<SnapshotPage>>() }));
 vi.mock('@/api/search', async (load) => ({ ...await load<typeof Search>(), namesQuery: (search: Search.NameSearch) => ({ queryKey: ['file-source-names', search], queryFn: io.names }) }));
@@ -60,7 +63,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await waitFor(() => expect(io.snapshots).toHaveBeenCalledWith(hit.id, null));
     const choose = screen.getByRole('button', { name: i18n.t('start.where.useFiles') }); expect(choose).toBeDisabled();
     await user.click(await screen.findByRole('combobox', { name: i18n.t('start.where.snapshot') }));
-    expect(screen.getByRole('option', { name: 'State bad' })).toHaveAttribute('data-disabled');
+    const incomplete = screen.getByRole('option', { name: 'State bad' });
+    expect(incomplete).toHaveAttribute('aria-disabled', 'true');
+    await user.click(incomplete);
+    expect(choose).toBeDisabled();
+    expect(screen.getByLabelText('Creation choices')).toHaveTextContent('{}');
     await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button', { name: i18n.t('ui.pagination.more') }));
     await waitFor(() => expect(io.snapshots).toHaveBeenCalledWith(hit.id, 'next'));
