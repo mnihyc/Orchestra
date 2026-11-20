@@ -364,7 +364,7 @@ pub struct SummaryProjection {
     pub inspecting: bool,
     /// Existing readable paragraph, or no paragraph for this currently readable source.
     pub text: Option<String>,
-    /// Stored producer facts; provider and offering remain subject to optional current provider Read.
+    /// The recorded producer. A key needs provider Read on this operation for model and account names.
     pub producer: Option<SummaryProducerView>,
     /// Actual last successful publication, if any.
     pub updated_at: Option<Time>,
@@ -441,7 +441,7 @@ pub enum SummaryState {
     NoSummarizer,
 }
 
-/// A readable producer identity, with private provider/offering details omitted independently.
+/// The producer identity visible to this reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SummaryProducerView {
     /// Installed producer kind, independent of a vendor.
@@ -450,7 +450,7 @@ pub struct SummaryProducerView {
     pub title: String,
     /// Only when current Read permits this provider's identity.
     pub provider: Option<ProviderView>,
-    /// Only when current Read permits this offering's identity.
+    /// The admitted model. On resource summaries a key needs provider Read on the consuming operation.
     pub offering: Option<String>,
 }
 
@@ -505,6 +505,15 @@ pub struct SummarySnapshot {
     pub producer: Option<SummaryProducerView>,
     /// Coverage of currently readable stored input, without provider/configuration details.
     pub input: Option<orch_plugin_contract::refs::SummaryInputFacts>,
+    /// Captured output facts of this readable paragraph, never reconstructed from later defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_facts: Option<crate::summary_facts::SummaryResultFacts>,
+    /// Retained actual latest attempt, separate from the paragraph it may have left unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt: Option<crate::summary_facts::SummaryAttemptFacts>,
+    /// Effect-free current manual proposal; choosing it never enables automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_proposal: Option<crate::summary_facts::SummaryRefreshProposal>,
     /// Manual availability; never enables or writes an automatic producer setting.
     pub manual_problem: Option<SummaryManualProblem>,
     /// Actual reason and eligibility time of accepted pending work.
