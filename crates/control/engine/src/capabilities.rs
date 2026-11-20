@@ -13,7 +13,7 @@
 //! policy names, and never the people whose work asked: the holders of `host.manage` on the environment's host
 //! (`host`), the admins of its home org (`org`), or the system's admins (`system`). Owning the thread, the topic or
 //! the environment decides nothing here. Gateway requests use holders of `ports.manage` on the environment.
-//! A request nobody decides lapses after the resolved `requests.expiry_hours`.
+//! A request nobody decides lapses after the resolved `requests.expiry_minutes`.
 //!
 //! **A grant** adds the key to what the environment was given, writes `capability.granted`, puts a line in the
 //! requesting thread's history, and asks for the environment's unit to be made anew with the capability's patch

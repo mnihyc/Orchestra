@@ -32,6 +32,18 @@ pub fn for_code(code: ErrorCode) -> String {
         .to_owned()
 }
 
+/// The public recovery can be more specific when the server reports a known reason.
+#[must_use]
+pub fn for_problem(code: ErrorCode, reason: Option<&str>) -> String {
+    if code == ErrorCode::ModelNotAllowed
+        && reason == Some("generation_unsupported")
+        && let Some(words) = at(catalogue(), "errors.ask.generation_unsupported")
+    {
+        return words.to_owned();
+    }
+    for_code(code)
+}
+
 /// A native or job failure retains its code while its human message has a known recovery sentence.
 #[must_use]
 pub fn for_failure(code: &str) -> String {

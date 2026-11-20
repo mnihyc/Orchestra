@@ -27,13 +27,24 @@ fn has_code(message: &str) -> bool {
 pub(super) fn prepare(problem: &mut Problem) {
     // Flattened extras cannot overwrite the contract fields (some native failures used
     // an extra `detail`, producing a second JSON member with the unreviewed diagnostics).
-    for reserved in ["type", "code", "title", "status", "detail", "request_id"] {
+    for reserved in [
+        "type",
+        "code",
+        "title",
+        "status",
+        "detail",
+        "request_id",
+        "session_end",
+    ] {
         problem.extra.remove(reserved);
     }
     problem.title = problem.code.title().to_owned();
-    problem.detail = words(problem.code);
+    problem.detail = orch_api_contract::messages::for_problem(
+        problem.code,
+        problem.extra.get("reason").and_then(Json::as_str),
+    );
     if let Some(message) = problem.extra.get_mut("message") {
-        *message = Json::String(words(problem.code));
+        *message = Json::String(problem.detail.clone());
     }
     if let Some(faults) = problem.extra.get_mut("errors").and_then(Json::as_array_mut) {
         for fault in faults {
@@ -62,7 +73,15 @@ pub mod tests {
             .with("message", diagnostic);
         problem.request_id = "request-for-support".to_owned();
         let original = problem.clone();
-        let reserved = ["type", "code", "title", "status", "detail", "request_id"];
+        let reserved = [
+            "type",
+            "code",
+            "title",
+            "status",
+            "detail",
+            "request_id",
+            "session_end",
+        ];
         for member in reserved {
             problem.extra.insert(member.to_owned(), json!(diagnostic));
         }
