@@ -70,6 +70,24 @@ pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
     }
 }
 
+/// A failed native probe retains its actual blocking policy, without exposing arbitrary program diagnostics.
+pub(crate) fn harness_start_failed(policy: Option<&str>) -> ApiError {
+    let mut error = ApiError::new(
+        ErrorCode::BindingIncompatible,
+        "the selected harness could not start on this machine",
+    )
+    .with("reason", "harness_error");
+    if let Some(policy) = policy.filter(|policy| {
+        matches!(
+            *policy,
+            "agent.programs" | "tools.fetch" | "agent.harnesses"
+        )
+    }) {
+        error = error.with("policy", policy);
+    }
+    error
+}
+
 /// Why a thread could not be made, as the problem a client acts on.
 pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiError {
     match error {
@@ -102,6 +120,7 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
             "environment.use",
             "the environment is not there or is being removed",
         ),
+        CreateThreadError::AgentStartFailed(policy) => harness_start_failed(policy.as_deref()),
         CreateThreadError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",

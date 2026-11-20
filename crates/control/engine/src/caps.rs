@@ -2136,6 +2136,25 @@ async fn ask_of_turn(
     )))
 }
 
+/// How many times the stop of a reached cap looks at the committed usage before it leaves the turns to the next
+/// report: after the grace, then after twice that, and so on, doubling each time: about three seconds in all with
+/// the grace a deployment ships with, so that a commit slowed by a loaded machine does not leave a turn running
+/// past its cap.
+const STOP_LOOKS: u32 = 7;
+
+/// The shortest wait between two such looks, whatever the grace is.
+const STOP_LOOK_FLOOR: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// What a look at a cap, made after the report that showed it reached, found.
+enum Reached {
+    /// The cap is gone or off: nothing to stop.
+    Gone,
+    /// It has room: the report that showed it reached is not committed yet, or is no longer true.
+    Room,
+    /// It has none: its turns were stopped.
+    NoRoom,
+}
+
 impl Engine {
     /// After usage was reported on a stream: looks again at the caps of the turns it concerns, no more often
     /// for a thread than `[engine] cap_check_secs`. Notices are written in the transaction of the report; a
@@ -2173,17 +2192,55 @@ impl Engine {
 
     async fn look_at_caps(&self, unit: &mut Unit<'_>, thread: Id) -> Result<(), EngineError> {
         let now = unit.now();
-        {
+        let remaining = {
             let mut checked = lock(&self.inner.cap_checks);
             let wait = Duration::from_std(self.inner.config.cap_check)
                 .unwrap_or_else(|_| Duration::zero());
             forget_stale_checks(&mut checked, now, wait);
-            if checked.contains_key(&thread) {
-                return Ok(());
+            if let Some(last) = checked.get(&thread) {
+                Some(*last + wait - now)
+            } else {
+                checked.insert(thread, now);
+                None
             }
-            checked.insert(thread, now);
+        };
+        match remaining {
+            None => self.look_at_caps_now(unit, thread).await,
+            Some(remaining) => {
+                self.look_at_caps_later(thread, remaining);
+                Ok(())
+            }
         }
-        self.look_at_caps_now(unit, thread).await
+    }
+
+    /// A report that comes while the window of a look is open is not looked at then, but it is looked at when the
+    /// window ends, once for however many reports came: a turn that reports and then runs on without a report must
+    /// still be stopped at its cap, and the next report may be minutes away.
+    fn look_at_caps_later(&self, thread: Id, remaining: Duration) {
+        if !lock(&self.inner.cap_looks_due).insert(thread) {
+            return;
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let wait =
+                remaining.to_std().unwrap_or_default() + engine.inner.config.post_commit_grace;
+            tokio::time::sleep(wait).await;
+            if let Err(error) = engine.look_at_caps_in_a_turn_of_its_own(thread).await {
+                tracing::warn!(%error, %thread, "the caps of a thread could not be looked at when their window ended");
+            }
+            lock(&engine.inner.cap_looks_due).remove(&thread);
+        });
+    }
+
+    /// The look at the caps of a thread's running turn, in a transaction of its own, which restarts the window.
+    async fn look_at_caps_in_a_turn_of_its_own(&self, thread: Id) -> Result<(), EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+        lock(&self.inner.cap_checks).insert(thread, unit.now());
+        self.look_at_caps_now(&mut unit, thread).await?;
+        let finished = unit.finish().await?;
+        self.commit(tx, finished).await?;
+        Ok(())
     }
 
     /// Forgets when a thread's caps were last looked at, once its turn ended: the next turn's are looked at
@@ -2214,22 +2271,41 @@ impl Engine {
                 && each.cap.at_limit == at_limit::STOP
                 && !bypass_names(turn.limit_bypass.as_ref(), each.cap.id)
             {
-                self.stop_later(each.cap.id, each.person);
+                self.stop_later(each.cap.id, each.person, thread);
             }
         }
         Ok(())
     }
 
     /// Has the turns a cap covers stopped, once the transaction that showed it reached has committed.
-    fn stop_later(&self, cap: Id, person: Option<Id>) {
+    ///
+    /// The look that found the cap reached was made inside that transaction, which has not committed when the
+    /// look of its own begins, and may never commit: a conflict rolls it back and the report is applied again.
+    /// That look reads what has been committed. After the grace it may find room (the report is not visible
+    /// yet); then the thread's note that its caps were looked at is taken away, so that the report applied
+    /// again is looked at and not passed over as one looked at a moment ago, and the look is made again after
+    /// twice as long, up to `STOP_LOOKS` times. A stop that found room and gave up would leave the turn running
+    /// until a next report, and the next report may be minutes away.
+    fn stop_later(&self, cap: Id, person: Option<Id>, thread: Id) {
         if !lock(&self.inner.cap_stops).insert((cap, person)) {
             return;
         }
         let engine = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(engine.inner.config.post_commit_grace).await;
-            if let Err(error) = engine.stop_covered(cap, person).await {
-                tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; the next report looks again");
+            let mut wait = engine.inner.config.post_commit_grace;
+            for _ in 0..STOP_LOOKS {
+                tokio::time::sleep(wait).await;
+                match engine.stop_covered_if_reached(cap, person).await {
+                    Ok(Reached::NoRoom | Reached::Gone) => break,
+                    Ok(Reached::Room) => {
+                        engine.forget_cap_check(thread);
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %cap, "the turns a cap covers could not be stopped; it looks again");
+                        wait = wait.saturating_mul(2).max(STOP_LOOK_FLOOR);
+                    }
+                }
             }
             lock(&engine.inner.cap_stops).remove(&(cap, person));
         });
@@ -2237,23 +2313,25 @@ impl Engine {
 
     /// Ends every running turn a cap that is reached covers (for a cap counted per person, the person's),
     /// except those it was let past.
-    pub(crate) async fn stop_covered(
+    ///
+    /// It says what it found: the cap gone or off, with room, or without room (and its turns stopped).
+    async fn stop_covered_if_reached(
         &self,
         cap: Id,
         person: Option<Id>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Reached, EngineError> {
         let now = self.inner.clock.now();
         let (message, victims) = {
             let mut conn = self.inner.db.acquire().await?;
             let Some(cap) = rows::get(&mut conn, cap).await? else {
-                return Ok(());
+                return Ok(Reached::Gone);
             };
             if !cap.enabled {
-                return Ok(());
+                return Ok(Reached::Gone);
             }
             let standing = standing(&mut conn, &cap, person, now).await?;
             if standing.has_room() {
-                return Ok(());
+                return Ok(Reached::Room);
             }
             let message = describe(&mut conn, &standing).await?;
             let covered = rows::running(&mut conn, &cap, standing.person, now).await?;
@@ -2268,7 +2346,7 @@ impl Engine {
             self.stop_turn(turn.thread_id, turn.turn_id, &message)
                 .await?;
         }
-        Ok(())
+        Ok(Reached::NoRoom)
     }
 
     /// Ends a running turn because a cap was reached: its lease is closed, the harness is asked to stop, and
@@ -2346,12 +2424,6 @@ impl Engine {
 // ---------------------------------------------------------------- waiting threads
 
 impl Engine {
-    /// The threads that wait for room in a cap, the one with the oldest input first.
-    pub(crate) async fn threads_waiting_for_room(&self) -> Result<Vec<Id>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
-        Ok(rows::blocked_for_room(&mut conn, self.inner.config.sweep_batch).await?)
-    }
-
     /// Looks at the threads that wait for room in a cap, one after the other, the one whose oldest input is
     /// oldest first, so that a cap behaves as a queue: when room is made, the first of those it fits starts.
     /// A pass under way is not started again.
@@ -2371,28 +2443,42 @@ impl Engine {
     }
 
     async fn release_in_order(&self) -> Result<usize, EngineError> {
-        let waiting = self.threads_waiting_for_room().await?;
+        let mut after = None;
+        let batch = self.inner.config.sweep_batch;
         let mut started = 0;
         // The caps that a thread of this pass was found to wait for. Room may be made while the pass is
         // under way, and a thread behind one of those caps must not overtake the thread in front of it: it
         // is left for the next pass, which begins with the thread that has waited longest.
         let mut full: HashSet<Id> = HashSet::new();
-        for thread in waiting {
-            if self.is_stopped() {
-                break;
-            }
-            if !full.is_empty() && self.is_behind(thread, &full).await? {
-                continue;
-            }
-            lock(&self.inner.cap_waits).remove(&thread);
-            match self.preflight(thread).await? {
-                crate::preflight::Outcome::Started(_) => started += 1,
-                crate::preflight::Outcome::Blocked(_) => {
-                    if let Some(cap) = lock(&self.inner.cap_waits).remove(&thread) {
-                        full.insert(cap);
-                    }
+        loop {
+            let waiting = {
+                let mut conn = self.db().acquire().await?;
+                rows::blocked_for_room_page(&mut conn, after.as_ref(), batch).await?
+            };
+            let last_page =
+                waiting.is_empty() || i64::try_from(waiting.len()).unwrap_or(i64::MAX) < batch;
+            for waiter in waiting {
+                let thread = waiter.thread;
+                after = Some(waiter);
+                if self.is_stopped() {
+                    return Ok(started);
                 }
-                _ => {}
+                if !full.is_empty() && self.is_behind(thread, &full).await? {
+                    continue;
+                }
+                lock(&self.inner.cap_waits).remove(&thread);
+                match self.preflight(thread).await? {
+                    crate::preflight::Outcome::Started(_) => started += 1,
+                    crate::preflight::Outcome::Blocked(_) => {
+                        if let Some(cap) = lock(&self.inner.cap_waits).remove(&thread) {
+                            full.insert(cap);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if last_page {
+                break;
             }
         }
         Ok(started)
@@ -2454,17 +2540,15 @@ impl Engine {
     /// Says that room may have been made in a cap: a turn ended, a cap was raised or removed, a period turned.
     /// The supervisor looks at the threads that wait.
     pub fn room_may_have_been_made(&self) {
-        *lock(&self.inner.room_made) = Some(self.inner.clock.now());
+        let _ = lock(&self.inner.room_made).get_or_insert_with(tokio::time::Instant::now);
         self.inner.signal.notify_one();
     }
 
     /// Whether room was said to have been made a moment ago and has not been looked at yet.
     pub(crate) fn take_room_made(&self) -> bool {
         let mut made = lock(&self.inner.room_made);
-        let wait = Duration::from_std(self.inner.config.post_commit_grace)
-            .unwrap_or_else(|_| Duration::zero());
         match *made {
-            Some(at) if self.inner.clock.now() - at >= wait => {
+            Some(at) if at.elapsed() >= self.inner.config.post_commit_grace => {
                 *made = None;
                 true
             }

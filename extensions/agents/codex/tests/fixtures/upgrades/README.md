@@ -8,9 +8,9 @@ The fixture contracts consumed-fields.json and managed-pins.json refer to those 
 
 managed-pins.json freezes all thirty actual automation pins. The test compares the whole inventory with the same production declaration used at process and thread launch, checks each native spelling, and checks actual configuration values after a profile attempts to override them. plugin_discovery_prefetch was introduced in 0.167.0; the older schema must not pretend it exists. The current adapter correctly refuses to drive 0.165.0. Protocol compatibility replay and native build acceptance are separate assertions; older protocol data never turns that refusal into a supported old binary.
 
-The complete two-direction replay corpora live under the shared tests/fixtures/harness/codex directory when their runner and expected events are committed. Schema checks here are one part of that qualification, not a claim that replay, every control actor or native execution has passed.
+The complete two-direction replay corpora live under the shared tests/fixtures/harness/codex directory when their runner and expected events are committed. Schema checks here are one part of that check, not a claim that replay, every control actor or native execution has passed.
 
-Integrator command, with no vendor process or network required:
+Run this, with no vendor process or network:
 
 ```sh
 cargo test -p orch-adapter-codex --test upgrade_schema
