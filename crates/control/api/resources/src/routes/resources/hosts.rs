@@ -1437,6 +1437,17 @@ async fn runtime_list(
     runtime_views(&ctx, &mut conn, found).await
 }
 
+/// What a request to force the stop or the removal of an environment's unit is told: that is for a provider's unit,
+/// and nothing is changed.
+fn force_is_for_providers() -> ApiError {
+    ApiError::new(
+        ErrorCode::PlanBlocked,
+        "Stopping or deleting by force is for a provider's runtime; the unit of an environment is stopped or deleted without it.",
+    )
+    .with("reason", "force_environment")
+    .with("can_force", false)
+}
+
 /// Stops the selected unit on the host, returning credentials and respecting active work.
 async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiResult<Runtime> {
     let host = ctx.id("id")?;
@@ -1453,6 +1464,7 @@ async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiRe
                 host,
                 runtime,
                 body.interrupt,
+                body.force == Some(true),
             )
             .await
             .map_err(super::provider_runtime::refused)?;
@@ -1469,6 +1481,9 @@ async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiRe
             "this unit has no environment or provider",
         ));
     };
+    if body.force == Some(true) {
+        return Err(force_is_for_providers());
+    }
     let user = ctx.user()?.id();
     ctx.app
         .engine
@@ -1528,6 +1543,7 @@ async fn runtime_delete(ctx: Ctx, query: api::HostRuntimeDeleteQuery, (): ()) ->
                 host,
                 runtime,
                 query.volumes == Some(true),
+                query.force == Some(true),
             )
             .await
             .map_err(super::provider_runtime::refused);
@@ -1538,6 +1554,9 @@ async fn runtime_delete(ctx: Ctx, query: api::HostRuntimeDeleteQuery, (): ()) ->
             "this unit has no environment or provider",
         ));
     };
+    if query.force == Some(true) {
+        return Err(force_is_for_providers());
+    }
     if !orch_db::queries::jobs::open_of_environment(&mut tx, environment)
         .await?
         .is_empty()

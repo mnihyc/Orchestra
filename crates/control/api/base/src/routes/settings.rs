@@ -57,7 +57,7 @@ orch_api_base::api_family_callback! {
     slot __ApiCallbackddd9a09986, __API_CALLBACK_DDD9A09986, __api_set_ddd9a09986;
     base orch_api_base::routes::settings;
 
-    fn registry_definitions() -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::settings::SettingDef>>;
+    fn registry_definitions<'__api>(arg0: Option<&'__api orch_engine::Engine>) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::settings::SettingDef>>;
 }
 
 orch_api_base::api_family_callback! {
