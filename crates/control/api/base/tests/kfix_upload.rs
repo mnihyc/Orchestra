@@ -58,6 +58,7 @@ async fn disk_room() -> (Room, TempDir) {
     let blobs = Blobs::new(store, directory.path());
     old.engine.attach_blobs(blobs.store());
     let state = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: old.db.clone(),
@@ -157,6 +158,7 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: "source.txt".into(),
             media_type: None,
@@ -181,6 +183,8 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
 }
 
 fn same_refusal(known: &Problem, missing: &Problem) {

@@ -6,7 +6,7 @@ import { scenario, signIn } from './support.ts';
 test.beforeEach(async () => { await scenario(); });
 
 const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation' });
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 
 async function viewMenu(page: Page) {
   await bar(page).getByRole('button', { name: 'View options' }).click();

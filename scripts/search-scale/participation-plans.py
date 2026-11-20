@@ -43,9 +43,16 @@ bindings = {
     7: f"ARRAY[{root},md5('inventory/document/1')::uuid,md5('missing/1')::uuid,md5('missing/2')::uuid,md5('missing/3')::uuid,md5('missing/4')::uuid]",
     8: f'ARRAY[{root}]', 9: "'{}'::uuid[]", 10: 'NULL::uuid', 11: f'ARRAY[{root}]',
 }
+ancestors = {}
+if '__ANCESTOR_MARKS__' in source:
+    template = args.query_sql or (tree / 'crates/control/db/src/queries/access/participation.sql')
+    ancestors = {shape: template.with_name(f'participation_{shape}_ancestors.sql').read_text()
+                 for shape in ('open', 'scoped')}
 def statement(overrides=None):
     values = bindings | (overrides or {})
-    return re.sub(r'\$(\d+)\b', lambda m: values[int(m[1])], source)
+    scoped = values[9] != bindings[9] or values[10] != bindings[10]
+    query = source.replace('__ANCESTOR_MARKS__', ancestors.get('scoped' if scoped else 'open', ''))
+    return re.sub(r'\$(\d+)\b', lambda m: values[int(m[1])], query)
 tables = ['nodes', 'documents', 'permission_entries', 'permission_rows', 'node_roles',
           'providers', 'agents', 'environments', 'hosts', 'machines', 'env_templates',
           'mcp_servers', 'mounts', 'skills', 'subscriptions', 'chats', 'chat_states',
@@ -124,6 +131,7 @@ sql.append("ROLLBACK;\n\\echo DONE participation proof")
 (out / 'inputs.json').write_text(json.dumps({
     'head': subprocess.check_output(['git','-C',str(tree),'rev-parse','HEAD'],text=True).strip(),
     'query_sha256': hashlib.sha256(source.encode()).hexdigest(),
+    'ancestor_sha256': {shape: hashlib.sha256(sql.encode()).hexdigest() for shape, sql in ancestors.items()},
     'sizes':sizes,'wide':args.wide,
 },indent=2)+'\n')
 with (out / 'psql.log').open('x') as log:

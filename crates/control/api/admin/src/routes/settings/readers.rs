@@ -9,7 +9,7 @@ use super::add_mode_choices;
 
 use super::secret_failed;
 
-use crate::middleware::authorization;
+use orch_api_base::routes::settings::readers::readable;
 
 use crate::middleware::requests::ApiError;
 
@@ -26,10 +26,6 @@ use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::nodes::NodeRef;
 
 use orch_api_contract::settings as api;
-
-use orch_authz::Act;
-
-use orch_authz::Policy;
 
 use orch_authz::Principal;
 
@@ -52,26 +48,6 @@ pub use orch_api_base::routes::settings::readers::PreparedSettings;
 pub use orch_api_base::routes::settings::readers::PreparedSecrets;
 
 pub use orch_api_base::routes::settings::readers::resolved_views;
-/// The native readers' existing NodeView decision, on this operation's current Principal.
-/// The caller owns credential restoration and operation admission on the supplied snapshot;
-/// no child endpoint selection, replacement caller or wide-name proof is created here.
-async fn readable(conn: &mut Conn, principal: &Principal, node: Id) -> ApiResult<()> {
-    let bounded = principal
-        .caller()
-        .grant()
-        .is_some_and(|grant| grant.operation_scope().is_some());
-    authorization::require_projected(
-        conn,
-        principal,
-        node,
-        authorization::VIEW,
-        Act::Use,
-        Policy::default(),
-        bounded,
-    )
-    .await
-}
-
 /// Resolve the same values, locks and writability hints as the native node settings list.
 pub(crate) async fn prepare_settings(
     conn: &mut Conn,

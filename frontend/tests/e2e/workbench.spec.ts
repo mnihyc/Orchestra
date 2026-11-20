@@ -2,14 +2,14 @@
 import { expect, type Page, test } from '@playwright/test';
 
 import { ACME, changeTree, dropConnections, endTokens, PEOPLE, scenario, signIn, screenAddress } from './support.ts';
-import { showWorkbenchView } from './workbench-support.ts';
+import { restAtEdge, showHiddenBarsOnHover, showWorkbenchView } from './workbench-support.ts';
 
 test.beforeEach(async () => {
   await scenario();
 });
 
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Orgs and your own places' });
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const tabs = (page: Page, area: string) => page.getByRole('tablist', { name: area });
 const said = (page: Page) => page.locator('[id^="DndLiveRegion"]');
 
@@ -174,8 +174,8 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   const current = page.getByRole('menuitem', { name: 'Conversation', exact: true });
   await expect(current).toHaveAttribute('aria-disabled', 'true');
   await expect(current).toHaveAccessibleDescription(/Right bar/);
-  await page.getByRole('menuitem', { name: 'Bottom', exact: true }).press('Enter');
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Bottom panel', exact: true }).press('Enter');
+  await expect(tabs(page, 'Bottom panel').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
   await showWorkbenchView(page, 'Chat');
   const chat = side.getByRole('button', { name: 'Chat', exact: true });
   await chat.focus(); await page.keyboard.press('Space'); await atRest(page);
@@ -188,17 +188,17 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   await expect(tabs(page, 'Main area').getByRole('tab', { name: /^Chat\b/ })).toBeVisible();
   await page.waitForTimeout(500);
   await page.reload();
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
+  await expect(tabs(page, 'Bottom panel').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
   await expect(tabs(page, 'Main area').getByRole('tab', { name: /^Chat\b/ })).toBeVisible();
   await page.goto(`/thread/${ACME.repro}`);
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
+  await expect(tabs(page, 'Bottom panel').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
   await page.goto('/inbox');
   await expect(page.getByRole('tab', { name: /^Outline\b/ })).toHaveCount(0);
   await page.goto(`/thread/${ACME.mainThread}`);
   await page.getByRole('button', { name: 'Layout', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Reset layout', exact: true }).click();
   await expect(side.getByRole('button', { name: 'Outline', exact: true })).toHaveAttribute('aria-expanded', 'true');
-  await expect(tabs(page, 'Bottom')).toHaveCount(0);
+  await expect(tabs(page, 'Bottom panel')).toHaveCount(0);
 });
 
 test('choosing Code sets its frame and adds Files without closing or moving the thread, and Reset layout restores the standard frame with the main tabs and their drafts kept', async ({ page }) => {
@@ -215,7 +215,7 @@ test('choosing Code sets its frame and adds Files without closing or moving the 
   // Code is a choice from the Layout menu. It sets that frame's bars and adds its views.
   await chooseLayout(page, 'Code');
   await expect(main.getByRole('tab', { name: 'Files', exact: true })).toBeVisible();
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Terminal', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs(page, 'Bottom panel').getByRole('tab', { name: 'Terminal', exact: true })).toHaveAttribute('aria-selected', 'true');
   const side = page.locator('[data-workbench-bar="right"]');
   await expect(side).toHaveAttribute('data-active-container', 'conversation');
   await expect(side.getByRole('button', { name: 'Outline', exact: true })).toBeVisible();
@@ -228,7 +228,7 @@ test('choosing Code sets its frame and adds Files without closing or moving the 
   // Reset layout restores the standard frame and gathers the existing main tabs, with their content and drafts.
   await page.getByRole('button', { name: 'Layout', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Reset layout', exact: true }).click();
-  await expect(tabs(page, 'Bottom')).toHaveCount(0);
+  await expect(tabs(page, 'Bottom panel')).toHaveCount(0);
   await expect(side.getByRole('button', { name: 'Outline', exact: true })).toHaveAttribute('aria-expanded', 'true');
   expect(await ids()).toEqual(after);
   await expect(thread).toHaveAttribute('aria-selected', 'true');
@@ -237,6 +237,7 @@ test('choosing Code sets its frame and adds Files without closing or moving the 
 
 test('the bars are shown and hidden by their keys and by the switches in the title, and a view that was closed is added again', async ({ page }) => {
   await signIn(page);
+  await showHiddenBarsOnHover(page);
   await page.goto(`/thread/${ACME.mainThread}`);
   await showWorkbenchView(page, 'Terminal');
   await page.getByRole('button', { name: 'Bottom panel', exact: true }).click();
@@ -258,13 +259,13 @@ test('the bars are shown and hidden by their keys and by the switches in the tit
   await expect(temporary).toHaveCount(0);
   await page.keyboard.press('Control+Shift+Period');
   await expect(side).toHaveCount(0);
-  await page.locator('[data-bar-edge="right"]').hover();
+  await restAtEdge(page, 'right');
   await expect(temporary).toBeVisible();
   await temporary.getByRole('button', { name: 'Keep open as a bar', exact: true }).click();
   await expect(temporary).toHaveCount(0);
   await expect(side).toBeVisible();
   await page.getByRole('button', { name: 'Bottom panel', exact: true }).click();
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
+  await expect(tabs(page, 'Bottom panel').getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
   await side.getByRole('button', { name: 'Actions for Outline', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Hide', exact: true }).click();
   await expect(side.getByRole('button', { name: 'Outline', exact: true })).toHaveCount(0);

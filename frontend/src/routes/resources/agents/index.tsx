@@ -6,8 +6,8 @@
 import { usePageSearch, usePageNavigate } from '@/features/workbench/pageContext';
 import { createFileRoute } from '@tanstack/react-router';
 
-import { AGENT_STATES, AgentList, type AgentsSearch } from '@/features/resources/agents/AgentList';
-import { oneOf, readText } from '@/features/resources/search';
+import { AgentList } from '@/features/resources/agents/AgentList';
+import { AGENT_STATES, type AgentsSearch, oneOf, readText } from '@/features/resources/search';
 
 /** What the address says, with everything that is not one of the things it may say left out. */
 export function readSearch(search: Record<string, unknown>): AgentsSearch {
