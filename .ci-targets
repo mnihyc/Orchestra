@@ -1,0 +1,3 @@
+test -p orch-api-core --test provider_harness -- a_subscription_offers_its_models_after_its_signed_in_harness_can_start_again
+test -p orch-api-core --test provider_harness --test provider_models
+test -p orch-engine --test provider_fact_reads

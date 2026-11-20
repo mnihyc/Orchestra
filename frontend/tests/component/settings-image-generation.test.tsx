@@ -8,7 +8,7 @@ import type { ResolvedSetting } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 afterEach(async () => { await setLocale('en'); });
 
 function draw(reason: string | null) {
@@ -41,6 +41,6 @@ it.each(['en', 'zh-CN'] as const)('keeps an unreported program generic without i
   const def = draw('harness_image_generation_unavailable');
   const user = userEvent.setup();
   await user.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: def.title }) }));
-  expect(await screen.findByText(locale === 'en' ? 'This agent program has not offered image generation.' : '此代理程序尚未提供图像生成。')).toBeVisible();
+  expect(await screen.findByText(locale === 'en' ? 'This agent program has not offered image generation.' : '此智能体程序尚未提供图片生成。')).toBeVisible();
   expect(screen.queryByText(/Claude Code/)).not.toBeInTheDocument();
 });

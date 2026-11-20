@@ -92,7 +92,9 @@ impl Scene {
                 api_key: Some(API_SECRET.into()),
                 secrets: Some([("x-tenant-secret".into(), HEADER_SECRET.into())].into()),
                 access: Some(NewResourceAccess::OnlyMe),
-                runtime_machine_id: machine,
+                runtime_location: machine.map(|machine_id| {
+                    orch_api_contract::resources::ProviderConnectionLocation::Machine { machine_id }
+                }),
                 key_machine_id: machine,
                 arrangements: None,
                 runtime_config: None,
@@ -476,7 +478,7 @@ async fn portable_subscription_copies_start_signed_out_with_no_login_secret_or_o
             agent_id: agent,
             config: None,
             sign_in: None,
-            runtime_machine_id: None,
+            runtime_location: None,
             key_machine_id: None,
             access: Some(NewResourceAccess::OnlyMe),
             arrangements: None,
@@ -833,7 +835,7 @@ async fn a_provider_move_requires_the_actual_owner_and_a_current_native_delete_c
         .await;
     ok(&preview)?;
     let plan: MoveOutDeletePlan = serde_json::from_slice(&preview.raw)?;
-    sqlx::query("UPDATE providers SET revision=revision+1 WHERE id=$1")
+    sqlx::query("UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1")
         .bind(s.source)
         .execute(&s.world.db.pool)
         .await?;
