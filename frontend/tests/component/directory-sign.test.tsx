@@ -34,7 +34,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 }
 
 const unavailableWords = {
-  en: { unchecked: 'Directory not checked', offline: 'Environment offline', refused: 'Files access refused', checking: 'Checking directory…' },
+  en: { unchecked: 'Directory not checked', offline: 'Environment offline', refused: 'Access to files was refused', checking: 'Checking directory…' },
   'zh-CN': { unchecked: '未检查目录', offline: '环境离线', refused: '文件访问被拒绝', checking: '正在检查目录…' },
 };
 function statRefusal(kind: 'offline' | 'refused') {

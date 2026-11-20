@@ -23,7 +23,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Status
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use orch_link_contract::content::{BLOBS_PATH, COMMAND_HEADER, MAX_CHUNK_BYTES};
+use orch_link_contract::content::{BLOBS_PATH, COMMAND_HEADER};
 use orch_link_contract::enrollment::{ENROLL_PATH, RENEW_PATH, REQUEST_TIMEOUT_SECS};
 use orch_link_contract::version::PATH_PREFIX;
 use rustls::pki_types::ServerName;
@@ -74,9 +74,6 @@ const SMALL_BODY_BYTES: usize = 64 * 1024;
 /// How large a question which content is missing may be: a thousand hashes
 /// of seventy characters, and room.
 const MISSING_BODY_BYTES: usize = 128 * 1024;
-/// What an upload's body may exceed a piece's size by: nothing is meant to,
-/// and a request line's worth of room is not a way to carry more.
-const PIECE_SLACK_BYTES: usize = 4 * 1024;
 /// How long the gateway waits to reach the system.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -146,7 +143,7 @@ fn kinded(method: &Method, path: &str) -> Option<Kinded> {
     }
     if serves(path) && path.starts_with(BLOBS_PATH) {
         let body_limit = if method == Method::PUT {
-            usize::try_from(MAX_CHUNK_BYTES).unwrap_or(usize::MAX) + PIECE_SLACK_BYTES
+            usize::MAX
         } else if method == Method::POST {
             MISSING_BODY_BYTES
         } else if method == Method::GET || method == Method::HEAD {
@@ -337,39 +334,23 @@ async fn relay_request(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response<Body>, Upstream> {
-    let url = url::Url::parse(&gateway.inner.settings.backplane_url)
+    // The configured address is the WebSocket backplane; HTTP content uses its origin and an absolute route.
+    let target = api_target(&gateway.inner.settings.backplane_url, target)
         .map_err(|_| Upstream::Unreachable)?;
-    let host = url.host_str().ok_or(Upstream::Unreachable)?.to_owned();
-    let port = url.port_or_known_default().ok_or(Upstream::Unreachable)?;
-    let name = ServerName::try_from(host.clone()).map_err(|_| Upstream::Unreachable)?;
-    let socket = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((host.clone(), port)))
-        .await
-        .map_err(|_| Upstream::TimedOut)?
-        .map_err(|_| Upstream::Unreachable)?;
-    let _ = socket.set_nodelay(true);
-    let tls = TlsConnector::from(Arc::clone(&gateway.inner.upstream_tls))
-        .connect(name, socket)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "the system refused the gateway's connection");
-            Upstream::Unreachable
-        })?;
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake::<_, Body>(TokioIo::new(tls))
-            .await
-            .map_err(|_| Upstream::Unreachable)?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
     let mut upstream = Request::new(body);
     *upstream.method_mut() = method;
-    *upstream.uri_mut() = target.parse().map_err(|_| Upstream::Unreachable)?;
+    *upstream.uri_mut() = target;
     *upstream.headers_mut() = headers;
-    insert(upstream.headers_mut(), "host", &format!("{host}:{port}"));
-    let response = sender.send_request(upstream).await.map_err(|error| {
-        tracing::warn!(%error, "a request could not be handed to the system");
-        Upstream::Unreachable
-    })?;
+    let response = gateway
+        .inner
+        .content_client
+        .0
+        .request(upstream)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error,"a request could not be handed to the system");
+            Upstream::Unreachable
+        })?;
     let (mut parts, incoming) = response.into_parts();
     for name in NOT_PASSED_BACK {
         parts.headers.remove(name);
@@ -378,4 +359,130 @@ async fn relay_request(
         parts,
         incoming.map_err(proxy_error).boxed(),
     ))
+}
+
+fn api_target(base: &str, path: &str) -> Result<http::Uri, std::io::Error> {
+    let mut base = url::Url::parse(base).map_err(std::io::Error::other)?;
+    base.set_scheme("https")
+        .map_err(|()| std::io::Error::other("the API needs HTTPS"))?;
+    base.join(path)
+        .map_err(std::io::Error::other)?
+        .as_str()
+        .parse()
+        .map_err(std::io::Error::other)
+}
+
+/// The gateway's authenticated API connections are reused across piece requests and machines.
+/// Hyper returns a connection to its pool only after the streamed body has been consumed.
+pub(crate) struct Client(hyper_util::client::legacy::Client<ToApi, Body>);
+impl Client {
+    pub(crate) fn new(tls: Arc<rustls::ClientConfig>) -> Self {
+        Self(
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_timer(hyper_util::rt::TokioTimer::new())
+                .build(ToApi(tls)),
+        )
+    }
+}
+#[derive(Clone)]
+struct ToApi(Arc<rustls::ClientConfig>);
+impl tower::Service<http::Uri> for ToApi {
+    type Response = ApiSocket;
+    type Error = std::io::Error;
+    type Future = futures::future::BoxFuture<'static, Result<ApiSocket, std::io::Error>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let tls = Arc::clone(&self.0);
+        Box::pin(async move {
+            if uri.scheme_str() != Some("https") {
+                return Err(std::io::Error::other("the API requires HTTPS"));
+            }
+            let host = uri
+                .host()
+                .ok_or_else(|| std::io::Error::other("the API needs a host"))?
+                .to_owned();
+            let port = uri.port_u16().unwrap_or(443);
+            tokio::time::timeout(CONNECT_TIMEOUT, async move {
+                let socket = TcpStream::connect((host.as_str(), port)).await?;
+                socket.set_nodelay(true)?;
+                let name = ServerName::try_from(host).map_err(std::io::Error::other)?;
+                let tls = TlsConnector::from(tls).connect(name, socket).await?;
+                Ok(ApiSocket(TokioIo::new(tls)))
+            })
+            .await
+            .map_err(std::io::Error::other)?
+        })
+    }
+}
+struct ApiSocket(TokioIo<tokio_rustls::client::TlsStream<TcpStream>>);
+impl hyper_util::client::legacy::connect::Connection for ApiSocket {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        let connected = hyper_util::client::legacy::connect::Connected::new();
+        if self.0.inner().get_ref().1.alpn_protocol() == Some(b"h2") {
+            connected.negotiated_h2()
+        } else {
+            connected
+        }
+    }
+}
+impl hyper::rt::Read for ApiSocket {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Read::poll_read(std::pin::Pin::new(&mut self.0), cx, buf)
+    }
+}
+impl hyper::rt::Write for ApiSocket {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        hyper::rt::Write::poll_write(std::pin::Pin::new(&mut self.0), cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_flush(std::pin::Pin::new(&mut self.0), cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_shutdown(std::pin::Pin::new(&mut self.0), cx)
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    #[test]
+    fn pooled_content_uses_the_backplane_origin_without_its_websocket_route()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let target = api_target(
+            "wss://api:8444/internal/backplane",
+            "/internal/link/blobs/file?offset=9&size=20",
+        )?;
+        assert_eq!(
+            target.to_string(),
+            "https://api:8444/internal/link/blobs/file?offset=9&size=20"
+        );
+        assert_eq!(
+            api_target(
+                "https://api:8444/internal/backplane",
+                "/internal/gateway/renew"
+            )?
+            .path(),
+            "/internal/gateway/renew"
+        );
+        Ok(())
+    }
 }

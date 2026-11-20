@@ -9,7 +9,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 import { sandboxReadiness as readiness } from '../fixtures/sandbox-readiness';
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   Link: ({ to, params, search, children }: { to:string; params:{id:string}; search?:{tab:string}; children:ReactNode }) =>
     <a href={`${to.replace('$id', params.id)}${search ? `?tab=${search.tab}` : ''}`}>{children}</a>,
 }));

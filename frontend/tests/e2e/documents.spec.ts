@@ -198,7 +198,7 @@ test('a film is given as an address and is played from there only when the reade
   await caretAtEndOf(page, 'A bulleted line');
   await page.keyboard.press('Enter');
   await slash(page, 'film');
-  const dialog = page.getByRole('dialog', { name: 'Add a film' });
+  const dialog = page.getByRole('dialog', { name: 'Add a video' });
   await dialog.getByRole('textbox', { name: 'Address' }).fill('http://insecure.example.org/a.mp4');
   await dialog.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(dialog.getByText('Give an address that begins with https://')).toBeVisible();

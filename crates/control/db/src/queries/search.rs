@@ -292,7 +292,7 @@ pub async fn participant_chats(
     user: Id,
     ids: &[Id],
 ) -> Result<Vec<ParticipantChat>, DbError> {
-    Ok(sqlx::query_as("SELECT c.id, c.org_id, cm.guest, cm.manager, cm.expires_at FROM chats c JOIN chat_members cm ON cm.chat_id = c.id JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE cm.user_id = $1 AND cm.left_at IS NULL AND c.id = ANY($2) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(home.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT c.id, c.org_id, cm.guest, cm.manager, cm.expires_at FROM chats c JOIN chat_members cm ON cm.chat_id = c.id JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE cm.user_id = $1 AND cm.left_at IS NULL AND c.id = ANY($2) AND (SELECT path_state.live FROM orch_path_state(home.path) path_state)")
         .bind(user).bind(ids).fetch_all(conn).await?)
 }
 
@@ -313,47 +313,47 @@ pub async fn name_roots(
         .fetch_all(conn)
         .await?);
     }
-    Ok(sqlx::query_scalar(r"WITH held AS MATERIALIZED (
-        SELECT * FROM unnest($3::text[],$4::uuid[],$5::text[]) AS given(kind,id,role) WHERE $6
-        UNION ALL SELECT * FROM access_holders($1,$2,false) WHERE NOT $6
-      ), objects AS (
-        SELECT 'node'::text kind,id,id place,org_id,owner_id FROM nodes WHERE deleted_at IS NULL
-        UNION ALL SELECT 'document',id,node_id,org_id,owner_id FROM documents WHERE deleted_at IS NULL
-        UNION ALL SELECT 'document_container',id,node_id,org_id,owner_id FROM document_containers WHERE deleted_at IS NULL
-        UNION ALL SELECT 'chat',id,COALESCE(node_id,home_id,org_id),org_id,NULL FROM chats
-        UNION ALL SELECT 'provider',id,home_id,org_id,owner_id FROM providers WHERE deleted_at IS NULL
-        UNION ALL SELECT 'agent',id,home_id,org_id,owner_id FROM agents WHERE deleted_at IS NULL
-        UNION ALL SELECT 'environment',id,home_node_id,org_id,owner_id FROM environments WHERE deleted_at IS NULL
-        UNION ALL SELECT 'host',h.id,h.home_id,h.org_id,h.owner_id FROM hosts h JOIN machines m ON m.id=h.machine_id WHERE m.deleted_at IS NULL
-        UNION ALL SELECT 'template',id,home_id,org_id,owner_id FROM env_templates WHERE deleted_at IS NULL
-        UNION ALL SELECT 'mcp_server',id,home_id,org_id,owner_id FROM mcp_servers WHERE deleted_at IS NULL
-        UNION ALL SELECT 'mount',id,home_id,org_id,owner_id FROM mounts WHERE deleted_at IS NULL
-        UNION ALL SELECT 'skill',id,home_id,org_id,owner_id FROM skills WHERE deleted_at IS NULL
-        UNION ALL SELECT 'machine',id,home_id,org_id,owner_id FROM machines WHERE deleted_at IS NULL
-      ), seeds AS (
-        SELECT m.org_id place FROM org_members m WHERE m.user_id=$1
-        UNION SELECT n.id FROM held h JOIN nodes n ON n.id=h.id WHERE h.kind IN ('role','visible')
-        UNION SELECT COALESCE(o.place,o.org_id) FROM objects o WHERE o.owner_id=$1
-        UNION SELECT COALESCE(o.place,o.org_id) FROM permission_entries e JOIN objects o ON o.kind=e.object_kind AND o.id=e.object_id
-          LEFT JOIN nodes n ON n.id=COALESCE(o.place,o.org_id)
-          WHERE e.removed_at IS NULL AND (e.expires_at IS NULL OR e.expires_at>$2)
-            AND (EXISTS (SELECT 1 FROM held h WHERE
-                 (e.holder_kind=h.kind AND e.holder_id=h.id AND e.holder_kind IN ('user','group','members'))
-                 OR (e.holder_kind='role' AND h.kind IN ('role','visible') AND h.id=COALESCE(e.holder_id,o.place)
-                     AND array_position(ARRAY['viewer','interactor','developer','admin'],h.role)>=array_position(ARRAY['viewer','interactor','developer','admin'],e.holder_role)))
-                 OR (e.holder_kind='everyone' AND EXISTS (SELECT 1 FROM held h WHERE h.kind='visible' AND h.id=ANY(n.path))))
-        UNION SELECT c.org_id FROM chat_members cm JOIN chats c ON c.id=cm.chat_id WHERE cm.user_id=$1 AND cm.left_at IS NULL
-      ), roots AS (
-        SELECT DISTINCT n.path[1] root FROM seeds s JOIN nodes n ON n.id=s.place WHERE n.deleted_at IS NULL
-      )
-      SELECT DISTINCT n.id FROM nodes n JOIN roots r ON n.path[1]=r.root
-        WHERE n.kind='org' AND n.deleted_at IS NULL")
-        .bind(user).bind(at)
+    Ok(sqlx::query_scalar(include_str!("search/name_roots.sql"))
+        .bind(user)
+        .bind(at)
         .bind(held.map(|held| held.kinds.as_slice()).unwrap_or_default())
         .bind(held.map(|held| held.ids.as_slice()).unwrap_or_default())
         .bind(held.map(|held| held.roles.as_slice()).unwrap_or_default())
         .bind(held.is_some())
-        .fetch_all(conn).await?)
+        .bind(direct_holder_ids(held))
+        .fetch_all(conn)
+        .await?)
+}
+
+/// Executes the actual ordinary candidate-root statement with its plan and buffer statistics.
+/// Shared by the team-sized diagnostics; the same source and bindings serve the ordinary read.
+pub async fn explain_name_roots(
+    conn: &mut Conn,
+    user: Id,
+    at: DateTime<Utc>,
+    held: &super::access::kept::Held,
+) -> Result<orch_types::Json, DbError> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}",
+        include_str!("search/name_roots.sql"),
+    )))
+    .bind(user)
+    .bind(at)
+    .bind(&held.kinds)
+    .bind(&held.ids)
+    .bind(&held.roles)
+    .bind(true)
+    .bind(direct_holder_ids(Some(held)))
+    .fetch_one(conn)
+    .await?)
+}
+
+fn direct_holder_ids(held: Option<&super::access::kept::Held>) -> Vec<Id> {
+    held.into_iter()
+        .flat_map(|held| held.kinds.iter().zip(&held.ids))
+        .filter(|(kind, _)| matches!(kind.as_str(), "user" | "group" | "members"))
+        .map(|(_, id)| *id)
+        .collect()
 }
 
 /// Ranked name candidates inside reachable roots; the route bounds its bulk visibility checks.
@@ -373,12 +373,13 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
             -- and root tests the batch applies below, before any place is read.
             SELECT d.id, d.title, d.node_id, d.org_id, d.owner_id, d.updated_at FROM documents d
              WHERE d.deleted_at IS NULL AND __DOCUMENT_NAME__ AND 'document' = ANY($6) AND ($7::uuid IS NULL OR d.org_id = $7)
+               AND ($12::uuid[] IS NULL OR d.id = ANY($12))
                AND ($3 OR $12::uuid[] IS NOT NULL OR d.org_id IS NULL OR d.org_id = ANY($11::uuid[]) OR d.owner_id = $1)
         ), document_places AS MATERIALIZED (
             -- Each live place of those documents is read once, not once for every document in it.
-            SELECT n.id, EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.archived_at IS NOT NULL) archived
+            SELECT n.id, (SELECT path_state.archived FROM orch_path_state(n.path) path_state) archived
               FROM nodes n WHERE n.id IN (SELECT node_id FROM document_hits)
-               AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+               AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
         ), document_pool AS MATERIALIZED (
             -- The documents this batch can show: the best and newest matches in the order the batch is ranked
             -- by, and every match the reader visited (which ranks by its visits), starred or named. A word in a
@@ -402,31 +403,32 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
             UNION ALL SELECT 'mcp_server', id, name, owner_id, home_id, org_id, updated_at FROM mcp_servers WHERE deleted_at IS NULL AND environment_id IS NULL
             UNION ALL SELECT 'mount', id, name, owner_id, home_id, org_id, updated_at FROM mounts WHERE deleted_at IS NULL
             UNION ALL SELECT 'skill', id, name, owner_id, home_id, org_id, updated_at FROM skills WHERE deleted_at IS NULL
+            UNION ALL SELECT 'pool', id, name, owner_id, home_id, org_id, updated_at FROM pools WHERE deleted_at IS NULL
         ), all_names AS (
             SELECT n.kind, n.id, n.name,
                    CASE WHEN n.kind = 'org' THEN (SELECT string_agg(o.slug, '.' ORDER BY p.ord) FROM unnest(n.path) WITH ORDINALITY p(id, ord) JOIN orgs o ON o.node_id = p.id) END address,
                    n.id node_id, n.org_id, NULL::uuid owner_id, GREATEST(n.activity_at,n.updated_at,n.created_at,th.last_activity_at) AS updated_at, NULL::timestamptz old_visited_at,
-                   EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.archived_at IS NOT NULL) archived,
+                   (SELECT path_state.archived FROM orch_path_state(n.path) path_state) archived,
                    NULL::text username
               FROM nodes n
               LEFT JOIN threads th ON th.node_id = n.id
              WHERE n.deleted_at IS NULL AND NOT n.unlisted AND th.side_of IS NULL AND (n.kind = 'org' OR __NODE_NAME__)
-               AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+               AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'document', d.id, d.title, NULL, d.node_id, d.org_id, d.owner_id, d.updated_at, NULL, p.archived, NULL
               FROM document_pool d JOIN document_places p ON p.id = d.node_id
             UNION ALL
             SELECT 'document_container', c.id, c.name, NULL, c.node_id, c.org_id, c.owner_id, c.updated_at, NULL,
-                   EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.archived_at IS NOT NULL), NULL
+                   (SELECT path_state.archived FROM orch_path_state(n.path) path_state), NULL
               FROM document_containers c JOIN nodes n ON n.id=c.node_id
-             WHERE c.deleted_at IS NULL AND __CONTAINER_NAME__ AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE c.deleted_at IS NULL AND __CONTAINER_NAME__ AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'chat', c.id,
                    COALESCE(c.name, n.name, (SELECT string_agg(u.display_name, ', ' ORDER BY u.username) FROM chat_members cm JOIN users u ON u.id = cm.user_id WHERE cm.chat_id = c.id AND cm.left_at IS NULL)),
                    NULL, c.node_id, c.org_id, NULL, COALESCE(c.last_message_at, c.created_at), NULL,
-                   EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(COALESCE(n.path, root.path)) AND a.archived_at IS NOT NULL), NULL
+                   (SELECT path_state.archived FROM orch_path_state(COALESCE(n.path, root.path)) path_state), NULL
               FROM chats c LEFT JOIN nodes n ON n.id = c.node_id JOIN nodes root ON root.id = c.org_id
-             WHERE (n.id IS NULL OR NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
+             WHERE (n.id IS NULL OR (SELECT path_state.live FROM orch_path_state(n.path) path_state))
                -- A search finds a direct or group chat by the people in it (inspecting one is an audited
                -- opening, never a hit); an exact lookup of one is asked as the reader may open it.
                AND (c.node_id IS NOT NULL OR (c.kind='group' AND c.visibility='public' AND c.org_id=ANY($2::uuid[])) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)
@@ -436,35 +438,35 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
                     OR EXISTS (SELECT 1 FROM favorites saved WHERE saved.user_id=$1 AND saved.kind='chat' AND saved.id=c.id)
                     OR EXISTS (SELECT 1 FROM chat_messages m
                     WHERE m.chat_id = c.id AND m.kind = 'message' AND m.deleted_at IS NULL))
-               AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(root.path) AND a.deleted_at IS NOT NULL)
+               AND (SELECT path_state.live FROM orch_path_state(root.path) path_state)
             UNION ALL
             SELECT 'tag', t.id, t.name, NULL, n.id, n.org_id, NULL, t.created_at, NULL,
-                   EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.archived_at IS NOT NULL), NULL
+                   (SELECT path_state.archived FROM orch_path_state(n.path) path_state), NULL
               FROM tags t JOIN nodes n ON n.id = t.node_id
-             WHERE __TAG_NAME__ AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE __TAG_NAME__ AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'user', u.id, u.display_name,
                    (SELECT string_agg(o.slug, '.' ORDER BY p.ord) FROM unnest(n.path) WITH ORDINALITY p(id, ord) JOIN orgs o ON o.node_id = p.id) || '.' || u.username,
                    n.id, n.org_id, NULL, u.updated_at, NULL, false, u.username
               FROM users u JOIN org_members m ON m.user_id = u.id JOIN nodes n ON n.id = m.domain_id
-             WHERE m.org_id = ANY($2) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE m.org_id = ANY($2) AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'user', u.id, u.display_name,
                    (SELECT string_agg(o.slug, '.' ORDER BY p.ord) FROM unnest(n.path) WITH ORDINALITY p(id, ord) JOIN orgs o ON o.node_id = p.id) || '.' || u.username,
                    n.id, n.org_id, NULL, u.updated_at, NULL, false, u.username
               FROM users u JOIN nodes n ON n.id = u.service_org_id
-             WHERE n.org_id = ANY($2) AND u.kind = 'service' AND u.status = 'active' AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE n.org_id = ANY($2) AND u.kind = 'service' AND u.status = 'active' AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'group', g.id, g.name, NULL, n.id, n.org_id, NULL, g.updated_at, NULL, false, NULL
               FROM groups g JOIN nodes n ON n.id = g.org_id
-             WHERE n.org_id = ANY($2) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE n.org_id = ANY($2) AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT r.kind, r.id, r.name,
                    CASE WHEN r.node_id IS NULL THEN 'system.' || CASE WHEN r.kind='environment' THEN __ENVIRONMENT_SEGMENT__ ELSE r.name END ELSE
                      (SELECT string_agg(o.slug, '.' ORDER BY p.ord) FROM unnest(n.path) WITH ORDINALITY p(id, ord) JOIN orgs o ON o.node_id = p.id) || '.' || u.username || '.' || CASE WHEN r.kind='environment' THEN __ENVIRONMENT_SEGMENT__ ELSE r.name END END,
                    r.node_id, r.org_id, r.owner_id, r.updated_at, NULL, false, NULL
               FROM resource_names r LEFT JOIN nodes n ON n.id = r.node_id LEFT JOIN users u ON u.id = r.owner_id
-             WHERE n.id IS NULL OR NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
+             WHERE n.id IS NULL OR (SELECT path_state.live FROM orch_path_state(n.path) path_state)
             UNION ALL
             SELECT 'machine', m.id, m.name, NULL,
                    CASE WHEN h.id IS NULL THEN m.home_id ELSE h.home_id END,
@@ -560,11 +562,15 @@ pub struct TagScope {
 
 /// Scopes whose ordinary tag lists include these definitions; access is resolved in one bulk check.
 pub async fn tag_scopes(conn: &mut Conn, tags: &[Id]) -> Result<Vec<TagScope>, DbError> {
-    Ok(sqlx::query_as("SELECT t.id AS tag_id, n.id AS node_id FROM tags t
+    Ok(sqlx::query_as(
+        "SELECT t.id AS tag_id, n.id AS node_id FROM tags t
         JOIN nodes n ON t.node_id = ANY(n.path)
         WHERE t.id = ANY($1) AND n.kind IN ('org','project','topic')
-          AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)")
-        .bind(tags).fetch_all(conn).await?)
+          AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)",
+    )
+    .bind(tags)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// A live node inside the scope, before its access is resolved.
@@ -580,21 +586,21 @@ pub struct PlaceRow {
 
 /// Nodes within the scope, excluding deleted places and side threads.
 pub async fn places(conn: &mut Conn, scope: Option<Id>) -> Result<Vec<PlaceRow>, DbError> {
-    Ok(sqlx::query_as("SELECT n.id, n.kind, n.parent_id FROM nodes n LEFT JOIN threads th ON th.node_id = n.id WHERE ($1::uuid IS NULL OR $1 = ANY(n.path)) AND NOT n.unlisted AND th.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT n.id, n.kind, n.parent_id FROM nodes n LEFT JOIN threads th ON th.node_id = n.id WHERE ($1::uuid IS NULL OR $1 = ANY(n.path)) AND NOT n.unlisted AND th.side_of IS NULL AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)")
         .bind(scope).fetch_all(conn).await?)
 }
 
 /// One selected scope, without enumerating its descendants.
 pub async fn place(conn: &mut Conn, id: Id) -> Result<Option<PlaceRow>, DbError> {
     Ok(sqlx::query_as("SELECT n.id,n.kind,n.parent_id FROM nodes n LEFT JOIN threads t ON t.node_id=n.id
-        WHERE n.id=$1 AND NOT n.unlisted AND t.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)")
+        WHERE n.id=$1 AND NOT n.unlisted AND t.side_of IS NULL AND (SELECT path_state.live FROM orch_path_state(n.path) path_state)")
         .bind(id).fetch_optional(conn).await?)
 }
 
 /// Whether an exact selected document/chat home is live and inside the requested scope.
 pub async fn within(conn: &mut Conn, node: Id, scope: Option<Id>) -> Result<bool, DbError> {
     Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes n WHERE n.id=$1 AND ($2::uuid IS NULL OR n.path @> ARRAY[$2::uuid])
-        AND NOT EXISTS(SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL))")
+        AND (SELECT path_state.live FROM orch_path_state(n.path) path_state))")
         .bind(node).bind(scope).fetch_one(conn).await?)
 }
 
@@ -619,7 +625,7 @@ pub async fn chats_in_admin_mode(
     system_admin: bool,
     trees: &[Id],
 ) -> Result<Vec<super::chats::ChatRow>, DbError> {
-    Ok(sqlx::query_as("SELECT c.* FROM chats c JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE (c.node_id = ANY($2) OR (c.kind='group' AND COALESCE(c.node_id,c.home_id,c.org_id)=ANY($2)) OR ($4 AND ($3::uuid IS NULL OR home.path @> ARRAY[$3::uuid]) AND ($5 OR c.org_id=ANY($6::uuid[]) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)))) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(home.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT c.* FROM chats c JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE (c.node_id = ANY($2) OR (c.kind='group' AND COALESCE(c.node_id,c.home_id,c.org_id)=ANY($2)) OR ($4 AND ($3::uuid IS NULL OR home.path @> ARRAY[$3::uuid]) AND ($5 OR c.org_id=ANY($6::uuid[]) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)))) AND (SELECT path_state.live FROM orch_path_state(home.path) path_state)")
         .bind(user).bind(nodes).bind(scope).bind(include_directs).bind(system_admin).bind(trees)
         .fetch_all(conn).await?)
 }
@@ -843,7 +849,11 @@ pub(super) fn advanced_source_sql(selection: &str, kind: &str, source: &str, par
         "(SELECT COALESCE(adv_m.edited_at,adv_m.created_at) FROM chat_messages adv_m WHERE adv_m.id={part})"
     );
     let edited = fact("adv_d.updated_at", "adv_n.updated_at", &chat_edited);
-    advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited)
+    let facts = advanced_facts_sql(selection, &owner, &creator, &editor, &created, &edited);
+    format!(
+        "({facts}) AND ({selection}->>'stream' IS NULL OR ({kind}='item' AND EXISTS \
+        (SELECT 1 FROM items adv_i WHERE adv_i.id={part} AND adv_i.stream={selection}->>'stream')))"
+    )
 }
 
 /// Compare the recorded source facts without changing the ordering of candidate streams.
@@ -871,7 +881,7 @@ pub(super) fn advanced_source_needed(selection: Option<&orch_types::Json>) -> bo
             .and_then(|value| value.get(key))
             .is_some_and(|value| !value.is_null())
     };
-    ["owner_id", "created_by_id", "edited_by_id"]
+    ["owner_id", "created_by_id", "edited_by_id", "stream"]
         .iter()
         .any(|key| present(key))
         || present("date_field") && (present("from") || present("to"))
@@ -1272,8 +1282,20 @@ pub async fn context_projection_items(
 
 /// Repairs a batch only while the source payload and status still match.
 pub async fn put_item_texts(conn: &mut Conn, updates: &orch_types::Json) -> Result<u64, DbError> {
+    let mut updates = updates.clone();
+    if let Some(rows) = updates.as_array_mut() {
+        for row in rows {
+            // Source guards compare the database representation, not decoded operational values.
+            if let Some(payload) = row.get_mut("payload") {
+                *payload = orch_types::storable::encode_exact(payload);
+            }
+            if let Some(orch_types::Json::String(text)) = row.get_mut("text") {
+                orch_types::storable::normalize_text(text);
+            }
+        }
+    }
     Ok(sqlx::query("UPDATE items i SET search_text = x.text FROM jsonb_to_recordset($1) AS x(id uuid, payload jsonb, status text, text text) WHERE i.id = x.id AND i.payload = COALESCE(x.payload, 'null'::jsonb) AND i.status = x.status AND i.search_text IS DISTINCT FROM x.text")
-        .bind(updates).execute(conn).await?.rows_affected())
+        .bind(&updates).execute(conn).await?.rows_affected())
 }
 
 /// Messages to repair, including deleted rows whose old text must be cleared.
