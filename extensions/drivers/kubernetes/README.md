@@ -32,7 +32,6 @@ registered for runtime work; its checks include configuration and ownership case
 | [locks](src/locks.rs) | Serialize mutations of the same native name without blocking other names. |
 | [logs](src/logs.rs) | Bounded native logs fenced to a Pod and container incarnation. |
 | [names](src/names.rs) | Map node volume names to Kubernetes DNS-subdomain names without losing identity. |
-| [network_policy](src/network_policy.rs) | Build one unit's restricted NetworkPolicy from exact verified endpoints. |
 | [ownership](src/ownership.rs) | Incarnation and consumer checks for cluster-owned objects. |
 | [peer](src/peer.rs) | Authenticate the workload supervisor by kernel credentials and its container scope. |
 | [platform](src/platform.rs) | Select workers compatible with the node's verified Linux tool artifacts. |
