@@ -17,7 +17,7 @@ use orch_api_contract::common::{ErrorCode, MAX_JSON_BYTES};
 use orch_api_contract::directory::{
     GroupHolderAdd, GroupHolderList, GroupUpdate, OrgGroupCreate, OrgGroupCreateBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{access, identity, transaction_guard};
@@ -34,9 +34,9 @@ struct Key {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
-    let hash = token_hash(&secret);
     let id = new_id();
+    let secret = new_api_token(id);
+    let hash = token_hash(&secret);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

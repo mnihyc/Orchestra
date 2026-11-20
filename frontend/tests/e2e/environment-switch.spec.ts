@@ -35,7 +35,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const heading = locale === 'en' ? 'Switching to Moved work on host-1' : '正在切换到 host-1 上的 Moved work';
     await expect(form.getByRole('heading', { name: heading, exact: true })).toBeVisible();
     await change.finish();
-    const done = locale === 'en' ? 'This thread now runs in Moved work.' : '此线程现在在 Moved work 中运行。';
+    const done = locale === 'en' ? 'This thread now runs in Moved work.' : '此会话现在在 Moved work 中运行。';
     await expect(form.getByText(done, { exact: true })).toBeVisible();
     await form.getByRole('button', { name: words.change.result.doneButton, exact: true }).click();
     const history = page.getByRole('log', { name: words.timeline.label, exact: true });
