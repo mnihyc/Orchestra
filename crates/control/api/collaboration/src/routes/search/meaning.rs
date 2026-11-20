@@ -42,6 +42,9 @@ pub(super) struct Position {
     /// An intentional index pause does not make a cached-vector query unavailable.
     #[serde(default)]
     pub paused: Option<String>,
+    /// Native source receipt, absent for older uncaptured records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<orch_engine::semantic::query::ServingReceipt>,
 }
 
 /// One independent semantic batch, ready for the stream's server-side fusion.
@@ -158,6 +161,7 @@ pub(super) async fn retrieve(
             .ok_or_else(|| ApiError::internal("semantic source position missing"))?;
         match answer.map_err(ApiError::internal)? {
             Meaning::Found {
+                receipt,
                 near: found,
                 fusion_k: k,
                 candidates,
@@ -167,6 +171,7 @@ pub(super) async fn retrieve(
                 let consumed = i64::try_from(found.len()).unwrap_or(i64::MAX);
                 position.offset = position.offset.saturating_add(consumed);
                 position.generation = Some(generation_id);
+                position.receipt = Some(receipt);
                 position.paused = paused;
                 position.done = consumed < candidates;
                 lists.push(

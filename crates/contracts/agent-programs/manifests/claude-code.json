@@ -142,6 +142,10 @@
         "name": "parallel_calls"
       },
       {
+        "name": "auto_review",
+        "feature": "approval_modes.auto"
+      },
+      {
         "name": "image_result",
         "feature": "input_images"
       },
@@ -155,6 +159,10 @@
       {
         "name": "tools.result_form",
         "feature": "orch_tools"
+      },
+      {
+        "name": "input_prefix",
+        "feature": "native_input_prefix"
       }
     ],
     "tool_names": {

@@ -20,12 +20,13 @@ import type { CapStatus, Metering, UsageCap } from '@/generated/api-types';
 import { openCap } from '@/features/usage/AddCap';
 import { amountText } from '@/features/usage/capForm';
 import { decimal, formatCredits } from '@/features/usage/figures';
-import { allowanceWords, capSentence, capTitle, startsAgain, usedWords } from '@/features/usage/words';
+import { allowanceWords, capSentence, capTitle, usedWords } from '@/features/usage/words';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber, formatTokens } from '@/lib/format';
 import { boxClasses,Section } from '@/shell/Page';
 import { ForecastLine } from './ForecastLine';
-import { CapTitle,CapSetter,CapShare } from './CapPeople';
+import { CapTitle,CapSetter,CapShare,CapSubjectName } from './CapPeople';
+import { formatExact } from '@/lib/time';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -147,10 +148,14 @@ function AmountEditor({ cap, onDone }: { cap: UsageCap; onDone: () => void }) {
   );
 }
 
-function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: CapStatus; here: { nodeId?: string; providerId?: string }; readOnlyHere: boolean; metering: Metering | undefined; onRates: (() => void) | undefined }) {
+function CapRow({ status, replacing, here, readOnlyHere, metering, onRates }: { status: CapStatus; replacing: CapStatus | undefined; here: { nodeId?: string; providerId?: string }; readOnlyHere: boolean; metering: Metering | undefined; onRates: (() => void) | undefined }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const cap = status.cap;
+  const effective = status.replaced_by === null ? cap : replacing?.cap;
+  const perPerson = cap.split === 'each' || cap.subject.kind === 'user';
+  const selection = !perPerson || status.replaced_by !== null ? null
+    : t(cap.subject.kind === 'user' ? 'caps.row.personalPriority' : cap.subject.kind === 'everyone' ? 'caps.row.everyoneAllowance' : 'caps.row.largestPriority');
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [showWaiting, setShowWaiting] = useState(false);
@@ -204,6 +209,10 @@ function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: Cap
               </span>
             )}
             {status.person !== null && <CapShare user={status.person} />}
+            {cap.enabled && status.replaced_by !== null && <span className="inline-flex flex-wrap items-center gap-1">
+              {replacing === undefined ? t('caps.row.anotherAllowance') : <><span>{t('caps.row.replacedBy')}</span><CapSubjectName cap={replacing.cap}/><span>· {allowanceWords(replacing.cap,t,locale)}</span></>}
+            </span>}
+            {cap.enabled && selection !== null && <span>{selection}</span>}
             {!cap.enabled && <Badge>{t('caps.row.off')}</Badge>}
           </p>
           {cap.note !== '' && <p className="text-sm text-text-muted">{cap.note}</p>}
@@ -243,7 +252,11 @@ function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: Cap
       )}
 
       <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted">
-        {status.period_ends_at !== null && <span>{startsAgain(status.period_ends_at, cap.period, locale, t)}</span>}
+        {status.period_ends_at !== null && <time dateTime={status.period_ends_at}>{t('caps.startsAgain',{when:formatExact(status.period_ends_at,{locale,timeZone:'UTC'})})}</time>}
+        {cap.enabled && effective !== undefined && effective.amount !== null && effective.meter !== 'running' && <span>{t('caps.row.policy',{
+          consequence:t(effective.at_limit==='stop'?'caps.row.stopAtLimit':'caps.row.finishCurrent'),
+          measurement:t(effective.uncounted==='block'?'caps.row.unmeasuredBlocked':'caps.row.unmeasuredAllowed'),
+        })}</span>}
         {firm !== null && <span>{firm}</span>}
         {decimal(status.in_progress) > 0 && <span>{t('caps.row.running', { amount: cap.meter === 'tokens' ? formatTokens(decimal(status.in_progress), locale) : formatCredits(decimal(status.in_progress), locale) })}</span>}
         {status.bypasses.count > 0 && (
@@ -263,6 +276,7 @@ function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: Cap
                 <span>{t('caps.row.passedLast')}</span>
                 <UserChip user={status.bypasses.last.by} size={24} />
                 <RelativeTime at={status.bypasses.last.at} className="text-text-muted" />
+                <span className="text-sm text-text-muted">{t('caps.row.recheckAtStart')}</span>
               </p>
             )}
           </Popover>
@@ -329,7 +343,9 @@ function LimitsView({ of, metering, onRates, bare = false, className }: LimitsPr
   ) : (
     <ul className="flex flex-col divide-y divide-border">
       {rows.map((status) => (
-        <CapRow key={`${status.cap.id}:${status.person?.id ?? ''}`} status={status} here={here} readOnlyHere={of.kind === 'mine'} metering={metering} onRates={onRates} />
+        <CapRow key={`${status.cap.id}:${status.person?.id ?? ''}`} status={status}
+          replacing={status.replaced_by===null?undefined:rows.find((candidate)=>candidate.cap.id===status.replaced_by&&candidate.person?.id===status.person?.id)}
+          here={here} readOnlyHere={of.kind === 'mine'} metering={metering} onRates={onRates} />
       ))}
     </ul>
   );
