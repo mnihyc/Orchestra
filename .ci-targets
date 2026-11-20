@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-engine --test source_uniform --test source
+test -p orch-engine --lib -- jobs::source::
+test -p orch-api-core --test workspace_source --test workspace_source_scopes
+web typecheck
+web lint
+web test
