@@ -819,6 +819,7 @@ pub struct ChatMessageCreateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_review: Option<Hash>,
     /// A client-generated UUID: a repeated pair of author and value returns the stored message.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 
@@ -1080,6 +1081,7 @@ pub struct ForwardCreateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
     /// A client-generated UUID: a repeated value returns what was stored.
+    #[schemars(extend("x-storage-exact" = true))]
     pub client_id: String,
 }
 

@@ -1,0 +1,1 @@
+web-e2e tests/e2e/resource-details.spec.ts --project=chromium --grep "resource details are bounded, reachable and lazy .*en/light/" --retries=0

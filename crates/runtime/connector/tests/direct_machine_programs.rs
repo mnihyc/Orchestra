@@ -54,12 +54,12 @@ async fn open(
         "native_session_ref":null,"archive":null,"history":null,"upto_turn_ordinal":null,
         "workspace_root":workspace,"instruction_root_marker":false,
         "directory":directory,"cwd":directory,"mounts":[],
-        "model":"fake-large","effort":"medium","params":{},"approval_mode":"on_request",
+        "model":"fake-large","effort":"medium","params":{},"approval_mode":"on_request","web_action_wait_secs":120,
         "sandbox_mode":"workspace","instructions":"x","memory":null,
         "arrangement":"separated","provider":{"path":"native","provider_id":rig.provider},
         "exec":{"executor":"echo-exec","environment_id":rig.environment,"generation":generation,
             "ticket":ticket(rig,thread,version)},
-        "mcp":[],"orch_tools":[],"raw_events":false
+        "mcp":[],"orch_tools":[],"output_capture_bytes":67108864, "raw_events":false
     }))
     .unwrap();
     rig.succeed(&open).await;
