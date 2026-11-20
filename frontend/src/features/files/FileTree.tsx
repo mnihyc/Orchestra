@@ -13,17 +13,19 @@ import { useTranslation } from 'react-i18next';
 import { formatDateTime } from '@/lib/time';
 
 import type { Door } from '@/api/workspace';
-import type { DirEntry } from '@/generated/api-types';
+import type { DirEntry, FileSourceFacts } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes } from '@/lib/format';
 import { isComposing } from '@/lib/shortcuts';
 import { type DirectoryState, type DirectoryWindow, directoryKey } from '@/realtime/stores/environment';
 import { DirectoryPager } from './DirectoryPager';
+import { entryReadProblem } from './indexWords';
 import { readWorkspaceDrag, workspaceDrag } from './drag';
 import { toast } from '@/ui/Toast';
 import { ContextEntries, ContextMenu } from '@/ui/ContextMenu';
 import { cx } from '@/ui/cx';
 import { DropdownEntries, Menu, type MenuEntry } from '@/ui/Menu';
+import { StatusDot } from '@/ui/StatusDot';
 import { Button } from '@/ui/Button';
 import { environmentFileReference } from '@/features/people/references';
 import { ORCH_REFERENCE } from '@/lib/drop';
@@ -49,6 +51,9 @@ export interface FileRow {
   setSize: number;
   /** The row is from a cached view of its directory, where only what Orch keeps a copy of can be opened. */
   cachedView: boolean;
+  asOf?: string | null;
+  facts?: FileSourceFacts | null | undefined;
+  mount?: string | null | undefined;
   error?: unknown;
   reason?: string | undefined;
   retryable?: boolean;
@@ -94,7 +99,7 @@ export function layoutRows(root: string, expanded: ReadonlySet<string>, dirs: Re
     state.entries.forEach((entry, index) => {
       const isDir = entry.type === 'dir';
       const open = isDir && expanded.has(entry.path);
-      rows.push({ id: entry.path, kind: 'entry', entry, depth, parent: directory, expandable: isDir, expanded: open, position: index + 1, setSize, cachedView });
+      rows.push({ id: entry.path, kind: 'entry', entry, depth, parent: directory, expandable: isDir, expanded: open, position: index + 1, setSize, cachedView, asOf: state.asOf, facts: state.facts, mount: state.mount });
       if (open) visit(entry.path, depth + 1);
     });
     if (window !== undefined) {
@@ -312,7 +317,7 @@ export function FileTree({ door, directories: dirs, onNavigate, root, label, exp
           done(); return;
         }
         if (entry.type === 'dir') onExpandedChange(entry.path, !row.expanded);
-        else onOpen(entry, false);
+        else if (entryReadProblem(t, entry.type) === undefined) onOpen(entry, false);
         done();
         return;
       case ' ':
@@ -475,10 +480,11 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
   }
 
   const entry = row.entry;
+  const problem = entryReadProblem(t, entry.type);
   const isDir = entry.type === 'dir';
   const Icon = isDir ? (row.expanded ? FolderOpen : Folder) : entry.type === 'symlink' ? FileSymlink : FileIcon;
   // In a cached view the files Orch keeps a copy of are the ones that can still be opened.
-  const kept = row.cachedView && !isDir && entry.cached;
+  const contentState = row.cachedView && !isDir && problem === undefined;
 
   const click = (event: MouseEvent<HTMLElement>) => {
     onFocused(entry.path);
@@ -487,7 +493,7 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
     else {
       onSelect(entry, 'single', rows);
       if (isDir) onExpandedChange(entry.path, !row.expanded);
-      else onOpen(entry, false);
+      else if (problem === undefined) onOpen(entry, false);
     }
   };
 
@@ -502,7 +508,7 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
       aria-setsize={row.setSize}
       aria-expanded={row.expandable ? row.expanded : undefined}
       aria-selected={isSelected}
-      title={[entry.path, isDir ? '' : formatBytes(entry.size, format.locale), formatDateTime(entry.mtime, format)].filter(Boolean).join(' · ')}
+      title={problem === undefined ? [entry.path, isDir ? '' : formatBytes(entry.size, format.locale), formatDateTime(entry.mtime, format)].filter(Boolean).join(' · ') : [entry.path, problem].join(' · ')}
       tabIndex={tabbable ? 0 : -1}
       style={indent}
       draggable
@@ -537,7 +543,7 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
       onContextMenu={() => { onFocused(entry.path); if (!isSelected) onSelect(entry, 'single', rows); }}
       onClick={click}
       onDoubleClick={() => {
-        if (!isDir) onOpen(entry, true);
+        if (!isDir && problem === undefined) onOpen(entry, true);
       }}
       className={cx(
         'group/row focus-inset relative flex h-full cursor-default items-center gap-1 pr-1 text-base select-none',
@@ -548,10 +554,11 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
       <span aria-hidden className={cx('flex size-4 shrink-0 items-center justify-center rounded-sm text-text-subtle', !row.expandable && 'invisible')}>
         <ChevronRight className={cx('transition-transform', row.expanded && 'rotate-90')} />
       </span>
-      {isDir || entry.type === 'symlink' ? <><Icon className={cx('shrink-0', isDir ? 'text-accent-text' : 'text-text-muted')} aria-hidden /><span data-user-content className="min-w-0 flex-1 truncate">{entry.name}</span></> :
-        <span className="flex min-w-0 flex-1 items-center"><FileChip source={{ ...workspaceSource(door, entry.path, entry.name, entry.size), updatedAt: entry.mtime }} presentation={{ place: 'compact' }} bare onOpen={click} menuEntries={() => menuFor(entry, selected.has(entry.path) ? selected : new Set([entry.path]))} /></span>}
+      {problem !== undefined || isDir || entry.type === 'symlink' ? <><Icon className={cx('shrink-0', isDir ? 'text-accent-text' : 'text-text-muted')} aria-hidden /><span data-user-content className="min-w-0 flex-1 truncate">{entry.name}</span></> :
+        <span className="flex min-w-0 flex-1 items-center"><FileChip source={{ ...workspaceSource(door, entry.path, entry.name, entry.size, row.mount ?? undefined), updatedAt: entry.mtime, facts: row.facts, ...(row.cachedView ? { observation: { cached: entry.cached, at: row.asOf ?? null } } : {}) }} presentation={{ place: 'compact' }} bare onOpen={click} menuEntries={() => menuFor(entry, selected.has(entry.path) ? selected : new Set([entry.path]))} /></span>}
       {over && <span role="status" className="min-w-0 truncate text-sm text-text-muted">{t('uploads.target.move', { path: entry.path })}</span>}
-      {kept && <span role="img" aria-label={t('files.tree.cached')} title={t('files.tree.cached')} className="size-2 shrink-0 rounded-full bg-info" />}
+      {problem !== undefined && <span className="shrink-0 text-sm text-text-muted">{problem}</span>}
+      {contentState && <StatusDot tone={entry.cached ? 'info' : 'idle'} label={t(entry.cached ? 'files.tree.cached' : 'files.tree.needsMachine')} showLabel className="shrink-0 text-sm text-text-muted" />}
       <MenuButton entry={entry} menuFor={menuFor} selected={selected} />
     </div>
   );

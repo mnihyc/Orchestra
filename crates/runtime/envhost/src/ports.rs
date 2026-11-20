@@ -116,6 +116,7 @@ impl Drop for InternalPort {
 /// A temporary proof for the current selected owned native socket.
 #[derive(Debug, Clone)]
 pub struct OwnedPort {
+    named: Option<u16>,
     socket: NativeSocket,
     observation_id: String,
     /// The deterministic current local destination; a wildcard uses its family's loopback.
@@ -226,7 +227,7 @@ impl Ports {
             }
             (state.activity_at, dropped)
         };
-        match self.observations(now) {
+        match self.observations(now, None) {
             Ok((_, listeners)) => PortSnapshot {
                 environment_id: self.environment_id,
                 generation: self.generation,
@@ -252,11 +253,28 @@ impl Ports {
 
     /// Resolves the same preferred current owned address for every caller of this port.
     pub fn owned(&self, port: u16, transport: PortTransport) -> Result<OwnedPort, PortReadError> {
-        let (native, observations) = self.observations(Time::new(self.clock.now()))?;
+        self.resolve(port, transport, false)
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        port: u16,
+        transport: PortTransport,
+        machine_reach: bool,
+    ) -> Result<OwnedPort, PortReadError> {
+        let named = (machine_reach && transport == PortTransport::Tcp).then_some(port);
+        let (native, observations) = self.observations(Time::new(self.clock.now()), named)?;
         let mut candidates: Vec<_> = observations
             .iter()
             .filter(|row| row.port == port && row.transport == transport && !row.internal)
             .filter(|row| row.unavailable_reason.is_none())
+            .filter(|row| {
+                named.is_none()
+                    || row
+                        .local_address
+                        .parse::<IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            })
             .collect();
         candidates.sort_by_key(|row| {
             row.local_address
@@ -298,16 +316,18 @@ impl Ports {
                     && other.address.port() == port
                     && other.inode != socket.inode
                     && same_destination(other.address.ip(), destination.ip())
-                    && !observations.iter().any(|known| {
-                        !known.internal
-                            && known.unavailable_reason.is_none()
-                            && known.observation_id.starts_with(&socket_key(other))
-                    })
+                    && (named.is_some()
+                        || !observations.iter().any(|known| {
+                            !known.internal
+                                && known.unavailable_reason.is_none()
+                                && known.observation_id.starts_with(&socket_key(other))
+                        }))
             })
         {
             return Err(PortReadError::Foreign);
         }
         Ok(OwnedPort {
+            named,
             socket,
             observation_id: row.observation_id.clone(),
             address: destination,
@@ -316,7 +336,11 @@ impl Ports {
 
     /// Checks the temporary proof again after connecting and before handing caller bytes on.
     pub fn recheck(&self, proof: &OwnedPort) -> Result<(), PortReadError> {
-        let current = self.owned(proof.socket.address.port(), proof.socket.transport)?;
+        let current = self.resolve(
+            proof.socket.address.port(),
+            proof.socket.transport,
+            proof.named.is_some(),
+        )?;
         if current.socket == proof.socket && current.observation_id == proof.observation_id {
             Ok(())
         } else {
@@ -327,6 +351,7 @@ impl Ports {
     fn observations(
         &self,
         now: Time,
+        named: Option<u16>,
     ) -> Result<(Vec<NativeSocket>, Vec<PortObservation>), PortReadError> {
         let native = native_sockets()?;
         let listed = self.processes.list();
@@ -372,7 +397,10 @@ impl Ports {
                 || state
                     .internal
                     .contains_key(&(socket.address.port(), socket.transport));
-            if process.is_none() && !internal && self.scope == PortScope::Processes {
+            let declared = named == Some(socket.address.port())
+                && socket.transport == PortTransport::Tcp
+                && socket.address.ip().is_loopback();
+            if process.is_none() && !declared && !internal && self.scope == PortScope::Processes {
                 continue;
             }
             let start = process

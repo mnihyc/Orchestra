@@ -5,14 +5,14 @@ import type * as Workspace from '@/api/workspace';
 import { ApiError, client } from '@/api/client';
 import { queryClient } from '@/api/query';
 import { useWorkspaceUploads } from '@/features/files/Uploads';
-import type { FileStat, Job } from '@/generated/api-types';
+import type { FileStat, Job, UploadDestination } from '@/generated/api-types';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ write: vi.fn<typeof Workspace.writeUploadedFile>(), finish: vi.fn<typeof Workspace.finishWorkspaceUpload>(), refresh: vi.fn<(...paths: string[]) => Promise<void>>(), cancel: vi.fn(), slow: false, started: vi.fn() }));
+const calls = vi.hoisted(() => ({ write: vi.fn<typeof Workspace.writeUploadedFile>(), finish: vi.fn<typeof Workspace.finishWorkspaceUpload>(), refresh: vi.fn<(...paths: string[]) => Promise<void>>(), cancel: vi.fn(), slow: false, started: vi.fn(), destinations: [] as UploadDestination[] }));
 vi.mock('@/api/workspace', async (load) => ({ ...await load<typeof Workspace>(), writeUploadedFile: calls.write, finishWorkspaceUpload: calls.finish, makeDirectory: vi.fn(() => Promise.resolve({})) }));
 vi.mock('@/lib/uploads', () => ({ UploadTask: class {
   readonly uploadId = '10000000-0000-0000-0000-000000000001';
-  constructor(readonly file: File) {}
+  constructor(readonly file: File, _requests?: unknown, to?: UploadDestination) { if (to !== undefined) calls.destinations.push(to); }
   run(signal: AbortSignal, progress: (received: number) => void) {
     calls.started(); progress(calls.slow ? 7 : this.file.size);
     if (calls.slow) return new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(new DOMException('Upload cancelled', 'AbortError')), { once: true }); });
@@ -27,7 +27,7 @@ function Probe({ files, blocked = false }: { files: File[]; blocked?: string | f
   return <><button onClick={() => uploads.add('assets', files)}>Upload files</button>{uploads.progress}{uploads.dialog}</>;
 }
 const exists = () => new ApiError({ type: 'orch:error:conflict.stale_revision', code: 'conflict.stale_revision', status: 409, title: 'Exists', detail: 'Exists', request_id: 'test' }, null);
-beforeEach(() => { calls.write.mockReset(); calls.finish.mockReset(); calls.finish.mockResolvedValue(undefined); calls.refresh.mockReset(); calls.refresh.mockResolvedValue(undefined); calls.cancel.mockClear(); calls.started.mockClear(); calls.slow = false; });
+beforeEach(() => { calls.write.mockReset(); calls.finish.mockReset(); calls.finish.mockResolvedValue(undefined); calls.refresh.mockReset(); calls.refresh.mockResolvedValue(undefined); calls.cancel.mockClear(); calls.started.mockClear(); calls.slow = false; calls.destinations = []; });
 
 function stat(path: string, size = 3): FileStat { return { type: 'file', path, name: path.slice(path.lastIndexOf('/') + 1), size, mtime: '2026-10-25T00:00:00Z', mode: 0o644, link_target: null, cached: false, hash: null, media_type: 'text/plain', is_text: true }; }
 
@@ -52,7 +52,7 @@ it('uploads beyond the old raw-body limit without buffering another copy of the 
   await waitFor(() => expect(calls.finish).toHaveBeenCalledTimes(1));
   const attempt = calls.write.mock.calls[0]?.[7];
   expect(attempt?.id).toEqual(expect.any(String));
-  expect(calls.write).toHaveBeenCalledWith(door, 'assets/large.bin', expect.any(String), 'none', expect.any(AbortSignal), expect.any(String), expect.any(Function), { id: attempt?.id });
+  expect(calls.write).toHaveBeenCalledWith(door, 'assets/large.bin', expect.any(String), 'none', expect.any(AbortSignal), expect.any(String), expect.any(Function), { id: attempt?.id }, undefined);
   expect(buffer).not.toHaveBeenCalled();
 });
 
@@ -250,4 +250,15 @@ it('does not finish an old private batch as the person who signs in next', async
   } finally {
     act(() => client.session.setState({ ...before, readerVersion: (client.session.getState().readerVersion ?? 0) + 1 }));
   }
+});
+
+
+it('names the selected environment and full relative destination before the first byte is uploaded', async () => {
+  calls.write.mockResolvedValue(stat('assets/tree/leaf.txt'));
+  const file = new File(['leaf'], 'leaf.txt');
+  Object.defineProperty(file, 'webkitRelativePath', { value: 'tree/leaf.txt' });
+  show(<Probe files={[file]} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Upload files' }));
+  await waitFor(() => expect(calls.finish).toHaveBeenCalledTimes(1));
+  expect(calls.destinations).toEqual([{ environment_id: door.environmentId, path: 'assets/tree/leaf.txt' }]);
 });

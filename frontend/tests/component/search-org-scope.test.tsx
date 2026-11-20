@@ -42,7 +42,7 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(),
   orgsQuery: { queryKey: ['org-scope-roots'], queryFn: () => calls.orgs },
   nodeQuery: (id: string) => ({ queryKey: ['org-scope-node', id], queryFn: () => Promise.resolve(org(id, 'outside', 'Outside', ADA, { org_id: personal })) }),
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), useRouter: () => ({ history: { push: vi.fn() } }) }));
 function Page({ initial = { q: 'canary' } }: { initial?: SearchParams }) {
   const [params, setParams] = useState(initial);

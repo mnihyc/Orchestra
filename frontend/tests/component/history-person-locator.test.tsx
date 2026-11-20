@@ -14,7 +14,7 @@ import { HistoryView } from '@/features/inspector/History';
 import { PersonLocator } from '@/features/people/PersonLocator';
 import { TraceFilters } from '@/features/trace/Filters';
 import { traceHref, type TraceSearch, type TraceScope } from '@/features/trace/params';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import type { HistoryLine, HistoryLinePage, UserRef } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { TYPING_PAUSE_MS } from '@/lib/debounce';
@@ -52,9 +52,9 @@ const personInput = (label = i18n.t('threadViews.history.person')) => screen.get
 
 function Frame({ id = threadId }: { id?: string }) {
   const read = resultThreadRead(id, owner);
-  return <ViewInstanceContext.Provider value={{ id: owner, root: createRef(), target: { kind: 'thread', id }, headingOwner: owner, content: false, focusedContent: false }}>
+  return <ViewInstanceProvider value={{ id: owner, root: createRef(), target: { kind: 'thread', id }, headingOwner: owner, content: false, focusedContent: false }}>
     <ThreadReadProvider read={read}><HistoryView tab={{ id: owner, view: 'history' }} area="right" /></ThreadReadProvider>
-  </ViewInstanceContext.Provider>;
+  </ViewInstanceProvider>;
 }
 function draw(children: ReactNode) {
   const Wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={cache}><TooltipProvider>{children}</TooltipProvider></QueryClientProvider>;

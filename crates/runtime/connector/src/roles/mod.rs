@@ -162,6 +162,8 @@ pub struct Services {
     pub keys: Arc<Keys>,
     /// The configuration as the connector started with it.
     pub config: ConnectorConfig,
+    /// The physical composition's verified build cache, when it can fetch named programs.
+    pub build_cache: Option<Arc<dyn crate::builds::BuildCache>>,
     /// The read-only directory of tools a managed runtime is given, if it was.
     pub tools_dir: Option<PathBuf>,
     /// The harnesses that directory held when the connector started: the builds the system put in this
@@ -195,6 +197,7 @@ impl Services {
                 kind: found.kind.clone(),
                 path: found.program.display().to_string(),
                 version: found.version.clone(),
+                sha256: None,
                 daemon: false,
             })
     }
@@ -203,6 +206,8 @@ impl Services {
 /// A command as a role is handed it.
 #[derive(Debug, Clone)]
 pub struct Call {
+    /// The actual dispatcher execution timer; absent for work without a reported job.
+    pub work_deadline: Option<orch_api_contract::workspace::JobWorkDeadline>,
     /// What the link knows of it: its identifier, its key, its deadline, and the token that fires when
     /// the system asks for it not to be carried out.
     pub context: CommandContext,
