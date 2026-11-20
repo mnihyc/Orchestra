@@ -80,6 +80,24 @@ pub async fn keep(
     Ok(())
 }
 
+/// One internal captured source whose request is neither live nor publishing.
+/// These private owners have no replay consumer after cancellation or restart.
+pub async fn abandoned_history_capture(conn: &mut Conn) -> Result<Option<Id>, DbError> {
+    let cut: Option<Id> = sqlx::query_scalar(concat!(
+        "SELECT c.id FROM thread_history_cuts c JOIN idempotency_keys k
+              ON k.user_id=c.request_user_id AND k.key=c.request_key
+            WHERE k.response->>'native_kind'='history_capture' AND NOT EXISTS (
+              SELECT 1 FROM pg_locks l WHERE l.locktype='advisory' AND l.granted AND l.objsubid=1
+                AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                AND ((l.classid::bigint << 32) | l.objid::bigint)=",
+        creation_lock_key!("k.user_id", "k.key"),
+        ") ORDER BY c.id LIMIT 1 FOR UPDATE OF k SKIP LOCKED"
+    ))
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(cut)
+}
+
 /// Forgets every answer kept before `before`. Returns how many went.
 pub async fn purge(conn: &mut Conn, before: DateTime<Utc>) -> Result<u64, DbError> {
     Ok(
@@ -87,6 +105,8 @@ pub async fn purge(conn: &mut Conn, before: DateTime<Utc>) -> Result<u64, DbErro
         // Observe existing holders without allocating a transaction lock per expired row.
         sqlx::query(concat!(
             "DELETE FROM idempotency_keys AS k WHERE created_at <= $1 AND NOT EXISTS (
+            SELECT 1 FROM thread_history_cuts c WHERE c.request_user_id=k.user_id AND c.request_key=k.key
+            ) AND NOT EXISTS (
             SELECT 1 FROM pg_locks AS l WHERE l.locktype='advisory' AND l.granted AND l.objsubid=1
             AND l.database=(SELECT oid FROM pg_database WHERE datname=current_database())
             AND ((l.classid::bigint << 32) | l.objid::bigint)=",

@@ -1,5 +1,5 @@
 /** AI-12: readable resources retain applicable management controls without lending their authority. */
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Resources from '@/api/resources';
@@ -38,7 +38,7 @@ vi.mock('@/api/skills', async (original) => ({ ...await original<typeof Skills>(
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), meQuery: { queryKey: ['implicit-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/agents/Edit', () => ({ EditAgent: () => <div role="dialog" aria-label="Profile editor" /> }));
 vi.mock('@/features/resources/ResourceAccess', () => ({ ResourceAccess: () => null }));
 vi.mock('@/features/resources/mcp/Enabled', () => ({ McpEnabledIn: () => null }));
@@ -97,6 +97,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(edit).toHaveAttribute('aria-disabled', 'true'); await user.click(edit); expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     view.unmount(); show(<McpScreen id={detailMcp.id} />);
     expect(await screen.findByRole('button', { name: i18n.t('resources.act.editButton') })).toHaveAttribute('aria-disabled', 'true');
+    await user.click(within(screen.getByRole('heading', { name: detailMcp.name, level: 1 }).closest('header')!).getByRole('button', { name: i18n.t('common.details') }));
     await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: detailMcp.name }) }));
     expect(screen.getByRole('menuitem', { name: new RegExp(i18n.t('resourceDetails.remove')) })).toHaveAttribute('aria-disabled', 'true');
     expect(calls.writes).not.toHaveBeenCalled();

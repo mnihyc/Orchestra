@@ -20,8 +20,8 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(),
   harnessKindsQuery: { queryKey: ['create-locator-kinds'], queryFn: calls.registry },
   machinesQuery: { queryKey: ['create-locator-machines'], queryFn: calls.machines },
   machineQuery: (key: string) => ({ queryKey: ['create-locator-machine', key], queryFn: () => calls.machine(key) }) }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange }: Pick<HomePickerProps, 'value' | 'onChange'>) =>
   <select aria-label="Fixture home" value={value} onChange={(event) => onChange(event.target.value)}>
     <option value="">Choose</option><option value="home">Workshop</option>

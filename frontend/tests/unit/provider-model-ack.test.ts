@@ -1,6 +1,6 @@
 /** Native model and provider acknowledgements update only the projections and standing they carry. */
-import { QueryClient } from '@tanstack/react-query';
-import { afterEach, expect, it } from 'vitest';
+import { QueryClient, QueryObserver } from '@tanstack/react-query';
+import { afterEach, expect, it, vi } from 'vitest';
 import { answerChanges } from '@/api/actAnswers';
 import { applyChanges } from '@/api/acts';
 import { applyCollection } from '@/api/cache';
@@ -20,8 +20,8 @@ it('keeps a model write in both collections while preserving parent fields the r
   const model:ProviderModel={ ...MODEL_ESTIMATE,id:'large',model_name:'Large example model',display_name:'Large example model',enabled:true,source:'manual',groups:[],parameters:{}};
   const action:Act={method:'POST',path:'/providers/{id}/models',input:{model_name:model.model_name},answer:model};
   const changes=answerChanges(action,(name)=>name==='id'?'p1':'',[{key:['provider'],id:'p1'}]);
-  expect(changes).toHaveLength(2);
-  for(const change of changes){expect(change).toHaveProperty('collection');if('collection' in change)applyCollection(cache,change.collection);}
+  expect(changes.filter((change) => 'collection' in change)).toHaveLength(2);
+  for(const change of changes){if('collection' in change)applyCollection(cache,change.collection);}
   const current=cache.getQueryData<Provider>(providerKey('p1'));
   expect(current?.models).toEqual([model]);
   expect(cache.getQueryData(['provider-models','p1'])).toEqual([model]);
@@ -40,4 +40,19 @@ it('uses the acceptance reply for the complete provider and both model collectio
   await applyChanges(changes,cache);
   expect(cache.getQueryData(providerKey('p1'))).toEqual(accepted);expect(cache.getQueryData(['provider-models','p1'])).toEqual([model]);
   expect(cache.getQueryData(providerKey('p2'))).toBe(other);expect(cache.getQueryState(providerKey('p1'))?.isInvalidated).toBe(false);
+});
+
+it('repairs only this provider’s active filtered model pages after a write', async () => {
+  const model = { ...MODEL_ESTIMATE, id:'renamed', model_name:'renamed', display_name:'Renamed', enabled:true, source:'manual' as const, groups:[], parameters:{} };
+  const result = { pages:[{items:[model],next_cursor:null}],pageParams:[null] };
+  const here = vi.fn(() => Promise.resolve(result)), other = vi.fn(() => Promise.resolve(result));
+  const observers = [
+    new QueryObserver(cache,{queryKey:['provider-model-pages','p1','Renamed'],queryFn:here,initialData:{pages:[],pageParams:[]},staleTime:Infinity}),
+    new QueryObserver(cache,{queryKey:['provider-model-pages','p2','Renamed'],queryFn:other,initialData:{pages:[],pageParams:[]},staleTime:Infinity}),
+  ];
+  const off=observers.map((observer)=>observer.subscribe(()=>undefined));
+  try {
+    await applyChanges(answerChanges({method:'PATCH',path:'/providers/{id}/models/{model_id}',answer:model},(name)=>name==='id'?'p1':'renamed',[{key:['provider'],id:'p1'}]),cache);
+    expect(here).toHaveBeenCalledOnce(); expect(other).not.toHaveBeenCalled();
+  } finally { off.forEach((stop)=>stop()); }
 });

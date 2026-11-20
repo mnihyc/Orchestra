@@ -14,6 +14,7 @@ pub(super) struct Request<'a> {
     pub reach: Reach,
     pub own_batch: Option<Id>,
     pub agent_access: Option<binding::BirthAgentAccess>,
+    pub pool: Option<&'a crate::resource_choice::ProviderSelection>,
 }
 
 /// Actual selected execution, independent of a later default-model setting.
@@ -36,7 +37,12 @@ pub(crate) async fn execution(
             .model
             .map(serde_json::from_value::<orch_api_contract::ask::AskModel>)
             .transpose()?
-            .map(|model| (model.provider_id, model.model)),
+            .and_then(|model| {
+                model
+                    .backend
+                    .offering
+                    .map(|offering| (offering.provider, offering.offering))
+            }),
     };
     let (provider, model) = selected.ok_or_else(|| {
         PlanError::invalid(
@@ -297,7 +303,17 @@ async fn model(
             "The destination provider is not ready",
         );
     }
-    if !input.principal.caller().permits(Permission::ProviderUse) {
+    if let Some(pool) = input.pool
+        && !pool.matches_request(id, Some(&model))
+    {
+        return Err(PlanError::invalid(
+            "to",
+            "the actual destination differs from the accepted pool member",
+        ));
+    }
+    if !(input.principal.caller().permits(Permission::ProviderUse)
+        || input.pool.is_some() && input.principal.caller().permits(Permission::PoolUse))
+    {
         blockers.add(
             code::ACCESS,
             "this credential does not include provider.use for the requested new binding",
@@ -308,6 +324,8 @@ async fn model(
         .provider_use(
             conn,
             &ProviderUse {
+                pool: input.pool,
+                purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                 person: input.principal.user(),
                 node: place,
                 provider: id,
@@ -697,7 +715,24 @@ async fn history(
         HistoryMethod::FileHandoff
     };
     let report = crate::fork_history::report_counts(method, &counts, None);
+    let window = resources::model(conn, prepared.target.provider.id, &prepared.target.model)
+        .await?
+        .and_then(|model| crate::fork_history::model_window(&model.parameters));
+    let allowance =
+        crate::fork_history::carry_allowance(conn, source.thread.node_id, window).await?;
     Ok(ForkPlanHistory {
+        selected_range: range
+            .filter(|(from, through)| through >= from)
+            .map(
+                |(from, through)| orch_api_contract::forks::HistoryTurnRange {
+                    from: i64::from(from),
+                    through: i64::from(through),
+                },
+            ),
+        context_allowance: Some(crate::fork_history::allowance_for_method(
+            allowance.fact,
+            method,
+        )),
         mode,
         turns: counts.turns,
         method,
