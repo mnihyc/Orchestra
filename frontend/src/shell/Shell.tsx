@@ -5,43 +5,25 @@
  * small screen it is one view at a time. The screen of the route is handed to whichever of the two
  * is in use, and shown in the view its reader put it in.
  */
-import { PanelTargetChoice } from '@/features/workbench/panelScope';
-import { CloseViews } from '@/features/workbench/CloseViews';
-import { WorkspaceCommands } from '@/features/workbench/workspaceActions';
 import { useRouterState } from '@tanstack/react-router';
 import { PanelBottom, PanelLeft, PanelRight } from 'lucide-react';
-import { Activity, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Activity, Suspense, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
 import { unclaimedFileDrop } from '@/lib/drop';
 import '@/features/chat/register';
-import { useChatLinks } from '@/features/chat/links';
 import '@/features/documents/register';
-import { ExportHost } from '@/features/export/ExportHost';
 import { ExportStatus } from '@/features/export/ExportStatus';
-import { ImportHost } from '@/features/people/ImportHost';
 import { ImportStatus } from '@/features/people/ImportStatus';
 import { closeFinder } from '@/features/finder/store';
-import { ShellCommands } from '@/features/finder/shellCommands';
 import { registerHelpView } from '@/features/help/register';
 import { registerAskView } from '@/features/ask/register';
-import { TutorialHost } from '@/features/help/Tutorial';
-import { HelpOverlayHost, HelpWork } from '@/features/help/HelpOverlay';
+import { HelpWork } from '@/features/help/HelpWork';
 import { useHelpState } from '@/features/help/state';
-import { AccessHost } from '@/features/access/AccessDialog';
 import { registerInspectorViews } from '@/features/inspector/Inspector';
-import { usePortsRegistration } from '@/features/ports/View';
-import { useBrowserRegistration } from '@/features/browser/View';
-import { useVncRegistration } from '@/features/vnc/View';
-import { DuplicateHost } from '@/features/duplicate/DuplicateHost';
-import { ChangeHost } from '@/features/change/ChangeHost';
-import { useRememberPlace } from '@/features/navigation/lastPlace';
-import { NodeDialogHost } from '@/features/navigation/NodeDialogs';
-import { CapHost } from '@/features/usage/AddCap';
 import { NavigationActions, Sidebar } from '@/features/navigation/Sidebar';
-import { useVisitRecorder } from '@/features/navigation/visits';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
 import { useWorkbenchChoiceHelp } from '@/features/workbench/choiceHelp';
 import { clearViewOpenings } from '@/features/workbench/viewOpening';
@@ -52,26 +34,34 @@ import { registerShippedViews } from '@/features/workbench/shippedViews';
 import { ConnectionPart, ThreadStatusParts } from '@/features/workbench/StatusParts';
 import { useWorkbench } from '@/features/workbench/store';
 import { type BarId, barHasViews } from '@/features/workbench/layout';
-import { useChatActivity } from '@/realtime/stores/chat';
 import { Banners } from '@/shell/Banners';
 import { MobileNavigation } from '@/shell/MobileNavigation';
 import { clearSelectedOrg } from '@/shell/org';
 import { Rail } from '@/shell/Rail';
 import { type KeyActionId, keysAct } from '@/shell/keyActions';
 import { useKeyChoices } from '@/shell/keys';
-import { Shortcuts } from '@/shell/Shortcuts';
 import { IconButton } from '@/ui/IconButton';
 import { ScreenTitleBar } from '@/shell/TitleBar';
 import { useVisibleLayout } from '@/features/workbench/availability';
 import { StatusBar } from '@/ui/StatusBar';
 import { SkipMain } from '@/shell/SkipMain';
+import { mark, whenContentShown } from '@/lib/marks';
+import { pageHtmlReads } from '@/api/htmlReads';
 import { useShellBootstrap } from '@/shell/bootstrap';
+import { useKeepShell } from '@/shell/keepShell';
+import { uncover } from '@/shell/keptShell';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { ErrorState } from '@/ui/ErrorState';
 import { OverlayChoices } from '@/features/workbench/OverlayChoices';
 import { PageRouting } from '@/features/workbench/PageRouting';
 import { holdViewReveals } from '@/features/workbench/openView';
 import { FrameReadiness, useFrameReadiness } from '@/shell/FrameReadiness';
+
+import { lazyPart } from '@/features/files/lazy';
+import { ContentBoundary } from '@/ui/ContentBoundary';
+import type { FrameServicesProps } from '@/shell/FrameServices';
+
+const FrameServices = lazyPart<FrameServicesProps>(() => import('@/shell/FrameServices'));
 
 registerShippedViews(Sidebar, NavigationActions, NavigationActions);
 // Each feature supplies its own views; only registered views are offered.
@@ -159,23 +149,31 @@ function AdmittedServices({ ready, children }: { ready: boolean; children: React
   return <Activity mode={ready ? 'visible' : 'hidden'}>{children}</Activity>;
 }
 
-function FrameServices() {
-  useChatLinks();
-  usePortsRegistration();
-  useBrowserRegistration();
-  useVncRegistration();
-  useVisitRecorder();
-  useRememberPlace();
-  useChatActivity();
-  return <><ShellCommands /><WorkspaceCommands /><TutorialHost /></>;
-}
-
 function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children: ReactNode; leavingAdmin: boolean; ready: boolean }) {
   const frame = useFrameReadiness();
   const [addressed, setAddressed] = useState(false);
   const admitAddress = useCallback(() => setAddressed(true), []);
   const admitted = ready && addressed;
+  const [wasReady, setWasReady] = useState(ready);
+  if (ready && !wasReady) setWasReady(true);
+  const pageAdmitted = addressed && (ready || !wasReady && !leavingAdmin);
+  useEffect(() => { mark('start/shell-drawn'); }, []);
+  useEffect(() => { if (admitted) { mark('start/shell-ready'); uncover(); } }, [admitted]);
+  useEffect(() => { if (pageAdmitted) uncover(); }, [pageAdmitted]);
+  useKeepShell(userId, admitted);
   const readerVersion = useStore(client.session, (state) => state.readerVersion ?? 0);
+  useEffect(() => {
+    if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return;
+    const away = new AbortController();
+    void whenContentShown(userId, readerVersion, away.signal).then((shown) => {
+      if (shown && !away.signal.aborted) return navigator.serviceWorker.register('/sw.js');
+    }).catch(() => undefined);
+    return () => away.abort();
+  }, [userId, readerVersion]);
+  const activeContent = useWorkbench((state) => state.activeContent);
+  useLayoutEffect(() => {
+    if (admitted && activeContent === null) mark('page/content', { user: userId, reader: String(readerVersion), view: '', address: '/workbench', outcome: 'ready' });
+  }, [admitted, activeContent, userId, readerVersion]);
   const viewAdmission = useRef<ReturnType<typeof holdViewReveals> | null>(null);
   useLayoutEffect(() => {
     const admission = holdViewReveals(userId, readerVersion);
@@ -187,7 +185,10 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
   const href = useRouterState({ select: (state) => state.location.href });
   const previousHref = useRef(href);
   useLayoutEffect(() => {
-    if (previousHref.current !== href && useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
+    if (previousHref.current !== href) {
+      pageHtmlReads()?.contentShown?.();
+      if (useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
+    }
     previousHref.current = href;
   }, [href]);
   const shape = useShape();
@@ -199,22 +200,17 @@ function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children:
 
   return (
     <>
-      <PageRouting ready={ready} onAddressed={admitAddress} />
-      <FrameReadiness.Provider value={{ ready: admitted, pending: frame.pending }}>
-      <AdmittedServices ready={admitted}><FrameServices />
-      <HelpOverlayHost />
-      <Shortcuts listOpen={shortcutList} onListOpenChange={setShortcutList} />
-      <NodeDialogHost />
-      <CapHost />
-      <ChangeHost />
-      <DuplicateHost />
-      <AccessHost />
-      <ExportHost /><ImportHost /><CloseViews /><PanelTargetChoice />
+      <PageRouting onAddressed={admitAddress} />
+      <FrameReadiness.Provider value={{ ready: admitted, pageReady: pageAdmitted, pending: frame.pending }}>
+      <AdmittedServices ready={admitted}>
+        <ContentBoundary>
+          <Suspense fallback={null}><FrameServices shortcutList={shortcutList} onShortcutList={setShortcutList} /></Suspense>
+        </ContentBoundary>
       </AdmittedServices>
       <OpenViewCommands />
       <HelpWork>
       <SkipMain />
-      <AdmittedServices ready={admitted}><ViewHost layout={visibleLayout} /></AdmittedServices>
+      <AdmittedServices ready={pageAdmitted}><ViewHost layout={visibleLayout} /></AdmittedServices>
       {shape === 'small' ? (
         <MobileNavigation onShortcuts={showShortcuts} pending={leavingAdmin} focusMode={focusMode} />
       ) : (

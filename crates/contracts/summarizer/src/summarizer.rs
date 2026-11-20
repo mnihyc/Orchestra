@@ -34,8 +34,6 @@ pub const DESCRIPTION_MAX_CHARS: u32 = 200;
 pub const HANDOFF_MAX_CHARS: u32 = 3_000;
 /// The handoff producer's maximum word count.
 pub const HANDOFF_MAX_WORDS: usize = 400;
-/// The longest the pause after failures grows to: one hour.
-pub const BACKOFF_CEILING: Duration = Duration::from_secs(60 * 60);
 
 /// How much a summary may be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -83,6 +81,10 @@ pub struct SummaryRequest {
     #[serde(default)]
     pub config: Json,
 }
+
+/// What a summarizer's `Failed` says when the model's answer ran into its output allowance before it was whole:
+/// the one failure that asking again with the same allowance cannot mend.
+pub const OUTPUT_CUT: &str = "the model used its output allowance before finishing";
 
 /// Why a summary was not made.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -132,11 +134,21 @@ impl SummarizeError {
 }
 
 /// How long to wait before the next attempt after `failures` failures in a row: `min_interval` doubled for
-/// each, and never more than [`BACKOFF_CEILING`]. With none, the minimum interval itself.
+/// each, held to the chosen ceiling. With none, the minimum interval itself, held to that ceiling.
 #[must_use]
-pub fn next_interval(min_interval: Duration, failures: u32) -> Duration {
-    let factor = 1u32.checked_shl(failures.min(31)).unwrap_or(u32::MAX);
-    min_interval.saturating_mul(factor).min(BACKOFF_CEILING)
+pub fn next_interval(min_interval: Duration, failures: u32, ceiling: Duration) -> Duration {
+    let mut wait = min_interval.min(ceiling);
+    if wait.is_zero() {
+        return wait;
+    }
+    // Stop at the ceiling or Duration's representation, even for a very large failure count.
+    for _ in 0..failures {
+        if wait >= ceiling {
+            return ceiling;
+        }
+        wait = wait.checked_mul(2).unwrap_or(ceiling).min(ceiling);
+    }
+    wait
 }
 
 /// One implementation per kind, used by `orch-api`.
@@ -250,19 +262,37 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_retry_ceiling_changes_the_actual_backoff_instead_of_silently_stopping_at_an_hour() {
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            next_interval(minute, 10, Duration::from_secs(7200)),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            next_interval(minute, 10, Duration::from_secs(90)),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            next_interval(Duration::from_nanos(1), u32::MAX, Duration::MAX),
+            Duration::MAX
+        );
+    }
+
+    #[test]
     fn after_failures_the_next_attempt_backs_off_doubling_up_to_one_hour() {
         let min = Duration::from_secs(60);
+        let ceiling = Duration::from_secs(3600);
         let waits: Vec<u64> = (0..9)
-            .map(|failures| next_interval(min, failures).as_secs())
+            .map(|failures| next_interval(min, failures, ceiling).as_secs())
             .collect();
         assert_eq!(waits, [60, 120, 240, 480, 960, 1920, 3600, 3600, 3600]);
-        assert_eq!(next_interval(min, u32::MAX), BACKOFF_CEILING);
+        assert_eq!(next_interval(min, u32::MAX, ceiling), ceiling);
         assert_eq!(
-            next_interval(Duration::from_secs(7200), 0),
-            BACKOFF_CEILING,
+            next_interval(Duration::from_secs(7200), 0, ceiling),
+            ceiling,
             "a minimum above the ceiling is held to it"
         );
-        assert_eq!(next_interval(Duration::ZERO, 5), Duration::ZERO);
+        assert_eq!(next_interval(Duration::ZERO, 5, ceiling), Duration::ZERO);
     }
 
     #[test]

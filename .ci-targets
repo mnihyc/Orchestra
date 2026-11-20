@@ -1,0 +1,13 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test threads_settings
+test -p orch-api-core --test ownership_settings_native_scopes
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture --test-threads=1
+test -p orch-api-core --test accounts -- anonymous_cookie_discovery
+test -p orch-api-core --test bound
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test
+web build
