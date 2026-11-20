@@ -155,6 +155,14 @@ impl Copy {
                 }
                 (body.environment_id, true)
             }
+            CommandKind::FsMaterializeIfAbsent => {
+                let body: orch_link_contract::commands::FsMaterializeIfAbsent =
+                    serde_json::from_value(command.body.clone())?;
+                if body.job_id != job {
+                    return Ok(false);
+                }
+                (body.environment_id, false)
+            }
             CommandKind::FsMaterialize => {
                 let body: FsMaterialize = serde_json::from_value(command.body.clone())?;
                 if body.job_id != Some(job)

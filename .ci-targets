@@ -1,0 +1,5 @@
+test -p orch-api-core --test ask
+test -p orch-api-core --test everything_scale -- page_budgets:: --test-threads=1
+test -p orch-api-core --test ask_tools_native_origin --test kfix_schemas
+test -p orch-api-core --test node_chat_opening_scopes -- summary_provider_scope_declines_only_its_metadata_and_never_the_admitted_chat
+test -p orch-api-core --lib
