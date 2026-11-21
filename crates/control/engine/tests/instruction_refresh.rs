@@ -111,6 +111,7 @@ async fn instructions_file_chain_codex_resumes_each_local_turn_without_inventing
         .handler
         .on(CommandKind::AgentStart, move |_: &Command| {
             Ok(CommandResult::AgentStart(AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(descriptor.clone()).unwrap(),

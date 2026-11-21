@@ -62,11 +62,22 @@ export function formatMeasure(value: number, measure: Measure, locale: string): 
   return measure === 'credits' ? formatCredits(value, locale) : measure === 'tokens' ? formatTokens(value, locale) : formatNumber(value, locale);
 }
 
-/** A value of a measure on the scale of a chart: shorter, because many are written side by side. */
-export function formatScale(value: number, measure: Measure, locale: string): string {
-  if (measure === 'speed' || measure === 'first_token' || measure === 'errors') return formatMeasure(value, measure, locale);
-  if (measure === 'tokens') return formatTokens(value, locale);
-  return formatNumber(value, locale, { maximumFractionDigits: value < 10 ? 1 : 0 });
+/** Keep the usual unit and abbreviation while it distinguishes the actual splits. */
+export function scaleLabels(splits: readonly number[], measure: Measure, locale: string): string[] {
+  const count = measure === 'requests' || measure === 'turns' || measure === 'tokens';
+  const label = (value: number, precise: boolean): string => {
+    if (count && !Number.isInteger(value)) return '';
+    if (!precise && measure !== 'credits') return formatMeasure(value, measure, locale);
+    // Fifteen significant digits retain decimal tick intervals without binary rounding noise.
+    const options = { maximumSignificantDigits: 15 };
+    if (measure === 'errors') return formatNumber(value, locale, { ...options, style: 'percent' });
+    if (measure === 'first_token') return i18n.t('usagePerf.timeValue', { value: formatNumber(value / 1000, locale, options) });
+    const number = formatNumber(value, locale, options);
+    return measure === 'speed' ? i18n.t('usagePerf.speedValue', { value: number }) : number;
+  };
+  const labels = splits.map((value) => label(value, false));
+  const visible = labels.filter((text) => text !== '');
+  return new Set(visible).size === visible.length ? labels : splits.map((value) => label(value, true));
 }
 
 // ---------------------------------------------------------------- what a sum of credits says of itself

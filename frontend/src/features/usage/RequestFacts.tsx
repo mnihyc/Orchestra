@@ -2,6 +2,7 @@
 import { useTranslation } from 'react-i18next';
 import type { UsageEvent } from '@/generated/api-types';
 import { Facts } from '@/features/resources/Facts';
+import { CopyId } from '@/ui/CopyId';
 import { useFormatContext } from '@/lib/appearance';
 import {purposeLabel} from './words';
 import {serviceQuantityWords,serviceQuoteWords} from './services';
@@ -19,20 +20,25 @@ export function nativeCounterRows(event: Pick<UsageEvent, 'scope' | 'origin' | '
   });
 }
 
-export function TokenFacts({ event }: { event: UsageEvent }) {
+export function useTokenFactRows(event: UsageEvent) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
-  if(event.timing?.service_usage!==undefined && event.timing.service_usage!==null) return null;
+  if(event.timing?.service_usage!==undefined && event.timing.service_usage!==null) return [];
   const parts = requestInputParts(event);
   const number = (value: number | null) => value === null ? t('usagePerf.dash') : new Intl.NumberFormat(locale).format(value);
-  return <Facts compact rows={[
+  return [
     { name: t('usageRequest.uncached'), value: number(parts.uncached) },
     { name: t('usageRequest.cached'), value: number(parts.cached) },
     { name: t('usageRequest.cacheWrite'), value: number(parts.written) },
-  ]} />;
+  ];
 }
 
-export function RequestFacts({ event, details = false, speed = false }: { event: UsageEvent; details?: boolean; speed?: boolean }) {
+export function TokenFacts({ event }: { event: UsageEvent }) {
+  const rows = useTokenFactRows(event);
+  return rows.length === 0 ? null : <Facts compact rows={rows} />;
+}
+
+export function useRequestFactRows(event: UsageEvent, details = false, speed = false) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const timing = event.timing;
@@ -56,7 +62,7 @@ export function RequestFacts({ event, details = false, speed = false }: { event:
   const number = (value: number | null | undefined) => value === null || value === undefined ? t('usagePerf.dash') : new Intl.NumberFormat(locale).format(value);
   const ownerName = event.thread_owner?.display_name;
   const service=timing?.service_usage;
-  const rows = [
+  return [
     ...(service===undefined || service===null?[]:[{name:t('usage.chip.purpose'),value:purposeLabel(event.purpose,t)},
       {name:t('usage.serviceUnits.title'),value:serviceQuantityWords(service.unit,service.quantity.state==='told'?service.quantity.value:null,t,locale)},
       ...(!details?[]:[{name:t('usage.serviceUnits.price'),value:serviceQuoteWords(service,t)},
@@ -80,10 +86,14 @@ export function RequestFacts({ event, details = false, speed = false }: { event:
       { name: t('usageRequest.countedCredits'), value: event.credits ?? t('usagePerf.dash') },
     ]),
     ...(!details ? [] : [
-      { name: t('usageRequest.providerId'), value: timing?.provider_request_id ?? t('usagePerf.dash') },
-      { name: t('usageRequest.adapterId'), value: event.request_ref ?? t('usagePerf.dash') },
+      { name: t('usageRequest.providerId'), value: timing?.provider_request_id === undefined || timing.provider_request_id === null ? t('usagePerf.dash') : <CopyId value={timing.provider_request_id} /> },
+      { name: t('usageRequest.adapterId'), value: event.request_ref === null ? t('usagePerf.dash') : <CopyId value={event.request_ref} /> },
       { name: t('usageRequest.owner'), value: ownerName === '' ? t('usagePerf.dash') : ownerName ?? t('usagePerf.dash') },
     ]),
   ];
+}
+
+export function RequestFacts({ event, details = false, speed = false }: { event: UsageEvent; details?: boolean; speed?: boolean }) {
+  const rows = useRequestFactRows(event, details, speed);
   return rows.length === 0 ? null : <Facts compact rows={rows} />;
 }
