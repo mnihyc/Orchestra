@@ -4,6 +4,113 @@ use orch_api_contract::threads::MarkerHarnessChanged;
 use orch_api_contract::usage::UsageMeasurement;
 
 impl Mapper {
+    pub(super) fn runtime_warning(
+        &mut self,
+        params: &Json,
+        out: &mut Vec<SessionEvent>,
+        ctx: &Context<'_>,
+    ) {
+        let thread = text(params, "threadId");
+        let Some(stream) = self.stream_of(thread) else {
+            return;
+        };
+        let message = text(params, "message");
+        if message.trim().is_empty() {
+            return;
+        }
+        let turn = self.turn_for(thread);
+        self.warning_sequence = self.warning_sequence.saturating_add(1);
+        let data = MarkerHarnessChanged {
+            program: "Codex".into(),
+            change: "warning".into(),
+            subject: None,
+            previous: UsageMeasurement::Unsupported,
+            expected: UsageMeasurement::Unsupported,
+            value: json!({"message":message}),
+            changed: false,
+            diverged: false,
+            next_turn: false,
+            turn_id: turn,
+            reported_at: ctx.clock.time(),
+        };
+        let parent = self
+            .children
+            .get(thread)
+            .and_then(|child| child.parent_item.clone());
+        let reference = format!(
+            "native-warning-{}-{}-{}",
+            self.config.segment_id, self.observation_epoch, self.warning_sequence
+        );
+        self.emit_harness_observation(reference, &stream, parent, data, None, out);
+    }
+
+    pub(super) fn turn_diff_updated(
+        &mut self,
+        params: &Json,
+        out: &mut Vec<SessionEvent>,
+        ctx: &Context<'_>,
+    ) {
+        let thread = text(params, "threadId");
+        let native = text(params, "turnId");
+        let Some(stream) = self.stream_of(thread) else {
+            return;
+        };
+        let Some(turn) = self.reported_turn(thread, native) else {
+            return;
+        };
+        let Some(diff) = params.get("diff").and_then(Json::as_str) else {
+            return;
+        };
+        let hash = Hash::of(diff.as_bytes());
+        if self
+            .turn_diffs
+            .get(thread)
+            .is_some_and(|(old_turn, old_hash)| old_turn == native && *old_hash == hash)
+        {
+            return;
+        }
+        let Some(changes) = super::turn_diff::changes(diff, &self.config.directory) else {
+            if let Some((serial, data)) = self.native_settings.state(
+                thread,
+                "turn_diff_unavailable",
+                None,
+                json!({"reason":"format_unknown","turn_id":turn}),
+                Some(turn),
+                ctx.clock.time(),
+            ) {
+                let parent = self
+                    .children
+                    .get(thread)
+                    .and_then(|child| child.parent_item.clone());
+                self.emit_harness_change(serial, &stream, parent, data, None, out);
+            }
+            return;
+        };
+        self.turn_diffs.insert(thread.into(), (native.into(), hash));
+        let data = MarkerHarnessChanged {
+            program: "Codex".into(),
+            change: "turn_diff".into(),
+            subject: None,
+            previous: UsageMeasurement::Unsupported,
+            expected: UsageMeasurement::Unsupported,
+            value: json!({"changes":changes}),
+            changed: true,
+            diverged: false,
+            next_turn: false,
+            turn_id: Some(turn),
+            reported_at: ctx.clock.time(),
+        };
+        let reference = format!(
+            "turn-diff-{}",
+            Hash::of(json!([thread, native]).to_string().as_bytes())
+        );
+        let parent = self
+            .children
+            .get(thread)
+            .and_then(|child| child.parent_item.clone());
+        self.emit_harness_observation(reference, &stream, parent, data, None, out);
+    }
+
     fn reported_turn(&self, thread: &str, native: &str) -> Option<TurnId> {
         if native.is_empty() {
             return None;

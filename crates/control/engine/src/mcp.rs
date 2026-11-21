@@ -383,6 +383,14 @@ async fn resolve_where_candidates(
                 Code::ImportDisabled,
                 "the machine permits no imported MCP server",
             )
+        } else if matches!(
+            row.name.as_str(),
+            orch_agent_contract::loopback::ORCH_SERVER | orch_agent_contract::loopback::EXEC_SERVER
+        ) {
+            unavailable(
+                Code::NameConflict,
+                "this name belongs to a builtin tool server",
+            )
         } else if name_conflict(&mut names, &row.name, active.contains(&row.id)) {
             unavailable(
                 Code::NameConflict,
@@ -723,7 +731,7 @@ impl Engine {
                     .insert("environment_generation".to_owned(), json!(env.generation));
             }
             result.push(SessionOpenMcp {
-                server_id: Some(server.row.id),
+                server_id: server.row.id,
                 name: server.row.name,
                 ticket,
             });

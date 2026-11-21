@@ -21,6 +21,12 @@ use serde::{Deserialize, Serialize};
     deny_unknown_fields
 )]
 pub enum CommandEvidence {
+    /// The actual logical Provider Stop and its original selected managed unit.
+    ProviderUnitStop(Box<crate::commands::provider_unit::Command>),
+    /// The actual Host Stop and exact physical unit, separate from Tenant permissions.
+    HostUnitStop(Box<crate::commands::host_unit::Command>),
+    /// The original administrator and exact bundled-node release update job.
+    ServerUpdate(Box<crate::jobs::server_update::command::Source>),
     /// The actual retained Ask model call and its still-current controller.
     Ask(Box<crate::ask::command::CommandSource>),
     Skill(super::skill_creation::CommandSource),
@@ -28,30 +34,56 @@ pub enum CommandEvidence {
     MountEnsure(super::mount_locations::SetSource),
     ReferenceStat(super::reference_preview::FileSource),
     ReferenceFetch(super::reference_preview::FileSource),
+    ReferenceRelayDescribe(super::reference_preview::FileSource),
+    ReferenceRelaySend(super::reference_preview::FileSource),
     FileMkdir(crate::commands::FileMkdirCommand),
+    UploadSession(super::upload_session::SessionSource),
+    ProviderRelay(super::provider_relay::CallSource),
+    UploadWrite(crate::jobs::workspace_upload::authority::CommandSource),
+    MachineDirectory(Box<crate::commands::MachineDirectoryAuthority>),
+    FilePath(Box<super::file_commands::FileCommand>),
 }
 impl CommandEvidence {
     pub fn command_kind(&self) -> &'static str {
         match self {
+            Self::ProviderUnitStop(_) => "node.runtime.stop",
+            Self::HostUnitStop(_) => "node.runtime.stop",
+            Self::ServerUpdate(_) => "node.server.update",
             Self::Ask(_) => "provider.generate",
             Self::Skill(source) => source.command_kind(),
             Self::MountRemove(_) => "node.volume.remove",
             Self::MountEnsure(_) => "node.volume.ensure",
             Self::ReferenceStat(_) => "fs.stat",
             Self::ReferenceFetch(_) => "fs.fetch",
+            Self::ReferenceRelayDescribe(_) => "fs.relay.describe",
+            Self::ReferenceRelaySend(_) => "fs.relay.send",
             Self::FileMkdir(source) => source.command_kind(),
+            Self::UploadSession(source) => source.command_kind(),
+            Self::ProviderRelay(source) => source.command_kind(),
+            Self::UploadWrite(source) => source.command_kind(),
+            Self::MachineDirectory(_) => "machine.directory.list",
+            Self::FilePath(source) => source.command_kind(),
         }
     }
     pub async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
         match self {
+            Self::ProviderUnitStop(source) => source.lock_source(conn).await,
+            Self::HostUnitStop(source) => source.lock_source(conn).await,
+            Self::ServerUpdate(source) => source.lock_source(conn).await,
             Self::Ask(source) => source.lock_source(conn).await,
             Self::Skill(source) => source.lock_source(conn).await,
             Self::MountEnsure(source) => source.lock_source(conn).await,
             Self::MountRemove(source) => source.lock_source(conn).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.lock_source(conn).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.lock_source(conn).await,
             Self::FileMkdir(source) => source.lock_source(conn).await,
+            Self::UploadSession(source) => source.lock_source(conn).await,
+            Self::ProviderRelay(source) => source.lock_source(conn).await,
+            Self::UploadWrite(source) => source.lock_source(conn).await,
+            Self::MachineDirectory(source) => source.lock_source(conn).await,
+            Self::FilePath(source) => source.lock_source(conn).await,
         }
     }
     pub async fn current_issue_callers(
@@ -65,14 +97,25 @@ impl CommandEvidence {
             return Ok(None);
         }
         match self {
+            Self::ProviderUnitStop(source) => source.current_issue(conn, command, clock).await,
+            Self::HostUnitStop(source) => source.current_issue(conn, command, clock).await,
+            Self::ServerUpdate(source) => source.current_issue(conn, command, clock).await,
             Self::Ask(source) => source.current_issue_callers(conn, command, clock).await,
             Self::Skill(source) => source.current_issue(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,
             Self::MountRemove(source) => source.current(conn, clock).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.current(conn, clock).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.current(conn, clock).await,
             Self::FileMkdir(source) => source.current_issue(conn, command, clock).await,
+            Self::UploadSession(source) => source.current(conn, clock).await,
+            Self::ProviderRelay(source) => source.current_issue(conn, command, clock).await,
+            Self::UploadWrite(source) => source.current(conn, clock).await,
+            Self::MachineDirectory(source) => {
+                source.current_issue_callers(conn, command, clock).await
+            }
+            Self::FilePath(source) => source.issue(conn, command, clock).await,
         }
     }
     pub async fn current_callers(
@@ -86,14 +129,23 @@ impl CommandEvidence {
             return Ok(None);
         }
         match self {
+            Self::ProviderUnitStop(source) => source.current_stored(conn, command, clock).await,
+            Self::HostUnitStop(source) => source.current_stored(conn, command, clock).await,
+            Self::ServerUpdate(source) => source.current_stored(conn, command, clock).await,
             Self::Ask(source) => source.current_callers(conn, command, clock).await,
             Self::Skill(source) => source.current_stored(conn, command, clock).await,
             Self::MountEnsure(source) => source.current(conn, clock).await,
             Self::MountRemove(source) => source.current(conn, clock).await,
-            Self::ReferenceStat(source) | Self::ReferenceFetch(source) => {
-                source.current(conn, clock).await
-            }
+            Self::ReferenceStat(source)
+            | Self::ReferenceFetch(source)
+            | Self::ReferenceRelayDescribe(source)
+            | Self::ReferenceRelaySend(source) => source.current(conn, clock).await,
             Self::FileMkdir(source) => source.current_stored(conn, command, clock).await,
+            Self::UploadSession(source) => source.current(conn, clock).await,
+            Self::ProviderRelay(source) => source.current_stored(conn, command, clock).await,
+            Self::UploadWrite(source) => source.current(conn, clock).await,
+            Self::MachineDirectory(source) => source.current_callers(conn, command, clock).await,
+            Self::FilePath(source) => source.stored(conn, command, clock).await,
         }
     }
 }
