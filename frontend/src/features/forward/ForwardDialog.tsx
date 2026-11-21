@@ -10,12 +10,10 @@
  * go anywhere a message does; into that thread's own chat, offered first, they go as live quotes.
  */
 import { ThreadStateIcon } from '@/ui/ThreadState';
-import { useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query';
-import { Bot, Diamond, Folder, Info, LayoutGrid, MessageSquareText, Search, User, Users, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useQueries } from '@tanstack/react-query';
+import { Bot, Diamond, Folder, Info, LayoutGrid, MessageSquareText, User, Users, X } from 'lucide-react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { EmptyState } from '@/ui/EmptyState';
-import { ThreadIdentity } from '@/features/people/ThreadIdentity';
 import { useStore } from 'zustand';
 
 import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
@@ -23,33 +21,28 @@ import { nodeQuery } from '@/api/nodes';
 import { holds } from '@/lib/permissions';
 import { mentionNames } from '@/features/people/wording';
 import { ErrorState } from '@/ui/ErrorState';
-import { forward, orgChatsQuery, peopleQuery, PEOPLE_SEARCH_MIN_CHARS } from '@/api/chats';
+import { forward } from '@/api/chats';
 import { firstLine, plain, textOfParts } from '@/features/chat/text';
 import {
   type Destination,
   destinationsOf,
-  groupDestinations,
   MOST_DESTINATIONS,
-  nodeDestinations,
-  personDestinations,
   refusedDestination,
   summary,
-  threadDestinations,
 } from '@/features/forward/destinations';
 import type { ChatMessage, ForwardCreateReply, NodeKind } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
-import { useDebounced } from '@/lib/debounce';
-import { pathTo, useOrgTree } from '@/realtime/stores/tree';
+import { DestinationPicker } from '@/features/forward/DestinationPicker';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { Avatar } from '@/ui/Avatar';
 import { Button } from '@/ui/Button';
-import { cx } from '@/ui/cx';
 import { Dialog } from '@/ui/Dialog';
 import { useErrorText } from '@/ui/errorText';
 import { InlineAlert } from '@/ui/InlineAlert';
-import { fieldBoxClasses } from '@/ui/Input';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
+import { UserChip } from '@/ui/UserChip';
 
 /** What is forwarded: messages of a chat, or items of a thread. */
 export type ForwardSource =
@@ -76,8 +69,6 @@ export type ForwardSource =
 
 const NODE_ICONS: Record<NodeKind, typeof Diamond> = { org: LayoutGrid, project: Folder, topic: Diamond, thread: MessageSquareText };
 
-/** How many places of each kind the list shows before the person narrows it by typing. */
-const SHOWN_PER_KIND = 6;
 /** How many characters of a message the preview shows. */
 const PREVIEW_CHARS = 140;
 
@@ -97,7 +88,8 @@ export interface ForwardDialogProps {
 }
 
 export function ForwardDialog({ source, onClose, onForwarded, initialDestinations }: ForwardDialogProps) {
-  return source === null ? null : <ForwardForm source={source} initialDestinations={initialDestinations ?? []} onClose={onClose} {...(onForwarded === undefined ? {} : { onForwarded })} />;
+  const reader = useStore(client.session, (state) => JSON.stringify([state.userId, state.readerVersion]));
+  return source === null ? null : <ForwardForm key={`${reader}:${source.orgId}:${source.kind}:${source.kind === 'chat' ? source.chatId : source.threadId}`} source={source} initialDestinations={initialDestinations ?? []} onClose={onClose} {...(onForwarded === undefined ? {} : { onForwarded })} />;
 }
 
 function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { source: ForwardSource; initialDestinations: readonly Destination[]; onClose: () => void; onForwarded?: (reply: ForwardCreateReply) => void }) {
@@ -106,37 +98,13 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
   const locale = useAppearance((state) => state.locale);
   const me = useStore(client.session, (state) => state.userId);
   const actKey = useActKey();
-  const [query, setQuery] = useState('');
   const [chosen, setChosen] = useState<Destination[]>(() => [...initialDestinations]);
-  const threadChecks = useQueries({ queries: chosen.flatMap((target) => target.kind === 'thread' ? [{ ...nodeQuery(target.threadId), retry:false, staleTime:0 }] : []) });
+  const threadChecks = useQueries({ queries: chosen.flatMap((target) => target.kind === 'thread' ? [{ ...nodeQuery(target.threadId), retry:false }] : []) });
   const threadInteract = 'thread.interact';
   const mayAsk = threadChecks.every((read) => read.isSuccess && !read.isFetching && read.data.kind === 'thread' && holds(read.data.access, threadInteract) && !read.data.archived);
   const [comment, setComment] = useState('');
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<{ error: unknown; destination: Destination | null } | null>(null);
-  const settled = useDebounced(query);
-
-  const tree = useOrgTree(source.orgId);
-  const groups = useInfiniteQuery(orgChatsQuery(source.orgId, { scope: 'mine', of: null }));
-  const found = useQuery({ ...peopleQuery(source.orgId, settled.trim()), enabled: Array.from(settled.trim()).length >= PEOPLE_SEARCH_MIN_CHARS });
-
-  const choices = useMemo<Destination[]>(() => {
-    const pathOf = (node: { id: string }): string | null => {
-      const above = pathTo(tree, node.id).slice(0, -1);
-      return above.length === 0 ? null : above.map((entry) => entry.name).join(' / ');
-    };
-    // The items of a thread go first to its own chat, where they stay live quotes.
-    const home: Destination[] =
-      source.kind === 'thread'
-        ? [{ key: `chat:${source.threadChat.chatId}`, kind: 'group', chatId: source.threadChat.chatId, label: source.threadChat.label, detail: null }]
-        : [];
-    const nodes = nodeDestinations(tree.nodes.values(), query, pathOf).filter((one) => !home.some((first) => first.key === one.key));
-    const mine = groupDestinations(groups.data?.pages.flatMap((page) => page.items) ?? [], query, me);
-    const people = personDestinations(found.data ?? [], me);
-    const agents = threadDestinations(tree.nodes.values(), query, pathOf, source.kind === 'thread' ? source.threadId : null);
-    const capped = query.trim() === '' ? SHOWN_PER_KIND : SHOWN_PER_KIND * 2;
-    return [...home, ...mine.slice(0, capped), ...people.slice(0, capped), ...agents.slice(0, capped), ...nodes.slice(0, capped)];
-  }, [source, tree, query, groups.data, found.data, me]);
 
   const total = source.kind === 'chat' ? source.messages.length : source.itemIds.length;
   const sums = summary(chosen);
@@ -184,12 +152,15 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
       client_id: actKey({ source: source.kind === 'chat' ? source.messages.map((m) => m.id) : source.itemIds, to: chosen.map((one) => one.key), comment }),
       ...(comment.trim() === '' ? {} : { comment: comment.trim() }),
     };
+    const reader = libraryReader();
     try {
       const reply = await forward(body);
+      if (!sameLibraryReader(reader)) return;
       toast({ tone: 'success', title: t('forward.done', { count: chosen.length }) });
       onForwarded?.(reply);
       onClose();
     } catch (error) {
+      if (!sameLibraryReader(reader)) return;
       if (error instanceof ReceiptAcknowledged) {
         // The atomic forward committed. Keep full-result callbacks separate from this acknowledgement;
         // closing also prevents the original submit control from offering to repeat accepted work.
@@ -243,9 +214,10 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
               {chosen.map((one) => (
                 <li key={one.key} className="inline-flex max-w-full items-center gap-1 rounded-full border border-border bg-bg-subtle py-1 pr-1 pl-2 text-sm">
                   <DestinationIcon destination={one} />
-                  <span className="truncate">{one.label}</span>
+                  {one.kind === 'person' && one.person !== undefined ? <UserChip user={one.person} size={24} /> : <span className="truncate">{one.label}</span>}
                   <button
                     type="button"
+                    disabled={pending}
                     aria-label={t('forward.remove', { name: one.label })}
                     onClick={() => toggle(one)}
                     className="inline-flex size-5 items-center justify-center rounded-full text-text-muted hover:bg-bg-muted hover:text-text"
@@ -256,42 +228,9 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
               ))}
             </ul>
           )}
-          <label className="relative block">
-            <span className="sr-only">{t('forward.search')}</span>
-            <Search aria-hidden size={16} className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-text-subtle" />
-            <input
-              type="search"
-              value={query}
-              autoComplete="off"
-              placeholder={t('forward.search')}
-              onChange={(event) => setQuery(event.target.value)}
-              className={`${fieldBoxClasses} input-leading-icon`}
-            />
-          </label>
-          <div role="group" aria-label={t('forward.found')} data-scroll-allow="choices" className="flex max-h-[30dvh] flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
-            {choices.length === 0 ? (
-              <EmptyState compact className="px-2" title={t('forward.nothing')} />
-            ) : (
-              choices.map((one) => {
-                const on = chosen.some((held) => held.key === one.key);
-                return (
-                  <button
-                    key={one.key}
-                    type="button"
-                    aria-pressed={on}
-                    onClick={() => toggle(one)}
-                    className={cx('focus-inset flex items-center gap-2 rounded-md px-2 py-1 text-left text-base hover:bg-bg-muted', on && 'bg-accent-subtle')}
-                  >
-                    <DestinationIcon destination={one} />
-                    <span className="truncate font-medium">{one.label}</span>
-                    {one.detail !== null && <span className="truncate text-sm text-text-muted">{one.detail}</span>}
-                    {one.kind === 'thread' && <ThreadIdentity id={one.threadId} />}
-                    <span className="ml-auto shrink-0 text-xs text-text-muted">{t(`forward.kind.${one.kind}`)}</span>
-                  </button>
-                );
-              })
-            )}
-          </div>
+          <DestinationPicker orgId={source.orgId} me={me} sourceThread={source.kind === 'thread' ? source.threadId : null}
+            ownChat={source.kind === 'thread' ? { key: `chat:${source.threadChat.chatId}`, kind: 'group', chatId: source.threadChat.chatId, label: source.threadChat.label, detail: null } : null}
+            chosen={chosen} disabled={pending || chosen.length >= MOST_DESTINATIONS} onChoose={toggle} icon={(destination) => <DestinationIcon destination={destination} />} />
           {chosen.length >= MOST_DESTINATIONS && <p className="text-xs text-text-muted">{t('forward.most', { count: MOST_DESTINATIONS })}</p>}
           {source.kind === 'thread' && (
             <p className="flex items-start gap-1 text-xs text-text-muted">

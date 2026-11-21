@@ -65,6 +65,7 @@ pub fn probed_descriptor(
         gateway_access: Some(orch_driver_contract::host::GatewayAccess::NodeAddress),
         volume_export_consistency: None,
         host_ports: orch_driver_contract::descriptor::OperationSupport::available(true, ""),
+        program_units: Default::default(),
         kept_file_transfer: Default::default(),
         local_accounts: true,
         unavailable: std::collections::BTreeMap::from([
