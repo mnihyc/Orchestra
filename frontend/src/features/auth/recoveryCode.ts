@@ -8,7 +8,7 @@ let putAway: (() => void) | undefined;
 export function recoveryCodeUsed(): void {
   putAway?.();
   putAway = toast({ tone: 'info', persistent: true, title: i18n.t('security.recovery.used'), description: i18n.t('security.recovery.replaceSoon'),
-    action: { label: i18n.t('security.recovery.open'), run: () => window.location.assign('/settings/security') } });
+    action: { label: i18n.t('security.recovery.open'), href: '/settings/security', run: recoveryCodesIssued } });
 }
 
 /** A new sheet is already being shown; the earlier reminder no longer applies. */

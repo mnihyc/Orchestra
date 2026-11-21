@@ -81,8 +81,8 @@ test('frame choices keep names and contextual destinations without duplicate cap
   await page.keyboard.press('Escape');
   await right(page).getByRole('button', { name: 'Actions for Outline', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).hover();
-  const destination = page.getByRole('menuitem', { name: 'Bottom', exact: true });
-  await expect(destination).toHaveAccessibleName('Bottom');
+  const destination = page.getByRole('menuitem', { name: 'Bottom panel', exact: true });
+  await expect(destination).toHaveAccessibleName('Bottom panel');
   await expect(destination).toHaveAccessibleDescription('Open the view in the panel below the main area.');
 });
 
@@ -115,7 +115,7 @@ test('a lone section uses the bar title and keeps its actions and saved expansio
   await expect(navigationTitle.getByRole('button', { name: 'Help: Navigation', exact: true })).toHaveCount(0);
   await expect(navigationTitle.locator('button[aria-haspopup="menu"]')).toHaveCount(1);
   await expect(navigationTitle.getByRole('button', { name: 'Navigation actions', exact: true })).toBeVisible();
-  await expect(left.getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
+  await expect(left.getByRole('tree', { name: 'Organizations, projects, topics and threads' })).toBeVisible();
   // The title remains a keyboard carry handle after the duplicate header is removed.
   await navigationTitle.getByRole('button', { name: 'Navigation', exact: true }).focus();
   await page.keyboard.press('Space');
@@ -313,9 +313,9 @@ test('a section is dragged to another container and moved to the bottom from its
   await expect(section(page, 'History')).toBeVisible();
   await right(page).getByRole('button', { name: 'Actions for History' }).click();
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).hover();
-  await page.getByRole('menuitem', { name: 'Bottom', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Bottom panel', exact: true }).click();
   // A section moved out of its thread names the thread it belongs to once it is read: the tab is that section, with or without its place.
-  await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: /^History(?: · .+)?$/ })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Bottom panel', exact: true }).getByRole('tab', { name: /^History(?: · .+)?$/ })).toBeVisible();
   await expect(right(page).getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
 });
 
@@ -372,7 +372,7 @@ test('a phone offers the desktop containers in order and draws their sections in
   await code.getByRole('button', { name: 'Close', exact: true }).first().click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.getByRole('button', { name: 'Navigation', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Navigation', exact: true }).getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Navigation', exact: true }).getByRole('tree', { name: 'Organizations, projects, topics and threads' })).toBeVisible();
 });
 
 const THREAD_SECTIONS = [
@@ -459,7 +459,7 @@ for (const width of [1280, 1440, 1920, 'minimum bar'] as const) {
     // The terminal is a bottom-panel view, reached through the Environment container's labelled action.
     await chooseContainer(page, 'Environment');
     await right(page).getByRole('button', { name: 'Open terminal', exact: true }).click();
-    await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Bottom panel', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
     await expectStripControlsInside(page);
   });
 }
