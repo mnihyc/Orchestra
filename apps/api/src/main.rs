@@ -3,9 +3,11 @@
 //! The program reads the deployment's configuration, brings the schema up
 //! to date, and serves until it is told to stop.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
+#[forbid(unsafe_code)]
 mod composition;
+mod upkeep;
 
 use anyhow::Context;
 use clap::Parser;

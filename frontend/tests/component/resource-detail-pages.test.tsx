@@ -12,6 +12,7 @@ import { environmentKey } from '@/api/environments';
 import type * as ToolsApi from '@/api/resource-tools';
 import { mcpKey } from '@/api/resource-tools';
 import { AgentScreen, type AgentTab } from '@/features/resources/agents/Profile';
+import { useChangeHost } from '@/features/change/target';
 import { EnvironmentScreen, type EnvironmentTab } from '@/features/resources/environments/Environment';
 import { HostScreen, type HostTab } from '@/features/resources/hosts/Host';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
@@ -20,6 +21,7 @@ import { McpScreen } from '@/features/resources/mcp/Preset';
 import { MountScreen } from '@/features/resources/mounts/Mount';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { formatBytes } from '@/lib/format';
 import type { Environment, EnvironmentSandboxReadiness } from '@/generated/api-types';
 import { detailAgent, detailEnvironment, detailHost, detailMachine, detailMcp, detailMount, detailSchema, detailTemplate } from './resource-detail-fixtures';
 import { show } from './support';
@@ -58,7 +60,7 @@ vi.mock('@/api/resource-tools', async (load) => {
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useNavigate: () => vi.fn(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
   Link: ({ children, to, params, className }: { children: ReactNode; to: string; params?: Record<string, string>; className?: string }) => <a className={className} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => 'workshop' }));
 vi.mock('@/realtime/environmentFeed', () => ({ useEnvironmentFeed: () => undefined }));
@@ -102,6 +104,18 @@ afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); d
   records.agent = detailAgent;
   records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
+
+for(const locale of ['en','zh-CN'] as const) it(`names the idle reconnect beside automatic certificate renewal only for a valid identity (${locale})`,async()=>{
+  await setLocale(locale);
+  const renewal=locale==='en'?'Automatic · reconnects when idle':'自动续期 · 空闲时重新连接';
+  const view=draw(<Machine machineId={detailMachine.id} tab="certificate" onTab={vi.fn()} />);
+  expect(await screen.findByText(renewal)).toBeVisible();
+  expect(screen.getByText(i18n.t('machines.certificate.ends'))).toBeVisible();
+  act(()=>{view.client.setQueryData(machineKey(detailMachine.id),{...detailMachine,status:'revoked'});});
+  await waitFor(()=>expect(screen.queryByText(renewal)).not.toBeInTheDocument());
+  const certificate=screen.getByLabelText(i18n.t('machines.certificate.title'),{selector:'dl'});
+  expect(within(certificate).getByText(i18n.t('machines.certificate.revoked'))).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
@@ -148,8 +162,8 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['missing', 'partial', 'z
   const value = term?.parentElement?.querySelector('dd');
   if (!(value instanceof HTMLElement)) throw new Error('The machine link has no fact value');
   const expected = state === 'missing' ? '–' : state === 'partial'
-    ? i18n.t('machines.overview.linkPartial', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '0 bit/s', down: '–' })
-    : i18n.t('machines.overview.linkValue', { trip: state === 'zero' ? '0' : '200', up: state === 'zero' ? '0 bit/s' : '8 kbit/s', down: state === 'zero' ? '0 bit/s' : '16 kbit/s' });
+    ? i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '0 bit/s', down: '–' })
+    : i18n.t('machines.overview.linkValue', { trip: i18n.t('machines.overview.linkTrip', {value:state === 'zero' ? '0' : '200'}), up: state === 'zero' ? '0 bit/s' : '8 kbit/s', down: state === 'zero' ? '0 bit/s' : '16 kbit/s' });
   expect(value).toHaveTextContent(expected);
   if (state === 'missing') {
     expect(value.textContent).toBe('–');
@@ -175,6 +189,28 @@ it('keeps an environment terminal address inside Tools and does not mount its MC
   await screen.findByRole('heading', { name: detailEnvironment.name });
   expect(screen.getByRole('tab', { name: i18n.t('resourceDetails.layout.tools') })).toHaveAttribute('aria-selected', 'true');
   expect(await screen.findByText('door-reader')).toBeVisible(); expect(calls.hidden).toHaveBeenCalledExactlyOnceWith('door-reader');
+});
+
+it('shows an environment operation once and opens its current job from the header', async () => {
+  const user = userEvent.setup();
+  const view = draw(<EnvironmentScreen environmentId={detailEnvironment.id} tab="overview" onTab={vi.fn()} />);
+  const heading = await screen.findByRole('heading', { name: detailEnvironment.name, level: 1 });
+  const header = within(heading.closest('header')!);
+  const progress = i18n.t('change.banner.progress');
+  const job = { id: 'move-workspace', kind: 'environment_move', state: 'running', phase: 'transfer', percent: 40 } as const;
+  act(() => { view.client.setQueryData<Environment>(environmentKey(detailEnvironment.id), { ...detailEnvironment, job }); });
+  expect(await screen.findByText(i18n.t('environments.status.moving'), { exact: true })).toBeVisible();
+  try {
+    await user.click(header.getByRole('button', { name: progress }));
+    expect(useChangeHost.getState().current).toMatchObject({
+      target: { kind: 'environment', id: detailEnvironment.id }, options: { kind: 'progress', job: job.id },
+    });
+  } finally {
+    useChangeHost.setState({ current: null, open: false });
+  }
+  act(() => { view.client.setQueryData(environmentKey(detailEnvironment.id), detailEnvironment); });
+  expect(await header.findByText(i18n.t('environments.status.running'), { exact: true })).toBeVisible();
+  expect(header.queryByRole('button', { name: progress })).toBeNull();
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
@@ -250,12 +286,12 @@ it('shows readable parameter defaults with the native Defaults destination and b
 
 it.each(['en', 'zh-CN'] as const)('uses the declared program name and translated parameter words in %s', async (locale) => {
   await setLocale(locale);
-  const english = 'How much of a conversation Example agent keeps, in tokens';
-  const chinese = '示例代理保留的对话长度，以词元计';
+  const english = 'How much of a thread Example agent keeps, in tokens';
+  const chinese = '示例智能体保留的对话长度，以词元计';
   records.agent = { ...detailAgent, descriptor: {
     harness: { name: 'Example agent', status: 'supported', version: '1.0.0' },
     parameters: [{ key: 'context', type: 'integer', title: 'Context', description: english, default: { from_model: 'default_context' } }],
-    text: { 'zh-CN': { 'harness.name': '示例代理', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
+    text: { 'zh-CN': { 'harness.name': '示例智能体', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
   } };
   draw(<AgentScreen agentId={detailAgent.id} tab="parameters" onTab={vi.fn()} />);
   const description = await screen.findByText(locale === 'en' ? english : chinese);
@@ -331,4 +367,39 @@ it.each(['en', 'zh-CN'] as const)('keeps the machine Access address reachable in
   expect(view.container.querySelector('[data-resource-section="access"]')).toBeVisible();
   expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
   expect(calls.hidden).not.toHaveBeenCalled();
+});
+
+for(const locale of ['en','zh-CN'] as const) {
+  it(`shows measured host load and free storage before declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,capacity:{cpu_millis:6000,memory_mb:1344,disk_gb:66},declared:{cpu_millis:2000,memory_mb:2048,disk_gb:0},
+      usage:{cpu_percent_milli:12500,memory_used_mb:617,observed_at:'2026-11-13T18:38:00Z'},
+      storages:[{name:'Root',default:true,capacity_gb:66,free_gb:54,private_views:false}]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    expect(facts).toHaveTextContent(i18n.t('placeRoom.cpu',{count:5.9,n:'5.9'}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredMemory',{used:formatBytes(617*1024*1024,locale),free:formatBytes(727*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(facts).toHaveTextContent(i18n.t('hosts.capacity.measuredStorage',{name:'Root',free:i18n.t('resources.amount.disk',{size:54}),capacity:i18n.t('resources.amount.disk',{size:66})}));
+    expect(facts).not.toHaveTextContent(i18n.t('hosts.capacity.declared',{declared:formatBytes(2048*1024*1024,locale),capacity:formatBytes(1344*1024*1024,locale)}));
+    expect(screen.queryByLabelText(i18n.t('hosts.capacity.title'))).not.toBeInTheDocument();
+  });
+  it(`keeps unreported host load unknown instead of substituting declared needs (${locale})`,async()=>{
+    await setLocale(locale);
+    const host={...detailHost,usage:null,storages:[]};
+    draw(<HostScreen hostId={host.id} tab="overview" onTab={vi.fn()}/>,host);
+    const facts=await screen.findByLabelText(i18n.t('hosts.overview.about'),{selector:'dl'});
+    for(const key of ['cpu','memory','disk']) {
+      const term=[...facts.querySelectorAll('dt')].find((row)=>row.textContent===`${i18n.t(`hosts.capacity.${key}`)}:`);
+      expect(term?.nextElementSibling).toHaveTextContent(key === 'cpu' ? i18n.t('placeRoom.cpuUnknown') : '–');
+    }
+  });
+}
+
+it('opens machine Storage from the machine read even when the viewer cannot list its mounts', async () => {
+  records.machine = { ...detailMachine, facts: { ...detailMachine.facts as object, storages: [{ name: 'Workspace SSD', capacity_gb: 50, free_gb: 12 }] } };
+  const view = draw(<Machine machineId={detailMachine.id} tab="storage" onTab={vi.fn()} />);
+  expect(await screen.findByText('Workspace SSD')).toBeVisible();
+  expect(view.container.querySelector('#machine-storages')).toBeVisible();
+  expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
+  expect(view.container.querySelector('[data-resource-section="mounts"]')).not.toBeInTheDocument();
 });
