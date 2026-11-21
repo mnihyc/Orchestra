@@ -8,7 +8,7 @@
  * value, the values hidden for a secret map. A field that declares no help has no line under it.
  */
 import { Plus, Trash2, X } from 'lucide-react';
-import { type ReactNode, useId, useRef } from 'react';
+import { type ReactNode, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { Field as FieldDeclaration } from '@/generated/api-types';
@@ -19,6 +19,7 @@ import { Checkbox } from '@/ui/Checkbox';
 import { cx } from '@/ui/cx';
 import { IconButton } from '@/ui/IconButton';
 import { Input, PasswordInput } from '@/ui/Input';
+import { SavedSecret, SecretField } from '@/ui/SecretField';
 import { DateField } from '@/ui/DateField';
 import { ChoiceLocator } from '@/ui/ChoiceLocator';
 import { Textarea } from '@/ui/Textarea';
@@ -43,6 +44,12 @@ export interface FieldFormProps {
    * the line that would stand under the field. A field that declares no help is given nothing to draw.
    */
   helpFor?: (field: FieldDeclaration) => ReactNode;
+  /** The secret fields that already hold a saved value: each is shown as a field of dots that is set, with Replace, and never as an empty box. */
+  secretsSet?: readonly string[] | undefined;
+  /** The secret fields whose saved value is to be taken away with the next save. */
+  secretsRemoved?: readonly string[] | undefined;
+  /** Remove or keep a saved secret; where this is not given, a saved secret can only be replaced. */
+  onSecretAct?: ((name: string, act: 'remove' | 'keep') => void) | undefined;
 }
 
 const asText = (value: FormValue | undefined): string => (typeof value === 'string' ? value : '');
@@ -281,7 +288,25 @@ function SecretText({
   );
 }
 
-export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor }: FieldFormProps) {
+/** Text and map secrets share the same saved-value acts as an ordinary secret field. */
+function DeclaredSecret({ field, saved, removed, empty, disabled, help, error, onReset, onAct, children }: {
+  field: FieldDeclaration; saved: boolean; removed: boolean; empty: boolean; disabled: boolean;
+  help?: ReactNode; error: string | undefined; onReset: () => void;
+  onAct: FieldFormProps['onSecretAct']; children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const [replacing, setReplacing] = useState(false);
+  if (saved && !removed && empty && !replacing) return <SavedSecret label={field.label} optional={!field.required} help={help} error={error} disabled={disabled}
+    onReplace={() => setReplacing(true)} onRemove={onAct === undefined ? undefined : () => { setReplacing(false); onAct(field.name, 'remove'); }} />;
+  return <div className="flex min-w-0 flex-col gap-1">
+    {children}
+    {saved && !removed && <div><Button size="sm" variant="ghost" disabled={disabled} onClick={() => { onReset(); setReplacing(false); }}>{t('settingsEditors.secret.keep')}</Button></div>}
+    {removed && <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted"><span>{t('settingsEditors.secret.removed')}</span>
+      {onAct !== undefined && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => { onReset(); setReplacing(false); onAct(field.name, 'keep'); }}>{t('settingsEditors.secret.keepSaved')}</Button>}</div>}
+  </div>;
+}
+
+export function FieldForm({ fields, values, onChange, errors = {}, disabled = false, className, helpFor, secretsSet = [], secretsRemoved = [], onSecretAct }: FieldFormProps) {
   const { t } = useTranslation();
   return (
     <div className={cx('flex flex-col gap-4', className)}>
@@ -332,7 +357,7 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
             );
           case 'secret':
             return (
-              <PasswordInput
+              <SecretField
                 key={field.name}
                 label={field.label}
                 optional={!field.required}
@@ -341,14 +366,17 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
                 error={error}
                 value={asText(value)}
                 disabled={disabled}
-                onChange={(event) => onChange(field.name, event.target.value)}
-                autoComplete="off"
+                onValueChange={(next) => onChange(field.name, next)}
+                set={secretsSet.includes(field.name)}
+                removed={secretsRemoved.includes(field.name)}
+                {...(onSecretAct === undefined ? {} : { onRemove: () => onSecretAct(field.name, 'remove'), onKeep: () => onSecretAct(field.name, 'keep') })}
               />
             );
           case 'secret_text':
             return (
+              <DeclaredSecret key={field.name} field={field} saved={secretsSet.includes(field.name)} removed={secretsRemoved.includes(field.name)}
+                empty={asText(value) === ''} disabled={disabled} help={aside} error={error} onAct={onSecretAct} onReset={() => onChange(field.name, '')}>
               <SecretText
-                key={field.name}
                 help={aside}
                 field={field}
                 value={asText(value)}
@@ -356,6 +384,7 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
                 error={error}
                 onChange={(next) => onChange(field.name, next)}
               />
+              </DeclaredSecret>
             );
           case 'choice': {
             const choices = field.choices ?? [];
@@ -404,15 +433,19 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
                 onValueChange={(value) => onChange(field.name, value)}
               />
             );
-          case 'map':
           case 'secret_map':
+            return <DeclaredSecret key={field.name} field={field} saved={secretsSet.includes(field.name)} removed={secretsRemoved.includes(field.name)}
+              empty={Object.keys(asMap(value)).length === 0} disabled={disabled} help={aside} error={error} onAct={onSecretAct} onReset={() => onChange(field.name, {})}>
+              <MapRows field={field} help={aside} value={asMap(value)} secret disabled={disabled} error={error} onChange={(next) => onChange(field.name, next)} />
+            </DeclaredSecret>;
+          case 'map':
             return (
               <MapRows
                 key={field.name}
                 help={aside}
                 field={field}
                 value={asMap(value)}
-                secret={field.type === 'secret_map'}
+                secret={false}
                 disabled={disabled}
                 error={error}
                 onChange={(next) => onChange(field.name, next)}

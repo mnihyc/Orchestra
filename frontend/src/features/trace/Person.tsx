@@ -1,4 +1,5 @@
 /** A person's trace entry, in exactly the place the caller is looking at. */
+import { PathLink } from '@/shell/TrailLink';
 import { useRouter } from '@tanstack/react-router';
 import { ACTIONS } from '@/ui/actions';
 import { useTranslation } from 'react-i18next';
@@ -20,5 +21,5 @@ export function useTraceEntry(scope: TraceScope | null, allowed: boolean) {
 export function TracePerson({ user, scope, allowed, size = 28, showUsername = false }: { user: UserRef; scope: TraceScope; allowed: boolean; size?: 24 | 28; showUsername?: boolean }) {
   const { t } = useTranslation();
   const identity = <UserChip className="max-w-full" user={user} size={size} showUsername={showUsername} card={!allowed} />;
-  return allowed ? <PersonCard user={user} actions={<Button size="sm" action="history" asChild><a href={traceHref(scope, user.id)}>{t('trace.entry')}</a></Button>}>{identity}</PersonCard> : identity;
+  return allowed ? <PersonCard user={user} actions={<Button size="sm" action="history" asChild><PathLink href={traceHref(scope, user.id)}>{t('trace.entry')}</PathLink></Button>}>{identity}</PersonCard> : identity;
 }

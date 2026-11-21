@@ -22,14 +22,14 @@ use orch_api_contract::auth::{
 };
 use orch_api_contract::common::{ErrorCode, IDEMPOTENCY_HEADER, Page};
 use orch_api_contract::nodes::NodeGet;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, key_activity};
 use orch_types::{Id, new_id};
 use serde_json::json;
 use support::{FullTokenReply as _, World};
 
 async fn credential(world: &World, owner: Id, id: Id, scope: Option<&KeyScope>) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let scopes = if scope.is_some() {
         Vec::new()
     } else {

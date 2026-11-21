@@ -201,8 +201,8 @@ async fn context(s: &Scene, who: &Who, session: bool) -> TestResult<(Ctx, Caller
     let (bearer, token, surface) = if session {
         (who.token.clone(), None, HttpSurface::Browser)
     } else {
-        let bearer = authentication::new_token(authentication::API_TOKEN_PREFIX);
         let id = new_id();
+        let bearer = authentication::new_api_token(id);
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
