@@ -32,7 +32,7 @@ test('environment, branch and changed lines, isolation and shell count live in t
   await expect(page.getByTestId('changes-panel')).toBeVisible();
   await page.getByRole('button', { name: 'Bottom panel', exact: true }).click();
   await status.getByRole('button', { name: /^\d+ shells?$/ }).click();
-  await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Bottom panel', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
 });
 
 for (const reason of ['not_a_repository', 'git_missing', 'offline', 'unknown']) {

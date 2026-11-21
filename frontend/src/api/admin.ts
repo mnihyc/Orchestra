@@ -8,6 +8,7 @@
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
+import { READ_AGAIN_DOWN_MS } from '@/api/readAgain';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
 import { resourceRows } from '@/api/listed';
 import type {
@@ -24,10 +25,13 @@ import type {
   AuditEntryPage,
   AuditExportFormat,
   BackupRestoreList,
+  BundledNodeEnrollment,
   CapabilityDef,
   HarnessBuild,
   HarnessChannelsStatus,
   HarnessKindInfo,
+  HumanCheckState,
+  HumanCheckTestReply,
   Host,
   IdentityProvider,
   IdentityProviderInput,
@@ -78,7 +82,6 @@ export const backupRestoreListQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: ['admin', 'backup-restore-list'] as const,
   queryFn: ({ signal }): Promise<BackupRestoreList | null> => ok(api.GET('/admin/backup-restore-list', { signal })),
-  staleTime: 0,
   refetchOnMount: 'always',
 });
 
@@ -280,6 +283,17 @@ export function nameOwner(orgId: string, userId: string): Promise<Node> {
 
 // ---------------------------------------------------------------- hosts and runtimes
 
+export const bundledNodeQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: ['admin', 'bundled-node-enrollment'] as const,
+  queryFn: ({signal}): Promise<BundledNodeEnrollment | null> => ok(api.GET('/admin/bundled-node/enrollment', {signal})),
+  refetchInterval: (query) => query.state.data ? READ_AGAIN_DOWN_MS : false,
+});
+
+export function retryBundledNode(): Promise<void> {
+  return done(api.POST('/admin/bundled-node/enrollment/retry'));
+}
+
 export const hostsKey = ['admin', 'hosts'] as const;
 
 /** Every host on the system, the system's own and those members added for their orgs. */
@@ -330,7 +344,6 @@ export const harnessChannelsKey = [...harnessBuildsKey, 'channels'] as const;
 /** Local channel read metadata and the reason for its current schedule; this contacts no vendor. */
 export const harnessChannelsQuery = queryOptions({
   ...ADMIN_QUERY,
-  staleTime: 0,
   queryKey: harnessChannelsKey,
   queryFn: ({ signal }): Promise<HarnessChannelsStatus> => ok(api.GET('/admin/harnesses/channels', { signal })),
 });
@@ -361,8 +374,13 @@ export function readHarnessChannels(): Promise<HarnessBuild[]> {
 }
 
 /** Checks a kept build again, in the background, and answers every build, that one marked as being checked. */
-export function checkHarnessBuild(build: HarnessBuild): Promise<HarnessBuild[]> {
-  return ok(api.POST('/admin/harnesses/{kind}/{version}/check', { params: { path: { kind: build.kind, version: build.version } } }));
+export function checkHarnessBuild(build: Pick<HarnessBuild, 'kind' | 'version'> & { machine_id?: string; sha256?: string }): Promise<HarnessBuild[]> {
+  return ok(api.POST('/admin/harnesses/{kind}/{version}/check', {
+    params: {
+      path: { kind: build.kind, version: build.version },
+      query: { machine_id: build.machine_id ?? null, sha256: build.sha256 ?? null },
+    },
+  }));
 }
 
 export const systemAgentsKey = ['admin', 'agents'] as const;
@@ -461,6 +479,32 @@ export function startAuditExport(format: AuditExportFormat, from: string, to: st
       ...(signal === undefined ? {} : { signal }),
     }),
   ) as Promise<ReadableStream<Uint8Array>>;
+}
+
+// ---------------------------------------------------------------- the human check
+
+export const humanCheckKey = ['admin', 'human-check'] as const;
+
+/** Whether the human check has its secret, and when it was last set; never the secret. */
+export const humanCheckQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: humanCheckKey,
+  queryFn: ({ signal }): Promise<HumanCheckState> => ok(api.GET('/admin/human-check', { signal })),
+});
+
+/** Keeps the secret, sealed; it is never read back. */
+export function setHumanCheckSecret(secret: string): Promise<HumanCheckState> {
+  return ok(api.PUT('/admin/human-check/secret', { body: { secret } }));
+}
+
+/** Takes the secret away. */
+export function deleteHumanCheckSecret(): Promise<HumanCheckState> {
+  return ok(api.DELETE('/admin/human-check/secret'));
+}
+
+/** Asks the service with a token that is not one, to see that it is reached and accepts the keys. */
+export function testHumanCheck(): Promise<HumanCheckTestReply> {
+  return ok(api.POST('/admin/human-check/test'));
 }
 
 // ---------------------------------------------------------------- identity providers

@@ -172,7 +172,7 @@ copy as the web import, and audits its command-line origin. The local import cei
 Name collisions require an explicit harness or directory choice; a lost answer is unconfirmed.
 | [builds](src/builds.rs) | Harness and executor builds fetched on the server's word where the owner allows it, verified by hash. |
 | [forwarder](src/forwarder.rs) | Lease, model, allowance and path checks, endpoint choice by protocol, the key presented as the endpoint says with its headers and query, optional translation and upstream streaming. |
-| [upstream](src/upstream.rs) | The HTTP exchange with an upstream model service: a connection made for the request, the request sent whole, and the answer handed on piece by piece as it arrives. |
+| [upstream](src/upstream.rs) | The shared orch-link model exchange, with response backpressure and usage watchers. |
 | [leases](src/leases.rs) | The leases of the credential kept here: one turn's leave to use it, the models it allows, what it has used, and which one a session's model calls run under. |
 | [credentials](src/credentials.rs) | Local keys, sealed exchange, shared renewal and handover. |
 | [usage](src/usage.rs) | Provider facts and per-request usage reporting. |
