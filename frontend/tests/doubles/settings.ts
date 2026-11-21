@@ -1,3 +1,4 @@
+import { channelPage, pageOf } from './collection.ts';
 /** What the fake API says of a person's own settings: their password, second step, sessions, tokens and the state the interface keeps; and of an org's settings, the settings of a node, channels and destinations.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: the same
@@ -6,8 +7,9 @@
  * their phone; a code that is mailed is read from the outbox, as the people of the fake system would
  * read their mail.
  */
-import { randomUUID } from 'node:crypto';
-import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { crc32 } from 'node:zlib';
+import type { ApiTokenInfo, AuditEntry, Destination, Holdings, Me, Member, MemberMovePlan, NodeRef, NotificationChannel, Notifier, ResolvedSetting, Role, SecretInfo, ServiceAccount, SessionInfo, SettingDef, Suspension, ThreadComposer, UserRef, ResolvedSetting as SettingWithParts } from '../../src/generated/api-types.ts';
 import { narrowingMerge, resolvedParts } from './day100-settings.ts';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry.ts';
 import type { RecoveryCodeBatch, RecoveryCodeStatus } from '../../src/generated/api-types.ts';
@@ -60,7 +62,7 @@ const REGISTRY: readonly Key[] = [
   key('switch.batch_threads', 'Threads per batch', 'Threads in one reviewed switch batch.', 'switching', 'policy', ['system'], {type:'integer',minimum:1}, 200, 'replace', {unit:'raw',zero:null}, 500),
   key('cleanup.unused_keep_days', 'Clean unused caches', 'Remove unused images and tool versions after this many days. Zero switches automatic cleanup off.', 'retention', 'policy', ['system', 'host'], {type:'integer',minimum:0,'x-unit':'days'}, 7, 'replace', {unit:'days',zero:'off'}, 14),
   key('cleanup.release_keep_count', 'Keep unused releases', 'Unused releases kept in addition to current and previous. Zero switches pruning off and keeps all.', 'retention', 'policy', ['system'], {type:'integer',minimum:0}, 3, 'replace', {unit:'raw',zero:'off'}, 5),
-  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets').map((def): Key => {
+  ...SETTINGS_REGISTRY.filter((def) => def.key.startsWith('calls.') || def.key.startsWith('agents.') && def.key.endsWith('_backend') || def.key === 'sharing.agent_messages' || def.key === 'sharing.on_link' || def.key === 'env.host_id' || def.key === 'org.terms' || def.key === 'collab.attribution' || def.key === 'thread.side_max' || def.key === 'summary.targets' || ['composer.paste_inline_context_share', 'thread.plan_first', 'thread.silent_after_secs', 'thread.plan_answered_by', 'orch_tools.owner_reads', 'threads.opening_items'].includes(def.key)).map((def): Key => {
     if (typeof def.group !== 'string') throw new Error('A served policy has its declared settings group');
     return { def: { ...def, group: def.group, ...(def.key === 'calls.repeat_limit' ? { display: { unit: 'raw', zero: 'off' } as const } : {}) }, at: def.scopes };
   }),
@@ -71,8 +73,8 @@ const REGISTRY: readonly Key[] = [
   key('agent.model', 'Model', 'The model that threads here run on, by its routing name.', 'agent', 'parameter', ORG_DOWN, { type: 'string' }, null),
   key('agent.default_provider_id', 'Provider for new threads', 'The provider that a new thread here starts on, by its identifier.', 'agent', 'parameter', ORG_TO_TOPIC, { type: 'string' }, null),
   key('agent.default_agent_id', 'Agent profile for new threads', 'The agent profile that a new thread here starts with, by its identifier.', 'agent', 'parameter', ORG_TO_TOPIC, { type: 'string' }, null),
-  key('agent.effort', 'Effort', 'How much effort the model puts into a turn, where it takes the choice.', 'agent', 'parameter', ORG_DOWN, { type: 'string' }, null),
-  key('collab.default_delivery', 'Delivery of messages', 'What a message sent to a thread that is busy does: waits its turn, goes into the turn, or stops it and goes first.', 'agent', 'parameter', ORG_DOWN, CHOICE('queue', 'steer', 'interrupt'), 'queue'),
+  key('agent.effort', 'Effort', 'How much effort the model puts into a turn, for models that let you choose.', 'agent', 'parameter', ORG_DOWN, { type: 'string' }, null),
+  key('collab.default_delivery', 'Delivery of messages', 'What happens to a message sent to a busy thread: it is queued, steers the running turn, or stops the turn and goes first.', 'agent', 'parameter', ORG_DOWN, CHOICE('queue', 'steer', 'interrupt'), 'queue'),
   key('agent.instructions', 'Instructions', 'Standing instructions given to the agent with every session.', 'agent', 'parameter', ORG_DOWN, { type: 'string', maxLength: 20000 }, '', 'append'),
   key('workspace.ignore', 'Ignored paths', 'Patterns excluded from the workspace index.', 'workspace', 'parameter', ORG_TO_TOPIC, { type: 'array', items: { type: 'string' } }, [], 'union'),
   key('agent.features', 'Agent features', 'Which optional features of agents are switched on, by feature.', 'agent', 'policy', WITH_SYSTEM, { type: 'object', additionalProperties: { type: 'boolean' } }, {}, 'map'),
@@ -91,14 +93,14 @@ const REGISTRY: readonly Key[] = [
   key('terminal.enabled', 'Shells', 'Whether interactive shells may be opened.', 'shells', 'policy', WITH_SYSTEM, { type: 'boolean' }, true),
   key('terminal.max_per_person', 'Shells per person', 'How many shells one person may have open at once in one environment.', 'shells', 'policy', WITH_SYSTEM, { type: 'integer', minimum: 1 }, 4),
   key('docs.max_bytes', 'Document size', 'The most text one document here may hold, in bytes.', 'chat_documents', 'policy', WITH_SYSTEM, { type: 'integer', minimum: 65536, 'x-unit': 'bytes' }, 2097152),
-  key('invitations.forms', 'Invitation forms', 'The forms of invitation that may be made for an org of this tree.', 'joining', 'policy', ['system', 'org'], SET_OF('link', 'email'), ['link', 'email']),
-  key('invitations.default_hours', 'Invitation life', 'For how many hours an invitation is good when its inviter says nothing.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'hours' }, 168),
-  key('invitations.max_hours', 'Longest invitation', 'The most hours an invitation may be good for.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'hours' }, 720),
+  key('invitations.forms', 'Invitation forms', 'The forms of invitation that may be made for an organization of this tree.', 'joining', 'policy', ['system', 'org'], SET_OF('link', 'email'), ['link', 'email']),
+  key('invitations.default_minutes', 'Invitation life', 'For how many minutes an invitation is good when its inviter says nothing.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'minutes' }, 10080),
+  key('invitations.max_minutes', 'Longest invitation', 'The most minutes an invitation may be good for.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, 'x-unit': 'minutes' }, 43200),
   key('invitations.max_uses', 'Uses of a shared link', 'How many people one shared link may bring in at most.', 'joining', 'policy', ['system', 'org'], { type: 'integer', minimum: 1, maximum: 1000 }, 100),
-  key('auth.email_code', 'Code by mail', 'What a code sent to a person’s confirmed address may be when they sign in.', 'signing_in', 'policy', ['system', 'org'], SET_OF('sign_in', 'second_step'), []),
+  key('auth.email_code', 'Code by mail', 'What a code sent to a person’s confirmed address may be used for when they sign in.', 'signing_in', 'policy', ['system', 'org'], SET_OF('sign_in', 'second_step'), []),
   key('auto.triggers', 'Triggers', 'When automatic titles and descriptions are written again.', 'automation', 'parameter', WITH_SYSTEM, { type: 'object', properties: { on: SET_OF('turn_completed', 'milestone', 'interval'), min_interval_secs: { type: 'integer', minimum: 0, 'x-unit': 'seconds' } }, required: ['on', 'min_interval_secs'], additionalProperties: false }, { on: ['turn_completed', 'milestone'], min_interval_secs: 120 }),
   key('retention.archive_idle_days', 'Archive idle topics', 'Archive a topic after this many days without activity; 0 never does.', 'retention', 'policy', WITH_SYSTEM, { type: 'integer', minimum: 0, 'x-unit': 'days' }, 0),
-  key('sharing.allow_external', 'Owners share outside', 'Whether the owners of a thing here may themselves name somebody from outside its root org on its page.', 'collaboration', 'policy', WITH_SYSTEM, { type: 'boolean' }, true),
+  key('sharing.allow_external', 'Owners share outside', 'Whether the owners of a thing here may themselves name somebody from outside its root organization on its page.', 'collaboration', 'policy', WITH_SYSTEM, { type: 'boolean' }, true),
   // The fake world's orgs keep their trees by name, the order every test that reads the tree was written against; the
   // real registry's own default is the most recently changed first.
   key('navigation.order', 'Order of the tree', 'The order in which the org’s tree is shown to whoever follows the org’s own.', 'collaboration', 'parameter', ['system', 'org'], { type: 'object', properties: { by: CHOICE('custom', 'newest', 'changed', 'name'), custom: { type: 'object', additionalProperties: { type: 'array', items: { type: 'string' }, uniqueItems: true } } }, required: ['by'], additionalProperties: false }, { by: 'name' }),
@@ -194,7 +196,7 @@ export const AUTHENTICATOR_CODE = '135790';
 const AUTHENTICATOR_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
 
 /** The keys the interface may keep for a person: the nine the server admits. */
-const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'sidebar', 'project_views', 'keys', 'reactions', 'inbox'] as const;
+const STATE_KEYS = ['help', 'layouts', 'viewers', 'timeline', 'interface', 'sidebar', 'project_views', 'keys', 'reactions', 'picker_recents', 'inbox', 'thread_setup'] as const;
 
 /** A person's keys in the shape the server keeps them: the switch, and for each action its keys as text or none. */
 function keysFault(body: Record<string, unknown>): string | null {
@@ -233,6 +235,18 @@ interface MadeResource {
 
 const ROLES: readonly Role[] = ['viewer', 'interactor', 'developer', 'admin'];
 
+function keyForRow(id: string): string {
+  const body = `opat_${id}_${randomBytes(32).toString('base64url')}`;
+  const digits = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  let crc = crc32(body);
+  let suffix = '';
+  for (let place = 0; place < 6; place++) {
+    suffix = digits.charAt(crc % 62) + suffix;
+    crc = Math.floor(crc / 62);
+  }
+  return body + suffix;
+}
+
 /** The part of the fake API about settings. */
 export class Settings implements Part {
   readonly world: World;
@@ -241,6 +255,8 @@ export class Settings implements Part {
   private tokens = new Map<string, TokenHeld[]>();
   private mintedTokens = new Map<string, { at: number; info: ApiTokenInfo; asked: string }>();
   private state = new Map<string, Record<string, unknown>>();
+  private modelRecents = new Map<string, { provider_id: string; model_name: string }[]>();
+  private modelRecentActs = new Map<string, string>();
   /** Who has asked for the secret of an authenticator app and not switched it on yet. */
   private pendingSecret = new Set<string>();
   /** Who is held out of which org: org identifier, then username. */
@@ -738,6 +754,15 @@ export class Settings implements Part {
     return { value, lockedBy: locking?.id ?? null };
   }
 
+  /** Closed native controls keep their values and default marks without carrying the settings panel. */
+  composerModes(person: Person, nodeId: string): Pick<ThreadComposer, 'approval_default' | 'sandbox_mode' | 'sandbox_default'> {
+    const approval = this.resolve(person, nodeId, this.entryOf('approval.mode'));
+    const sandbox = this.resolve(person, nodeId, this.entryOf('sandbox.mode'));
+    return { approval_default: approval.source.scope !== 'thread',
+      sandbox_mode: typeof sandbox.value === 'string' ? sandbox.value : null,
+      sandbox_default: sandbox.source.scope !== 'thread' };
+  }
+
   /** The binding preview carries the same actual creation value and its setting provenance. */
   viewerDefault(person: Person, nodeId: string): { value: boolean; source: ResolvedSetting['source'] } {
     const setting = this.resolve(person,nodeId,this.entryOf('threads.let_viewers_in'));
@@ -1126,7 +1151,7 @@ export class Settings implements Part {
       expires_at: typeof body.expires_at === 'string' ? body.expires_at : null,
       last_used_at: null,
     };
-    const secret = `opat_${randomUUID().replaceAll('-', '')}`;
+    const secret = keyForRow(info.id);
     this.tokensOf(person).push({ info });
     if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
     this.tokenActivity.remember(info.id, person.me.id);
@@ -1134,6 +1159,17 @@ export class Settings implements Part {
   }
 
   // ---------------------------------------------------------------- what the interface keeps
+
+  /** Picker history belongs to the same account state as its other portable preferences. */
+  pickerRecentsOf(person:Person):{count:number;choices:Record<string,string[]>} {
+    const count=Number(SETTINGS_REGISTRY.find((def)=>def.key==='ui.picker_recent_count')?.default??5);
+    const raw=this.stateOf(person).picker_recents;
+    const choices=raw!==null&&typeof raw==='object'&&!Array.isArray(raw)?Object.fromEntries(Object.entries(raw).flatMap(([kind,keys])=>{
+      const kept=Array.isArray(keys)?keys.filter((key):key is string=>typeof key==='string').slice(0,count):[];
+      return kept.length===0?[]:[[kind,kept]];
+    })):{};
+    return {count,choices};
+  }
 
   /** The caller's one portable-state record, shared by parts which add a personal key. */
   stateOf(person: Person): Record<string, unknown> {
@@ -1215,7 +1251,7 @@ export class Settings implements Part {
       case 'POST /me/email-code/disable':
         return this.mailCodeDisable(person, body);
       case 'GET /me/sessions':
-        return { status: 200, body: this.sessionsOf(person) };
+        return { status: 200, body: pageOf(this.sessionsOf(person), _query, (row) => row.user_agent + ' ' + (row.ip ?? '')) };
       case 'DELETE /me/sessions': {
         const kept = this.sessionsOf(person).filter((session) => session.current);
         this.world.revokeBrowserSessions(person);
@@ -1223,13 +1259,41 @@ export class Settings implements Part {
         return { status: 200, body: kept };
       }
       case 'GET /me/tokens':
-        return { status: 200, body: this.tokensOf(person).map((held) => held.info) };
+        return { status: 200, body: pageOf(this.tokensOf(person).map((held) => held.info), _query, (row) => row.name) };
       case 'GET /me/token-operations':
         return { status: 200, body: structuredClone(TOKEN_OPERATIONS) };
       case 'POST /me/tokens':
         return this.makeToken(person, body, actKey);
+      case 'GET /me/picker-recents':
+        return {status:200,body:this.pickerRecentsOf(person)};
+      case 'POST /me/picker-recents': {
+        const kind=asText(body.kind), key=asText(body.key);
+        if(kind===''||key.trim()==='')this.invalid('key','is empty');
+        const before=this.pickerRecentsOf(person);
+        if(before.count===0)return {status:200,body:{count:0,remembered:false}};
+        this.stateOf(person).picker_recents={...before.choices,[kind]:[...new Set([key,...before.choices[kind]??[]])].slice(0,before.count)};
+        this.world.users.tell(person.me.username,{what:'state',key:'picker_recents'});
+        return {status:200,body:{count:before.count,remembered:true}};
+      }
       case 'GET /me/state':
         return { status: 200, body: this.stateOf(person) };
+      case 'GET /me/model-recents': {
+        const count = SETTINGS_REGISTRY.find((def) => def.key === 'interface.recent_models')?.default;
+        return { status: 200, body: { recent: structuredClone(this.modelRecents.get(person.me.username) ?? []), recent_count: typeof count === 'number' ? count : 0 } };
+      }
+      case 'POST /me/model-recents': {
+        if (typeof body.provider_id !== 'string' || typeof body.model_name !== 'string' || body.model_name.trim() === '') this.invalid('model_name', 'must name a model');
+        const model = { provider_id: body.provider_id, model_name: body.model_name };
+        const request = JSON.stringify(model), key = actKey === undefined ? null : `${person.me.username}:${actKey}`;
+        if (key !== null && this.modelRecentActs.has(key)) {
+          if (this.modelRecentActs.get(key) !== request) throw new Refusal(409, 'conflict.exists', 'the selection key was already used');
+          return { status: 204 };
+        }
+        this.modelRecents.set(person.me.username, [model, ...(this.modelRecents.get(person.me.username) ?? []).filter((held) => held.provider_id !== model.provider_id || held.model_name !== model.model_name)]);
+        if (key !== null) this.modelRecentActs.set(key, request);
+        this.world.users.tell(person.me.username, { what: 'model_recents' });
+        return { status: 204 };
+      }
       default:
     }
     if ((found = /^GET \/nodes\/([^/]+)\/audit$/.exec(route))) {
@@ -1250,7 +1314,10 @@ export class Settings implements Part {
     }
     if ((found = /^GET \/orgs\/([^/]+)\/service-accounts$/.exec(route))) {
       this.world.places.need(person, found[1] ?? '', 'members.manage');
-      return { status: 200, body: (this.accounts.get(found[1] ?? '') ?? []).map((entry) => ({ ...entry, token_count: (this.accountTokens.get(entry.user.id) ?? []).length })) };
+      const accounts = (this.accounts.get(found[1] ?? '') ?? [])
+        .map((entry) => ({ ...entry, token_count: (this.accountTokens.get(entry.user.id) ?? []).length }))
+        .sort((one, other) => one.user.display_name.localeCompare(other.user.display_name) || one.user.id.localeCompare(other.user.id));
+      return { status: 200, body: pageOf(accounts, _query, (entry) => entry.user.display_name) };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/service-accounts$/.exec(route))) {
       const orgId = found[1] ?? '';
@@ -1278,7 +1345,8 @@ export class Settings implements Part {
       const { account, orgId } = this.accountOf(found[2] ?? '');
       this.world.places.need(person, orgId, 'members.manage');
       const held = this.accountTokens.get(account.user.id) ?? [];
-      if (found[1] === 'GET') return { status: 200, body: held.map((entry) => entry.info) };
+      if (found[1] === 'GET') return { status: 200, body: pageOf(held.map((entry) => entry.info)
+        .sort((one, other) => other.created_at.localeCompare(one.created_at) || other.id.localeCompare(one.id)), _query, (entry) => entry.name) };
       const identity = actKey === undefined ? null : `${person.me.id}:service:${account.user.id}:${actKey}`;
       const asked = JSON.stringify({ name: body.name, rules: body.rules, scopes: body.scopes, node_id: body.node_id, expires_at: body.expires_at });
       const replay = identity === null ? undefined : this.mintedTokens.get(identity);
@@ -1289,7 +1357,7 @@ export class Settings implements Part {
       const name = asText(body.name).trim();
       if (name === '') this.invalid('name', 'must not be empty');
       const info: ApiTokenInfo = { id: randomUUID(), name, ...tokenScope(body), node: typeof body.node_id === 'string' ? this.nodeRef(body.node_id) : null, created_at: new Date().toISOString(), expires_at: typeof body.expires_at === 'string' ? body.expires_at : null, last_used_at: null };
-      const secret = `opat_${randomUUID().replaceAll('-', '')}`;
+      const secret = keyForRow(info.id);
       this.accountTokens.set(account.user.id, [...held, { info }]);
       if (identity !== null) this.mintedTokens.set(identity, { at: Date.now(), info: structuredClone(info), asked });
       this.tokenActivity.remember(info.id, account.user.id);
@@ -1307,7 +1375,7 @@ export class Settings implements Part {
       const orgId = _query.get('org_id');
       if (orgId === null) return null;
       this.mayManageChannels(person, orgId);
-      return { status: 200, body: this.channels.get(orgId) ?? [] };
+      return { status: 200, body: channelPage(this.channels.get(orgId) ?? [], _query) };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/notification-channels$/.exec(route))) {
       const orgId = found[1] ?? '';
@@ -1353,7 +1421,7 @@ export class Settings implements Part {
     }
     if ((found = /^GET \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       this.world.places.node(person, found[1] ?? '');
-      return { status: 200, body: this.destinations.get(found[1] ?? '') ?? [] };
+      return { status: 200, body: pageOf(this.destinations.get(found[1] ?? '') ?? [], _query, (row) => row.name + ' ' + row.channel) };
     }
     if ((found = /^POST \/nodes\/([^/]+)\/destinations$/.exec(route))) {
       const nodeId = found[1] ?? '';

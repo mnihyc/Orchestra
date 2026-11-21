@@ -104,11 +104,17 @@ fn overlay(
     for (key, example) in shape {
         let name = format!("{prefix}_{}", key.to_uppercase());
         if let toml::Value::Table(inner) = example {
-            let slot = given
-                .entry(key.clone())
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            if let toml::Value::Table(slot) = slot {
-                overlay(inner, slot, &name, variable)?;
+            match given.get_mut(key) {
+                Some(toml::Value::Table(section)) => overlay(inner, section, &name, variable)?,
+                None => {
+                    // Preserve field defaults when neither the file nor the environment sets this section.
+                    let mut overrides = toml::Table::new();
+                    overlay(inner, &mut overrides, &name, variable)?;
+                    if !overrides.is_empty() {
+                        given.insert(key.clone(), toml::Value::Table(overrides));
+                    }
+                }
+                Some(_) => {}
             }
             continue;
         }
@@ -170,6 +176,30 @@ mod tests {
         assert_eq!(config.auth.login_failure_limit, 8);
         assert_eq!(config.database.slow_statement_ms, 1_000);
         assert_eq!(config.database.slow_acquire_ms, 1_000);
+    }
+
+    #[test]
+    fn a_connector_can_enroll_without_a_platform_review_in_its_configuration() {
+        use crate::ConnectorConfig;
+        use orch_agent_programs::confirmation::PlatformConsent;
+
+        for text in ["", "[exec]\noffers = []\n"] {
+            let config: ConnectorConfig = load_text(text, "connector", none).unwrap();
+            assert_eq!(config.exec.platform, PlatformConsent::Off);
+        }
+        // An explicitly present decision still needs its state and an approval needs its build.
+        assert!(load_text::<ConnectorConfig>("[exec.platform]\n", "connector", none).is_err());
+        assert!(
+            load_text::<ConnectorConfig>("", "connector", |key| {
+                (key == "ORCH_EXEC_PLATFORM_STATE").then(|| "approved".into())
+            })
+            .is_err()
+        );
+        let config: ConnectorConfig = load_text("", "connector", |key| {
+            (key == "ORCH_EXEC_PLATFORM_STATE").then(|| "off".into())
+        })
+        .unwrap();
+        assert_eq!(config.exec.platform, PlatformConsent::Off);
     }
 
     #[test]
@@ -291,6 +321,23 @@ mod tests {
         assert!(
             error.to_string().contains("link.dead_after_secs"),
             "{error}"
+        );
+        let error = load_text::<ServerConfig>("[link]\nmax_message_bytes = 1000\n", "test", none)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("link.max_message_bytes"),
+            "{error}"
+        );
+        let config =
+            load_text::<ServerConfig>("[link]\nmax_message_bytes = 1048576\n", "test", none)
+                .unwrap();
+        assert_eq!(config.link.max_message_bytes, 1_048_576);
+        assert_eq!(
+            load_text::<ServerConfig>("", "test", none)
+                .unwrap()
+                .link
+                .max_message_bytes,
+            16 * 1024 * 1024
         );
     }
 }
