@@ -81,6 +81,73 @@ pub struct MetaIdentityProvider {
     pub auto_register: bool,
 }
 
+/// The service that makes the human check of a system, as the sign-in pages load it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckService {
+    /// hCaptcha.
+    Hcaptcha,
+    /// Google Cloud Fraud Defense, whose widget and notice are still called reCAPTCHA.
+    Recaptcha,
+}
+
+/// Which way reCAPTCHA is asked about a token, which decides which of its scripts the page loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckVerification {
+    /// `siteverify`, with the site key and secret key of Google's console: the widget is `api.js`.
+    Siteverify,
+    /// `CreateAssessment`, with a Google Cloud project: the widget is `enterprise.js`.
+    Assessments,
+}
+
+/// How the widget of the human check shows itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckWidget {
+    /// A box the person ticks.
+    Checkbox,
+    /// Unseen: it asks the person only where the service doubts.
+    Invisible,
+}
+
+/// What a person does that may need a human check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckAct {
+    /// Signing in with a proof, every try and the second step included.
+    SignIn,
+    /// Asking for a sign-in code to be mailed.
+    EmailCode,
+    /// Registering.
+    Register,
+    /// Asking for a link to reset a password.
+    Recovery,
+    /// Asking for the confirmation link of an address again.
+    Resend,
+}
+
+/// The human check a system asks of people who have no session, for the pages that show its widget. Nothing of its
+/// secret is here, and the pages load nothing from the service unless this is present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MetaHumanCheck {
+    /// Who makes it.
+    pub provider: HumanCheckService,
+    /// The public key of its widget.
+    pub site_key: String,
+    /// How the widget shows itself.
+    pub mode: HumanCheckWidget,
+    /// What the pages ask it for.
+    pub acts: Vec<HumanCheckAct>,
+    /// Whether the widget is loaded from the service's alternate address.
+    pub alternate_host: bool,
+    /// For reCAPTCHA, the way it is asked, which decides its script; none for the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<HumanCheckVerification>,
+    /// How many seconds a page waits for the widget to give a token before it says that the service cannot be reached.
+    pub wait_secs: u32,
+}
+
 /// How serious a banner is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +225,22 @@ pub enum OrgCreation {
     Invited,
 }
 
+/// Installation defaults for a person's reading experience.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InterfaceDefaults {
+    /// Effective installation threshold for automatic catch-up; absent when it was not reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_above_items: Option<i64>,
+    /// Extra recently closed views to retain; open views always retain their state.
+    pub kept_closed_tabs: i64,
+    /// Milliseconds before a read shows a loading indication.
+    pub progress_delay_ms: i64,
+    /// Freshness in milliseconds for directory, lookup, report and status reads.
+    pub read_freshness_ms: std::collections::BTreeMap<String, i64>,
+    /// Recent/usual sample windows and relative/noise thresholds for measured link degradation.
+    pub connection_quality: std::collections::BTreeMap<String, i64>,
+}
+
 /// What a client may know before anybody has signed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Meta {
@@ -173,6 +256,8 @@ pub struct Meta {
     /// Other browser origins that name this same installation.
     #[serde(default)]
     pub alternate_urls: Vec<String>,
+    /// The committed revision that primary and alternate browser origins were read from together.
+    pub public_address_revision: i64,
     /// Whether the first administrator is still to be made.
     pub needs_setup: bool,
     /// Who may register.
@@ -192,6 +277,9 @@ pub struct Meta {
     pub email_code_login: bool,
     /// The identity providers that can be signed in through.
     pub identity_providers: Vec<MetaIdentityProvider>,
+    /// The human check that the pages ask of a person who has no session; none while the system asks none.
+    #[serde(default)]
+    pub human_check: Option<MetaHumanCheck>,
     /// The languages the interface is written in.
     pub locales: Vec<Locale>,
     /// A notice to show above every page.
@@ -202,6 +290,8 @@ pub struct Meta {
     pub link_endpoints: Vec<MetaLinkEndpoint>,
     /// The sizes the system accepts.
     pub limits: MetaLimits,
+    /// Installation defaults for choices each person may override in Interface.
+    pub interface_defaults: InterfaceDefaults,
 }
 
 /// What a sign-in, a registration or a refresh answers with.
@@ -213,6 +303,38 @@ pub struct AuthResult {
     pub access_expires_at: Time,
     /// Who signed in.
     pub user: Me,
+}
+
+/// The renewed browser session and the addressed thread's own authorized first screen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AuthThreadOpening {
+    pub session: AuthResult,
+    pub opening: crate::nodes::OverviewPart<crate::threads::ThreadOpening>,
+}
+
+/// The native reads a page shows first, asked for together with its session.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSessionOpenQuery {
+    /// One native browser read, as its path and query below the API's base (for example `/me/bootstrap`); given once
+    /// for each read. Each is answered as that read itself would answer the restored session.
+    #[serde(default)]
+    pub read: Vec<String>,
+}
+
+/// A device may remember a more recent thread than the portable interface state.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MeLandingQuery {
+    pub thread: Option<Id>,
+}
+
+/// The signed-in shell and the native first screen of its remembered conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MeLandingReply {
+    pub shell: MeBootstrapReply,
+    pub thread_id: Option<Id>,
+    pub thread: crate::nodes::OverviewPart<crate::threads::ThreadOpening>,
 }
 
 /// The current browser session's administrator switch and whether the person administers a place.
@@ -228,6 +350,8 @@ pub struct AdminMode {
 /// projection and access rules as its individual read, without loading any organization's tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct MeBootstrapReply {
+    /// The committed change cut captured before selecting this shell, compared with personal-feed admission.
+    pub personal_revision: PersonalRevision,
     /// The shell's public facts, with organization creation checked for this reader.
     pub meta: Meta,
     /// The signed-in person and their preferences.
@@ -259,6 +383,19 @@ pub struct MeBootstrapReply {
     /// This same authenticated account's native notification preferences, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notification_preferences: Option<crate::notifications::NotificationPrefs>,
+}
+
+/// Native change order for a person's shell, independent of a process or the browser's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PersonalRevision {
+    /// Changes announced only to this person's live readers.
+    pub personal: i64,
+    /// Their committed Inbox row sequence.
+    pub inbox: i64,
+    /// Committed public metadata changes.
+    pub meta: i64,
+    /// Committed authority changes that may alter the shell projection.
+    pub authority: i64,
 }
 
 /// Fresh authority after personal-feed admission, without reloading preferences or Inbox state.
@@ -345,7 +482,9 @@ pub struct ApiTokenInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TokenCreated {
     /// The secret, in the first answer only; `null` when the same creation is asked again with its key,
-    /// since no secret is kept to be given twice.
+    /// since no secret is kept to be given twice. The canonical encoding is
+    /// opat_<lowercase hyphenated key UUID>_<43 base64url secret characters><6 Base62 CRC32 digits>.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: Option<String>,
     /// The token as it is listed.
     pub info: ApiTokenInfo,
@@ -360,7 +499,9 @@ pub struct TokenCreateReceipt {
     pub projection: crate::common::ReceiptProjection,
     /// The credential that was made.
     pub token_id: Id,
-    /// The newly generated secret, once; null on an idempotent replay.
+    /// The newly generated identity-bound 256-bit secret with its CRC32 checksum, once;
+    /// null on an idempotent replay. It uses the same canonical encoding as TokenCreated.token.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: Option<String>,
     /// When the credential was created.
     pub created_at: Time,
@@ -408,6 +549,7 @@ impl TokenCreateResponse {
 pub struct SensitiveProof {
     /// The caller's password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof their identity provider gave for this act, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,13 +644,16 @@ pub struct OrgToken {
 #[serde(deny_unknown_fields)]
 pub struct SetupCreateBody {
     /// The username to sign in with.
+    #[schemars(extend("x-storage-exact" = true))]
     pub username: String,
     /// The name to show.
     pub display_name: String,
     /// The password, at least [`PASSWORD_MIN_CHARS`] characters.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
     /// Their address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<String>,
     /// The browser's time zone, an IANA name: their zone follows their device from the start, and is
     /// UTC until a browser reports one where none is given.
@@ -524,16 +669,20 @@ pub struct AuthRegisterBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_terms_hash: Option<String>,
     /// The username to sign in with.
+    #[schemars(extend("x-storage-exact" = true))]
     pub username: String,
     /// The name to show.
     pub display_name: String,
     /// The password, at least [`PASSWORD_MIN_CHARS`] characters.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
     /// Their address; a personal invitation requires the address it was made for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<String>,
     /// The secret of an invitation, where registration needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub invitation: Option<String>,
     /// Explicitly accept the invitation's target as part of this registration/sign-in.
     /// Standalone registration uses a system admission link and joins no team.
@@ -671,6 +820,7 @@ pub struct AuthLoginBody {
     pub login: String,
     /// Their password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A code that was mailed to them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -692,6 +842,7 @@ pub struct AuthEmailCodeSendBody {
     pub login: String,
     /// Their password, which makes a code a second step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
 }
 
@@ -700,6 +851,7 @@ pub struct AuthEmailCodeSendBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthRecoveryStartBody {
     /// The address of the user.
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: String,
 }
 
@@ -708,8 +860,10 @@ pub struct AuthRecoveryStartBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthRecoveryConfirmBody {
     /// The secret of the link.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: String,
     /// The new password.
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: String,
 }
 
@@ -718,6 +872,7 @@ pub struct AuthRecoveryConfirmBody {
 #[serde(deny_unknown_fields)]
 pub struct AuthEmailVerifyBody {
     /// The secret of the link.
+    #[schemars(extend("x-storage-exact" = true))]
     pub token: String,
 }
 
@@ -773,6 +928,7 @@ pub struct MeUpdateBody {
         skip_serializing_if = "Option::is_none"
     )]
     #[schemars(with = "Option<String>")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub email: Option<Option<String>>,
     /// The password, when a new address is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,6 +947,7 @@ pub struct AuthOidcStartQuery {
     pub redirect: Option<String>,
     /// The secret of an invitation, where registration needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub invitation: Option<String>,
     /// Explicitly accept the invitation's target as part of this registration/sign-in.
     /// Standalone registration uses a system admission link and joins no team.
@@ -841,6 +998,7 @@ pub struct MePasswordChangeBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_password: Option<String>,
     /// The password to have.
+    #[schemars(extend("x-storage-exact" = true))]
     pub new_password: String,
 }
 
@@ -851,6 +1009,7 @@ pub struct MePasswordChangeBody {
 pub struct MeTotpSetupBody {
     /// Their password, where they have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof of their identity provider, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -890,6 +1049,7 @@ pub enum SensitivePurpose {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MeTotpSetupReply {
     /// The secret.
+    #[schemars(extend("x-storage-exact" = true))]
     pub secret: String,
     /// The same as an address an app can read from a picture.
     pub otpauth_url: String,
@@ -959,6 +1119,7 @@ pub struct MeRecoveryCodesRegenerateBody {
 pub struct MeTotpDisableBody {
     /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A code of the app, or one unused saved recovery code.
     pub code: String,
@@ -972,6 +1133,7 @@ pub struct MeTotpDisableBody {
 pub struct MeEmailCodeSendBody {
     /// Their password, where they have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// The one-use proof of their identity provider, where they have no password.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -992,6 +1154,7 @@ pub struct MeEmailCodeEnableBody {
 pub struct MeEmailCodeDisableBody {
     /// Their password for a browser or legacy credential; unnecessary for an admitted explicit key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-storage-exact" = true))]
     pub password: Option<String>,
     /// A mailed code, or one of their authenticator.
     pub code: String,
@@ -1033,17 +1196,17 @@ crate::endpoints! {
     /// Makes the first system administrator, while the system still needs one.
     SetupCreate: POST "/setup", Public, none, json SetupCreateBody, json SetupCreateReply, 200,
         operation Op::protocol();
-    /// Registers a user: answers `201` with a session, or `202` when the address is to be confirmed first.
+    /// Registers a user: answers `201` with a session, or `202` when the address is to be confirmed first. Where the system asks a human check of this act, its token travels in the `X-Human-Check` header.
     AuthRegister: POST "/auth/register", Public, none, json AuthRegisterBody, json AuthRegisterReply, 201,
         responses [201 => AuthRegisterCreatedReply, 202 => AuthRegisterPendingReply],
         operation Op::protocol();
     /// Checks whether a public username or root-org slug is free, without accepting an email address.
     AuthNameAvailabilityGet: GET "/auth/name-availability", Public, query AuthNameAvailabilityGetQuery, none, json AuthNameAvailabilityGetReply, 200,
         operation Op::protocol();
-    /// Signs a person in with one proof, or two where they have a second step.
+    /// Signs a person in with one proof, or two where they have a second step. Where the system asks a human check of this act, its token travels in the `X-Human-Check` header, on every call, the second step's included.
     AuthLogin: POST "/auth/login", Public, none, json AuthLoginBody, json AuthResult, 200,
         operation Op::protocol();
-    /// Mails a sign-in code where one may be sent; answers `202` whatever the name.
+    /// Mails a sign-in code where one may be sent; answers `202` whatever the name. Where the system asks a human check of this act, its token travels in the `X-Human-Check` header.
     AuthEmailCodeSend: POST "/auth/email-code", Public, none, json AuthEmailCodeSendBody, none, 202,
         operation Op::protocol();
     /// Gives a new access token to the browser that holds the session cookie.
@@ -1052,10 +1215,16 @@ crate::endpoints! {
     /// Restores this browser's cookie session, or answers null when no cookie is present.
     AuthSessionRestore: POST "/auth/session", Cookie, none, none, json Option<AuthResult>, 200,
         operation Op::protocol();
+    /// Restores the cookie session and opens its addressed thread with the same access as the native read.
+    AuthSessionThreadOpen: POST "/auth/session/thread/{id}", Cookie, none, none, json Option<AuthThreadOpening>, 200,
+        operation Op::protocol();
+    /// Restores the cookie session and answers the page's first native reads with it, as lines of JSON: the session first (null without a cookie), then each read as it is ready, by its position in the query.
+    AuthSessionOpen: POST "/auth/session/open", Cookie, query AuthSessionOpenQuery, none, raw, 200,
+        operation Op::protocol();
     /// Ends the session of the browser and revokes it.
     AuthLogout: POST "/auth/logout", Cookie, none, none, none, 204,
         operation Op::protocol();
-    /// Mails a link to reset a password; answers `202` whatever the address.
+    /// Mails a link to reset a password; answers `202` whatever the address. Where the system asks a human check of this act, its token travels in the `X-Human-Check` header.
     AuthRecoveryStart: POST "/auth/recovery", Public, none, json AuthRecoveryStartBody, none, 202,
         operation Op::protocol();
     /// Checks that a reset link is still usable without consuming it or revealing its account.
@@ -1067,12 +1236,15 @@ crate::endpoints! {
     /// Confirms an address with the token of the link that was mailed.
     AuthEmailVerify: POST "/auth/verify-email", Public, none, json AuthEmailVerifyBody, none, 204,
         operation Op::protocol();
-    /// Mails the confirmation link again; answers `202` whatever the name.
+    /// Mails the confirmation link again; answers `202` whatever the name. Where the system asks a human check of this act, its token travels in the `X-Human-Check` header.
     AuthEmailVerifyResend: POST "/auth/verify-email/resend", Public, none, json AuthEmailVerifyResendBody, none, 202,
         operation Op::protocol();
     /// Reads the signed-in person.
     MeGet: GET "/me", User, none, none, json Me, 200,
         operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
+    /// Continues a browser sign-in with the shell and its remembered thread's authorized first screen.
+    MeLandingGet: GET "/me/landing", Session, query MeLandingQuery, none, json MeLandingReply, 200,
+        operation Op::protocol();
     /// Loads the browser shell's personal data in one request; trees and chat contents stay lazy.
     MeBootstrapGet: GET "/me/bootstrap", Session, none, none, json MeBootstrapReply, 200,
         operation Op::facets(&[

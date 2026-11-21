@@ -194,7 +194,7 @@ export class Chats implements Part {
         createdBy: this.world.places.metaOf(row.id).owner,
         createdAt: this.world.places.metaOf(row.id).createdAt,
         seq: 0,
-        lastMessageSeq: row.chat.seq,
+        lastMessageSeq: row.chat.seq ?? 0,
         lastMessageAt: null,
         messages: [],
         sent: new Map(),

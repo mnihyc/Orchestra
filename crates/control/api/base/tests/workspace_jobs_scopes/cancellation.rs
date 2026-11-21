@@ -56,6 +56,8 @@ async fn command(site: &Site, job: Id) -> Id {
     link::insert_command(
         &mut *site.world.conn().await,
         &link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id,
             machine_id: site.machine,
             kind: "fs.copy",

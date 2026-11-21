@@ -16,7 +16,7 @@ import { create, useStore } from 'zustand';
 
 import { client } from '@/api/client';
 import { copyFile, deleteFile, makeDirectory, renameFile, writeFile, type Door } from '@/api/workspace';
-import type { DirEntry, Environment } from '@/generated/api-types';
+import type { DirEntry, Environment, FileSourcePolicy } from '@/generated/api-types';
 import { directoryWriter } from '@/realtime/stores/environment';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
@@ -45,6 +45,27 @@ interface Clipboard {
 
 /** What was cut or copied in the tree, until it is pasted or replaced. */
 const EMPTY_CLIPBOARD: Clipboard = { environmentId: null, mode: null, paths: [] };
+
+function fileReader() {
+  const { userId, readerVersion } = client.session.getState();
+  return { userId, readerVersion };
+}
+type Reader = ReturnType<typeof fileReader>;
+function sameReader(reader: Reader): boolean {
+  const current = fileReader();
+  return current.userId === reader.userId && current.readerVersion === reader.readerVersion;
+}
+function keepReader(reader: Reader): void {
+  if (!sameReader(reader)) throw new DOMException('The file reader changed', 'AbortError');
+}
+
+/** Every way of moving reports the entries that could not safely leave their old name. */
+async function moveFile(door: Door, from: string, to: string, t: TFunction, reader: Reader): Promise<void> {
+  keepReader(reader);
+  const moved = await renameFile(door, from, to);
+  keepReader(reader);
+  if (moved.kept_entries > 0) toast({ tone: 'info', title: t('files.menu.moveKept', { count: moved.kept_entries, path: from }) });
+}
 export const useFileClipboard = create<Clipboard>(() => EMPTY_CLIPBOARD);
 client.session.subscribe((next, previous) => {
   if (next.readerVersion !== previous.readerVersion) useFileClipboard.setState(EMPTY_CLIPBOARD);
@@ -104,6 +125,7 @@ export interface FileActions {
 export interface FileActionOptions {
   access: EnvironmentWorkspaceAccess;
   environment: Environment | undefined;
+  policy?: FileSourcePolicy | null | undefined;
   /** A file is opened. */
   open: (entry: DirEntry, permanent: boolean) => void;
   /** The tree shows the directory again after something changed in it. */
@@ -114,7 +136,8 @@ export interface FileActionOptions {
 }
 
 /** The reason a person may not change files here, as a sentence; `false` where they may. */
-export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Environment | undefined, t: TFunction): string | false {
+export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Environment | undefined, t: TFunction, policy?: FileSourcePolicy | null): string | false {
+  if (policy?.writable === false) return t('fileFacts.readOnlyMount');
   if (!access.mayManage) return workspaceDenial(t, 'files.manage', access.environment);
   if (environment === undefined) return t('common.loading');
   if (isAway(environment)) return t('files.menu.why.away', { name: access.environment.name });
@@ -124,20 +147,23 @@ export function whyNoWrite(access: EnvironmentWorkspaceAccess, environment: Envi
   return false;
 }
 
-export function useFileActions({ access, environment, open, collapseAll, search, entries }: FileActionOptions): FileActions {
+export function useFileActions({ access, environment, policy, open, collapseAll, search, entries }: FileActionOptions): FileActions {
   const { t } = useTranslation();
   const { door } = access;
   const userId = useStore(client.session, (state) => state.userId);
+  const readerVersion = useStore(client.session, (state) => state.readerVersion);
   const clipboard = useFileClipboard();
-  const [act, setAct] = useState<FileAct | null>(null);
+  const [act, setAct] = useState<{ reader: Reader; value: FileAct } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const pickInto = useRef('');
-  const why = whyNoWrite(access, environment, t);
+  const why = whyNoWrite(access, environment, t, policy);
   const pasteBlocked = why !== false ? why : clipboard.mode === null ? t('files.menu.nothingToPaste') : clipboard.environmentId !== door.environmentId ? t('files.menu.otherWorkspace') : false;
   const start = useCallback((next: FileAct) => {
+    const reader = { userId, readerVersion };
+    if (!sameReader(reader)) return;
     if (why !== false) { toast({ tone: 'info', title: why }); return; }
-    setAct(next);
-  }, [why]);
+    setAct({ reader, value: next });
+  }, [why, userId, readerVersion]);
 
   const refresh = useCallback(
     async (...directories: string[]) => {
@@ -151,29 +177,31 @@ export function useFileActions({ access, environment, open, collapseAll, search,
 
   const paste = useCallback(
     (directory: string) => {
+      const reader = { userId, readerVersion };
+      if (!sameReader(reader)) return;
       const captured = useFileClipboard.getState();
       const { mode, paths, environmentId } = captured;
       if (why !== false) { toast({ tone: 'info', title: why }); return; }
       if (mode === null) return;
       if (environmentId !== door.environmentId) { toast({ tone: 'info', title: t('files.menu.otherWorkspace') }); return; }
-      const reader = client.session.getState().readerVersion;
       void (async () => {
         try {
           for (const from of paths) {
-            if (client.session.getState().readerVersion !== reader) return;
+            keepReader(reader);
             const to = joinPath(directory, baseName(from));
-            if (mode === 'cut') await renameFile(door, from, to);
+            if (mode === 'cut') await moveFile(door, from, to, t, reader);
             else await copyFile(door, from, to);
           }
-          if (client.session.getState().readerVersion !== reader) return;
+          keepReader(reader);
           if (mode === 'cut' && useFileClipboard.getState() === captured) useFileClipboard.setState(EMPTY_CLIPBOARD);
           await refresh(directory, ...paths.map(parentOf));
         } catch {
+          if (!sameReader(reader)) return;
           toast({ tone: 'danger', title: t('files.menu.pasteFailed') });
         }
       })();
     },
-    [door, refresh, t, why],
+    [door, refresh, t, why, userId, readerVersion],
   );
 
   const fromDirectory = (path: string) => (access.directory !== '' && path.startsWith(`${access.directory}/`) ? path.slice(access.directory.length + 1) : path);
@@ -291,6 +319,8 @@ export function useFileActions({ access, environment, open, collapseAll, search,
   };
 
   const move = (target: DirEntry, paths: readonly string[]) => {
+    const reader = { userId, readerVersion };
+    if (!sameReader(reader)) return;
     if (why !== false) {
       toast({ tone: 'info', title: why });
       return;
@@ -298,11 +328,14 @@ export function useFileActions({ access, environment, open, collapseAll, search,
     void (async () => {
       try {
         for (const from of paths) {
+          keepReader(reader);
           if (from === target.path || target.path.startsWith(`${from}/`) || parentOf(from) === target.path) continue;
-          await renameFile(door, from, joinPath(target.path, baseName(from)));
+          await moveFile(door, from, joinPath(target.path, baseName(from)), t, reader);
         }
+        keepReader(reader);
         await refresh(target.path, ...paths.map(parentOf));
       } catch {
+        if (!sameReader(reader)) return;
         toast({ tone: 'danger', title: t('files.menu.moveFailed') });
       }
     })();
@@ -326,9 +359,10 @@ export function useFileActions({ access, environment, open, collapseAll, search,
 
   const dialogs = (
     <>{uploads.dialog}<FileActDialogs
-      act={act}
+      act={act !== null && act.reader.userId === userId && act.reader.readerVersion === readerVersion ? act.value : null}
+      reader={act?.reader ?? { userId, readerVersion }}
       blocked={why}
-      onClose={() => setAct(null)}
+      onClose={() => setAct((current) => current === act ? null : current)}
       door={door}
       environmentName={access.environment.name}
       refresh={refresh}
@@ -343,6 +377,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
 // ---------------------------------------------------------------- the dialogs
 
 interface DialogsProps {
+  reader: Reader;
   blocked: string | false;
   act: FileAct | null;
   onClose: () => void;
@@ -353,13 +388,13 @@ interface DialogsProps {
   list: () => readonly DirEntry[];
 }
 
-function FileActDialogs({ act, blocked, onClose, door, environmentName, refresh, open }: DialogsProps) {
+function FileActDialogs({ act, reader, blocked, onClose, door, environmentName, refresh, open }: DialogsProps) {
   if (act === null) return null;
-  if (act.kind === 'delete') return <DeleteDialog act={act} blocked={blocked} onClose={onClose} door={door} environmentName={environmentName} refresh={refresh} />;
-  return <NameDialog key={`${act.kind}.${'entry' in act ? act.entry.path : 'directory' in act ? act.directory : act.entries.map((entry) => entry.path).join(',')}`} act={act} blocked={blocked} onClose={onClose} door={door} refresh={refresh} open={open} />;
+  if (act.kind === 'delete') return <DeleteDialog act={act} reader={reader} blocked={blocked} onClose={onClose} door={door} environmentName={environmentName} refresh={refresh} />;
+  return <NameDialog key={`${act.kind}.${'entry' in act ? act.entry.path : 'directory' in act ? act.directory : act.entries.map((entry) => entry.path).join(',')}`} act={act} reader={reader} blocked={blocked} onClose={onClose} door={door} refresh={refresh} open={open} />;
 }
 
-function DeleteDialog({ act, blocked, onClose, door, environmentName, refresh }: { blocked: string | false; act: Extract<FileAct, { kind: 'delete' }>; onClose: () => void; door: Door; environmentName: string; refresh: DialogsProps['refresh'] }) {
+function DeleteDialog({ act, reader, blocked, onClose, door, environmentName, refresh }: { reader: Reader; blocked: string | false; act: Extract<FileAct, { kind: 'delete' }>; onClose: () => void; door: Door; environmentName: string; refresh: DialogsProps['refresh'] }) {
   const { t } = useTranslation();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -376,15 +411,21 @@ function DeleteDialog({ act, blocked, onClose, door, environmentName, refresh }:
       error={error}
       disabled={blocked !== false}
       onConfirm={() => {
-        if (blocked !== false || pending) return;
+        if (blocked !== false || pending || !sameReader(reader)) return;
         setPending(true);
         setError(null);
         void (async () => {
           try {
-            for (const entry of act.entries) await deleteFile(door, entry.path, entry.type === 'dir');
+            for (const entry of act.entries) {
+              keepReader(reader);
+              await deleteFile(door, entry.path, entry.type === 'dir');
+            }
+            keepReader(reader);
             await refresh(...act.entries.map((entry) => parentOf(entry.path)));
+            keepReader(reader);
             onClose();
           } catch (failure) {
+            if (!sameReader(reader)) return;
             setError(failure);
             setPending(false);
           }
@@ -398,7 +439,7 @@ function DeleteDialog({ act, blocked, onClose, door, environmentName, refresh }:
   );
 }
 
-function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: string | false; act: Exclude<FileAct, { kind: 'delete' }>; onClose: () => void; door: Door; refresh: DialogsProps['refresh']; open: DialogsProps['open'] }) {
+function NameDialog({ act, reader, blocked, onClose, door, refresh, open }: { reader: Reader; blocked: string | false; act: Exclude<FileAct, { kind: 'delete' }>; onClose: () => void; door: Door; refresh: DialogsProps['refresh']; open: DialogsProps['open'] }) {
   const { t } = useTranslation();
   const creationKey = useActKey();
   const initial =
@@ -429,18 +470,22 @@ function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: s
           : t('files.name.confirm.move');
 
   const submit = () => {
+    if (!sameReader(reader)) return;
     setTouched(true);
     if (fault !== null || blocked !== false || pending) return;
     setPending(true);
     setError(null);
     void (async () => {
       try {
+        keepReader(reader);
         const name = text.trim();
         switch (act.kind) {
           case 'newFile': {
             const path = joinPath(act.directory, name);
             await writeFile(door, path, '', 'none');
+            keepReader(reader);
             await refresh(act.directory);
+            keepReader(reader);
             onClose();
             open({ ...blank(path, name) }, true);
             return;
@@ -448,26 +493,32 @@ function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: s
           case 'newFolder': {
             const path = joinPath(act.directory, name);
             await makeDirectory(door, path, creationKey({ door, path }));
+            keepReader(reader);
             await refresh(act.directory);
             break;
           }
           case 'rename':
-            await renameFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name));
+            await moveFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name), t, reader);
+            keepReader(reader);
             await refresh(parentOf(act.entry.path));
             break;
           case 'duplicate':
             await copyFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name));
+            keepReader(reader);
             await refresh(parentOf(act.entry.path));
             break;
           case 'move': {
             const destination = cleanDirectory(text);
-            for (const entry of act.entries) await renameFile(door, entry.path, joinPath(destination, entry.name));
+            for (const entry of act.entries) await moveFile(door, entry.path, joinPath(destination, entry.name), t, reader);
+            keepReader(reader);
             await refresh(destination, ...act.entries.map((entry) => parentOf(entry.path)));
             break;
           }
         }
+        keepReader(reader);
         onClose();
       } catch (failure) {
+        if (!sameReader(reader)) return;
         setError(failure);
         setPending(false);
       }

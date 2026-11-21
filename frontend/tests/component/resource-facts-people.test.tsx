@@ -36,7 +36,7 @@ it('asks once before stopping and preserves the non-interrupting permission boun
   await user.click(screen.getByRole('button', { name: environment.name }));
   await user.click(await screen.findByRole('button', { name: 'Stop' }));
   const confirmation = await screen.findByRole('alertdialog', { name: `Stop ${environment.name}` });
-  expect(confirmation).toHaveTextContent(`Stops open shells and processes in ${environment.name}`);
+  expect(confirmation).toHaveTextContent(`Stops open terminals and processes in ${environment.name}`);
   expect(calls.stop).not.toHaveBeenCalled();
   await user.click(within(confirmation).getByRole('button', { name: 'Cancel' }));
   expect(calls.stop).not.toHaveBeenCalled();
