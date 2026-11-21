@@ -18,7 +18,7 @@ use orch_api_contract::auth::{MeGet, OrgTokenList, OrgTokenListQuery, OrgTokenRe
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{OrgServiceAccountCreate, OrgServiceAccountCreateBody};
 use orch_api_contract::nodes::{DeletedInspectionQuery, NodeGet};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::{Caller, Principal};
 use orch_db::queries::{access, identity};
@@ -61,8 +61,8 @@ async fn issue(
         assert!(scope.validate().is_empty());
         assert!(node.is_none());
     }
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     let scopes = if scope.is_some() {
         Vec::new()
     } else {

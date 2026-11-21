@@ -66,6 +66,7 @@ cases cover the slow profiles, saturation and socket limits.
 | [framing](src/framing.rs) | Control and binary framing. |
 | [websocket](src/websocket.rs) | The session over a real socket: WebSocket frames on TLS, on either end. |
 | [outward](src/outward.rs) | Connections out of a machine, directly or through the HTTP proxy its environment names: a tunnel asked for with `CONNECT`, and the TLS above it the caller's own. |
+| [upstream](src/upstream.rs) | Shared model HTTP exchange, response backpressure, exact body termination and usage watchers. |
 | [streams](src/streams.rs) | Sequenced event delivery, replay and acknowledgement. |
 | [spool](src/spool.rs) | Durable local event segments and overflow handling. |
 | [commands](src/commands.rs) | Serial command execution and deadlines. |
