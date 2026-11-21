@@ -11,6 +11,7 @@ use axum::extract::ws::Message;
 use futures::Sink;
 
 use futures::SinkExt;
+use futures::task::AtomicWaker;
 
 use orch_types::Clock;
 
@@ -19,6 +20,9 @@ use std::future::Future;
 use std::future::poll_fn;
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Wake, Waker};
 
 use tokio::sync::mpsc;
 /// The preparation future is first polled AFTER socket capacity is ready. It runs the
@@ -73,7 +77,24 @@ where
     Ok(true)
 }
 
-/// A single EXISTING parser message. Zero-byte/pending work rechecks on each wake.
+/// Only the native writer can announce that its blocked first byte may now proceed.
+struct WriterWake {
+    ready: AtomicBool,
+    task: AtomicWaker,
+}
+
+impl Wake for WriterWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.store(true, Ordering::Release);
+        self.task.wake();
+    }
+}
+
+/// A single existing parser message. Pending first bytes recheck after a native writer wake.
 /// Once actual bytes of this exact message enter the native buffer, completing only its
 /// remaining bytes preserves protocol framing/accepted work; no next message borrows it.
 pub(super) async fn write_message<W, Make, F>(
@@ -88,20 +109,42 @@ where
     F: Future<Output = ApiResult<Option<CurrentCaller>>>,
 {
     use tokio::io::AsyncWriteExt;
-    let mut check = Box::pin(prepare());
-    let first = poll_fn(|cx| match check.as_mut().poll(cx) {
-        std::task::Poll::Pending => std::task::Poll::Pending,
-        std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
-        std::task::Poll::Ready(Ok(None)) => std::task::Poll::Ready(Ok(None)),
-        std::task::Poll::Ready(Ok(Some((caller, session)))) => {
-            if !deadline_allows(&caller, session, clock) {
-                return std::task::Poll::Ready(Ok(None));
-            }
-            match Pin::new(&mut *writer).poll_write(cx, bytes) {
-                std::task::Poll::Ready(result) => std::task::Poll::Ready(Ok(Some(result))),
-                std::task::Poll::Pending => {
-                    check = Box::pin(prepare());
-                    std::task::Poll::Pending
+    let wake = Arc::new(WriterWake {
+        ready: AtomicBool::new(false),
+        task: AtomicWaker::new(),
+    });
+    let writer_waker = Waker::from(Arc::clone(&wake));
+    let mut waiting = false;
+    let mut check: Option<Pin<Box<F>>> = None;
+    let first = poll_fn(|cx| {
+        wake.task.register(cx.waker());
+        if waiting && !wake.ready.swap(false, Ordering::AcqRel) {
+            return std::task::Poll::Pending;
+        }
+        waiting = false;
+        // A database completion may wake this task after the writer became blocked. It must
+        // not start a check against an earlier policy snapshot while capacity is still absent.
+        let checked = check
+            .get_or_insert_with(|| Box::pin(prepare()))
+            .as_mut()
+            .poll(cx);
+        match checked {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Ready(Ok(None)) => std::task::Poll::Ready(Ok(None)),
+            std::task::Poll::Ready(Ok(Some((caller, session)))) => {
+                if !deadline_allows(&caller, session, clock) {
+                    return std::task::Poll::Ready(Ok(None));
+                }
+                wake.ready.store(false, Ordering::Release);
+                let mut native = Context::from_waker(&writer_waker);
+                match Pin::new(&mut *writer).poll_write(&mut native, bytes) {
+                    std::task::Poll::Ready(result) => std::task::Poll::Ready(Ok(Some(result))),
+                    std::task::Poll::Pending => {
+                        check = None;
+                        waiting = true;
+                        std::task::Poll::Pending
+                    }
                 }
             }
         }

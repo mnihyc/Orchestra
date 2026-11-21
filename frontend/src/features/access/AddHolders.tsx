@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** The field that adds people, groups and roles to a page with one of the three choices and an optional end, and says what that comes to before it is done.
  *
  * It offers only what its reader may give: the choices, and on a place the roles, are those the page says they may give.
@@ -37,6 +38,9 @@ import { type Candidate, useCandidates, useTargetOrg } from './candidates';
 import { type Changes } from './changes';
 import { askToLetIn, letInChange, offerFor } from './doors';
 import { CoversLine, type PlaceKind, type Reach, ReachSelect } from './Covers';
+import { EnvironmentAccessChoice } from './GeneralAccess';
+import { ProviderPurposeField } from './EntryOptions';
+import { purposeNames } from './purposes';
 import { firstChoice, keptLine, mayGiveAsRole, mayGiveChoice, ROLE_OF_CHOICE, sharingIsKept, whyNot } from './gives';
 import { HolderView, placeName } from './holders';
 import { type Catalogue, CHOICE_ORDER, containerOf, middleOf, nameChange } from './model';
@@ -106,6 +110,7 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   const [wanted, setChoice] = useState<AccessChoice>(() => firstChoice(page, initial));
   const [until, setUntil] = useState('');
   const [optionsOpen, setOptionsOpen] = useState(false);
+  const [purposes, setPurposes] = useState<string[] | null>(null);
   const [inviting, setInviting] = useState<string | null>(null);
   const [failed, setFailed] = useState<{ error: unknown; name: string } | null>(null);
   const [tell, setTell] = useState<TellState>({ on: true, line: '' });
@@ -133,7 +138,8 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   const choices = CHOICE_ORDER.filter((entry) => catalogue.choice(entry, target.kind).length > 0);
   const off = outsiderReason(t, page, target);
   const defaultPlace = containerOf(page);
-  const candidates = useCandidates(query, orgId, { kinds: ['user', 'group', 'role', 'members'], enabled: !kept && (query.trim() !== '' || optionsOpen), browsePlaces: optionsOpen, thing: target.name, outsiderOff: off, placeId: place !== null ? target.id : (defaultPlace === null || defaultPlace === 'system' ? undefined : defaultPlace.id) });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const candidates = useCandidates(query, orgId, { kinds: ['user', 'group', 'role', 'members'], enabled: !kept && (query.trim() !== '' || optionsOpen || pickerOpen), browsePlaces: optionsOpen, thing: target.name, outsiderOff: off, placeId: place !== null ? target.id : (defaultPlace === null || defaultPlace === 'system' ? undefined : defaultPlace.id) });
   const stagedKeys = new Set(staged.map((entry) => JSON.stringify(entry.input)));
 
   // An address nobody is registered with is invited, where the caller may bring somebody from outside. An invitation is to this one place, so a place shared with what is in it is shared on its own when one is chosen.
@@ -166,7 +172,7 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   const outsiders = staged.filter((entry) => entry.outside);
   const said = note?.(choice) ?? null;
   const why = whyNot(page, { t, name: target.name, kind: target.kind, choice: (entry) => choiceWords(t, entry, target.kind) }, { onPlace: place !== null });
-  const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+  const expires = until === '' ? null : new Date(until).toISOString();
 
   // Giving a role is one request for each person: the ones that were given leave the list, the one that was refused stays with its reason.
   const giving = useMutation({
@@ -250,7 +256,9 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
     const names = staged.map((entry) => entry.name).join(', ');
     const made = await changes.run({
       label: t('access.add.adding', { names }),
-      make: (current) => nameChange(current, choice, staged.map((entry) => entry.input), { expires_at: expires, ...(exportRows.length > 0 && mayExport && !takeAway ? { export: false } : {}) }),
+      make: (current) => nameChange(current, choice, staged.map((entry) => entry.input), { expires_at: expires,
+        ...(target.kind === 'provider' && choice === 'full_interact' && purposes !== null ? { options: { purposes } } : {}),
+        ...(exportRows.length > 0 && mayExport && !takeAway ? { export: false } : {}) }),
     });
     if (!made) return;
     onNamed?.(staged, choice);
@@ -279,13 +287,13 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
   return (
     <div className="flex flex-col gap-2" data-tutorial-target="holder-picker">
       <div className="flex flex-wrap items-start gap-2">
-        <Combobox
+        <CandidatePicker candidates={candidates} onOpenChange={setPickerOpen}
           label={t('access.add.label')}
           hideLabel
           placeholder={t('access.add.placeholder')}
           query={query}
           onQueryChange={setQuery}
-          minChars={1}
+          minChars={0}
           loading={candidates.loading}
           empty={t('access.candidates.none')}
           groups={groups}
@@ -325,10 +333,12 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
         <Button variant="ghost" aria-expanded={optionsOpen} onClick={() => setOptionsOpen(!optionsOpen)}>{t('access.roster.options')}</Button>
       </div>
 
+      {target.kind === 'provider' && choice === 'full_interact' && purposes !== null && <span className="text-sm text-text-muted">{t('access.options.purposes')}{': '}{purposeNames(t, purposes)}</span>}
       {optionsOpen && <div className="flex flex-wrap items-start gap-3 rounded-md border border-border p-3">
         {candidates.placePicker}
         {place !== null && <ReachSelect place={target.name} value={reach} onValueChange={setReach} className="flex-[1_1_12rem]" />}
-        <DateField label={t('access.add.until')} value={until} onValueChange={setUntil} aria-label={t('access.add.untilLabel')} fieldClassName="w-[12rem]" />
+        <DateField type="datetime-local" label={t('access.add.until')} value={until} onValueChange={setUntil} aria-label={t('access.add.untilLabel')} fieldClassName="w-[12rem]" />
+        {target.kind === 'provider' && choice === 'full_interact' && <ProviderPurposeField schema={catalogue.defs.get('provider.use')?.options_schema} value={purposes} onChange={setPurposes} />}
         {!inside && exportRows.length > 0 && (mayExport
           ? <Checkbox label={t('access.export.label')} checked={takeAway} onCheckedChange={setTakeAway} />
           : <p className="text-sm text-text-muted">{t('access.export.cannot')}</p>)}
@@ -359,10 +369,11 @@ export function AddHolders({ page, target, catalogue, changes, initial = 'full_v
 
       {staged.length > 0 && <TellThem target={target} staged={staged} state={tell} onChange={setTell} />}
       {offer !== null && staged.length > 0 && environmentChoice === undefined && (
-        <Checkbox
+        <EnvironmentAccessChoice
           label={offer.mayView ? t('access.doors.letIn', { name: offer.environment.name }) : t('access.doors.askFor', { owner: offer.environment.owner?.display_name ?? '' })}
           checked={letIn}
           onCheckedChange={setLetIn}
+          manage={offer.giveManage.length > 0 || offer.askManage.length > 0}
         />
       )}
       {waiting !== null && <InlineAlert tone="info">{waiting}</InlineAlert>}

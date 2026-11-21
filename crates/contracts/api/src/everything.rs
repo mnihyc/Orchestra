@@ -171,6 +171,11 @@ pub struct EverythingTakes {
 /// One visible thing, or a deliberately minimal path step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EverythingRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<crate::resource_rows::ResourceSharing>,
+    /// The table projection, independently requested without a resource's full page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_row: Option<crate::resource_rows::ResourceListRow>,
     /// Existing resource home, origin and per-machine native judgements.
     /// Absent for non-resource/path-only rows; an empty judgement list grants no availability.
     #[serde(default, flatten)]
@@ -270,13 +275,16 @@ pub struct EverythingListQuery {
     /// Requires exactly one resource kind and parent=resources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_details: Option<bool>,
+    /// Include each resource's compact table projection. Configuration and full reports belong to its own read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_rows: Option<bool>,
     /// A resource's own state, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_state: Option<String>,
     /// An agent's harness, applied before the page limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-    /// A template's unit kind, or an environment's origin (machine/template).
+    /// A template's unit kind, an environment's origin (machine/template), or system for an agent without a home.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_kind: Option<String>,
     /// Nested ownership, management, use and view of the selected resource kind.

@@ -1,0 +1,2 @@
+test -p orch-api-core --test everything_resources --test giving --test hidden_rows
+test -p orch-api-core --test kfix_envreads --test imports
