@@ -3,6 +3,8 @@
 import { Laptop, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 
 import { resourceReaders } from '@/features/resources/inventory';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
@@ -13,7 +15,7 @@ import { MachineLink } from '@/features/resources/machines/MachineLink';
 export { MachineLink } from '@/features/resources/machines/MachineLink';
 import { architectureName, OS_NAMES } from '@/features/resources/machines/facts';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
-import type { Machine } from '@/generated/api-types';
+import type { MachineListRow as Machine } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
@@ -33,10 +35,16 @@ export function machineState(machine: Pick<Machine, 'status' | 'online'>): Machi
 }
 
 /** What a machine's state looks like as a dot: connected is green, away is quiet, revoked is struck. */
-export function MachineStatus({ machine, showLabel = true }: { machine: Pick<Machine, 'status' | 'online'> & Partial<Pick<Machine, 'lost_at'>>; showLabel?: boolean }) {
+export function MachineStatus({ machine, showLabel = true }: { machine: Pick<Machine, 'status' | 'online'> & Partial<Pick<Machine, 'lost_at' | 'spool'>>; showLabel?: boolean }) {
   const { t } = useTranslation();
+  const locale = useAppearance((state) => state.locale);
   const state = machineState(machine);
-  return <StatusDot tone={machine.lost_at !== undefined ? 'warning' : state === 'online' ? 'success' : state === 'offline' ? 'idle' : 'off'} label={machine.lost_at !== undefined ? t('loss.status') : t(`machines.state.${state}`)} showLabel={showLabel} />;
+  const problem = machine.status === 'active' && machine.lost_at === undefined ? machine.spool?.problem : null;
+  const base = machine.lost_at !== undefined ? t('loss.status') : t(`machines.state.${state}`);
+  const waiting = machine.spool?.waiting_events ?? 0;
+  const reason = problem === undefined || problem === null ? null : t(`machineSpool.${problem}`, {count:waiting,waiting:formatNumber(waiting,locale)});
+  const label = reason === null ? base : `${base} · ${machine.online ? reason : t('machineSpool.last', {state:reason})}`;
+  return <StatusDot tone={machine.lost_at !== undefined || machine.online && reason !== null ? 'warning' : state === 'online' ? 'success' : state === 'offline' ? 'idle' : 'off'} label={label} showLabel={showLabel} />;
 }
 
 export function MachineList({ search, onSearch }: { search: MachinesSearch; onSearch: (patch: Partial<MachinesSearch>) => void }) {

@@ -686,17 +686,27 @@ async fn opening_is_a_window_and_old_item_pages_supply_their_own_historical_refe
         .send()
         .await
         .ok();
-    assert_eq!(opening.sync.seq, opening.outline.seq);
+    assert!(serde_json::to_value(&opening)?.get("outline").is_none());
+    let outline = app
+        .call(ThreadOutlineGet, &[&history.thread])
+        .token(&history.scene.ada.token)
+        .query(&ThreadOutlineGetQuery {
+            limit: Some(5),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(outline.seq >= opening.sync.seq);
     assert!(opening.sync.items.len() <= 10); // Existing union: five overall plus five main.
     assert_eq!(
         opening.sync.turns.len(),
         usize::try_from(THREAD_SYNC_ENDED_TURNS)?
     );
     assert_eq!(opening.sync.segments.len(), opening.sync.turns.len());
-    assert!(opening.outline.next_before.is_some());
+    assert!(outline.next_before.is_some());
     assert!(
-        opening
-            .outline
+        outline
             .entries
             .iter()
             .map(|entry| entry.item_id)

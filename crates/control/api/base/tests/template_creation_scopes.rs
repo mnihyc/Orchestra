@@ -12,7 +12,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::resources::{TemplateCreate, TemplateCreateBody, UnitKind};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{
     identity::{self, NewApiToken},
@@ -27,11 +27,12 @@ fn rule(operation: &str, kind: &str, id: Option<Id>, reach: &str, actions: &[&st
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native recipe creation",
             token_hash: &token_hash(&secret),
@@ -459,11 +460,12 @@ async fn recipe_creation_legacy_settings_writer_keeps_its_native_generated_resul
     let world = World::new().await;
     let c = resources::company(&world).await;
     schema(&world, &c).await;
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: c.boss.id(),
             name: "Legacy native recipe writer",
             token_hash: &token_hash(&secret),
