@@ -1,5 +1,5 @@
 /** Times, numbers, sizes, the one character of an avatar, and which keys are shortcuts: as each language and each keyboard needs them. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { formatBytes, formatNumber, formatPercent, formatTokens } from '@/lib/format';
 import { avatarText, graphemeCount, graphemes, IDENTITY_COLORS, identityColor } from '@/lib/grapheme';
@@ -64,6 +64,16 @@ describe('a time', () => {
 });
 
 describe('a number', () => {
+  it('reuses the locale’s ordinary formatter for successive live counts', () => {
+    const make = vi.spyOn(Intl, 'NumberFormat');
+    try {
+      expect(formatNumber(1.5, 'de')).toBe('1,5');
+      expect(formatNumber(2.5, 'de')).toBe('2,5');
+      expect(make).toHaveBeenCalledTimes(1);
+      expect(formatNumber(2.5, 'en')).toBe('2.5');
+      expect(formatNumber(0.5, 'en', { style: 'percent' })).toBe('50%');
+    } finally { make.mockRestore(); }
+  });
   it('is grouped as its language groups it', () => {
     expect(formatNumber(1234567.5, 'en')).toBe('1,234,567.5');
     expect(formatNumber(1234567.5, 'zh-CN')).toBe('1,234,567.5');

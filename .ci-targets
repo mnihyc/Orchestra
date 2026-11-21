@@ -1,0 +1,10 @@
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- --skip simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test threads_read --test thread_opening_scopes --test retained_scopes --test thread_display --test syncs
+test -p orch-api-core --test node_presentation --test node_chat_opening_scopes --test notification_exceptions --test access --test access_previews --test document_readers
+test -p orch-api-core --test thread_history_pages --test thread_continuation_reads --test thread_continuation_search --test realtime_continuations
+test -p orch-authz --lib --test kept_holders --test resource_properties --test outside_creation --test thread_viewer_groups
+test -p orch-db --lib --test participation_summaries --test commit_epochs
+test -p orch-api-base --lib -- simultaneous_replies_preserve_content_and_correlate_only_failed_panes
+clippy
+fmt

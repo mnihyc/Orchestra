@@ -10,7 +10,7 @@
 
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
-use orch_types::Id;
+use orch_types::{Id, Json};
 
 /// A node of the hierarchy, as the access engine needs it.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -75,17 +75,24 @@ pub async fn thread_environments(
 /// The nodes `ids` and every node on the way from their root orgs down to
 /// them, each once. A node that does not exist is not among them.
 pub async fn with_ancestors(conn: &mut Conn, ids: &[Id]) -> Result<Vec<NodeRow>, DbError> {
-    ancestor_rows(conn, ids).await
+    Ok(ancestor_rows(conn, ids)
+        .await?
+        .into_iter()
+        .map(|row| row.node)
+        .collect())
 }
 
-#[derive(sqlx::FromRow)]
-struct GovernedNode {
+#[derive(Clone, sqlx::FromRow)]
+pub(super) struct GovernedNode {
     #[sqlx(flatten)]
     node: NodeRow,
+    pub(super) has_readme: bool,
     ask_root_org_id: Option<Id>,
     ask_retention_days: Option<i32>,
     ask_last_message_at: Option<DateTime<Utc>>,
     ask_root_live: bool,
+    ask_inspectable: bool,
+    ask_person_id: Option<Id>,
 }
 
 /// The same ancestor read with the native Ask association already joined from each Thread.
@@ -114,10 +121,13 @@ pub async fn with_ancestor_governance(
                     Some(super::ask::Governance {
                         thread_id: row.node.id,
                         root_org_id,
-                        person_id: row.node.owner_id,
+                        person_id: row.ask_person_id.ok_or_else(|| DbError::Rule {
+                            constraint: "ask_governance_person".into(),
+                        })?,
                         retention_days,
                         last_message_at,
                         root_live: row.ask_root_live,
+                        inspectable: row.ask_inspectable,
                     })
                 }
             };
@@ -126,30 +136,63 @@ pub async fn with_ancestor_governance(
         .collect()
 }
 
-async fn ancestor_rows<R>(conn: &mut Conn, ids: &[Id]) -> Result<Vec<R>, DbError>
-where
-    R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Unpin + Send,
-{
+async fn ancestor_rows(conn: &mut Conn, ids: &[Id]) -> Result<Vec<GovernedNode>, DbError> {
+    use std::collections::HashSet;
+
+    let cached = super::snapshot::with(conn, |rows| {
+        let mut seen = HashSet::new();
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+        for id in ids {
+            match rows.nodes.get(id) {
+                Some(Some(row)) => {
+                    for ancestor in &row.node.path {
+                        if seen.insert(*ancestor)
+                            && let Some(Some(parent)) = rows.nodes.get(ancestor)
+                        {
+                            found.push(parent.clone());
+                        }
+                    }
+                }
+                Some(None) => (),
+                None => missing.push(*id),
+            }
+        }
+        (found, missing, seen)
+    });
+    let Some((mut found, missing, mut seen)) = cached else {
+        return load_ancestors(conn, ids).await;
+    };
+    if !missing.is_empty() {
+        let fresh = load_ancestors(conn, &missing).await?;
+        let _ = super::snapshot::with(conn, |rows| {
+            rows.nodes.extend(missing.into_iter().map(|id| (id, None)));
+            rows.nodes
+                .extend(fresh.iter().map(|row| (row.node.id, Some(row.clone()))));
+        });
+        found.extend(fresh.into_iter().filter(|row| seen.insert(row.node.id)));
+    }
+    Ok(found)
+}
+
+async fn load_ancestors(conn: &mut Conn, ids: &[Id]) -> Result<Vec<GovernedNode>, DbError> {
     // Both the storage home and Ask's distinct governing root are watched in this
     // same statement; the native graph keeps these factual associations together.
-    Ok(sqlx::query_as(
-        "WITH found AS MATERIALIZED (
-             SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.owner_id, n.archived_at, n.deleted_at,
-                    n.revision, e.placement, t.environment_id, t.ask_root_org_id,
-                    t.ask_retention_days, t.ask_last_message_at,
-                    COALESCE(r.id IS NOT NULL AND r.deleted_at IS NULL AND r.kind='org',false) AS ask_root_live
-               FROM nodes n
-               LEFT JOIN threads t ON t.node_id = n.id
-               LEFT JOIN environments e ON e.id = t.environment_id
-               LEFT JOIN nodes r ON r.id=t.ask_root_org_id
-              WHERE n.id IN (SELECT unnest(path) FROM nodes WHERE id = ANY($1))
-         ), watched AS MATERIALIZED (
-             SELECT orch_authz_saw(orch_authz_epochs(ARRAY(
-                 SELECT org_id FROM found UNION SELECT ask_root_org_id FROM found WHERE ask_root_org_id IS NOT NULL)))
-              WHERE COALESCE(current_setting('orch.authz_seen', true), '') <> ''
-         )
-         SELECT found.* FROM found, (SELECT count(*) FROM watched) w",
-    ).bind(ids).fetch_all(conn).await?)
+    Ok(sqlx::query_as(include_str!("hierarchy_ancestors.sql"))
+        .bind(ids)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// The same ancestor/governance read with its actual plan and buffer work.
+pub async fn explain_ancestors(conn: &mut Conn, ids: &[Id]) -> Result<orch_types::Json, DbError> {
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
+        include_str!("hierarchy_ancestors.sql")
+    )))
+    .bind(ids)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// The nodes that lie directly in `parent` and are not deleted, in the
@@ -363,6 +406,10 @@ pub struct NodeDetail {
     pub title_source: String,
     /// When automation last wrote the name or tags.
     pub auto_updated_at: Option<DateTime<Utc>>,
+    /// Bounded retained title/tag observations, separate from the current field values.
+    pub automatic_fields: Option<Json>,
+    /// Actual durable queue state and the policy captured when its timing was decided.
+    pub automatic_schedule: Option<Json>,
     /// Its first owner.
     pub owner_id: Id,
     /// When it was archived itself.
@@ -415,7 +462,9 @@ pub async fn details(
 ) -> Result<Vec<NodeDetail>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.kind, n.parent_id, n.org_id, n.path, n.name, n.description, n.color, n.custom_color, n.title_source,
-                n.auto_updated_at, n.owner_id, n.archived_at, n.archived_by,
+                n.auto_updated_at, ns.automatic_fields,
+                CASE WHEN ns.node_id IS NOT NULL THEN jsonb_build_object('due_at',ns.due_at,'next_at',ns.next_at,'last_at',ns.last_at,'failures',ns.failures,'reason_code',ns.reason_code,'has_reason',ns.reason IS NOT NULL,'run_id',ns.run_id,'retry_policy',ns.retry_policy) END AS automatic_schedule,
+                n.owner_id, n.archived_at, n.archived_by,
                 n.deleted_at, n.deleted_by, n.revision, n.created_at, n.updated_at, n.tree_seq,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq,
                 (SELECT count(DISTINCT x.person) FROM (
@@ -432,6 +481,7 @@ pub async fn details(
                 o.slug, o.org_kind, o.closed, o.flat,
                 t.status AS topic_status, t.done_at, n.tags_source, t.topic_seq
            FROM nodes n
+           LEFT JOIN node_summary_state ns ON ns.node_id=n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN orgs o ON o.node_id = n.id
            LEFT JOIN topics t ON t.node_id = n.id
@@ -634,7 +684,13 @@ pub async fn put_subscription(
     .bind(level)
     .bind(source)
     .bind(at)
-    .execute(conn)
+    .execute(&mut *conn)
+    .await?;
+    crate::sequences::notify_user_event(
+        conn,
+        &[user],
+        &serde_json::json!({"what":"subscription","node_id":node,"level":level,"source":source}),
+    )
     .await?;
     Ok(())
 }
@@ -645,9 +701,18 @@ pub async fn delete_subscription(conn: &mut Conn, user: Id, node: Id) -> Result<
     let done = sqlx::query("DELETE FROM subscriptions WHERE user_id = $1 AND node_id = $2")
         .bind(user)
         .bind(node)
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
-    Ok(done.rows_affected() == 1)
+    let removed = done.rows_affected() == 1;
+    if removed {
+        crate::sequences::notify_user_event(
+            conn,
+            &[user],
+            &serde_json::json!({"what":"subscription","node_id":node,"level":null,"source":null}),
+        )
+        .await?;
+    }
+    Ok(removed)
 }
 
 // ---- making and changing nodes ----
@@ -1217,18 +1282,55 @@ pub async fn tree(
     since: Option<i64>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, since, since.map(|_| limit), None).await
+    tree_rows(conn, root, since, since.map(|_| limit), None, None, None).await
 }
 
-/// One id-keyset page of a full tree. Callers continue until there is no next
-/// row, independently of how many rows the reader may view in this page.
+/// One id-keyset page of a root tree or a parent's direct children. Metadata and document
+/// counts are read only for the candidate page, independently of how large the tree is.
 pub async fn tree_page(
     conn: &mut Conn,
     root: Id,
+    parent: Option<Id>,
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<TreeRow>, DbError> {
-    tree_rows(conn, root, None, Some(limit), after).await
+    tree_rows(conn, root, None, Some(limit), after, parent, None).await
+}
+
+/// A bounded hierarchy selector; names are data, never SQL or client-side filtering.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TreeSelector<'a> {
+    pub order: Option<&'a order::Order>,
+    pub progress: Option<&'a order::Progress>,
+    pub exclude_threads: bool,
+    pub text: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub below: Option<Id>,
+    pub ids: Option<&'a [Id]>,
+}
+
+pub async fn tree_window(
+    conn: &mut Conn,
+    root: Id,
+    parent: Option<Id>,
+    after: Option<&order::Progress>,
+    limit: i64,
+    selector: &TreeSelector<'_>,
+) -> Result<Vec<TreeRow>, DbError> {
+    let selected = TreeSelector {
+        progress: after,
+        ..*selector
+    };
+    tree_rows(
+        conn,
+        root,
+        None,
+        Some(limit),
+        after.map(|key| key.id),
+        parent,
+        Some(&selected),
+    )
+    .await
 }
 
 async fn tree_rows(
@@ -1237,10 +1339,32 @@ async fn tree_rows(
     since: Option<i64>,
     limit: Option<i64>,
     after: Option<Id>,
+    parent: Option<Id>,
+    selector: Option<&TreeSelector<'_>>,
 ) -> Result<Vec<TreeRow>, DbError> {
+    let default_order = order::Order::default();
+    let ordered = selector
+        .and_then(|selector| selector.order)
+        .unwrap_or(&default_order);
+    let progress = selector.and_then(|selector| selector.progress);
+    let parent_scope = if parent.is_some() {
+        "n.parent_id = $5::uuid"
+    } else {
+        "$5::uuid IS NULL"
+    };
+    let candidate_scope = "n.org_id = $1\n               AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))\n                    OR n.tree_seq > $2)\n               AND ($4::uuid IS NULL OR __AFTER__)\n               AND __PARENT_SCOPE__\n               AND ($6::text IS NULL OR $6='' OR position(lower($6) in lower(n.name)) > 0\n                    OR position(lower($6) in lower(array_to_string(ARRAY(SELECT a.name FROM unnest(n.path) WITH ORDINALITY p(id,ord) JOIN nodes a ON a.id=p.id ORDER BY p.ord),' / '))) > 0)\n               AND ($7::text IS NULL OR n.kind = $7)\n               AND ($8::uuid IS NULL OR $8 = ANY(n.path))\n               AND ($9::uuid[] IS NULL OR n.id = ANY($9))\n               AND (NOT $10::boolean OR n.kind<>'thread')".replace("__PARENT_SCOPE__",parent_scope);
+    let candidates = ordered.candidates(&candidate_scope, parent.is_some());
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(
-        "WITH document_counts AS (
+        "WITH progress AS (SELECT $11::integer kind,$12::text name,$13::timestamptz stamp,$14::bigint seq,$15::jsonb custom,$16::bigint rank,$17::uuid parent),
+         custom_order AS MATERIALIZED (
+            SELECT p.key::uuid parent,e.id::uuid id,MIN(e.rank)::bigint rank FROM progress q
+            CROSS JOIN LATERAL jsonb_each(q.custom) p CROSS JOIN LATERAL jsonb_array_elements_text(p.value) WITH ORDINALITY e(id,rank)
+            GROUP BY p.key,e.id
+         ), candidate_nodes AS MATERIALIZED (
+            __CANDIDATES__
+         ), document_counts AS (
             SELECT d.node_id, count(*) AS docs FROM documents d
+             JOIN candidate_nodes selected ON selected.id = d.node_id
              WHERE d.org_id = $1 AND d.deleted_at IS NULL
                AND NOT EXISTS (SELECT 1 FROM permission_rows r
                                 WHERE r.object_kind = 'document' AND r.object_id = d.id
@@ -1261,23 +1385,32 @@ async fn tree_rows(
                 (SELECT count(*) FROM approvals a WHERE a.thread_id = n.id AND a.state = 'pending') AS pending_approvals,
                 th.activity_seq, th.last_activity_at,
                 c.id AS chat_id, COALESCE(c.last_message_seq, 0) AS chat_seq
-           FROM nodes n
+           FROM candidate_nodes n
            LEFT JOIN topics t ON t.node_id = n.id
            LEFT JOIN threads th ON th.node_id = n.id
            LEFT JOIN chats c ON c.node_id = n.id
            LEFT JOIN document_counts dc ON dc.node_id = n.id
            LEFT JOIN document_tree_scopes ds ON ds.node_id = n.id
-          WHERE n.org_id = $1
-            AND (($2::bigint IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
-                 OR n.tree_seq > $2)
-            AND ($4::uuid IS NULL OR n.id > $4)
-          ORDER BY n.id
-          LIMIT $3".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL),
+           __OUTER_ORDER_JOINS__
+          ORDER BY __ORDER__".replace("__WORK_ATTENTION__", super::source::ATTENTION_SQL).replace("__PARENT_SCOPE__", parent_scope).replace("__CANDIDATES__",&candidates).replace("__OUTER_ORDER_JOINS__",&ordered.joins()).replace("__AFTER__",&ordered.after()).replace("__ORDER__",&ordered.ordering()),
     ))
     .bind(root)
     .bind(since)
     .bind(limit)
     .bind(after)
+    .bind(parent)
+    .bind(selector.and_then(|s|s.text))
+    .bind(selector.and_then(|s|s.kind))
+    .bind(selector.and_then(|s|s.below))
+    .bind(selector.and_then(|s|s.ids))
+    .bind(selector.is_some_and(|s|s.exclude_threads))
+    .bind(progress.map(|key|key.kind_rank()).unwrap_or(0))
+    .bind(progress.map(|key|key.name.as_str()).unwrap_or(""))
+    .bind(progress.and_then(|key|key.activity))
+    .bind(progress.map(|key|key.seq).unwrap_or(0))
+    .bind(&ordered.custom)
+    .bind(progress.map(|key|ordered.rank(key.parent,key.id)).unwrap_or(i64::MAX))
+    .bind(progress.and_then(|key|key.parent))
     .fetch_all(conn)
     .await?)
 }
@@ -3218,6 +3351,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn folded_decisions_end_at_the_reader_clock_before_cleanup_and_keep_undated_requests() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let t = tree(&mut conn).await;
+        let now = clock::start();
+        let deadline = now + chrono::Duration::minutes(1);
+        for end in [Some(deadline), None] {
+            sqlx::query("INSERT INTO approvals(id,kind,node_id,thread_id,requester_user_id,title,request,required_permission,expires_at) VALUES($1,'harness',$2,$2,$3,'Pending decision','{}','thread.manage',$4)")
+                .bind(new_id()).bind(t.thread).bind(t.ada).bind(end).execute(&mut *conn).await.unwrap();
+        }
+        let before = tree_fold_window(
+            &mut conn,
+            &TreeFoldRead {
+                user: t.ada,
+                parents: &[t.project],
+                now,
+                after: None,
+                limit: 1,
+                archived: None,
+            },
+            TreeFoldSignal::Counts,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            before
+                .iter()
+                .find(|row| row.id == t.thread)
+                .unwrap()
+                .waiting,
+            2
+        );
+        let after = tree_fold_window(
+            &mut conn,
+            &TreeFoldRead {
+                user: t.ada,
+                parents: &[t.project],
+                now: deadline,
+                after: None,
+                limit: 1,
+                archived: None,
+            },
+            TreeFoldSignal::Counts,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            after.iter().find(|row| row.id == t.thread).unwrap().waiting,
+            1
+        );
+        let still_pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM approvals WHERE thread_id=$1 AND state='pending'",
+        )
+        .bind(t.thread)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            still_pending, 2,
+            "no cleanup was needed to make the read truthful"
+        );
+    }
+
+    #[tokio::test]
     async fn the_first_owner_is_set_and_counted_as_a_change() {
         let test = TestDb::fresh().await;
         let mut conn = test.pool.acquire().await.unwrap();
@@ -3236,4 +3433,227 @@ mod tests {
 }
 
 // Node presentation and child-kind selection.
+pub mod order;
 pub mod presentation;
+
+/// Minimal descendant facts for server-side folding. No names, document counts or content are read.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TreeFoldCandidate {
+    pub id: Id,
+    pub path: Vec<Id>,
+    pub kind: String,
+    pub archived: bool,
+    pub unread: bool,
+    pub chat_id: Option<Id>,
+    pub chat_unread: bool,
+    pub mentions: i64,
+    pub waiting: i64,
+}
+
+/// One structural probe, independent of names, documents, chats or thread presentation.
+pub struct TreeFoldStructure {
+    pub root: Id,
+    pub parent: Id,
+    pub direct: bool,
+    pub archived: Option<bool>,
+    pub after: Option<Id>,
+    pub limit: i64,
+}
+
+/// Private direct-child hints for one page, never a permission or a public structural fact.
+/// Each lateral probe stops at one indexed child instead of enumerating its subtree.
+pub async fn tree_fold_containers(
+    conn: &mut Conn,
+    root: Id,
+    parents: &[Id],
+) -> Result<Vec<Id>, DbError> {
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar("SELECT parent.id FROM unnest($2::uuid[]) parent(id)
+        CROSS JOIN LATERAL (SELECT 1 FROM nodes child WHERE child.org_id=$1 AND child.parent_id=parent.id LIMIT 1) witness")
+        .bind(root).bind(parents).fetch_all(conn).await?)
+}
+
+pub async fn tree_fold_structure_window(
+    conn: &mut Conn,
+    query: &TreeFoldStructure,
+) -> Result<Vec<Id>, DbError> {
+    // Direct children use the existing (org_id,parent_id,id) index, including generic prepared plans.
+    // A root opening uses (org_id,id) and stops at its witness without a descendant bitmap or sort.
+    let reach = if query.direct {
+        "n.parent_id=$2"
+    } else if query.parent == query.root {
+        "TRUE"
+    } else {
+        "n.path @> ARRAY[$2]::uuid[]"
+    };
+    let sql = "SELECT n.id FROM nodes n WHERE n.org_id=$1 AND n.id<>$2 AND __REACH__
+        AND ($3::uuid IS NULL OR n.id>$3)
+        AND ($5::boolean IS NULL OR $5=EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL))
+        AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.deleted_at IS NOT NULL)
+        ORDER BY n.id LIMIT $4".replace("__REACH__",reach);
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(query.root)
+        .bind(query.parent)
+        .bind(query.after)
+        .bind(query.limit)
+        .bind(query.archived)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// One reader's sparse signal window; all numbers are the current requested page or its progress.
+pub struct TreeFoldRead<'a> {
+    pub user: Id,
+    pub parents: &'a [Id],
+    pub now: DateTime<Utc>,
+    pub after: Option<Id>,
+    pub limit: i64,
+    pub archived: Option<bool>,
+}
+
+/// Each source can be read in native keyset windows without enumerating silent hierarchy nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFoldSignal {
+    /// Exact pending-decision and positive mention totals.
+    Counts,
+    /// A followed unread thread or an engaged unread node chat.
+    Unread,
+    /// Potential current work, resolved by the one native thread-display producer.
+    Work,
+    /// An unseen completion, after current work was considered.
+    Finished,
+}
+
+pub async fn tree_fold_window(
+    conn: &mut Conn,
+    query: &TreeFoldRead<'_>,
+    signal: TreeFoldSignal,
+) -> Result<Vec<TreeFoldCandidate>, DbError> {
+    let TreeFoldRead {
+        user,
+        parents,
+        now,
+        after,
+        limit,
+        archived,
+    } = *query;
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope = "n.path && $2::uuid[] AND ($4::uuid IS NULL OR n.id>$4)
+        AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.deleted_at IS NOT NULL)
+        AND ($6::boolean IS NULL OR $6=EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL))";
+    let drivers = match signal {
+        TreeFoldSignal::Counts => vec![
+            "SELECT DISTINCT a.thread_id id FROM approvals a JOIN nodes n ON n.id=a.thread_id
+             WHERE a.state='pending' AND (a.expires_at IS NULL OR a.expires_at>$3) AND __SCOPE__ ORDER BY id LIMIT $5",
+            "SELECT c.node_id id FROM chat_states cs JOIN chats c ON c.id=cs.chat_id JOIN nodes n ON n.id=c.node_id
+             WHERE cs.user_id=$1 AND cs.mentions_unread>0 AND __SCOPE__ ORDER BY id LIMIT $5",
+        ],
+        TreeFoldSignal::Unread => vec![
+            "SELECT th.node_id id FROM threads th JOIN nodes n ON n.id=th.node_id
+             LEFT JOIN thread_reads r ON r.thread_id=th.node_id AND r.user_id=$1 AND r.continuation_id=th.active_continuation_id
+             WHERE th.activity_seq>COALESCE(r.last_read_seq,0)
+              AND (r.last_read_seq IS NOT NULL OR COALESCE((SELECT level FROM subscriptions s
+                WHERE s.user_id=$1 AND s.node_id=ANY(n.path) ORDER BY array_position(n.path,s.node_id) DESC LIMIT 1),'off')<>'off')
+              AND __SCOPE__ ORDER BY id LIMIT $5",
+            "SELECT c.node_id id FROM chat_states cs JOIN chats c ON c.id=cs.chat_id JOIN nodes n ON n.id=c.node_id
+             LEFT JOIN notification_prefs p ON p.user_id=$1
+             WHERE cs.user_id=$1 AND c.last_message_seq>COALESCE(cs.last_read_seq,0)
+              AND COALESCE(cs.level,CASE WHEN cs.engaged THEN COALESCE(p.chat_node_level,'all') ELSE 'off' END)<>'off'
+              AND __SCOPE__ ORDER BY id LIMIT $5",
+        ],
+        TreeFoldSignal::Work => vec![
+            "SELECT th.node_id id FROM threads th JOIN nodes n ON n.id=th.node_id
+             WHERE (th.state<>'idle' OR th.blocked_reason IS NOT NULL OR th.queue_held
+               OR (SELECT t.state='failed' FROM turns t WHERE t.thread_id=th.node_id ORDER BY t.ordinal DESC LIMIT 1)
+               OR EXISTS(SELECT 1 FROM approvals a WHERE a.thread_id=th.node_id AND a.state='pending' AND (a.expires_at IS NULL OR a.expires_at>$3))
+               OR EXISTS(SELECT 1 FROM thread_inputs i WHERE i.thread_id=th.node_id AND i.continuation_id=th.active_continuation_id AND i.state IN ('pending','delivering'))
+               OR EXISTS(SELECT 1 FROM input_schedules s WHERE s.state='active' AND s.deleted_at IS NULL
+                  AND s.target->>'kind'='thread' AND s.target->>'thread_id'=th.node_id::text))
+              AND __SCOPE__ ORDER BY id LIMIT $5",
+        ],
+        TreeFoldSignal::Finished => vec![
+            "SELECT th.node_id id FROM threads th JOIN nodes n ON n.id=th.node_id
+             LEFT JOIN thread_reads r ON r.thread_id=th.node_id AND r.user_id=$1 AND r.continuation_id=th.active_continuation_id
+             WHERE EXISTS(SELECT 1 FROM turns t WHERE t.thread_id=th.node_id AND t.continuation_id=th.active_continuation_id
+               AND t.state='completed' AND t.completed_seq>COALESCE(r.last_read_seq,0))
+              AND __SCOPE__ ORDER BY id LIMIT $5",
+        ],
+    };
+    let candidates = drivers
+        .into_iter()
+        .map(|driver| format!("({})", driver.replace("__SCOPE__", scope)))
+        .collect::<Vec<_>>()
+        .join(" UNION ");
+    let sql = format!("WITH candidates AS MATERIALIZED (SELECT id FROM ({candidates}) ids ORDER BY id LIMIT $5)
+        SELECT n.id,n.path,n.kind,
+            EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL) AS archived,
+            (t.node_id IS NOT NULL AND t.activity_seq > COALESCE(r.last_read_seq,0)
+                 AND (r.last_read_seq IS NOT NULL OR COALESCE((SELECT level FROM subscriptions s WHERE s.user_id=$1
+                     AND s.node_id=ANY(n.path) ORDER BY array_position(n.path,s.node_id) DESC LIMIT 1),'off') <> 'off')) AS unread,
+            c.id AS chat_id,
+            (c.id IS NOT NULL AND c.last_message_seq > COALESCE(cs.last_read_seq,0)
+             AND COALESCE(cs.level,CASE WHEN cs.engaged THEN COALESCE(np.chat_node_level,'all') ELSE 'off' END) <> 'off') AS chat_unread,
+            COALESCE(cs.mentions_unread,0)::bigint AS mentions,
+            (SELECT count(*) FROM approvals a WHERE a.thread_id=n.id AND a.state='pending' AND (a.expires_at IS NULL OR a.expires_at>$3)) AS waiting
+         FROM candidates selected JOIN nodes n ON n.id=selected.id LEFT JOIN threads t ON t.node_id=n.id
+         LEFT JOIN thread_reads r ON r.thread_id=n.id AND r.user_id=$1 AND r.continuation_id=t.active_continuation_id
+         LEFT JOIN chats c ON c.node_id=n.id
+         LEFT JOIN chat_states cs ON cs.chat_id=c.id AND cs.user_id=$1
+         LEFT JOIN notification_prefs np ON np.user_id=$1 ORDER BY n.id");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(user)
+        .bind(parents)
+        .bind(now)
+        .bind(after)
+        .bind(limit)
+        .bind(archived)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// Personal group-chat signals at their real homes, independently authorized by the native chat reader.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TreeGroupSignal {
+    pub chat_id: Id,
+    pub path: Vec<Id>,
+    pub archived: bool,
+    pub unread: bool,
+    pub mentions: i64,
+}
+
+pub async fn tree_group_signal_window(
+    conn: &mut Conn,
+    query: &TreeFoldRead<'_>,
+    mentions_only: bool,
+) -> Result<Vec<TreeGroupSignal>, DbError> {
+    let TreeFoldRead {
+        user,
+        parents,
+        now,
+        after,
+        limit,
+        archived,
+    } = *query;
+    if parents.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as("SELECT c.id AS chat_id,n.path,
+        EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL) AS archived,
+        c.last_message_seq > COALESCE(s.last_read_seq,0) AND COALESCE(s.level,p.chat_direct_level,'all') <> 'off' AS unread,
+        COALESCE(s.mentions_unread,0)::bigint AS mentions
+        FROM chats c JOIN nodes n ON n.id=COALESCE(c.home_id,c.org_id)
+        JOIN chat_members m ON m.chat_id=c.id AND m.user_id=$1 AND m.left_at IS NULL AND (m.expires_at IS NULL OR m.expires_at>$3)
+        LEFT JOIN chat_states s ON s.chat_id=c.id AND s.user_id=$1
+        LEFT JOIN notification_prefs p ON p.user_id=$1
+        WHERE c.kind='group' AND n.path && $2::uuid[] AND NOT COALESCE(s.hidden,false)
+        AND (($4 AND COALESCE(s.mentions_unread,0)>0) OR (NOT $4 AND c.last_message_seq>COALESCE(s.last_read_seq,0) AND COALESCE(s.level,p.chat_direct_level,'all')<>'off'))
+        AND ($5::uuid IS NULL OR c.id>$5)
+        AND ($7::boolean IS NULL OR $7=EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.archived_at IS NOT NULL))
+        AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND a.deleted_at IS NOT NULL)
+        ORDER BY c.id LIMIT $6")
+        .bind(user).bind(parents).bind(now).bind(mentions_only).bind(after).bind(limit).bind(archived).fetch_all(conn).await?)
+}
