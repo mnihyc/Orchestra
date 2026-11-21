@@ -7,7 +7,7 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
 const dialogField = (page: Page, name: RegExp | string) => page.getByRole('dialog').getByRole('textbox', { name });
 
@@ -104,7 +104,7 @@ test('a topic made without a name is called New topic, and a short name that is 
   await page.getByRole('dialog').getByRole('textbox', { name: 'Name', exact: true }).fill('Research');
   await page.getByRole('dialog').getByRole('button', { name: 'Create department' }).click();
   // The org that has the short name is named, and a free one is offered.
-  await expect(page.getByRole('dialog').getByText('Research has the short name research here already, and two orgs of one place cannot share an address. Choose another.')).toBeVisible();
+  await expect(page.getByRole('dialog').getByText('Research has the short name research here already, and two organizations of one place cannot share an address. Choose another.')).toBeVisible();
   await expect(page.getByRole('dialog').getByRole('button', { name: 'Use research-2' })).toBeVisible();
   // The dialog stays, with what was typed, for the person to change.
   await expect(page.getByRole('dialog').getByRole('textbox', { name: 'Short name' })).toHaveValue('research');
@@ -419,7 +419,7 @@ test('an invitation is made as a link for one address and as a link to share, an
   // A link to share, for up to three people.
   await page.getByRole('button', { name: 'Invite…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Invite to Acme' });
-  await expect(dialog.getByText('Whoever uses it will be a Viewer of Acme.')).toBeVisible();
+  await expect(dialog.getByText('Whoever uses it will hold the role Viewer of Acme.')).toBeVisible();
   await expect(dialog.getByText('30 days at most here, by the setting of Acme.')).toBeVisible();
   await dialog.getByRole('radio', { name: 'Link' }).click();
   await dialog.getByRole('spinbutton', { name: 'How many people' }).fill('3');

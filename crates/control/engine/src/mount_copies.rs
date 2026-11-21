@@ -1075,8 +1075,7 @@ async fn archived(
         .collect();
     fresh.sort();
     fresh.dedup();
-    storage::pin_blobs(&mut tx, &fresh).await?;
-    pins.extend(fresh);
+    pins.extend(storage::pin_transfer_blobs(&mut tx, &fresh).await?);
     pins.sort();
     known.insert(mount, archive.clone());
     jobs::merge_plan(
@@ -1479,8 +1478,17 @@ impl Engine {
                 .map(serde_json::from_value)
                 .transpose()?
                 .unwrap_or_default();
+            let mut released = None;
             if !pins.is_empty() {
-                storage::unpin_blobs(&mut tx, &pins, self.inner.clock.now()).await?;
+                released = Some(
+                    crate::transfers::release_transfer(
+                        &mut tx,
+                        crate::transfers::place_of(current.environment_id, current.provider_id),
+                        &pins,
+                        self.inner.clock.now(),
+                    )
+                    .await?,
+                );
                 jobs::merge_plan(
                     &mut tx,
                     row.id,
@@ -1490,6 +1498,9 @@ impl Engine {
                 .await?;
             }
             tx.commit().await.map_err(orch_db::DbError::from)?;
+            if let Some(released) = released {
+                released.settle(self).await;
+            }
             Ok(())
         }
         .await;

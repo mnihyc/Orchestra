@@ -22,7 +22,7 @@ use orch_api_contract::directory::{
 };
 use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::users::UserGet;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, key_activity};
 use orch_types::{Id, Time, new_id};
 use places::Who;
@@ -71,7 +71,7 @@ async fn stored_key(
         "fixture modes do not mix"
     );
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let raw = policy.map(|value| serde_json::to_value(value).unwrap());
     let scopes = if raw.is_some() {

@@ -12,9 +12,7 @@ use orch_api_contract::routes::Endpoint;
 
 use orch_api_contract::threads::ThreadHistoryListQuery;
 
-use orch_api_core::middleware::authentication::API_TOKEN_PREFIX;
-
-use orch_api_core::middleware::authentication::new_token;
+use orch_api_core::middleware::authentication::new_api_token;
 
 use orch_api_core::middleware::authentication::token_hash;
 
@@ -51,7 +49,7 @@ fn scope(rules: Vec<Value>) -> Proof<Value> {
 
 pub async fn key(world: &World, user: Id, rules: Vec<Value>) -> Proof<Key> {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let hash = token_hash(&secret);
     let now = world.now();
     create_api_token_scoped(
