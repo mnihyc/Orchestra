@@ -1,5 +1,5 @@
 /** Native observation times, reset review eligibility and UTC ledger periods. */
-import type { Provider as PlanProvider, UsageWindow as PlanWindow, ResetCredit } from '@/generated/api-types';
+import type { ModelSuggestion, Provider as PlanProvider, UsageWindow as PlanWindow, ResetCredit } from '@/generated/api-types';
 export type { Provider as PlanProvider, UsageWindow as PlanWindow, ResetCredit, UsageAnalytics as PlanAnalytics, ProviderResetConsumeBody as ResetBody } from '@/generated/api-types';
 import { DAY_MS } from '@/lib/time';
 import { detailState } from './details';
@@ -11,12 +11,12 @@ export function observedAt(provider: PlanProvider, field: string): string | null
 }
 
 /** Only a successful discovery can say that a listed model was absent; a failed read preserves its earlier date. */
-export function modelUnavailableAt(provider: PlanProvider, model: string): string | null {
+export function modelUnavailableAt(provider: PlanProvider, model: string, listing: readonly ModelSuggestion[] | undefined): string | null {
   const state = detailState(provider,'models');
   if (state !== 'told' && state !== 'empty') return null;
   if (state === 'empty') return observedAt(provider,'models');
-  const models = provider.facts.models;
-  return models === null || models.some((entry) => entry.model_name === model && entry.listed)
+  // A list that is not read yet says nothing of any model.
+  return listing === undefined || listing.some((entry) => entry.model_name === model && entry.listed)
     ? null : observedAt(provider, 'models');
 }
 

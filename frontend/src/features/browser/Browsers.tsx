@@ -5,11 +5,14 @@
  * together: where browsers are on and nothing could run one, the view says so with what was looked for
  * and "Look again"; where they are off, by whom and where that is changed.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { AppWindow, Ellipsis } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
+import { client as apiClient } from '@/api/client';
+import { choiceCopy } from '@/i18n/choices';
 
 import { BrowserProgramsMissing, browserKeys, browsersQuery, deleteProfile, lookAgain, renameProfile } from '@/api/browsers';
 import type { Browser, BrowserProfile, Environment, EnvironmentBrowsers } from '@/generated/api-types';
@@ -24,6 +27,9 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Menu } from '@/ui/Menu';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { Select } from '@/ui/Select';
+import { useViewChoice } from '@/lib/viewChoices';
+import { InteractiveFacts } from './InteractiveFacts';
 import { StatusDot } from '@/ui/StatusDot';
 
 import { Front } from './Front';
@@ -55,32 +61,64 @@ function useBrowsersFeed(environmentId: string): void {
   }, [client, environmentId]);
 }
 
-export function BrowsersPanel({ environment, threadId }: { environment: Environment; threadId: string | null }) {
+export function BrowsersPanel(props: { environment: Environment; threadId: string | null }) {
+  const scope = useStore(apiClient.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <BrowserContents key={`${scope}:${props.environment.id}`} {...props} scope={scope} />;
+}
+function BrowserContents({ environment, threadId, scope }: { environment: Environment; threadId: string | null; scope: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const query = useQuery(browsersQuery(environment.id));
+  const [keptState, setKeptState] = useViewChoice<string>('browser-list', 'state', 'open', environment.id);
+  const closed = keptState === 'closed';
+  const [search, setSearch] = useState('');
+  const canonical = useQuery({ ...browsersQuery(environment.id), enabled: false });
+  const specification = browsersQuery(environment.id, { closed, query: search });
+  const pageKey = [...specification.queryKey, 'pages', scope, closed, search];
+  const query = useInfiniteQuery({ queryKey: pageKey, initialPageParam: null as string | null,
+    queryFn: async (context): Promise<EnvironmentBrowsers> => {
+      if (!closed && search === '' && context.pageParam === null) return client.query(browsersQuery(environment.id));
+      const page = browsersQuery(environment.id, { closed, query: search, ...(context.pageParam === null ? {} : { cursor: context.pageParam }) });
+      const read = page.queryFn;
+      if (typeof read !== 'function') throw new Error('The browser reader is unavailable');
+      return read({ ...context, queryKey: page.queryKey });
+    }, getNextPageParam: (page) => page.next_cursor ?? undefined, placeholderData: (previous) => previous });
   useBrowsersFeed(environment.id);
   const [front, setFront] = useState<string | null>(null);
   const [opening, setOpening] = useState<{ url?: string; profile?: string } | null>(null);
   const [renaming, setRenaming] = useState<BrowserProfile | null>(null);
   const [deleting, setDeleting] = useState<BrowserProfile | null>(null);
   const requests = useBrowserRequests();
-  const look = useMutation({ mutationFn: () => lookAgain(environment.id), onSuccess: (list) => client.setQueryData(browserKeys.list(environment.id), list) });
+  // A deliberate Open from a tool can name a later page. Follow only that intent, never preload a list.
+  const wanted = requests.front;
+  const wantedPresent = query.data?.pages.some((page) => page.browsers.some((row) => row.id === wanted)) === true;
+  const { isPending: reading, isFetchingNextPage: readingMore, isPlaceholderData: placeholder, hasNextPage: more, fetchNextPage: readNext } = query;
+  useEffect(() => {
+    if (wanted === null) return;
+    if (closed) { setKeptState('open'); return; }
+    if (!wantedPresent && !reading && !readingMore && !placeholder && more) void readNext();
+  }, [wanted, closed, setKeptState, wantedPresent, reading, readingMore, placeholder, more, readNext]);
+  const look = useMutation({ mutationFn: () => lookAgain(environment.id), onSuccess: (list) => { client.setQueryData(browserKeys.list(environment.id), list); client.setQueryData(pageKey, { pages: [list], pageParams: [null] }); } });
   const permissions = environment.access.permissions;
   const mayDrive = permissions.includes('browser.manage');
 
   if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} message={query.error instanceof BrowserProgramsMissing ? t('browser.programsUnavailable') : undefined} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
-  const data = query.data;
-  const browsers = orderBrowsers(data.browsers, threadId);
-  const idle = data.profiles.filter((profile) => profile.browser === null || !browsers.some((browser) => browser.id === profile.browser));
+  const first = !closed && search === '' ? canonical.data ?? query.data.pages[0] : query.data.pages[0];
+  if (first === undefined) return null;
+  const held = [first, ...query.data.pages.slice(1)].flatMap((page) => page.browsers);
+  const data = { ...first, browsers: [...new Map(held.map((row) => [row.id, row])).values()] };
+  const matches = (text: string) => text.toLocaleLowerCase().includes(search.toLocaleLowerCase());
+  const selected = data.browsers.filter((browser) => (browser.state === 'closed') === closed && matches(`${browser.profile ?? ''} ${browser.note ?? ''} ${browser.program ?? ''}`));
+  const browsers = closed ? selected : orderBrowsers(selected, threadId);
+  const idle = closed ? [] : data.profiles.filter((profile) => profile.browser === null && matches(profile.name));
   // What another screen asked (a browser in front, an address to open here) stands until the person chooses otherwise.
   const asked = requests.front !== null && browsers.some((browser) => browser.id === requests.front) ? requests.front : null;
   const askedOpen = requests.open !== null && requests.open.environmentId === environment.id && mayDrive ? requests.open : null;
-  const shown = browsers.find((browser) => browser.id === (asked ?? front)) ?? browsers[0] ?? null;
+  const shown = closed ? null : browsers.find((browser) => browser.id === (asked ?? front)) ?? browsers[0] ?? null;
   const dialog: { url?: string; profile?: string } | null = opening ?? (askedOpen === null ? null : { url: askedOpen.url });
   const choose = (id: string) => {
     requests.takeFront();
+    setKeptState('open');
     setFront(id);
   };
   const endDialog = () => {
@@ -100,6 +138,11 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
             {t('browser.list.open')}
           </Button>
         )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Select size="sm" label={t('interactiveHistory.state')} value={closed ? 'closed' : 'open'} onValueChange={(value) => { requests.takeFront(); setKeptState(value); }}
+          options={[{ value: 'open', label: t('browser.state.open') }, { value: 'closed', label: t('browser.state.closed') }]} />
+        {(data.browsers.length + data.profiles.length > 10 || query.hasNextPage || search !== '') && <Input type="search" label={t('interactiveHistory.search')} value={search} onChange={(event) => { requests.takeFront(); setSearch(event.target.value); }} />}
       </div>
       {off !== null && <OffNotice off={off} environment={environment} />}
       {off === null && !found && (
@@ -125,10 +168,11 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
           {browsers.map((browser) => (
             <li key={browser.id} className={cx('flex items-start gap-2 border-b border-border px-2 py-1 last:border-0', browser.id === shown?.id && 'bg-bg-subtle')} data-browser-row={browser.id}>
               <StatusDot className="h-(--control-sm)" tone={browser.state === 'open' ? 'success' : 'info'} label={t(`browser.state.${browser.state}`)} />
-              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={browser.id === shown?.id} onClick={() => choose(browser.id)}>
+              <button type="button" className="min-w-0 flex-1 text-left" aria-pressed={browser.id === shown?.id} disabled={browser.state === 'closed'} onClick={() => choose(browser.id)}>
                 <span className="block truncate text-sm font-medium leading-(--control-sm)">{browser.profile ?? t('browser.list.ownProfile')}</span>
                 <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">
                   <span>{browser.opened_by !== null ? t('browser.list.openedBy', { name: browser.opened_by.display_name }) : browser.thread !== null ? t('browser.list.openedByAgent', { thread: browser.thread.name ?? t('browser.list.hiddenThread') }) : t('browser.list.announced')}</span>
+                  {browser.preset !== null && <span>{choiceCopy(t, `browserMode.${browser.preset}`).name}</span>}
                   {browser.tabs !== null && <span>{t('browser.list.tabs', { count: browser.tabs })}</span>}
                   {browser.note !== null && <span className="wrap-anywhere">{browser.note}</span>}
                 </span>
@@ -138,7 +182,8 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
                   {browser.thread.name}
                 </Link>
               )}
-              {browser.profile !== null && <ProfileMenu profile={data.profiles.find((one) => one.name === browser.profile) ?? null} running mayManage={mayDrive} onRename={setRenaming} onDelete={setDeleting} />}
+              <InteractiveFacts subject={browser} />
+              {!closed && browser.profile !== null && <ProfileMenu profile={data.profiles.find((one) => one.name === browser.profile) ?? null} running mayManage={mayDrive} onRename={setRenaming} onDelete={setDeleting} />}
             </li>
           ))}
           {idle.map((profile) => (
@@ -158,7 +203,9 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
           ))}
         </ul>
       )}
-      {browsers.length === 0 && idle.length === 0 && off === null && found && <EmptyState compact icon={<AppWindow aria-hidden />} title={t('browser.list.empty')} description={mayDrive ? t('browser.list.emptyHint') : undefined} />}
+      {query.hasNextPage && <Button size="sm" pending={query.isFetchingNextPage} disabled={query.isPlaceholderData} onClick={() => void query.fetchNextPage()}>{t('interactiveHistory.more')}</Button>}
+      {closed && !query.isPlaceholderData && browsers.length === 0 && <EmptyState compact title={t('interactiveHistory.empty')} />}
+      {!closed && browsers.length === 0 && idle.length === 0 && off === null && found && <EmptyState compact icon={<AppWindow aria-hidden />} title={t('browser.list.empty')} description={mayDrive ? t('browser.list.emptyHint') : undefined} />}
       {shown !== null ? (
         <Front key={shown.id} browser={shown} list={data} mayDrive={mayDrive} environmentName={environment.name} managers={managers} mayReadFiles={permissions.includes('files.view')} />
       ) : null}

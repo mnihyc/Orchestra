@@ -47,7 +47,7 @@ pub enum VapidError {
 pub struct Vapid {
     key: SigningKey,
     public_key: String,
-    contact: String,
+    contact: Option<String>,
 }
 
 impl std::fmt::Debug for Vapid {
@@ -65,9 +65,39 @@ impl Vapid {
     /// reach whoever runs this system.
     pub fn read(secret: &str, contact: &str) -> Result<Self, VapidError> {
         let contact = contact.trim();
-        if !(contact.starts_with("https://") || contact.starts_with("mailto:")) {
+        let uri = Url::parse(contact).map_err(|_| VapidError::NoContact)?;
+        let valid = match uri.scheme() {
+            "https" => uri.has_host() && uri.username().is_empty() && uri.password().is_none(),
+            "mailto" => uri
+                .path()
+                .split_once('@')
+                .is_some_and(|(user, domain)| !user.is_empty() && !domain.is_empty()),
+            _ => false,
+        };
+        if !valid {
             return Err(VapidError::NoContact);
         }
+        Self::from_key(secret, Some(contact.to_owned()))
+    }
+
+    /// Uses the operator's contact, or the public HTTPS address by default.
+    /// A local HTTP installation can register browsers and sign messages without
+    /// publishing its loopback address to their push services (RFC 8292, 2.1).
+    pub fn for_installation(
+        secret: &str,
+        public_url: &str,
+        contact: &str,
+    ) -> Result<Self, VapidError> {
+        if !contact.trim().is_empty() {
+            return Self::read(secret, contact);
+        }
+        if Url::parse(public_url).is_ok_and(|url| url.scheme() == "https") {
+            return Self::read(secret, public_url);
+        }
+        Self::from_key(secret, None)
+    }
+
+    fn from_key(secret: &str, contact: Option<String>) -> Result<Self, VapidError> {
         let text = secret.trim();
         let secret = if text.contains("-----BEGIN") {
             SecretKey::from_pkcs8_pem(text)
@@ -86,7 +116,7 @@ impl Vapid {
         Ok(Self {
             public_key: URL_SAFE_NO_PAD.encode(key.verifying_key().to_sec1_point(false).as_bytes()),
             key,
-            contact: contact.to_owned(),
+            contact,
         })
     }
 
@@ -104,11 +134,13 @@ impl Vapid {
             .timestamp()
             .checked_add(TOKEN_LIFETIME_SECS)
             .ok_or(VapidError::CannotSign)?;
-        let claims = json!({
+        let mut claims = json!({
             "aud": endpoint.origin().ascii_serialization(),
             "exp": expires,
-            "sub": self.contact,
         });
+        if let Some(contact) = &self.contact {
+            claims["sub"] = json!(contact);
+        }
         let claims = serde_json::to_vec(&claims).map_err(|_| VapidError::CannotSign)?;
         let unsigned = format!(
             "{}.{}",
@@ -184,6 +216,57 @@ mod tests {
                 Vapid::read(PRIVATE_BASE64, contact).unwrap_err(),
                 VapidError::NoContact,
                 "{contact:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_install_offers_the_same_browser_key_and_signs_with_the_available_contact() {
+        use orch_types::{ManualClock, Time};
+
+        let at = "2026-10-14T01:00:00.000Z".parse::<Time>().unwrap().get();
+        let clock = ManualClock::new(at);
+        let endpoint = Url::parse("https://push.example/device").unwrap();
+        let local = "http://127.0.0.1:41400";
+        let https = "https://orch.example";
+        let mail = "mailto:ops@orch.example";
+        for (origin, contact, subject) in [
+            (local, "", None),
+            (https, "", Some(https)),
+            (local, mail, Some(mail)),
+            (https, mail, Some(mail)),
+        ] {
+            let vapid = Vapid::for_installation(PRIVATE_BASE64, origin, contact).unwrap();
+            assert_eq!(vapid.public_key(), PUBLIC_BASE64);
+            let auth = vapid.sign_for(&endpoint, &clock).unwrap();
+            let encoded = auth
+                .strip_prefix("vapid t=")
+                .unwrap()
+                .split('.')
+                .nth(1)
+                .unwrap();
+            let claims: serde_json::Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).unwrap()).unwrap();
+            assert_eq!(claims["aud"], "https://push.example");
+            assert_eq!(claims["exp"], at.timestamp() + TOKEN_LIFETIME_SECS);
+            assert_eq!(
+                claims.get("sub").cloned(),
+                subject.map(|value| json!(value))
+            );
+        }
+        assert_eq!(
+            Vapid::for_installation("invalid", local, "").unwrap_err(),
+            VapidError::NotAKey
+        );
+        for invalid in [
+            "ops@orch.example",
+            "https://",
+            "mailto:",
+            "http://orch.example",
+        ] {
+            assert_eq!(
+                Vapid::for_installation(PRIVATE_BASE64, https, invalid).unwrap_err(),
+                VapidError::NoContact
             );
         }
     }
