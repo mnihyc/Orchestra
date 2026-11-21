@@ -1,0 +1,5 @@
+test -p orch-api-core --test kfeeds_live --test kfeeds_permissions --test document_feed --test notifications_feed --test node_presentation_feed --test review_feed_end --test org_home_live
+test -p orch-api-core --test threads_drive --test thread_continuation_queues --test thread_display_live --test thread_history_scale --test thread_terminalization --test syncs
+test -p orch-api-core --test chat_reader_scopes --test document_readers --test document_reader_scopes --test document_navigation --test document_entry_metadata --test api_surface_sockets
+test -p orch-api-core --test background_wake_reads --test binding_readiness --test environment_incarnation --test agent_terminal_recovery --test metrics_observations --test browsers
+test -p orch-api-core --test personal --test sign_in --test admin_person_credentials
