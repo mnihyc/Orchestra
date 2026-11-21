@@ -1,0 +1,1 @@
+test -p orch-api-core --features test-support --test kvnc_core --test kvnc_filter -- diagnose_controller_input --nocapture

@@ -198,3 +198,47 @@ async fn a_display_sitting_records_only_the_person_and_times_and_a_retry_keeps_o
     .unwrap();
     assert_eq!(count, 1);
 }
+
+/// Scratch diagnosis only (never merged): which controller input reaches the real window.
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnose_controller_input_reaching_the_real_window() {
+    let Some(floor) = Floor::new().await else {
+        eprintln!("DIAG no floor");
+        return;
+    };
+    floor.serve().await;
+    let browser = displays_support::window(&floor).await;
+    let display = browser.display.unwrap();
+    floor.peer.observe(
+        browser.id,
+        "document.getElementById('i').focus();window.actions=0;0",
+    );
+    let mut screen = Screen::attach(&floor, &floor.scene.ada, display, true).await;
+    screen.picture_without_clipboard().await;
+    let state = |label: &str| {
+        let value = floor.peer.observe(
+            browser.id,
+            "JSON.stringify({a:window.actions,f:document.hasFocus(),e:document.activeElement&&document.activeElement.id,v:(document.getElementById('i')||{}).value,u:location.href,t:document.title,w:innerWidth,h:innerHeight,ow:outerWidth,oh:outerHeight,x:screenX,y:screenY})",
+        );
+        eprintln!("DIAG {label} {value}");
+    };
+    let pause = || tokio::time::sleep(std::time::Duration::from_secs(3));
+    state("start");
+    screen.send(&[5, 0, 2, 128, 1, 144]).await;
+    pause().await;
+    state("after pointer move to 640,400");
+    screen.send(&key(65, true)).await;
+    screen.send(&key(65, false)).await;
+    pause().await;
+    state("after key A with the pointer inside");
+    screen.send(&[5, 1, 2, 128, 1, 144]).await;
+    screen.send(&[5, 0, 2, 128, 1, 144]).await;
+    pause().await;
+    state("after click at 640,400");
+    screen.send(&key(66, true)).await;
+    screen.send(&key(66, false)).await;
+    pause().await;
+    state("after key B");
+    screen.picture_without_clipboard().await;
+    state("end");
+}
