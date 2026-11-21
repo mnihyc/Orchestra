@@ -2,6 +2,8 @@ WITH __NODE_VISIBILITY__, __HISTORY__, readable_chats AS NOT MATERIALIZED (
   SELECT c.id FROM chats c JOIN nodes root ON root.id=c.org_id LEFT JOIN scoped_nodes n ON n.id=c.node_id
     CROSS JOIN LATERAL (SELECT CASE WHEN c.node_id IS NULL THEN $5::jsonb->'objects'->c.id::text ELSE n."grant"->'chat' END value) page
    WHERE $8::uuid IS NULL AND ($7::uuid IS NULL OR c.id=$7)
+     AND (NOT ($5::jsonb ? 'search_roots') OR root.org_id IN
+          (SELECT value::uuid FROM jsonb_array_elements_text($5::jsonb->'search_roots')))
      AND ((c.node_id IS NOT NULL AND n.id IS NOT NULL) OR (c.node_id IS NULL AND ($6::uuid IS NULL OR c.org_id=$6)))
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(root.path) AND gone.deleted_at IS NOT NULL)
      AND (__CONTENT_CANDIDATES__ OR COALESCE((page.value->>'view')::boolean,false))
@@ -13,6 +15,8 @@ WITH __NODE_VISIBILITY__, __HISTORY__, readable_chats AS NOT MATERIALIZED (
 ), readable_documents AS NOT MATERIALIZED (
   SELECT d.* FROM documents d JOIN nodes n ON n.id=d.node_id LEFT JOIN threads t ON t.node_id=n.id
    WHERE $7::uuid IS NULL AND ($8::uuid IS NULL OR d.id=$8) AND d.deleted_at IS NULL
+     AND (NOT ($5::jsonb ? 'search_roots') OR d.org_id IN
+          (SELECT value::uuid FROM jsonb_array_elements_text($5::jsonb->'search_roots')))
      AND ($6::uuid IS NULL OR n.path @> ARRAY[$6::uuid])
      AND ($31::uuid[] IS NULL OR d.id=ANY($31))
      AND NOT n.unlisted AND (($8 IS NOT NULL AND $6 IS NULL) OR t.side_of IS NULL)
@@ -63,6 +67,7 @@ WITH __NODE_VISIBILITY__, __HISTORY__, readable_chats AS NOT MATERIALIZED (
      AND i.kind=ANY($9::text[]) AND i.kind<>'marker' AND r.body->>'search_text' IS NOT NULL AND __OLD_ITEM_MATCH__
      AND ($32::uuid[] IS NULL OR i.id=ANY($32))
      AND r.body->>'search_text' NOT LIKE '%<orch>%'
+     AND ($5::jsonb->'search_advanced'->>'stream' IS NULL OR i.stream=$5::jsonb->'search_advanced'->>'stream')
      AND ($12::uuid IS NULL OR i.author_id=$12)
      AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $13::timestamptz IS NULL OR i.created_at >= $13) AND (($5::jsonb->'search_advanced'->>'date_field') IS NOT NULL OR $14::timestamptz IS NULL OR i.created_at <= $14)
      AND (NOT $21 OR orch_search_file_types(r.body->'payload') @> ARRAY['*/*'])

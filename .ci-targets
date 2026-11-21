@@ -1,0 +1,7 @@
+fmt
+clippy
+test -p orch-api-core --test realtime_threads --test realtime_feeds --test realtime_socket --test realtime_continuations --test realtime_origins
+test -p orch-api-core --test realtime_raw_sources --test realtime_rows_cost --test realtime_switches --test realtime_topic_members --test realtime_presence_processes --test realtime_chats
+test -p orch-api-core --test realtime_environment --test realtime_ephemeral --test realtime_usage --test realtime_machine_views --test realtime_large_gap --test realtime_daily_work --test realtime_diagnostics --test realtime_fixture_lifecycle
+test -p orch-api-core --lib
+test -p orch-db --lib
