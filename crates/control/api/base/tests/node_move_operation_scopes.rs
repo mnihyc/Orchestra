@@ -18,7 +18,7 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{
     OrgMove, OrgMovePreview, ProjectMove, ProjectMovePreview, TopicMove, TopicMovePreview,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{hierarchy, identity, transaction_guard};
@@ -80,8 +80,8 @@ fn rule(operation: &str, business: &str, target_kind: &str, target: Id, actions:
 async fn key(world: &World, owner: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

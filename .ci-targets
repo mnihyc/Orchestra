@@ -1,0 +1,8 @@
+clippy
+fmt
+test -p orch-api-core --lib
+test -p orch-api-core --test personal -- --test-threads=1 --nocapture
+test -p orch-api-core --test transaction_guards --test session_others --test account_key_proofs --test accounts --test sign_in --test koidc --test recovery_codes --test service_token_sign_in --test token_sign_in_acts --test kfix_account
+test -p orch-api-core --test kguard_resources --test kguard_nodes --test group_operation_scopes --test node_move_operation_scopes --test personal_notification_scope
+test -p orch-api-core --test realtime_socket -- --nocapture --test-threads=1
+test -p orch-db --lib --test approval_settlement
