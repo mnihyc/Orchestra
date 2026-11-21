@@ -3,19 +3,17 @@ import { useState } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
 import type { AgentAccessAvailability, AgentAccessChoice, AgentAccessWhere, ShareParts } from '@/generated/api-types';
-import { agentAccessValue } from '@/features/access/AgentAccessChoice';
-import { ADVANCED, advancedGiven, hasAgentParts, creationAreas, creationChoice, mayGiveParts, sameParts, stepOf, withStep } from '@/features/access/agentShares';
+import { REACHES, agentAccessValue, ADVANCED, advancedGiven, hasAgentParts, creationAreas, creationChoice, mayGiveParts, sameParts, stepOf, withStep } from '@/features/access/agentShares';
 
 const NONE: AgentAccessChoice = { where: 'nothing', parts: {} };
-const WHERE: readonly AgentAccessWhere[] = ['nothing', 'thread', 'topic', 'project'];
 
 function creationOffer(value: unknown): AgentAccessAvailability | null {
   if (typeof value !== 'object' || value === null || !('preset' in value) || !('choices' in value) || !Array.isArray(value.choices)) return null;
   const preset = agentAccessValue(value.preset);
   const choices = value.choices.map((entry: unknown) => agentAccessValue(entry));
-  if (preset === null || choices.some((entry) => entry === null) || choices.length !== WHERE.length) return null;
+  if (preset === null || choices.some((entry) => entry === null) || choices.length !== REACHES.length) return null;
   const valid = choices.filter((entry): entry is AgentAccessChoice => entry !== null);
-  if (WHERE.some((where) => valid.filter((entry) => entry.where === where).length !== 1)) return null;
+  if (REACHES.some((where) => valid.filter((entry) => entry.where === where).length !== 1)) return null;
   return { preset, choices: valid };
 }
 

@@ -3,33 +3,46 @@ import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useFormatContext } from '@/lib/appearance';
+import { serverClock,useServerNow } from '@/lib/serverClock';
 import { formatNumber } from '@/lib/format';
-import { DAY_MS, formatSpan, useNow } from '@/lib/time';
+import { DAY_MS, MINUTE_MS, formatSpan, useNow } from '@/lib/time';
 import { Input } from '@/ui/Input';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Select } from '@/ui/Select';
+import { durationMinutes, MinuteDuration, type MinuteUnit } from './MinuteDuration';
 
-type RequestDuration = 'never' | 'day' | 'week' | 'month' | 'custom';
+type RequestDuration = 'never' | 'day' | 'week' | 'month' | 'custom' | 'length';
 /** The day counts behind the three named choices. */
 const DAYS = { day: 1, week: 7, month: 30 } as const;
+const serverNow=()=>Date.now()+(serverClock.offset()??0);
 
 /** Common request choices; the instant is fixed when the person sends the request. */
 export function useRequestEnd() {
   const [duration, setDuration] = useState<RequestDuration>('never');
   const [date, setDate] = useState('');
-  const sent = useRef<{ duration: RequestDuration; date: string; attempt: number; end: string | null } | null>(null);
-  const now = useNow();
-  const time = Date.parse(date);
-  const valid = duration !== 'custom' || Number.isFinite(time) && time > now;
+  const [amount, setAmount] = useState('');
+  const [unit, setUnit] = useState<MinuteUnit>('minutes');
+  const sent = useRef<{ key: string; end: string | null } | null>(null);
+  const deviceNow=useNow();
+  const now=useServerNow(deviceNow)??deviceNow;
+  const time = Math.floor(Date.parse(date) / MINUTE_MS) * MINUTE_MS;
+  const minutes = durationMinutes(amount, unit);
+  const proposed = duration === 'length' ? now + (minutes ?? NaN) * MINUTE_MS : time;
+  const valid = duration === 'length' ? minutes !== null && Number.isFinite(new Date(proposed).getTime())
+    : duration !== 'custom' || Number.isFinite(time) && time > now;
   const chooseDuration = (next: RequestDuration) => { sent.current = null; setDuration(next); };
   const chooseDate = (next: string) => { sent.current = null; setDate(next); };
   const end = (attempt = 0): string | null => {
-    if (sent.current?.duration === duration && sent.current.date === date && sent.current.attempt === attempt && (sent.current.end === null || Date.parse(sent.current.end) > Date.now())) return sent.current.end;
-    const instant = duration === 'never' ? null : new Date(duration === 'custom' ? time : Date.now() + DAYS[duration] * DAY_MS).toISOString();
-    sent.current = { duration, date, attempt, end: instant };
+    const now=serverNow();
+    const key = JSON.stringify([duration, date, amount, unit, attempt]);
+    if (sent.current?.key === key && (sent.current.end === null || Date.parse(sent.current.end) > now)) return sent.current.end;
+    const target = duration === 'custom' ? time : duration === 'length' ? now + (minutes ?? NaN) * MINUTE_MS
+      : duration === 'never' ? NaN : now + DAYS[duration] * DAY_MS;
+    const instant = duration === 'never' ? null : new Date(Math.floor(target / MINUTE_MS) * MINUTE_MS).toISOString();
+    sent.current = { key, end: instant };
     return instant;
   };
-  return { duration, setDuration: chooseDuration, date, setDate: chooseDate, valid, end };
+  return { duration, setDuration: chooseDuration, date, setDate: chooseDate, amount, setAmount, unit, setUnit, valid, end };
 }
 
 export function RequestEndField({ value }: { value: ReturnType<typeof useRequestEnd> }) {
@@ -41,8 +54,10 @@ export function RequestEndField({ value }: { value: ReturnType<typeof useRequest
       { value: 'day', label: formatSpan(DAY_MS, format, 'long') },
       { value: 'week', label: formatNumber(1, format.locale, { style: 'unit', unit: 'week', unitDisplay: 'long' }) },
       { value: 'month', label: formatSpan(DAYS.month * DAY_MS, format, 'long') },
+      { value: 'length', label: t('access.request.customLength') },
       { value: 'custom', label: t('access.request.chooseDate') },
     ]} />
+    {value.duration === 'length' && <MinuteDuration amount={value.amount} unit={value.unit} onAmount={value.setAmount} onUnit={value.setUnit} />}
     {value.duration === 'custom' && <Input type="datetime-local" label={t('access.request.endsOn')} value={value.date} onChange={(event) => value.setDate(event.target.value)} error={value.date !== '' && !value.valid ? t('access.request.futureDate') : undefined} />}
   </div>;
 }

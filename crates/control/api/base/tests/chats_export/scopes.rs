@@ -3,7 +3,7 @@ use super::*;
 use futures::StreamExt;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{chats as rows, identity};
 use orch_types::{Hash, Json, new_id};
 use serde_json::json;
@@ -23,8 +23,8 @@ fn rule(operation: &str, action: &str, kind: &str, id: Id) -> Json {
 async fn key(room: &Room, actor: &Who, rules: Vec<Json>) -> Key {
     let policy: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(policy.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *room.world.conn().await,
         &identity::NewApiToken {
@@ -364,13 +364,19 @@ struct OpenGate {
 }
 #[async_trait::async_trait]
 impl BlobStore for OpenGate {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner.put_held(hash, size, body, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         let opened = self.inner.get(hash, range).await?;
@@ -389,8 +395,13 @@ impl BlobStore for OpenGate {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 async fn attachment(room: &Room) -> Hash {
@@ -401,7 +412,7 @@ async fn attachment(room: &Room) -> Hash {
         .unwrap();
     let mut conn = room.world.conn().await;
     blobs
-        .register(&mut conn, meta, room.world.now())
+        .register(&mut conn, &meta, room.world.now())
         .await
         .unwrap();
     orch_db::queries::uploads::remember(&mut conn, room.ada.id(), &meta.hash, room.world.now())
@@ -451,6 +462,7 @@ fn archive_gate(room: &mut Room, hash: Hash) -> Arc<OpenGate> {
         build: old.build,
         blobs: old.blobs.clone(),
         cache: orch_api_core::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

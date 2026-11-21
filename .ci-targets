@@ -1,0 +1,5 @@
+test -p orch-api-core --test realtime_socket
+test -p orch-api-core --test realtime_socket
+test -p orch-api-core --test realtime_socket -- a_sub_that_reuses_a_number
+test -p orch-api-core --test realtime_socket -- a_sub_that_reuses_a_number
+test -p orch-api-core --test realtime_socket -- a_sub_that_reuses_a_number
