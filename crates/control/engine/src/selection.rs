@@ -108,6 +108,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_instruction_preview_uses_only_the_file_that_the_native_selection_carries() {
+        for pattern in ["AGENTS.md", "*.md", "**/AGENTS.md", "?GENTS.md", "**"] {
+            assert!(
+                Matcher::new(&Selection {
+                    include: vec![pattern.into()],
+                    exclude: Vec::new()
+                })
+                .unwrap()
+                .matches("AGENTS.md")
+            );
+            assert!(
+                !Matcher::new(&Selection {
+                    include: vec!["**".into()],
+                    exclude: vec![pattern.into()]
+                })
+                .unwrap()
+                .matches("AGENTS.md")
+            );
+        }
+        for pattern in [
+            "src",
+            "src/**",
+            "[AGENTS].md",
+            "{AGENTS,README}.md",
+            "agents.md",
+        ] {
+            assert!(
+                !Matcher::new(&Selection {
+                    include: vec![pattern.into()],
+                    exclude: Vec::new()
+                })
+                .unwrap()
+                .matches("AGENTS.md")
+            );
+        }
+    }
+
+    #[test]
     fn a_selection_copies_only_its_named_tree_and_literals_and_leaves_excluded_paths_out() {
         let matcher = Matcher::new(&Selection {
             include: vec!["src".into(), "data[1].csv".into()],

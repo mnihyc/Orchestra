@@ -1,0 +1,8 @@
+test -p orch-api-core --test personal -- person_lock:: --nocapture --test-threads=1
+test -p orch-api-core --test accounts -- signing_out_
+test -p orch-api-core --test bootstrap --test account_native_scopes --test hierarchy_native_scopes --test thread_history_pages
+test -p orch-api-core --test thread_opening_scopes --test transaction_guards
+test -p orch-db --lib -- machine_reports::
+test -p orch-engine --test foreign_machine_streams
+clippy
+fmt
