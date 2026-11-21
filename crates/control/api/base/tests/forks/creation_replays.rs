@@ -22,6 +22,7 @@ async fn side_header_replay_uses_current_child_read_or_its_original_identity_rec
     w.s.rig.world.app.app.engine.stop();
     let token = orch_types::new_id().to_string();
     let input = ThreadSideCreateBody {
+        acting: false,
         content: vec![ContentPart::Text {
             text: "An aside accepted once".into(),
         }],

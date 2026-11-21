@@ -13,17 +13,17 @@ import type { TrailPart } from '@/shell/screen';
 import { TrailLink } from '@/shell/TrailLink';
 import { cx } from '@/ui/cx';
 import type { AdminAccess } from '@/generated/api-types';
-import { AsAdminMark, privateAdminAccess } from '@/ui/AsAdminMark';
+import { PrivateOpeningMark, privateAdminAccess } from '@/ui/AsAdminMark';
 import { ResourceOwner, type ResourceOwnership } from '@/features/resources/ResourceOwner';
 import { useAdminOpening } from '@/features/access/opening';
 import { ScrollArea } from '@/ui/ScrollArea';
 import { compactControls } from '@/ui/FilterBar';
 
 /** The scrolling column of a screen. It is as wide as reading is comfortable, and keeps a margin on a small screen. */
-export function Page({ children, className }: { children: ReactNode; className?: string }) {
+export function Page({ children, className, wide = false }: { children: ReactNode; className?: string; wide?: boolean }) {
   return (
     <ScrollArea className="h-full">
-      <div className={cx('mx-auto flex w-full max-w-(--container-page) flex-col gap-6 p-(--page-padding)', className)}>{children}</div>
+      <div className={cx('mx-auto flex w-full min-w-0 flex-col gap-6 p-(--page-padding)', !wide && 'max-w-(--container-page)', className)}>{children}</div>
     </ScrollArea>
   );
 }
@@ -53,8 +53,10 @@ export interface PageHeaderProps {
 
 export function PageHeader({ mark, title, help, headingId, titleInContext = false, lead, facts = [], actions, back, adminAccess, private: privatePage = false, ownership, opening }: PageHeaderProps) {
   const { t } = useTranslation();
-  useAdminOpening(opening?.kind ?? '', opening?.id, adminAccess !== null && adminAccess !== undefined);
-  if (titleInContext && mark === undefined && back === undefined && help === undefined && (adminAccess === null || adminAccess === undefined) && !privatePage && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
+  const reached = adminAccess !== null && adminAccess !== undefined;
+  useAdminOpening(opening?.kind ?? '', opening?.id, reached);
+  const privateReach = reached && (privatePage || privateAdminAccess(adminAccess));
+  if (titleInContext && mark === undefined && back === undefined && help === undefined && !privateReach && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
   return (
     <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
       <div className="flex min-w-0 flex-1 basis-[min(100%,14rem)] items-start gap-4">
@@ -73,7 +75,7 @@ export function PageHeader({ mark, title, help, headingId, titleInContext = fals
             {!titleInContext && <h1 id={headingId} className="min-w-0 text-2xl leading-[1.875rem] font-semibold wrap-anywhere text-text">{title}</h1>}
             {help !== undefined && <span className="flex h-[1.875rem] shrink-0 items-center">{help}</span>}
           </div>}
-          <AsAdminMark of={adminAccess?.place} sentence private={privatePage || privateAdminAccess(adminAccess)} />
+          {privateReach && <PrivateOpeningMark of={adminAccess.place} />}
           {ownership !== undefined && <div className="flex items-center gap-2 text-sm text-text-muted"><span className="shrink-0">{t('resources.listOwner')}</span><ResourceOwner {...ownership} /></div>}
           {lead !== undefined && lead !== null && <div className="max-w-prose text-base wrap-anywhere text-text-muted">{lead}</div>}
           {opening !== undefined && hasLibrary(opening.kind) && !privatePage && <ResourceLibrary object={{kind:opening.kind,id:opening.id}} />}

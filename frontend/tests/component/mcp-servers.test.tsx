@@ -10,7 +10,7 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const { read, restart, jobRead } = vi.hoisted(() => ({ read: vi.fn<() => Promise<EnvironmentMcp>>(), restart: vi.fn<(id: string,name: string) => Promise<Job>>(), jobRead: vi.fn<() => Promise<Job>>() }));
-vi.mock('@/api/environments', () => ({ environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id], queryFn: read }), restartEnvironmentMcpServer: restart }));
+vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), environmentMcpKey: (id: string) => ['environment-mcp',id], environmentMcpQuery: (id: string) => ({ queryKey: ['environment-mcp',id], queryFn: read }), restartEnvironmentMcpServer: restart }));
 vi.mock('@/api/forks', () => ({ jobQuery: (id: string) => ({ queryKey: ['job',id], queryFn: jobRead }) }));
 afterEach(() => vi.clearAllMocks());
 
@@ -100,4 +100,16 @@ describe('one MCP server restart', () => {
     await screen.findByText('flaky');
     expect(screen.queryByRole('button',{name:'Restart'})).not.toBeInTheDocument();
   });
+});
+
+it('retires native configuration names and import acts when the current read is refused', async () => {
+  read.mockResolvedValue({ ...list(), found: [{ name: 'private-native', source: 'codex', scope: 'user', directory: null, transport: 'stdio', imported: null, state: 'running', using: 'native' }] });
+  const cache = draw(false, true);
+  await screen.findByText('private-native');
+  read.mockRejectedValueOnce(new Error('Current connection read refused'));
+  await act(async () => { await cache.refetchQueries({ queryKey: ['environment-mcp', 'environment'], exact: true }); });
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(screen.queryByText('private-native')).not.toBeInTheDocument();
+  expect(screen.queryByRole('table', { name: i18n.t('mcpImport.found') })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: i18n.t('mcpImport.import') })).not.toBeInTheDocument();
 });

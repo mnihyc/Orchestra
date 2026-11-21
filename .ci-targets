@@ -1,0 +1,10 @@
+fmt
+contracts
+clippy
+test -p orch-settings-contract --lib
+test -p orch-settings --test resolution --test writes
+test -p orch-db --lib -- pool::tests::
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test settings --test personal --test admin_system --test skills --test threads_read --test threads_settings --test thread_read_tools --test setting_reach --test call_recovery --test ask
+test -p orch-engine --test skills --test turns --test failures --test provider_runtime --test orch_capabilities --test call_recovery --test orch_tools --test subagent_limits

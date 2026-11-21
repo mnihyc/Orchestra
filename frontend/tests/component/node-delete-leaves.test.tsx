@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { deleteNode, previewDelete, readNode } from '@/api/nodes';
-import { NodeDialogHost, openNodeDialog } from '@/features/navigation/NodeDialogs';
+import { NodeDialogHost } from '@/features/navigation/NodeDialogHost';
+import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import type { Node, NodeDeletePlan } from '@/generated/api-types';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { ACME, acmeTree } from '../doubles/fixtures';

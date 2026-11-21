@@ -311,6 +311,14 @@ pub enum SystemComponentName {
     Database,
 }
 
+/// A diagnosed operational issue of a service that can still answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemComponentIssue {
+    /// The optional metrics listener could not bind; the API continues serving.
+    MetricsListenerUnavailable,
+}
+
 /// How one part of the system fares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SystemComponent {
@@ -320,6 +328,9 @@ pub struct SystemComponent {
     pub ok: bool,
     /// What is wrong, where something is.
     pub detail: Option<String>,
+    /// A known operational issue, separate from the component's own diagnostic text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<SystemComponentIssue>,
     /// When it last reported.
     pub seen_at: Option<Time>,
 }
@@ -352,6 +363,75 @@ pub struct SystemInfo {
     pub threads_running: i64,
     /// The queues.
     pub queues: SystemQueues,
+    /// Allowlisted running values captured at startup; absent when this process did not report them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_configuration: Option<EffectiveConfiguration>,
+}
+
+/// Safe public names for process configuration; no credential, URL or path may enter this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ConfigurationKey {
+    /// Pool acquisition, including opening and checking a connection.
+    #[serde(rename = "database.acquire_timeout_ms")]
+    DatabaseAcquireTimeout,
+    /// Statements of the API request pool.
+    #[serde(rename = "database.request_statement_timeout_ms")]
+    DatabaseRequestStatementTimeout,
+    /// Statements of a worker or maintenance pool, when that process reports them.
+    #[serde(rename = "database.background_statement_timeout_ms")]
+    DatabaseBackgroundStatementTimeout,
+    /// Idle transactions of the reporting process.
+    #[serde(rename = "database.idle_transaction_timeout_ms")]
+    DatabaseIdleTransactionTimeout,
+}
+
+/// An actual configured deadline; an unreported value never becomes indefinite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigurationValue {
+    /// Unsigned decimal millisecond text preserves the complete native range.
+    Finite {
+        /// The exact millisecond value, without rounding through a browser number.
+        milliseconds: String,
+    },
+    /// This deadline was explicitly disabled.
+    Indefinite,
+}
+
+/// When a changed configuration value reaches its consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationApplication {
+    /// This consumer is constructed at process startup.
+    Restart,
+    /// This consumer reads changes while running.
+    Live,
+}
+
+/// One safe running value and its captured provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfigurationValue {
+    /// A public name from the explicit allowlist.
+    pub public_key: ConfigurationKey,
+    /// The applied value, distinct from unreported data.
+    pub typed_value: ConfigurationValue,
+    /// Uncaptured provenance stays unreported.
+    pub origin: Option<crate::common::ConfigurationOrigin>,
+    /// How this consumer applies changes.
+    pub application: ConfigurationApplication,
+}
+
+/// A process observation, never the contents of its currently edited file or environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfiguration {
+    /// The actual reporting process; another service's loaded values are not inferred.
+    pub service: SystemComponentName,
+    /// Opaque identity of the captured startup configuration.
+    pub process_revision: String,
+    /// When the configuration was captured.
+    pub measured_at: Time,
+    /// Complete authorized page of safe rows, with native continuation when needed.
+    pub values: crate::common::Page<EffectiveConfigurationValue>,
 }
 
 /// A read-only lookup at the operator's configured release source.
@@ -374,6 +454,127 @@ pub struct ReleaseCheck {
     pub error: Option<String>,
     /// Operator command as text only; never executed by the API or worker.
     pub command: Option<String>,
+}
+
+/// Progress or a safe reason while the bundled host is enrolling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BundledNodeEnrollment {
+    WaitingForAdministrator,
+    WaitingForNode,
+    TokenFileUnreadable,
+    InvalidTokenFile,
+    DifferentAuthority,
+    RegistrationUnavailable,
+}
+
+/// Whether the bundled node can run this installation's existing updater.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateAvailability {
+    /// The current bundled node offers the host Docker path.
+    Ready,
+    /// No active node is marked as bundled with this installation.
+    NoBundledNode,
+    /// More than one active node claims the installation bundle.
+    AmbiguousBundledNodes,
+    /// The bundled node has no current connection.
+    NodeOffline,
+    /// The node cannot use the installation's local Docker daemon.
+    DockerUnavailable,
+}
+
+/// One explicit offer selected by a system administrator, never a download URL or a shell command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ServerUpdateStart {
+    /// The exact version from the current validated release offer.
+    pub release: String,
+}
+
+/// The existing updater's durable phase, including what happened after a restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateStage {
+    /// Accepted, before fetching the selected release.
+    Queued,
+    /// Fetching the release's own manifest and assets.
+    Fetching,
+    /// Verifying the manifest's assets.
+    Verifying,
+    /// Preparing the verified payloads.
+    Applying,
+    /// Stopping the application services.
+    Stopping,
+    /// Taking the rollback database snapshot.
+    Dumping,
+    /// Atomically selecting the new payload generations.
+    Activating,
+    /// Starting the application services.
+    Starting,
+    /// Checking the effective public route and running release.
+    Checking,
+    /// Restoring the old payloads and their database snapshot.
+    RollingBack,
+    /// Resuming the original journal after the helper or host restarted.
+    Recovering,
+    /// The selected release passed readiness.
+    Updated,
+    /// The earlier release is running again.
+    RolledBack,
+    /// The updater could not finish; its existing recovery command remains available.
+    Failed,
+}
+impl ServerUpdateStage {
+    /// A terminal observation is retained after its detached helper is removed.
+    #[must_use]
+    pub const fn terminal(self) -> bool {
+        matches!(self, Self::Updated | Self::RolledBack | Self::Failed)
+    }
+}
+
+/// Safe updater reasons; native output and credentials never become a page's failure text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateFailure {
+    /// The selected release failed browser or service readiness.
+    HealthCheckFailed,
+    /// The update ended before a successful new release or rollback was confirmed.
+    UpdateFailed,
+    /// The original journal remains and needs the existing recovery path.
+    RecoveryRequired,
+}
+
+/// A factual observation from the operation's local updater record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerUpdateObservation {
+    /// The phase actually recorded by update.sh.
+    pub stage: ServerUpdateStage,
+    /// Its safe fixed failure reason, if any.
+    pub reason: Option<ServerUpdateFailure>,
+    /// The release being left, once the updater has opened its journal.
+    pub from_version: Option<String>,
+    /// The selected release of this exact operation.
+    pub to_version: String,
+}
+
+/// Management's server update row and the same durable job presentation as other updates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerUpdateView {
+    /// The release of the API that is answering now.
+    pub installed_version: String,
+    /// The current validated release offer, if one has been checked.
+    pub offered_version: Option<String>,
+    /// The offered release is newer than the API answering now.
+    pub update_available: bool,
+    /// The real local condition for the page's update act.
+    pub availability: ServerUpdateAvailability,
+    /// The existing operator path, available even when no bundled node can run the act.
+    pub command: String,
+    /// The most recent server update, including its outcome after reload.
+    pub job: Option<crate::workspace::Job>,
+    /// The latest recorded native updater phase and outcome.
+    pub observation: Option<ServerUpdateObservation>,
 }
 
 /// A failed local backup attempt, separate from the last successful completion.
@@ -633,6 +834,13 @@ pub enum HarnessBuildStatus {
     Failed,
 }
 
+/// A retry from a running program selects the observed host and build together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HarnessCheckQuery {
+    pub machine_id: Option<Id>,
+    pub sha256: Option<String>,
+}
+
 /// What the check of a build found: once per build, in the background, never when a session starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HarnessBuildCheck {
@@ -759,6 +967,9 @@ pub struct RunningHarnessBuild {
     pub harness: Option<crate::resources::HarnessKindName>,
     /// The version held by the unit.
     pub version: String,
+    /// The selected machine for a native check of these exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_machine_id: Option<Id>,
     /// The matching catalogue build; null when its origin is not known to this server.
     pub build: Option<HarnessBuild>,
 }
@@ -1212,6 +1423,75 @@ pub struct IdentityProviderTestReply {
     pub issuer_metadata: Option<Json>,
 }
 
+/// What a system admin may know of the human check's secret: whether there is one, never what it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckState {
+    /// Whether a secret is kept: hCaptcha's secret, reCAPTCHA's secret key, or the API key of a Google Cloud project.
+    pub secret_set: bool,
+    /// When it was last set.
+    pub secret_changed_at: Option<Time>,
+    /// What the web edge lets a page reach of the service that is chosen; none while no service is chosen.
+    pub edge: Option<HumanCheckEdge>,
+}
+
+/// Whether the web edge's content policy lets a page reach a service's widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckEdgeState {
+    /// The policy names the hosts the widget needs.
+    Allows,
+    /// The policy leaves some out: the browser blocks the widget, and nobody could pass the check.
+    Blocks,
+    /// The server could not read the policy.
+    Unknown,
+}
+
+/// Where the server read the web edge's policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanCheckEdgeVia {
+    /// At the address people open, through any front of the operator's own: what a browser is given.
+    Public,
+    /// At the stack's own web edge, where a front of the operator's own is not seen.
+    Stack,
+}
+
+/// What the web edge's content policy lets a page reach of the chosen service, as the server reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckEdge {
+    /// What the policy allows.
+    pub state: HumanCheckEdgeState,
+    /// Where it was read; none where it could not be.
+    pub via: Option<HumanCheckEdgeVia>,
+    /// What the policy leaves out, as `<host> in <directive>`, where it blocks.
+    pub lacking: Vec<String>,
+}
+
+/// The secret of the human check, as it is given: it is sealed, kept, and never read back.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HumanCheckSecretBody {
+    /// hCaptcha's secret, reCAPTCHA's secret key, or the API key of the Google Cloud project; write-only.
+    pub secret: String,
+}
+
+impl std::fmt::Debug for HumanCheckSecretBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HumanCheckSecretBody")
+            .field("secret", &"[secret]")
+            .finish()
+    }
+}
+
+/// What a test of the human check found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HumanCheckTestReply {
+    /// Whether the service was reached and accepted the keys: it refused the token of the test, as it should.
+    pub ok: bool,
+    /// What went wrong, in words an administrator can act on, when it did not work.
+    pub error: Option<String>,
+}
+
 /// Where an org's index of search by meaning stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1249,6 +1529,39 @@ pub struct SemanticGeneration {
     pub query_prefix: String,
     /// What was put before a document.
     pub document_prefix: String,
+}
+
+/// The actual next step chosen after an embedding batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRetryNext {
+    /// The same pieces were selected for an immediate smaller request.
+    Immediate,
+    /// Work waits for another indexer pass; no per-provider deadline was scheduled.
+    IndexerPass,
+    /// The retry's request finished; no next retry is promised.
+    Finished,
+}
+
+/// Batch and retry facts captured independently of later model or interval changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SemanticIndexRetry {
+    /// Actual endpoint selected for this attempted batch.
+    pub provider_id: Id,
+    /// Model name selected for this attempted batch.
+    pub model_name: String,
+    /// Its embedding space, for matching the current index without displaying an identifier.
+    pub generation_id: Id,
+    /// Pieces selected for the batch, not a token allowance or admission promise.
+    pub batch_pieces: i64,
+    /// Recorded next-step decision.
+    pub next: SemanticRetryNext,
+    /// Only a captured immediate eligibility instant; a shared interval never fills this.
+    pub next_eligible_at: Option<Time>,
+    /// Safe native reason, never endpoint details or credentials.
+    pub reason: String,
+    /// When the outcome or next-step decision was observed.
+    pub observed_at: Time,
 }
 
 /// Where search by meaning stands for one root org.
@@ -1293,6 +1606,9 @@ pub struct SemanticSearchOrg {
     pub rebuild_bytes: Option<i64>,
     /// And the seconds it takes to make them at the measured rate.
     pub rebuild_seconds: Option<i64>,
+    /// Missing when no attempt facts were captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<SemanticIndexRetry>,
 }
 
 /// Search by meaning across the system.
@@ -1524,7 +1840,7 @@ crate::endpoints! {
     AdminHarnessChecksumsImport: POST "/admin/harnesses/checksums", Session, none, json HarnessChecksumsImportBody, json HarnessChecksumsImportReply, 200,
         operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
     /// Checks every kept build of a harness at a version again, in the background, and lists the builds.
-    AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, none, none, json Vec<HarnessBuild>, 200,
+    AdminHarnessCheck: POST "/admin/harnesses/{kind}/{version}/check", Session, query HarnessCheckQuery, none, json Vec<HarnessBuild>, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads the audit trail of the whole system.
     AdminAuditList: GET "/admin/audit", Session, query AdminAuditListQuery, none, json Page<AuditEntry>, 200,
@@ -1560,6 +1876,18 @@ crate::endpoints! {
     /// Fetches the discovery document of an identity provider's issuer, to see that it works.
     AdminIdentityProviderTest: POST "/admin/identity-providers/{id}/test", Session, none, none, json IdentityProviderTestReply, 200,
         operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Says whether the human check has its secret.
+    AdminHumanCheckGet: GET "/admin/human-check", Session, none, none, json HumanCheckState, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Keeps the secret of the human check, sealed; it is never read back.
+    AdminHumanCheckSecretSet: PUT "/admin/human-check/secret", Session, none, json HumanCheckSecretBody, json HumanCheckState, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Takes the secret of the human check away.
+    AdminHumanCheckSecretDelete: DELETE "/admin/human-check/secret", Session, none, none, json HumanCheckState, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
+    /// Asks the service of the human check, with a token that is not one, to see that it is reached and accepts the keys.
+    AdminHumanCheckTest: POST "/admin/human-check/test", Session, none, none, json HumanCheckTestReply, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reads what the blob store holds.
     AdminStorageGet: GET "/admin/storage", Session, none, none, json StorageStats, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
@@ -1572,6 +1900,18 @@ crate::endpoints! {
     /// Checks only the operator's configured source and installs nothing.
     AdminReleaseCheck: POST "/admin/releases/check", Session, none, none, json ReleaseCheck, 200,
         operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Shows bundled host enrollment to a system administrator.
+    AdminBundledNodeEnrollmentGet: GET "/admin/bundled-node/enrollment", Session, none, none, json Option<BundledNodeEnrollment>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Wakes the automatic registration task after the administrator corrects a failure.
+    AdminBundledNodeEnrollmentRetry: POST "/admin/bundled-node/enrollment/retry", Session, none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
+    /// Reads the current server release, native update condition and retained job.
+    AdminServerUpdateGet: GET "/admin/server-update", Session, none, none, json ServerUpdateView, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
+    /// Runs the selected release through the bundled node's existing host updater, or joins its open job.
+    AdminServerUpdateStart: POST "/admin/server-update", Session, none, json ServerUpdateStart, json crate::workspace::Job, 202,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Reconciles protected host metadata before returning operational facts.
     AdminInstallationRecordsGet: GET "/admin/installation-records", Session, none, none, json InstallationRecords, 200,
         operation Op::single(Manage, &[Identity(I::System)], Target::System);
