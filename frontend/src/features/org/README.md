@@ -77,5 +77,4 @@ Regression sources: `tests/unit/org-work.test.ts`, `tests/component/org-home-wor
 `tests/component/recent-visit-order.test.tsx`, `tests/e2e/org-home-work.spec.ts`; native API
 `org_home_work` and `org_home_live`. They cover EN/ZH,
 light/dark, 1440/400 widths, first-line alignment, real links/keyboard, live answers/renames/revokes,
-scoping, slow/error/empty states and no follow-up reads. Written only: the integrator runs the round's
-Rust/contracts/frontend gates and captures fresh screenshots/request counts; no writer ran them.
+scoping, slow/error/empty states and no follow-up reads.

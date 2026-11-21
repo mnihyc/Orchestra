@@ -20,7 +20,7 @@ async fn an_admin_catalogue_refresh_reaches_a_primary_without_substituting_or_re
         GatewayCatalogueEntry, GatewayCatalogueGet, GatewayCatalogueUpdate,
         GatewayCatalogueUpdateBody, GatewayEndpoint, GatewayEndpointTrust,
     };
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     let mut world = World::start().await;
     let enrolled = world.enroll("fixed-primary").await;
     let machine = world.start_machine_on_gateway(&enrolled, "test-gateway", vec![Role::Agent]);
@@ -39,12 +39,13 @@ async fn an_admin_catalogue_refresh_reaches_a_primary_without_substituting_or_re
         .execute(world.db.pool())
         .await
         .unwrap();
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = orch_types::new_id();
+    let token = new_api_token(issued_key_id);
     let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(serde_json::json!({"rules":[{"target":{"kind":"system","reach":"self"},"allow":[{"operation":"GatewayCatalogueGet","actions":["read"]},{"operation":"GatewayCatalogueUpdate","actions":["manage"]}]}]})).unwrap();
     orch_db::queries::identity::create_api_token_scoped(
         &mut world.db.acquire().await.unwrap(),
         &orch_db::queries::identity::NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: world.user,
             name: "Gateway metadata fixture",
             token_hash: &token_hash(&token),

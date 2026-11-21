@@ -4,7 +4,6 @@ on:
   push:
     # A branch under ci-t/ runs only its targeted checks (ci-targeted.yml).
     branches: ['**', '!ci-t/**']
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -16,6 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  messages:
+    uses: ./.github/workflows/public-history.yml
+
   rust:
     name: Rust (${{ matrix.os }})
     # The slowest platform leg, macOS on Intel, takes about 200 minutes with a cache and, compiling from nothing
