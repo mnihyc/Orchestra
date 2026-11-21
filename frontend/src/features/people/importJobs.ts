@@ -126,7 +126,7 @@ export function useImportJobWatch(onOpen: (item: WatchedImport) => void): void {
       const state = job.state === 'succeeded' ? 'done' : job.state === 'cancelled' ? 'cancelled' : 'failed';
       const report = importIdOf(job) ?? held.report;
       change(held.job, (one) => ({ ...one, state, percent: job.progress.percent, report, reconnecting: false }));
-      void cache.invalidateQueries({ queryKey: importKeys.mine(), exact: true });
+      void cache.invalidateQueries({ queryKey: importKeys.mine() });
       if (report !== null) void cache.invalidateQueries({ queryKey: importKeys.one(report), exact: true });
       if (held.notify) {
         const title = held.undo && state === 'done' ? t('importWizard.job.undone') : t(state === 'done' ? 'importWizard.job.finished' : state === 'cancelled' ? 'importWizard.job.cancelled' : 'importWizard.job.failed');

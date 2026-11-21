@@ -46,6 +46,7 @@ import { Route as ResourcesHostsIndexRouteImport } from './routes/resources/host
 import { Route as ResourcesMachinesIndexRouteImport } from './routes/resources/machines/index';
 import { Route as ResourcesMcpIndexRouteImport } from './routes/resources/mcp/index';
 import { Route as ResourcesMountsIndexRouteImport } from './routes/resources/mounts/index';
+import { Route as ResourcesPoolsIndexRouteImport } from './routes/resources/pools/index';
 import { Route as ResourcesProvidersIndexRouteImport } from './routes/resources/providers/index';
 import { Route as ResourcesSkillsIndexRouteImport } from './routes/resources/skills/index';
 import { Route as ResourcesTemplatesIndexRouteImport } from './routes/resources/templates/index';
@@ -71,6 +72,7 @@ import { Route as ResourcesHostsIdIndexRouteImport } from './routes/resources/ho
 import { Route as ResourcesMachinesIdIndexRouteImport } from './routes/resources/machines/$id/index';
 import { Route as ResourcesMcpIdIndexRouteImport } from './routes/resources/mcp/$id/index';
 import { Route as ResourcesMountsIdIndexRouteImport } from './routes/resources/mounts/$id/index';
+import { Route as ResourcesPoolsIdIndexRouteImport } from './routes/resources/pools/$id/index';
 import { Route as ResourcesProvidersIdIndexRouteImport } from './routes/resources/providers/$id/index';
 import { Route as ResourcesSkillsIdIndexRouteImport } from './routes/resources/skills/$id/index';
 import { Route as ResourcesTemplatesIdIndexRouteImport } from './routes/resources/templates/$id/index';
@@ -263,6 +265,11 @@ const ResourcesMountsIndexRoute = ResourcesMountsIndexRouteImport.update({
   path: '/resources/mounts/',
   getParentRoute: () => rootRouteImport,
 } as any);
+const ResourcesPoolsIndexRoute = ResourcesPoolsIndexRouteImport.update({
+  id: '/resources/pools/',
+  path: '/resources/pools/',
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ResourcesProvidersIndexRoute = ResourcesProvidersIndexRouteImport.update({
   id: '/resources/providers/',
   path: '/resources/providers/',
@@ -392,6 +399,11 @@ const ResourcesMountsIdIndexRoute = ResourcesMountsIdIndexRouteImport.update({
   path: '/resources/mounts/$id/',
   getParentRoute: () => rootRouteImport,
 } as any);
+const ResourcesPoolsIdIndexRoute = ResourcesPoolsIdIndexRouteImport.update({
+  id: '/resources/pools/$id/',
+  path: '/resources/pools/$id/',
+  getParentRoute: () => rootRouteImport,
+} as any);
 const ResourcesProvidersIdIndexRoute =
   ResourcesProvidersIdIndexRouteImport.update({
     id: '/resources/providers/$id/',
@@ -454,6 +466,7 @@ export interface FileRoutesByFullPath {
   '/resources/machines/': typeof ResourcesMachinesIndexRoute;
   '/resources/mcp/': typeof ResourcesMcpIndexRoute;
   '/resources/mounts/': typeof ResourcesMountsIndexRoute;
+  '/resources/pools/': typeof ResourcesPoolsIndexRoute;
   '/resources/providers/': typeof ResourcesProvidersIndexRoute;
   '/resources/skills/': typeof ResourcesSkillsIndexRoute;
   '/resources/templates/': typeof ResourcesTemplatesIndexRoute;
@@ -479,6 +492,7 @@ export interface FileRoutesByFullPath {
   '/resources/machines/$id/': typeof ResourcesMachinesIdIndexRoute;
   '/resources/mcp/$id/': typeof ResourcesMcpIdIndexRoute;
   '/resources/mounts/$id/': typeof ResourcesMountsIdIndexRoute;
+  '/resources/pools/$id/': typeof ResourcesPoolsIdIndexRoute;
   '/resources/providers/$id/': typeof ResourcesProvidersIdIndexRoute;
   '/resources/skills/$id/': typeof ResourcesSkillsIdIndexRoute;
   '/resources/templates/$id/': typeof ResourcesTemplatesIdIndexRoute;
@@ -522,6 +536,7 @@ export interface FileRoutesByTo {
   '/resources/machines': typeof ResourcesMachinesIndexRoute;
   '/resources/mcp': typeof ResourcesMcpIndexRoute;
   '/resources/mounts': typeof ResourcesMountsIndexRoute;
+  '/resources/pools': typeof ResourcesPoolsIndexRoute;
   '/resources/providers': typeof ResourcesProvidersIndexRoute;
   '/resources/skills': typeof ResourcesSkillsIndexRoute;
   '/resources/templates': typeof ResourcesTemplatesIndexRoute;
@@ -547,6 +562,7 @@ export interface FileRoutesByTo {
   '/resources/machines/$id': typeof ResourcesMachinesIdIndexRoute;
   '/resources/mcp/$id': typeof ResourcesMcpIdIndexRoute;
   '/resources/mounts/$id': typeof ResourcesMountsIdIndexRoute;
+  '/resources/pools/$id': typeof ResourcesPoolsIdIndexRoute;
   '/resources/providers/$id': typeof ResourcesProvidersIdIndexRoute;
   '/resources/skills/$id': typeof ResourcesSkillsIdIndexRoute;
   '/resources/templates/$id': typeof ResourcesTemplatesIdIndexRoute;
@@ -591,6 +607,7 @@ export interface FileRoutesById {
   '/resources/machines/': typeof ResourcesMachinesIndexRoute;
   '/resources/mcp/': typeof ResourcesMcpIndexRoute;
   '/resources/mounts/': typeof ResourcesMountsIndexRoute;
+  '/resources/pools/': typeof ResourcesPoolsIndexRoute;
   '/resources/providers/': typeof ResourcesProvidersIndexRoute;
   '/resources/skills/': typeof ResourcesSkillsIndexRoute;
   '/resources/templates/': typeof ResourcesTemplatesIndexRoute;
@@ -616,6 +633,7 @@ export interface FileRoutesById {
   '/resources/machines/$id/': typeof ResourcesMachinesIdIndexRoute;
   '/resources/mcp/$id/': typeof ResourcesMcpIdIndexRoute;
   '/resources/mounts/$id/': typeof ResourcesMountsIdIndexRoute;
+  '/resources/pools/$id/': typeof ResourcesPoolsIdIndexRoute;
   '/resources/providers/$id/': typeof ResourcesProvidersIdIndexRoute;
   '/resources/skills/$id/': typeof ResourcesSkillsIdIndexRoute;
   '/resources/templates/$id/': typeof ResourcesTemplatesIdIndexRoute;
@@ -661,6 +679,7 @@ export interface FileRouteTypes {
     | '/resources/machines/'
     | '/resources/mcp/'
     | '/resources/mounts/'
+    | '/resources/pools/'
     | '/resources/providers/'
     | '/resources/skills/'
     | '/resources/templates/'
@@ -686,6 +705,7 @@ export interface FileRouteTypes {
     | '/resources/machines/$id/'
     | '/resources/mcp/$id/'
     | '/resources/mounts/$id/'
+    | '/resources/pools/$id/'
     | '/resources/providers/$id/'
     | '/resources/skills/$id/'
     | '/resources/templates/$id/'
@@ -729,6 +749,7 @@ export interface FileRouteTypes {
     | '/resources/machines'
     | '/resources/mcp'
     | '/resources/mounts'
+    | '/resources/pools'
     | '/resources/providers'
     | '/resources/skills'
     | '/resources/templates'
@@ -754,6 +775,7 @@ export interface FileRouteTypes {
     | '/resources/machines/$id'
     | '/resources/mcp/$id'
     | '/resources/mounts/$id'
+    | '/resources/pools/$id'
     | '/resources/providers/$id'
     | '/resources/skills/$id'
     | '/resources/templates/$id'
@@ -797,6 +819,7 @@ export interface FileRouteTypes {
     | '/resources/machines/'
     | '/resources/mcp/'
     | '/resources/mounts/'
+    | '/resources/pools/'
     | '/resources/providers/'
     | '/resources/skills/'
     | '/resources/templates/'
@@ -822,6 +845,7 @@ export interface FileRouteTypes {
     | '/resources/machines/$id/'
     | '/resources/mcp/$id/'
     | '/resources/mounts/$id/'
+    | '/resources/pools/$id/'
     | '/resources/providers/$id/'
     | '/resources/skills/$id/'
     | '/resources/templates/$id/'
@@ -866,6 +890,7 @@ export interface RootRouteChildren {
   ResourcesMachinesIndexRoute: typeof ResourcesMachinesIndexRoute;
   ResourcesMcpIndexRoute: typeof ResourcesMcpIndexRoute;
   ResourcesMountsIndexRoute: typeof ResourcesMountsIndexRoute;
+  ResourcesPoolsIndexRoute: typeof ResourcesPoolsIndexRoute;
   ResourcesProvidersIndexRoute: typeof ResourcesProvidersIndexRoute;
   ResourcesSkillsIndexRoute: typeof ResourcesSkillsIndexRoute;
   ResourcesTemplatesIndexRoute: typeof ResourcesTemplatesIndexRoute;
@@ -891,6 +916,7 @@ export interface RootRouteChildren {
   ResourcesMachinesIdIndexRoute: typeof ResourcesMachinesIdIndexRoute;
   ResourcesMcpIdIndexRoute: typeof ResourcesMcpIdIndexRoute;
   ResourcesMountsIdIndexRoute: typeof ResourcesMountsIdIndexRoute;
+  ResourcesPoolsIdIndexRoute: typeof ResourcesPoolsIdIndexRoute;
   ResourcesProvidersIdIndexRoute: typeof ResourcesProvidersIdIndexRoute;
   ResourcesSkillsIdIndexRoute: typeof ResourcesSkillsIdIndexRoute;
   ResourcesTemplatesIdIndexRoute: typeof ResourcesTemplatesIdIndexRoute;
@@ -1158,6 +1184,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ResourcesMountsIndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    '/resources/pools/': {
+      id: '/resources/pools/';
+      path: '/resources/pools';
+      fullPath: '/resources/pools/';
+      preLoaderRoute: typeof ResourcesPoolsIndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     '/resources/providers/': {
       id: '/resources/providers/';
       path: '/resources/providers';
@@ -1333,6 +1366,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ResourcesMountsIdIndexRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    '/resources/pools/$id/': {
+      id: '/resources/pools/$id/';
+      path: '/resources/pools/$id';
+      fullPath: '/resources/pools/$id/';
+      preLoaderRoute: typeof ResourcesPoolsIdIndexRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     '/resources/providers/$id/': {
       id: '/resources/providers/$id/';
       path: '/resources/providers/$id';
@@ -1402,6 +1442,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResourcesMachinesIndexRoute: ResourcesMachinesIndexRoute,
   ResourcesMcpIndexRoute: ResourcesMcpIndexRoute,
   ResourcesMountsIndexRoute: ResourcesMountsIndexRoute,
+  ResourcesPoolsIndexRoute: ResourcesPoolsIndexRoute,
   ResourcesProvidersIndexRoute: ResourcesProvidersIndexRoute,
   ResourcesSkillsIndexRoute: ResourcesSkillsIndexRoute,
   ResourcesTemplatesIndexRoute: ResourcesTemplatesIndexRoute,
@@ -1427,6 +1468,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResourcesMachinesIdIndexRoute: ResourcesMachinesIdIndexRoute,
   ResourcesMcpIdIndexRoute: ResourcesMcpIdIndexRoute,
   ResourcesMountsIdIndexRoute: ResourcesMountsIdIndexRoute,
+  ResourcesPoolsIdIndexRoute: ResourcesPoolsIdIndexRoute,
   ResourcesProvidersIdIndexRoute: ResourcesProvidersIdIndexRoute,
   ResourcesSkillsIdIndexRoute: ResourcesSkillsIdIndexRoute,
   ResourcesTemplatesIdIndexRoute: ResourcesTemplatesIdIndexRoute,

@@ -41,6 +41,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(read).toHaveBeenCalledTimes(1);
     expect(own.getByText(i18n.t('ui.read.retrying'))).toBeVisible();
     expect(pending.queryByText(i18n.t('ui.read.retrying'))).not.toBeInTheDocument();
+    fireEvent.click(own.getByRole('button', { name: i18n.t('common.details') }));
+    expect(document.querySelector('[data-fact-disclosure-body] time')).toBeInTheDocument();
+    expect(read).toHaveBeenCalledTimes(1);
     for (let attempt = 0; attempt < READ_RETRY_PAUSES_MS.length; attempt += 1) {
       await act(async () => { await vi.advanceTimersByTimeAsync(READ_RETRY_PAUSES_MS[attempt]!); });
       await settle();

@@ -9,6 +9,9 @@
 import { createStore, type StoreApi } from 'zustand/vanilla';
 
 import { shellTicket } from '@/api/terminals';
+import { queryClient } from '@/api/query';
+import type { Meta } from '@/generated/api-types';
+import { connectionQualitySettings, LinkHistory } from '@/realtime/connectionQuality';
 
 /** The one subprotocol a shell's socket speaks. */
 export const TERMINAL_SUBPROTOCOL = 'orch.terminal.v1';
@@ -36,6 +39,8 @@ export interface ShellState {
   exitCode: number | null;
   /** The middle one of the last few round trips, in milliseconds; `null` before one was measured. */
   roundTripMs: number | null;
+  usualRoundTripMs: number | null;
+  slow: boolean;
 }
 
 /** What an owner of a connection is told besides the state. */
@@ -62,8 +67,6 @@ const OPEN = 1;
 
 /** How often the round trip is measured: often enough that a slow line shows within a few seconds. */
 export const PING_EVERY_MS = 5_000;
-/** How many round trips the figure is the middle one of, so that one late packet changes nothing. */
-const ROUND_TRIPS_KEPT = 3;
 /** The pauses before a lost line is tried again, in milliseconds: it is a person's shell, which they want back soon. */
 export const RECONNECT_PAUSES_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
 /** The close codes of the socket that mean the shell cannot be had with this ticket: not authorised, or malformed. */
@@ -79,6 +82,7 @@ export interface ShellConnectionOptions {
   /** A ticket for attaching. The first is the one the opening gave; the next are asked for. */
   firstTicket?: string;
   tickets?: (terminalId: string) => Promise<string>;
+  quality?: () => unknown;
 }
 
 function defaultAddress(terminalId: string, ticket: string): string {
@@ -86,11 +90,6 @@ function defaultAddress(terminalId: string, ticket: string): string {
   return `${scheme}//${location.host}/api/v1/ws/terminals/${encodeURIComponent(terminalId)}?ticket=${encodeURIComponent(ticket)}`;
 }
 
-/** The middle of the last few figures. */
-function middle(values: readonly number[]): number {
-  const sorted = [...values].sort((one, other) => one - other);
-  return sorted[Math.floor(sorted.length / 2)] ?? 0;
-}
 
 export interface ShellConnection {
   state: StoreApi<ShellState>;
@@ -109,7 +108,9 @@ export function connectShell(options: ShellConnectionOptions): ShellConnection {
   const connect = options.connect ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as ShellSocketLike);
   const address = options.address ?? defaultAddress;
   const askTicket = options.tickets ?? (async (id: string) => (await shellTicket(id)).ticket);
-  const state = createStore<ShellState>(() => ({ phase: 'connecting', reason: null, exitCode: null, roundTripMs: null }));
+  const state = createStore<ShellState>(() => ({ phase: 'connecting', reason: null, exitCode: null, roundTripMs: null, usualRoundTripMs: null, slow: false }));
+  const quality = new LinkHistory();
+  const settings = options.quality ?? (() => queryClient.getQueryData<Meta>(['meta'])?.interface_defaults.connection_quality);
   let socket: ShellSocketLike | null = null;
   let ticket: string | null = options.firstTicket ?? null;
   const life = { wanted: true };
@@ -120,7 +121,6 @@ export function connectShell(options: ShellConnectionOptions): ShellConnection {
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let pingN = 0;
   const pings = new Map<number, number>();
-  let trips: number[] = [];
   let cols = 80;
   let rows = 24;
 
@@ -157,6 +157,7 @@ export function connectShell(options: ShellConnectionOptions): ShellConnection {
       socket = made;
       made.onopen = () => {
         attempts = 0;
+        state.setState(quality.reconnect());
         clearInterval(heartbeat);
         const ping = () => {
           if (made.readyState !== OPEN) return;
@@ -188,8 +189,8 @@ export function connectShell(options: ShellConnectionOptions): ShellConnection {
               const sent = pings.get(frame.n ?? -1);
               pings.delete(frame.n ?? -1);
               if (sent === undefined) return;
-              trips = [...trips, Math.round(performance.now() - sent)].slice(-ROUND_TRIPS_KEPT);
-              state.setState({ roundTripMs: middle(trips) });
+              const elapsed = performance.now() - sent;
+              if (Number.isFinite(elapsed) && elapsed >= 0) state.setState(quality.observe(elapsed, connectionQualitySettings(settings())));
               return;
             }
             default:
