@@ -18,9 +18,9 @@ pub async fn record(
         let ids: Vec<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(turn)
             .bind(provider)
-            .bind(adapter)
-            .bind(upstream)
-            .bind(&refs)
+            .bind(orch_types::storable::encode_key(adapter))
+            .bind(upstream.map(orch_types::storable::encode_key))
+            .bind(orch_types::storable::encode_exact(&refs))
             .fetch_all(&mut *conn)
             .await?;
         refresh(conn, &ids).await?;
@@ -36,7 +36,7 @@ pub async fn item_changed(
     reference: &str,
 ) -> Result<(), DbError> {
     let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM usage_events WHERE turn_id=$1 AND segment_id=$2 AND measurement_states->'_tool_refs' ? $3 UNION ALL SELECT id FROM usage_running WHERE turn_id=$1 AND segment_id=$2 AND measurement_states->'_tool_refs' ? $3")
-        .bind(turn).bind(segment).bind(reference).fetch_all(&mut *conn).await?;
+        .bind(turn).bind(segment).bind(orch_types::storable::encode_key(reference)).fetch_all(&mut *conn).await?;
     refresh(conn, &ids).await
 }
 

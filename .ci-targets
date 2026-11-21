@@ -1,0 +1,13 @@
+clippy
+contracts
+fmt
+test -p orch-api-core --lib
+test -p orch-api-core --test thread_opening_scopes --test thread_display
+test -p orch-authz --test ownership
+test -p orch-db --test usage_rollup -- a_long_running_turns_repeated_cost_read_keeps_exact_amounts_without_replaying_its_requests
+test -p orch-api-core --test resource_facts -- thread_status_costs_use_recorded_counted_credits_and_keep_missing_prices_unknown
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/thread.spec.ts tests/e2e/measure-pages.spec.ts tests/e2e/workbench-grid.spec.ts --grep "a folded opening fills|the shipped cold page fetches only its locale|a searchable exact-target locator"

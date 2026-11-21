@@ -47,8 +47,11 @@ that proof.
 
 The native conformance cases are shared. What differs between programs is said by the adapter in three hooks of
 `AgentAdapter`: `native_check`, `mcp_tool_name` and `verify_quiet_start`. The scripts of the cases that have the model call
-one of the program's tools say the tool by its role (`command`, `ask_user`, `read_file`, `spawn_agent`); the manifest's
-`checks.tool_names` maps each role the program's cases need to the program's own tool and the names of its arguments.
+one of the program's tools say the tool by its role (`command`, `background_command`, `ask_user`, `read_file`,
+`spawn_agent`); the manifest's `checks.tool_names` maps each role the program's cases need to the program's own tool, the
+names of its arguments and, in `with`, the arguments it needs besides the script's (what makes a command outlive its turn).
+A case's `feature` names what a failure switches off for the build: a capability that is a switch, an approval kind, an
+approval mode, or `native_input_prefix`.
 
 `cargo xtask names` fails when shared code names a program or a vendor of one.
 
@@ -254,3 +257,13 @@ changed:
 - Requests whose window cannot be decided (a side call, a shortening of the conversation, ambiguous sums, a message the
   program was still writing when it was lost) are not rows: the growth that holds them counted them once, in the remainder
   of its turn. What is lost is the line of the request, and, for a background sub-agent, the attribution to its origin.
+
+
+## Shipped feature states
+
+An agent descriptor declares optional features in `features`, a map from the program's feature IDs
+to booleans, for example `{"example.extra_tools": true}`. A parameter's `feature` references one
+of those IDs. The program's declaration supplies the shipped state; explicit `agent.features`
+settings are laid over it, including `false`. No program name belongs in the shared settings default.
+The same resolution governs native session options, parameter offers, recovery candidates and
+place-default forms. The settings switches show the declared state and the source of an override.

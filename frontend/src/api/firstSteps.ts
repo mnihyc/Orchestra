@@ -17,7 +17,6 @@ export const firstStepsQuery = (orgId: string | null) => queryOptions({
     params: { query: orgId === null ? {} : { org_id: orgId } },
     signal,
   })),
-  staleTime: 0,
 });
 
 /** Saves just this person's choices; the server preserves unrelated hints and navigation atomically. */
