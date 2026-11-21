@@ -76,6 +76,7 @@ fn adapter_script(extra: &Json) -> Json {
             "result": { "harness_version": "1.0.0", "descriptor": descriptor(PluginKind::Adapter) } },
         "agent.stop": { "result": {} },
         "session.open": { "events": [ { "event": "session.opened", "params": {
+                "opening_id": { "$params": "opening_id" },
                 "thread_id": { "$params": "thread_id" }, "segment_id": { "$params": "segment_id" },
                 "native_session_ref": "s-1", "resumed": false } } ],
             "result": { "native_session_ref": "s-1", "resumed": false, "import_report": null } },
@@ -152,11 +153,11 @@ fn agent_start(agent: &str) -> AgentStart {
 
 fn session_spec(agent: &str, thread: &str, segment: &str) -> SessionSpec {
     serde_json::from_value(json!({
-        "agent_id": agent, "thread_id": thread, "segment_id": segment, "mode": "new", "native_session_ref": null,
+        "opening_id":orch_types::new_id(), "agent_id": agent, "thread_id": thread, "segment_id": segment, "mode": "new", "native_session_ref": null,
         "upto_turn_ordinal": null, "workspace_root": "/workspace", "instruction_root_marker": false,
         "directory": "/workspace/web", "cwd": "/workspace/web", "mounts": [],
-        "model": "tiny-1", "effort": null, "params": {}, "approval_mode": "auto", "sandbox_mode": "open",
-        "instructions": "", "memory": null, "arrangement": "together", "orch_tools": [], "raw_events": false,
+        "model": "tiny-1", "effort": null, "params": {}, "approval_mode": "auto", "web_action_wait_secs": 120, "sandbox_mode": "open",
+        "instructions": "", "memory": null, "arrangement": "together", "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false,
         "session_key": "0123456789abcdef0123456789abcdef", "archive": null, "history": null,
         "provider": { "path": "native", "provider_id": PROVIDER },
         "exec": { "executor": null, "environment_id": "0199abcd-1234-7000-8000-0000000000f1", "generation": 1 },
@@ -310,6 +311,7 @@ async fn an_adapter_starts_opens_a_session_runs_a_turn_and_stops_and_hears_what_
             id(THREAD_A),
             "call-2",
             Err(ToolError {
+                rate_limit: None,
                 code: "denied".into(),
                 message: "no".into(),
             }),

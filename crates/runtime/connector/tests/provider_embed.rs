@@ -120,7 +120,7 @@ async fn started(url: &str) -> ProviderRig {
     let id = new_id();
     let body: orch_link_contract::commands::ProviderStart = serde_json::from_value(json!({
         "provider_id": p.rig.provider,
-        "protocols": [EMBEDDINGS],
+        "upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols": [EMBEDDINGS],
         "upstreams": [{"protocol": EMBEDDINGS, "base_url": url,
                        "options": {"auth": "none", "secret_headers": ["x-embed-secret"]}}],
         "credential": null,

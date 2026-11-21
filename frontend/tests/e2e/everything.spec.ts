@@ -171,7 +171,7 @@ test('a shared leaf is reachable through minimal redacted path steps and a membe
   const tree = page.getByRole('treegrid', { name: 'Everything I can see' });
   await tree.getByRole('button', { name: 'Expand Shared with me', exact: true }).click();
   const root = tree.getByRole('row').filter({ hasText: 'Private place' });
-  await expect(root).toContainText('Path only');
+  await expect(root).toContainText('Navigation only');
   await expect(root.getByRole('link')).toHaveCount(0);
   await expect(root.getByRole('button', { name: /Actions for/ })).toHaveCount(0);
   await root.getByRole('button', { name: 'Expand Private place', exact: true }).click();

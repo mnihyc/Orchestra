@@ -9,6 +9,8 @@
 #[path = "resource_groups/home_rules.rs"]
 mod home_rules;
 mod places;
+#[path = "resource_groups/pools.rs"]
+mod pools;
 mod support;
 
 use http::StatusCode;
@@ -19,7 +21,7 @@ use orch_api_contract::{
     resource_groups::{ObjectHomeSet, ObjectTagsSet, ResourceHomeSetBody, ResourceTagsSetBody},
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -44,6 +46,7 @@ fn plural(kind: &str) -> &'static str {
         "mcp_server" => "mcp-servers",
         "mount" => "mounts",
         "skill" => "skills",
+        "pool" => "pools",
         _ => panic!("unknown fixture resource"),
     }
 }
@@ -58,6 +61,7 @@ fn table(kind: &str) -> &'static str {
         "mcp_server" => "mcp_servers",
         "mount" => "mounts",
         "skill" => "skills",
+        "pool" => "pools",
         _ => panic!("unknown fixture resource"),
     }
 }
@@ -133,11 +137,12 @@ fn accepted(reply: RawReply) -> Json {
 async fn key(world: &World, owner: &Who, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: owner.id(),
             name: "Resource grouping control",
             token_hash: &token_hash(&secret),
@@ -195,6 +200,7 @@ async fn every_flat_resource_can_move_home_without_changing_its_owner_or_origin(
         "mcp_server",
         "mount",
         "skill",
+        "pool",
     ] {
         let id = resource(&world, &owner, from, kind, &format!("home-{kind}")).await;
         let before = row(&world, kind, id).await;
@@ -391,6 +397,7 @@ async fn resource_tags_reuse_place_definitions_and_stay_visible_after_a_home_mov
         "mcp_server",
         "mount",
         "skill",
+        "pool",
     ] {
         let id = resource(&world, &owner, source, kind, &format!("tagged-{kind}")).await;
         assert_eq!(
@@ -572,6 +579,7 @@ async fn resource_name_choices_keep_their_homes_and_bind_origin_labels_to_the_co
         "mcp_server",
         "mount",
         "skill",
+        "pool",
     ] {
         let id = resource(
             &world,
@@ -690,6 +698,7 @@ async fn every_flat_home_route_refuses_another_root_and_points_to_the_atomic_mov
         "mcp_server",
         "mount",
         "skill",
+        "pool",
     ] {
         let id = resource(&world, &owner, source, kind, &format!("cross-root-{kind}")).await;
         let before = row(&world, kind, id).await;
