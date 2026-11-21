@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-connector-core --lib -- interface_probe:: local_harnesses:: dispatch::tests::
+test -p orch-node-core --lib
+test -p orch-api-core --test machines
+test -p orch-api-core --test connected_program_versions
+test -p orch-api-core --test harness_checks
+test -p orch-api-core --test threads_settings
+test -p orch-engine --test approval_review
+test -p orch-connector --test program

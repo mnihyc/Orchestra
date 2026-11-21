@@ -1,7 +1,7 @@
 /** A served name search reports its own refusal and retries only the visible lookup; local commands stay usable. */
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -42,7 +42,7 @@ afterEach(async () => {
   document.documentElement.removeAttribute('data-theme'); await setLocale('en');
 });
 
-function draw(error: ApiError) {
+function draw(error: ApiError, initiallyOpen = true) {
   let fail = true;
   calls.get.mockImplementation((path) => {
     if (path === '/search/names') return fail ? Promise.reject(error) : Promise.resolve({ items: [], partial: false });
@@ -58,10 +58,24 @@ function draw(error: ApiError) {
   cache.setQueryData(['names', 'historical'], { items: [], partial: false });
   const root = createRootRoute({ component: () => <Finder ready={false} /> });
   const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ['/'] }) });
-  openFinder('local');
+  if (initiallyOpen) openFinder('local');
   show(<QueryClientProvider client={cache}><RouterProvider router={router} /></QueryClientProvider>);
-  return { run, background, recover: () => { fail = false; } };
+  return { cache, router, run, background, recover: () => { fail = false; } };
 }
+
+it('holds search readers only while a person is using Find', async () => {
+  const { cache, router } = draw(refusal(404), false);
+  const readers = () => cache.getQueryCache().getAll().reduce((sum, query) => sum + query.getObserversCount(), 0);
+  await waitFor(() => expect(router.state.status).toBe('idle'));
+  expect(readers()).toBe(0);
+  act(() => openFinder('local'));
+  expect(await screen.findByRole('dialog')).toBeVisible();
+  expect(readers()).toBeGreaterThan(0);
+  await userEvent.keyboard('{Escape}');
+  await waitFor(() => expect(readers()).toBe(0));
+  act(() => openFinder('local'));
+  expect(await screen.findByRole('dialog')).toBeVisible();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`shows a 404 as its actual cause and keeps local commands at ${locale}/${theme}`, async () => {

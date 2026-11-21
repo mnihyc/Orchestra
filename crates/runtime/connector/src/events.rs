@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use orch_agent_contract::adapter::AdapterEvent;
 use orch_agent_contract::events::{ItemDelta, SessionEvent};
-use orch_agent_contract::facts::HarnessStatus;
+use orch_agent_contract::facts::{HarnessState, HarnessStatus};
 use orch_link::machine::MachineLink;
 use orch_link::streams::PublishError;
 use orch_link_contract::events::{self as link, Event};
@@ -22,17 +22,41 @@ use orch_types::{Id, Json};
 /// the link allows, so that one run of text never fills a frame.
 pub const MAX_MERGED_DELTA_BYTES: usize = 16 * 1024;
 
+/// An observation and the original physical producer carried beside its unchanged stream.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Publication {
+    pub stream: Stream,
+    pub event: Event,
+    pub native_opening_id: Option<Id>,
+}
+
 /// Somewhere events are put. The link's spool is one; a test can be another.
 #[async_trait]
 pub trait Publisher: Send + Sync {
     /// Puts a durable event on a stream and returns once it is kept.
-    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError>;
+    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError> {
+        self.publish_from(None, stream, event).await
+    }
+    /// Puts the source captured by the producer in the same durable record as its observation.
+    async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: Stream,
+        event: Event,
+    ) -> Result<(), PublishError>;
     /// Puts events on their streams in their order and returns once all are kept, each one's answer in
     /// its place. As given here one after the other; the link hands all over before it waits (C-turns).
-    async fn publish_all(&self, events: Vec<(Stream, Event)>) -> Vec<Result<(), PublishError>> {
+    async fn publish_all(&self, events: Vec<Publication>) -> Vec<Result<(), PublishError>> {
         let mut answers = Vec::with_capacity(events.len());
-        for (stream, event) in events {
-            answers.push(self.publish(stream, event).await);
+        for publication in events {
+            answers.push(
+                self.publish_from(
+                    publication.native_opening_id,
+                    publication.stream,
+                    publication.event,
+                )
+                .await,
+            );
         }
         answers
     }
@@ -47,14 +71,26 @@ impl Publisher for MachineLink {
     async fn raw_after(&self, stream: Stream, after: i64) -> Result<(), PublishError> {
         MachineLink::raw_after(self, &stream, after).await
     }
-    async fn publish(&self, stream: Stream, event: Event) -> Result<(), PublishError> {
-        MachineLink::publish(self, &stream, &event).await
+    async fn publish_from(
+        &self,
+        native_opening_id: Option<Id>,
+        stream: Stream,
+        event: Event,
+    ) -> Result<(), PublishError> {
+        MachineLink::publish_from_now(self, native_opening_id, &stream, &event).await
     }
-    async fn publish_all(&self, events: Vec<(Stream, Event)>) -> Vec<Result<(), PublishError>> {
+    async fn publish_all(&self, events: Vec<Publication>) -> Vec<Result<(), PublishError>> {
         // All handed to the link first, in their order; then each answer (C-turns).
         let handed: Vec<_> = events
             .iter()
-            .map(|(stream, event)| MachineLink::publish_now(self, stream, event))
+            .map(|publication| {
+                MachineLink::publish_from_now(
+                    self,
+                    publication.native_opening_id,
+                    &publication.stream,
+                    &publication.event,
+                )
+            })
             .collect();
         let mut answers = Vec::with_capacity(handed.len());
         for answer in handed {
@@ -75,69 +111,156 @@ pub enum ConvertError {
     Shape(#[from] orch_link_contract::commands::CatalogueError),
 }
 
-/// The stream an event of the harness process of `provider_id` and `agent_id` goes on, and the event as
-/// the link carries it.
+fn stream_of(provider_id: Id, agent_id: Id, event: &AdapterEvent) -> Stream {
+    match event {
+        AdapterEvent::ModelRequest(report) => Stream::Session {
+            thread_id: report.thread_id,
+            segment_id: report.segment_id,
+        },
+        AdapterEvent::Session {
+            thread_id,
+            segment_id,
+            ..
+        } => Stream::Session {
+            thread_id: *thread_id,
+            segment_id: *segment_id,
+        },
+        AdapterEvent::Login(_) | AdapterEvent::Facts(_) => Stream::Provider { provider_id },
+        AdapterEvent::Descriptor(_) | AdapterEvent::Status(_) => Stream::Harness {
+            provider_id,
+            agent_id,
+        },
+    }
+}
+
+/// The stream and wire representation of an adapter event.
 pub fn convert(
     provider_id: Id,
     agent_id: Id,
     event: &AdapterEvent,
-) -> Result<(Stream, Event), ConvertError> {
-    Ok(match event {
-        AdapterEvent::ModelRequest(report) => (
-            Stream::Session {
-                thread_id: report.thread_id,
-                segment_id: report.segment_id,
-            },
-            Event::ModelRequest(orch_link_contract::events::ModelRequest {
-                turn_id: report.turn_id,
-                request: report.request.clone(),
-            }),
-        ),
-        AdapterEvent::Session {
-            thread_id,
-            segment_id,
-            event,
-        } => {
+) -> Result<Publication, ConvertError> {
+    let stream = stream_of(provider_id, agent_id, event);
+    let linked = match event {
+        AdapterEvent::ModelRequest(report) => Event::ModelRequest(link::ModelRequest {
+            turn_id: report.turn_id,
+            request: report.request.clone(),
+        }),
+        AdapterEvent::Session { event, .. } => {
             let written = serde_json::to_value(event)?;
-            let kind = event.kind();
-            let body = written.get("body").cloned().unwrap_or(Json::Null);
-            (
-                Stream::Session {
-                    thread_id: *thread_id,
-                    segment_id: *segment_id,
-                },
-                Event::decode(kind, body)?,
-            )
+            Event::decode(
+                event.kind(),
+                written.get("body").cloned().unwrap_or(Json::Null),
+            )?
         }
-        AdapterEvent::Login(state) => (
-            Stream::Provider { provider_id },
-            Event::ProviderLogin(state.clone()),
-        ),
-        AdapterEvent::Facts(facts) => (
-            Stream::Provider { provider_id },
-            Event::ProviderFacts(facts.clone()),
-        ),
-        AdapterEvent::Descriptor(descriptor) => (
-            Stream::Harness {
-                provider_id,
-                agent_id,
-            },
-            Event::HarnessDescriptor(descriptor.as_ref().clone()),
-        ),
-        AdapterEvent::Status(status) => (
-            Stream::Harness {
-                provider_id,
-                agent_id,
-            },
-            Event::HarnessStatus(harness_status(status)),
-        ),
+        AdapterEvent::Login(state) => Event::ProviderLogin(state.clone()),
+        AdapterEvent::Facts(facts) => Event::ProviderFacts(facts.clone()),
+        AdapterEvent::Descriptor(descriptor) => {
+            Event::HarnessDescriptor(descriptor.as_ref().clone())
+        }
+        AdapterEvent::Status(status) => Event::HarnessStatus(harness_status(status)),
+    };
+    Ok(Publication {
+        stream,
+        event: linked,
+        native_opening_id: event.native_opening_id(),
     })
+}
+
+/// Why the process of a harness is dead, when what the adapter reported says so: the harness failed, or its
+/// process was lost and the adapter says why. An adapter that ended its process on purpose, to start it again
+/// with a sign-in it was given, reports it offline and has nothing to say; that is not a death, and what the
+/// adapter reports after it (the sign-in that completed) must still be heard.
+pub(super) fn death_of(status: &HarnessStatus) -> Option<String> {
+    match status.status {
+        HarnessState::Error => Some(
+            status
+                .detail
+                .clone()
+                .unwrap_or_else(|| "the harness process is gone".to_owned()),
+        ),
+        HarnessState::Offline => status.detail.clone(),
+        _ => None,
+    }
+}
+
+/// Deliver each stream in order. An outstanding receipt holds only its stream's batch and capacity.
+/// Queued and in-flight records keep their original permits from the adapter's bounded event sink.
+pub(crate) async fn deliver_streams<F, D>(
+    mut input: orch_agent_contract::adapter::EventStream,
+    provider: Id,
+    agent: Id,
+    deliver: F,
+) -> Option<String>
+where
+    F: Fn(Vec<AdapterEvent>) -> D,
+    D: Future<Output = bool>,
+{
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use std::collections::btree_map::{BTreeMap, Entry};
+
+    let mut running = FuturesUnordered::new();
+    // An entry exists exactly while this stream has a delivery in flight or ready to launch.
+    let mut queued =
+        BTreeMap::<Stream, Vec<(AdapterEvent, orch_agent_contract::flow::Capacity)>>::new();
+    let mut closed = false;
+    let mut death = None;
+    while !closed || !running.is_empty() {
+        let mut ready = Vec::new();
+        tokio::select! {
+            Some(completed) = running.next(), if !running.is_empty() => {
+                let (key, current): (Stream, bool) = completed;
+                if !current {
+                    return None;
+                }
+                if queued.get(&key).is_some_and(Vec::is_empty) {
+                    queued.remove(&key);
+                } else {
+                    ready.push(key);
+                }
+            }
+            next = input.recv_held(), if !closed => {
+                let Some(first) = next else { closed = true; continue };
+                let burst = std::iter::once(first).chain(std::iter::from_fn(|| input.try_recv_held().ok()))
+                    .take(orch_agent_contract::flow::QUEUE_ITEMS);
+                for item in burst {
+                    if death.is_none() && let AdapterEvent::Status(status) = &item.0 {
+                        death = death_of(status);
+                    }
+                    let key = stream_of(provider, agent, &item.0);
+                    match queued.entry(key) {
+                        Entry::Occupied(mut entry) => entry.get_mut().push(item),
+                        Entry::Vacant(entry) => {
+                            ready.push(key);
+                            entry.insert(vec![item]);
+                        }
+                    }
+                }
+                // Drain already admitted output before registering the death and restarting the harness.
+                if death.is_some() {
+                    input.close();
+                }
+            }
+        }
+        for key in ready {
+            if let Some(batch) = queued.get_mut(&key) {
+                let (events, permits): (Vec<_>, Vec<_>) = std::mem::take(batch).into_iter().unzip();
+                let delivery = deliver(coalesce(events));
+                running.push(async move {
+                    let current = delivery.await;
+                    drop(permits);
+                    (key, current)
+                });
+            }
+        }
+    }
+    death
 }
 
 /// A status of the harness process in the form the stream carries.
 #[must_use]
 pub fn harness_status(status: &HarnessStatus) -> link::HarnessStatus {
     link::HarnessStatus {
+        home: status.home.clone(),
         status: serde_json::to_value(status.status)
             .ok()
             .and_then(|state| state.as_str().map(str::to_owned))
@@ -148,13 +271,15 @@ pub fn harness_status(status: &HarnessStatus) -> link::HarnessStatus {
     }
 }
 
-fn delta_of(event: &AdapterEvent) -> Option<(Id, Id, &ItemDelta)> {
+fn delta_of(event: &AdapterEvent) -> Option<(Id, Id, Option<Id>, &ItemDelta)> {
     match event {
         AdapterEvent::Session {
+            native_opening_id,
             thread_id,
             segment_id,
             event: SessionEvent::ItemDelta(delta),
-        } => Some((*thread_id, *segment_id, delta)),
+            ..
+        } => Some((*thread_id, *segment_id, *native_opening_id, delta)),
         _ => None,
     }
 }
@@ -169,13 +294,16 @@ pub fn coalesce(batch: Vec<AdapterEvent>) -> Vec<AdapterEvent> {
         let joined = match (merged.last_mut(), delta_of(&event)) {
             (
                 Some(AdapterEvent::Session {
+                    native_opening_id,
                     thread_id,
                     segment_id,
                     event: SessionEvent::ItemDelta(before),
+                    ..
                 }),
-                Some((thread, segment, delta)),
+                Some((thread, segment, opening, delta)),
             ) if *thread_id == thread
                 && *segment_id == segment
+                && *native_opening_id == opening
                 && before.native_ref == delta.native_ref
                 && before.field == delta.field
                 && before.offset + before.len == delta.offset
@@ -202,15 +330,78 @@ mod tests {
 
     fn delta(thread: Id, segment: Id, item: &str, offset: i64, data: &str) -> AdapterEvent {
         AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: thread,
             segment_id: segment,
             event: SessionEvent::ItemDelta(ItemDelta::text(item, DeltaField::Text, offset, data)),
         }
     }
 
+    #[tokio::test]
+    async fn a_waiting_provider_report_leaves_session_output_free_to_finish() {
+        let (sink, stream) = orch_agent_contract::adapter::EventSink::channel();
+        let provider_started = tokio::sync::Notify::new();
+        let session_finished = tokio::sync::Notify::new();
+        let release_provider = tokio::sync::Notify::new();
+        let (thread, segment) = (new_id(), new_id());
+        let producer = async {
+            sink.emit(AdapterEvent::Login(
+                orch_agent_contract::login::LoginState::idle(),
+            ))
+            .await
+            .unwrap();
+            provider_started.notified().await;
+            sink.emit(delta(thread, segment, "answer", 0, "done"))
+                .await
+                .unwrap();
+            session_finished.notified().await;
+            release_provider.notify_one();
+            drop(sink);
+        };
+        let delivery = deliver_streams(stream, new_id(), new_id(), |events| {
+            let (started, finished, release) =
+                (&provider_started, &session_finished, &release_provider);
+            async move {
+                match &events[..] {
+                    [AdapterEvent::Login(_)] => {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    [AdapterEvent::Session { .. }] => finished.notify_one(),
+                    _ => panic!("each producer has its own delivery"),
+                }
+                true
+            }
+        });
+        let (_, death) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(producer, delivery)
+        })
+        .await
+        .unwrap();
+        assert_eq!(death, None);
+    }
+
     fn data_of(event: &AdapterEvent) -> (&str, i64, i64) {
-        let (_, _, delta) = delta_of(event).unwrap();
+        let (_, _, _, delta) = delta_of(event).unwrap();
         (delta.data.as_str(), delta.offset, delta.len)
+    }
+
+    #[test]
+    fn text_from_different_physical_openings_keeps_its_own_events_on_one_stream() {
+        let (thread, segment) = (new_id(), new_id());
+        let event = |opening, offset, data| {
+            AdapterEvent::from_wire("item.delta",
+            serde_json::json!({"thread_id":thread,"segment_id":segment,"native_opening_id":opening,
+                "native_ref":"reused-item","field":"text","offset":offset,"len":1,"data":data})).unwrap()
+        };
+        let batch = coalesce(vec![event(new_id(), 0, "A"), event(new_id(), 1, "B")]);
+        assert_eq!(
+            batch.len(),
+            2,
+            "a replacement's text cannot join its predecessor's retained delta"
+        );
+        assert_eq!(data_of(&batch[0]), ("A", 0, 1));
+        assert_eq!(data_of(&batch[1]), ("B", 1, 1));
     }
 
     #[test]
@@ -229,6 +420,7 @@ mod tests {
     fn a_delta_is_not_merged_across_another_event_another_item_or_a_gap() {
         let (thread, segment) = (new_id(), new_id());
         let completed = AdapterEvent::Session {
+            native_opening_id: None,
             thread_id: thread,
             segment_id: segment,
             event: SessionEvent::TurnCompleted(TurnCompleted {
@@ -248,7 +440,7 @@ mod tests {
         ]);
         let shapes: Vec<_> = merged
             .iter()
-            .map(|event| delta_of(event).map(|(_, _, d)| d.data.clone()))
+            .map(|event| delta_of(event).map(|(_, _, _, d)| d.data.clone()))
             .collect();
         assert_eq!(
             shapes,
@@ -288,7 +480,11 @@ mod tests {
     fn a_session_event_goes_on_the_stream_of_its_session_in_the_form_the_link_carries() {
         let (provider, agent, thread, segment) = (new_id(), new_id(), new_id(), new_id());
         let event = delta(thread, segment, "item_1", 0, "Hi");
-        let (stream, converted) = convert(provider, agent, &event).unwrap();
+        let Publication {
+            stream,
+            event: converted,
+            ..
+        } = convert(provider, agent, &event).unwrap();
         assert_eq!(
             stream,
             Stream::Session {
@@ -310,18 +506,19 @@ mod tests {
         let (provider, agent) = (new_id(), new_id());
         let login = AdapterEvent::Login(orch_agent_contract::login::LoginState::idle());
         assert_eq!(
-            convert(provider, agent, &login).unwrap().0,
+            convert(provider, agent, &login).unwrap().stream,
             Stream::Provider {
                 provider_id: provider
             }
         );
         let status = AdapterEvent::Status(HarnessStatus {
+            home: None,
             status: orch_agent_contract::facts::HarnessState::Error,
             detail: Some("it died".into()),
             harness_version: None,
             sessions_open: 2,
         });
-        let (stream, event) = convert(provider, agent, &status).unwrap();
+        let Publication { stream, event, .. } = convert(provider, agent, &status).unwrap();
         assert_eq!(
             stream,
             Stream::Harness {
