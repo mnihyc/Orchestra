@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type * as Chats from '@/api/chats';
 import { SAVE_AFTER_MS, useDraft, useChatDraftGuard } from '@/features/chat/draft';
 import { draftKey } from '@/api/chats';
+import { ADA } from '../unit/general-access-fixtures';
 import { show } from './support';
 
 const reads = vi.hoisted(() => ({ draft: vi.fn<typeof Chats.fetchDraft>(), save: vi.fn<typeof Chats.saveDraft>(), clear: vi.fn<typeof Chats.discardDraft>() }));
@@ -14,6 +15,28 @@ function Editors({ shown }: { shown: boolean }) {
   return <><output aria-label="First draft">{first.text}</output><output aria-label="Second draft">{second.text}</output></>;
 }
 afterEach(() => { vi.clearAllMocks(); vi.useRealTimers(); });
+
+it('appends an owner mention to the saved chat draft without replacing its text or reply', async () => {
+  const id = 'chat-owner-mention';
+  reads.draft.mockResolvedValue({ parts: [{ type: 'text', text: 'My unsent question' }], reply_to: 'kept-reply', mention_names: [], updated_at: '2026-10-16T00:00:00Z' });
+  reads.save.mockImplementation((_chat, body) => Promise.resolve({ ...body, reply_to: body.reply_to ?? null, mention_names: [{ name: ADA.display_name, target: { kind: 'user', id: ADA.id } }], updated_at: '2026-10-16T00:00:00Z' }));
+  function Editor() {
+    const draft = useDraft(id, true);
+    return <><output aria-label="Mention draft">{draft.text}</output><button disabled={!draft.ready} onClick={() => draft.appendMention?.({ name: ADA.display_name, target: { kind: 'user', id: ADA.id } })}>Ask the owner</button></>;
+  }
+  const view = show(<Editor />);
+  try {
+    await screen.findByText('My unsent question');
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the owner' }));
+    expect(screen.getByLabelText('Mention draft')).toHaveTextContent(`My unsent question @${ADA.display_name}`);
+    await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_AFTER_MS); });
+    expect(reads.save).toHaveBeenCalledWith(id, expect.objectContaining({ reply_to: 'kept-reply', parts: [
+      { type: 'text', text: 'My unsent question ' }, { type: 'mention', target: { kind: 'user', id: ADA.id } },
+    ] }));
+    expect(reads.clear).not.toHaveBeenCalled();
+  } finally { view.unmount(); }
+});
 
 it('reads once on showing both composers, never in a hidden minute or in response to invalidating their hidden cache', async () => {
   reads.draft.mockResolvedValue({ parts: [{ type: 'text', text: 'The kept team message' }], reply_to: null, mention_names: [], updated_at: '2026-10-16T00:00:00Z' });

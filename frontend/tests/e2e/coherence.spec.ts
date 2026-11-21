@@ -76,7 +76,7 @@ test('the same names are allowed in two orgs and two parents, and refused beside
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('dep2');
   await expect(dialog.getByRole('textbox', { name: 'Short name' })).toHaveValue('dep2');
   await dialog.getByRole('button', { name: 'Create department' }).click();
-  await expect(dialog.getByText('dep2 has the short name dep2 here already, and two orgs of one place cannot share an address. Choose another.')).toBeVisible();
+  await expect(dialog.getByText('dep2 has the short name dep2 here already, and two organizations of one place cannot share an address. Choose another.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Use dep2-2' }).click();
   await expect(dialog.getByRole('textbox', { name: 'Short name' })).toHaveValue('dep2-2');
   await dialog.getByRole('button', { name: 'Create department' }).click();
