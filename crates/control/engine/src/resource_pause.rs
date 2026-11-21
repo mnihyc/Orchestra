@@ -20,7 +20,7 @@ use orch_db::{
     queries::{jobs, threads},
 };
 use orch_link_contract::commands::{AgentStop, NodeRuntimeStop, ProviderStop, SerialKey};
-use orch_types::{Id, new_id};
+use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -45,6 +45,7 @@ struct Recipe {
     target: FactTarget,
     turns: Vec<(Id, Id)>,
     requests: Vec<Id>,
+    placements: Vec<Id>,
     deleted: bool,
     #[serde(default)]
     harnesses: Vec<(Id, Id, Id)>,
@@ -253,7 +254,12 @@ impl Engine {
         };
         let marker = serde_json::to_value(MarkerPayload::ResourceStopped(MarkerResourceStopped {
             object: target.object,
-            name: name.into(),
+            // Pool Use does not disclose its definition or name to every future history reader.
+            name: if target.object.kind == ObjectKind::Pool {
+                target.object.id.to_string()
+            } else {
+                name.into()
+            },
             model,
             by: actor,
             note: note.map(str::to_owned),
@@ -291,7 +297,7 @@ impl Engine {
             unit.wake(thread.node_id);
             turns.push((row.thread, turn.id));
         }
-        let requests = activity::requests(unit.conn, &target).await?;
+        let requests = activity::requests_at(unit.conn, &target, Some(Time::new(now))).await?;
         let label = if target.model_id.is_some() {
             "Model"
         } else {
@@ -299,6 +305,7 @@ impl Engine {
                 ObjectKind::Provider => "Provider",
                 ObjectKind::Agent => "Agent profile",
                 ObjectKind::Environment => "Environment",
+                ObjectKind::Pool => "Pool",
                 _ => "Resource",
             }
         };
@@ -309,6 +316,7 @@ impl Engine {
                 "{label} {}",
                 if deleted { "removed" } else { "switched off" }
             ),
+            now,
         )
         .await?;
         let harnesses = if target.model_id.is_none()
@@ -355,12 +363,22 @@ impl Engine {
         } else {
             Vec::new()
         };
+        let placements = if target.object.kind == ObjectKind::Pool && target.model_id.is_none() {
+            activity::pool_placements(unit.conn, target.object.id).await?
+        } else {
+            Vec::new()
+        };
         let pending_native = !turns.is_empty()
             || !requests.is_empty()
+            || !placements.is_empty()
             || !harnesses.is_empty()
             || !keepers.is_empty()
             || !units.is_empty();
-        let plan = json!({"quiesce":Recipe{target,turns,requests,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
+        let notification_threads = work
+            .iter()
+            .map(|row| row.thread)
+            .collect::<std::collections::BTreeSet<_>>();
+        let plan = json!({"notification_operation":crate::notifications::current_operation(),"notification_threads":notification_threads,"quiesce":Recipe{target,turns,requests,placements,deleted,harnesses,keepers,units,logout,pending_native},"committed":true});
         let row = jobs::insert(
             unit.conn,
             &jobs::NewJob {
@@ -379,6 +397,43 @@ impl Engine {
         Ok((row, unit.finish().await?))
     }
 
+    /// Finish only the captured negative intent after the pool row has committed. Native placement
+    /// takes its Job before pool rows, so cancellation takes Job/command locks here in that same order.
+    async fn stop_pool_placement(
+        &self,
+        accepted: &jobs::JobRow,
+        recipe: &Recipe,
+        placement: Id,
+    ) -> Result<(), EngineError> {
+        if accepted.kind != KIND
+            || accepted.plan.get("committed") != Some(&json!(true))
+            || recipe.target.object.kind != ObjectKind::Pool
+            || recipe.target.model_id.is_some()
+            || !recipe.placements.contains(&placement)
+        {
+            return Err(EngineError::unreadable(
+                "the accepted pool stop association changed",
+            ));
+        }
+        let by = accepted
+            .created_by
+            .ok_or_else(|| EngineError::unreadable("the accepted pool stop has no actor"))?;
+        let mut tx = self.db().begin().await?;
+        jobs::lock_cancellation(&mut tx, placement).await?;
+        let associated =
+            activity::pool_placements_among(&mut tx, recipe.target.object.id, Some(&[placement]))
+                .await?;
+        if associated != [placement] {
+            return Ok(());
+        }
+        let asked = jobs::request_cancel(&mut tx, placement, by, self.inner.clock.now()).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        if asked {
+            self.stop_job_command(placement).await?;
+        }
+        Ok(())
+    }
+
     /// Sends the accepted stops immediately after commit; the durable runner repeats them after a crash.
     pub async fn stop_resource_now(&self, id: Id) -> Result<(), EngineError> {
         let row = jobs::job(&mut *self.db().acquire().await?, id)
@@ -386,6 +441,12 @@ impl Engine {
             .ok_or_else(|| EngineError::unreadable("the accepted stop is gone"))?;
         let recipe: Recipe = serde_json::from_value(row.plan["quiesce"].clone())?;
         let mut failure = None;
+        for placement in &recipe.placements {
+            let stopped = self.stop_pool_placement(&row, &recipe, *placement).await;
+            if let Err(error) = stopped {
+                failure = Some(error);
+            }
+        }
         for request in recipe.requests {
             if let Err(error) = self.inner.commands.cancel(request).await {
                 failure = Some(EngineError::from(error));
@@ -440,11 +501,31 @@ impl Phased for Quiescing {
                             self.engine.drive_interrupt(*thread).await?;
                         }
                     }
+                    let description = active.then_some("Waiting for the interrupted turns to stop");
+                    let placements = if self.recipe.placements.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut conn = self
+                            .engine
+                            .db()
+                            .acquire()
+                            .await
+                            .map_err(EngineError::from)?;
+                        activity::pool_placements_among(
+                            &mut conn,
+                            self.recipe.target.object.id,
+                            Some(&self.recipe.placements),
+                        )
+                        .await?
+                    };
+                    for placement in placements {
+                        active = true;
+                        self.engine.stop_job_command(placement).await?;
+                    }
                     if !active {
                         break;
                     }
-                    job.progress(0.0, Some("Waiting for the interrupted turns to stop"))
-                        .await?;
+                    job.progress(0.0, description).await?;
                     job.pause(OBSERVE_EVERY).await?;
                 }
             }
@@ -498,6 +579,7 @@ impl Phased for Quiescing {
                             *agent,
                             *machine,
                             &orch_db::queries::resources::thread_engine::HarnessReport {
+                                home: None,
                                 status: crate::harnesses::OFFLINE,
                                 detail: None,
                                 version: None,
@@ -565,22 +647,43 @@ impl Phased for Quiescing {
                     return Ok(Done::Finished);
                 }
                 for (runtime, machine) in &self.recipe.units {
-                    job.command_to_undo(
-                        Outgoing::new(
-                            ids::derived(
-                                "resource.pause.unit",
-                                &[job.id().as_bytes(), runtime.as_bytes()],
-                            ),
-                            *machine,
-                            SerialKey::Runtime(*runtime),
-                            &NodeRuntimeStop {
-                                runtime_id: *runtime,
-                                reason: None,
-                            },
+                    let stopped = job
+                        .command_to_undo(
+                            Outgoing::new(
+                                ids::derived(
+                                    "resource.pause.unit",
+                                    &[job.id().as_bytes(), runtime.as_bytes()],
+                                ),
+                                *machine,
+                                SerialKey::Runtime(*runtime),
+                                &NodeRuntimeStop {
+                                    runtime_id: *runtime,
+                                    reason: None,
+                                },
+                            )
+                            .map_err(EngineError::from)?,
                         )
-                        .map_err(EngineError::from)?,
-                    )
-                    .await?;
+                        .await;
+                    match stopped {
+                        Ok(_) => {}
+                        // A host that has no such unit has nothing left to stop; its word that it has none is written
+                        // down, so that the next start makes a unit.
+                        Err(Stop::Failed(failure)) if failure.code == "not_found" => {
+                            sqlx::query("UPDATE runtimes SET loss_missing=true WHERE id=$1")
+                                .bind(runtime)
+                                .execute(
+                                    &mut *self
+                                        .engine
+                                        .db()
+                                        .acquire()
+                                        .await
+                                        .map_err(EngineError::from)?,
+                                )
+                                .await
+                                .map_err(DbError::from)?;
+                        }
+                        Err(other) => return Err(other),
+                    }
                     sqlx::query("UPDATE runtimes SET state='stopped',updated_at=$2 WHERE id=$1 AND state IN ('running','starting')").bind(runtime).bind(job.now()).execute(&mut *self.engine.db().acquire().await.map_err(EngineError::from)?).await.map_err(DbError::from)?;
                 }
             }

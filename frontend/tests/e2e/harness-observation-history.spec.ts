@@ -4,8 +4,8 @@ import { marker } from '../doubles/thread-rows.ts';
 import { ACME, DOUBLE, emit, scenario, signIn } from './support.ts';
 
 const words={
-  en:{approval:'Claude Code reported its approval mode as Bypass program prompts.',pins:'Claude Code reported its managed launch settings.',rate:'rate limit: Native quota warning'},
-  'zh-CN':{approval:'Claude Code 报告的审批模式为跳过程序审批提示。',pins:'Claude Code 报告了受管启动设置。',rate:'速率限制：Native quota warning'},
+  en:{approval:'Claude Code reported its approval mode as Bypass (its own value: bypassPermissions).',pins:'Claude Code reported its managed launch settings.',rate:'rate limit: Native quota warning'},
+  'zh-CN':{approval:'Claude Code 报告的审批模式为跳过提示（程序自己的值：bypassPermissions）。',pins:'Claude Code 报告了受管启动设置。',rate:'速率限制：Native quota warning'},
 } as const;
 for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] as const) test(`native observations survive the thread tab click path (${locale}, ${theme})`,async({page},info)=>{
   await scenario();

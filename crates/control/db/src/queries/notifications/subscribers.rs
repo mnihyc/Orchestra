@@ -18,13 +18,15 @@ pub struct Follower {
     pub user_id: Id,
     /// `all`, `important` or `off`.
     pub level: String,
+    /// Whether the nearest choice was made by the person.
+    pub manual: bool,
 }
 
 /// Every person who has a subscription at `node` or at a node above it, with
 /// the level of the nearest one. Nobody is listed twice.
 pub async fn followers_of(conn: &mut Conn, node: Id) -> Result<Vec<Follower>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT DISTINCT ON (s.user_id) s.user_id, s.level
+        "SELECT DISTINCT ON (s.user_id) s.user_id, s.level, s.source = 'manual' AS manual
            FROM nodes n
           CROSS JOIN LATERAL unnest(n.path) WITH ORDINALITY AS p(node_id, ord)
            JOIN subscriptions s ON s.node_id = p.node_id
@@ -59,8 +61,7 @@ pub async fn level_of(conn: &mut Conn, user: Id, node: Id) -> Result<String, DbE
 /// it or wrote in it. A person who has a row at that node already, whichever
 /// they set it to, keeps theirs, and a service identity, which is told
 /// nothing, follows nothing. Says whether the row was written. The person's
-/// open screens are not sent news of it: a client loads a person's levels when
-/// it connects and when it opens a place, and the row is there by then.
+/// open screens learn its source on the same transaction's committed personal event.
 pub async fn follow(
     conn: &mut Conn,
     user: Id,
@@ -75,9 +76,13 @@ pub async fn follow(
     .bind(user)
     .bind(node)
     .bind(at)
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
-    Ok(done.rows_affected() == 1)
+    let made = done.rows_affected() == 1;
+    if made {
+        crate::sequences::notify_user_event(conn,&[user],&serde_json::json!({"what":"subscription","node_id":node,"level":"all","source":"auto"})).await?;
+    }
+    Ok(made)
 }
 
 /// Which of these are people, as against service identities, which are told
@@ -167,6 +172,89 @@ mod tests {
             project,
             topic,
         }
+    }
+
+    #[tokio::test]
+    async fn first_follow_publishes_its_source_only_on_commit_and_keeps_a_manual_choice() {
+        use crate::{
+            Db,
+            sequences::{self, Notice, UserNotice},
+        };
+        use std::time::Duration;
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let user = person(&mut conn, "source-reader").await;
+        let at = places(&mut conn, user).await;
+        drop(conn);
+        let db = Db::from_pool(test.pool.clone());
+        let mut notices = sequences::listen(&db, &[sequences::USER_CHANNEL])
+            .await
+            .unwrap();
+        let now = clock::start();
+        let mut tx = test.pool.begin().await.unwrap();
+        assert!(follow(&mut tx, user, at.topic, now).await.unwrap());
+        tx.rollback().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), notices.next())
+                .await
+                .is_err()
+        );
+        let mut tx = test.pool.begin().await.unwrap();
+        assert!(follow(&mut tx, user, at.topic, now).await.unwrap());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), notices.next())
+                .await
+                .is_err()
+        );
+        tx.commit().await.unwrap();
+        let Notice::Heard { payload, .. } =
+            tokio::time::timeout(Duration::from_secs(5), notices.next())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected committed follow news");
+        };
+        assert_eq!(
+            sequences::parse_user_payload(&payload),
+            Some(UserNotice::Event {
+                users: vec![user],
+                event: json!({"what":"subscription","node_id":at.topic,"level":"all","source":"auto"})
+            })
+        );
+        let mut tx = test.pool.begin().await.unwrap();
+        put_subscription(&mut tx, user, at.topic, "all", "manual", now)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let Notice::Heard { payload, .. } =
+            tokio::time::timeout(Duration::from_secs(5), notices.next())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected manual choice news");
+        };
+        assert_eq!(
+            sequences::parse_user_payload(&payload),
+            Some(UserNotice::Event {
+                users: vec![user],
+                event: json!({"what":"subscription","node_id":at.topic,"level":"all","source":"manual"})
+            })
+        );
+        let mut tx = test.pool.begin().await.unwrap();
+        assert!(!follow(&mut tx, user, at.topic, now).await.unwrap());
+        let row = crate::queries::hierarchy::subscriptions_on(&mut tx, user, &[at.topic])
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!((row.level.as_str(), row.source.as_str()), ("all", "manual"));
+        tx.commit().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), notices.next())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
