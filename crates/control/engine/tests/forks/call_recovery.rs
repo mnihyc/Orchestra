@@ -4,6 +4,106 @@ use super::*;
 use orch_link_contract::events::{Event, TurnCompleted, TurnError};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pool_provider_failover_retains_its_accepted_selection_through_the_ordinary_switch() {
+    let rig = Rig::new(
+        Can {
+            export_native: true,
+            ..Default::default()
+        },
+        "other",
+        Can {
+            import_neutral: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let thread = rig.thread_with_history("Switch through a pool").await;
+    let mut conn = rig.world.pool.acquire().await.unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "pool",
+        Some(rig.world.ada),
+        Some(rig.world.project),
+        "Switch candidates",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut conn,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Pool,
+            id: pool,
+        },
+        rig.world.ada,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        orch_types::Time::new(rig.world.clock.now()),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET definition=$2 WHERE id=$1").bind(pool).bind(json!({"kind":"model","enabled":true,"policy":{"type":"ordered"},"lend_members":false,"members":[],"config":{}})).execute(&mut *conn).await.unwrap();
+    sqlx::query("INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)").bind(pool).bind(new_id()).bind(json!({"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":rig.other_provider,"offering":MODEL},"config":{}}}})).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"pool-switch","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"pool","kind":"model","id":pool},"agent_id":rig.other_agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    rig.say(thread, "Finish through the pool").await;
+    let failed = rig.world.turn_start(thread, 1).await;
+    rig.world
+        .say(thread, common::turn_began(failed.turn_id))
+        .await;
+    rig.world.say(thread,Event::TurnCompleted(TurnCompleted {turn_id:failed.turn_id,status:TurnOutcome::Failed,error:Some(serde_json::from_value::<TurnError>(json!({"code":"model_refused","message":"Synthetic refusal","retryable":true,"retry_after_secs":60})).unwrap())})).await;
+    rig.world.wait_turn(failed.turn_id, "failed").await;
+    rig.record_native(thread).await;
+    sqlx::query("UPDATE model_call_recovery SET due_at=$2 WHERE node_id=$1 AND purpose='agent'")
+        .bind(thread)
+        .bind(rig.world.clock.now())
+        .execute(rig.world.pool.pool())
+        .await
+        .unwrap();
+    rig.world.engine().keep_call_recoveries().await.unwrap();
+    let job = Mutex::new(None);
+    eventually("the accepted pool uses the native switch", || async {
+        let mut conn = rig.world.pool.acquire().await.unwrap();
+        let row = orch_engine::calls::read(
+            &mut conn,
+            thread,
+            orch_provider_contract::calls::Purpose::Agent,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(row.state, "stopped", "{}", row.context);
+        let id = row.context["switch_job"]
+            .as_str()
+            .and_then(|id| id.parse::<Id>().ok());
+        *job.lock().unwrap() = id;
+        id.is_some()
+    })
+    .await;
+    let job = rig
+        .wait_job(job.into_inner().unwrap().unwrap(), "succeeded")
+        .await;
+    let pool_choice = job
+        .plan
+        .pointer("/confirmed_history_source/recovery_input/pool_choice")
+        .and_then(Json::as_str)
+        .and_then(|id| id.parse::<Id>().ok())
+        .expect("the native switch retains the pool choice reference");
+    let selected: Json = rig
+        .world
+        .scalar("SELECT target FROM pool_choices WHERE id=$1", pool_choice)
+        .await;
+    assert_eq!(selected, json!({"type":"pool","kind":"model","id":pool}));
+    let continued = rig.world.turn_start(thread, 2).await;
+    let provider: Id = rig
+        .world
+        .scalar(
+            "SELECT provider_id FROM segments WHERE id=(SELECT segment_id FROM turns WHERE id=$1)",
+            continued.turn_id,
+        )
+        .await;
+    assert_eq!(provider, rig.other_provider);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_configured_provider_failover_carries_the_interrupted_work_through_the_normal_switch() {
     let rig = Rig::new(
         Can {
@@ -18,7 +118,7 @@ async fn a_configured_provider_failover_carries_the_interrupted_work_through_the
     )
     .await;
     let thread = rig.thread_with_history("Carry interrupted work").await;
-    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":rig.other_provider,"agent_id":rig.other_agent,"model":MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":rig.other_provider,"offering":MODEL},"config":{}}}},"agent_id":rig.other_agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
     rig.say(thread, "Finish the work").await;
     let failed = rig.world.turn_start(thread, 1).await;
     rig.world
@@ -129,7 +229,7 @@ async fn stopping_recovery_during_a_switch_keeps_its_return_without_an_automatic
     let thread = rig
         .thread_with_history("Stop future recovery during a switch")
         .await;
-    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":rig.other_provider,"agent_id":rig.other_agent,"model":MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    rig.world.set(rig.world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":rig.other_provider,"offering":MODEL},"config":{}}}},"agent_id":rig.other_agent,"params":{}}},{"type":"wait","until":"person"}]}])).await;
     rig.say(thread, "Finish the work").await;
     let failed = rig.world.turn_start(thread, 1).await;
     rig.world
