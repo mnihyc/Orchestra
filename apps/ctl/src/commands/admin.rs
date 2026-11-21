@@ -14,6 +14,8 @@
 //! - `suspend` and `resume`: the person can no longer sign in anywhere, every
 //!   session of theirs ends now, and what they own stays theirs; `resume` lifts
 //!   that. The last system admin who can sign in is never suspended.
+//! - `human-check off` switches the human check off, for when its service cannot be reached
+//!   and nobody can get past it; its keys and choices stay as they were.
 
 use super::console::{finish, note, say};
 use super::host::{self, Host, HostError};
@@ -72,6 +74,19 @@ enum AdminCommand {
         /// The username the person signs in by.
         username: String,
     },
+    /// The human check that people are asked for before they sign in or register.
+    #[command(name = "human-check")]
+    HumanCheck {
+        #[command(subcommand)]
+        command: HumanCheckCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HumanCheckCommand {
+    /// Switch the human check off, for when its service cannot be reached and nobody can get
+    /// past it. Its keys and choices stay as they were; switch it on again in Management.
+    Off,
 }
 
 /// Why a command did not do what it was asked.
@@ -172,9 +187,15 @@ async fn reset_link(
             user.username, user.username
         ));
     }
-    if deployment.config.system.public_url == ServerConfig::default().system.public_url {
+    if made.url.starts_with(&format!(
+        "{}/",
+        ServerConfig::default()
+            .system
+            .public_url
+            .trim_end_matches('/')
+    )) {
         note(
-            "system.public_url is still the example address of the configuration: set it to the address people open, or this link leads nowhere",
+            "the effective public address is still the shipped example: set the address people open in Management, or restore the file seed with orchctl public-address reset --config <file>",
         );
     }
     Ok(())
@@ -246,8 +267,31 @@ async fn change(host: &Host, username: &str, act: Act) -> Result<(), AdminError>
     Ok(())
 }
 
+/// Switches the human check off, as the system.
+async fn human_check_off(host: &Host) -> Result<(), AdminError> {
+    let deployment = host.connect().await?;
+    let mut tx = deployment.db.begin().await?;
+    let changed = orch_api_core::sign_in::human_check::switch_off(
+        &mut tx,
+        &host::origin(),
+        SystemClock.now(),
+    )
+    .await
+    .map_err(|error| AdminError::Database(error.to_string()))?;
+    tx.commit().await.map_err(DbError::from)?;
+    say(if changed {
+        "the human check is off: people no longer need it to sign in or register"
+    } else {
+        "the human check was off already; nothing was changed"
+    })?;
+    Ok(())
+}
+
 async fn work(args: &AdminArgs) -> Result<(), AdminError> {
     match &args.command {
+        AdminCommand::HumanCheck {
+            command: HumanCheckCommand::Off,
+        } => human_check_off(&args.host).await,
         AdminCommand::ResetLink {
             username,
             clear_second_step,

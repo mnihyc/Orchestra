@@ -136,6 +136,10 @@ pub(crate) enum Point {
     NativeDisplay,
     NativePrepared,
     NativeCompleted,
+    ProgramCaptured,
+    ProgramStart,
+    ProgramWaiting,
+    ProgramResult,
     AnswerRetained,
 }
 struct Gate {
@@ -207,6 +211,14 @@ fn gate(thread: Id, call: &str, point: Point) -> (oneshot::Receiver<()>, oneshot
 /// Only a named test call pauses; neither SQL locks nor pool leases enter this boundary.
 pub(crate) async fn pause(call: &CallContext, point: Point) {
     pause_key((call.thread, call.call_ref.clone(), point)).await;
+}
+
+pub(crate) async fn pause_program_start(thread: Id) {
+    pause_key((thread, String::new(), Point::ProgramStart)).await;
+}
+
+pub(crate) async fn pause_program_wait(helper: Id) {
+    pause_key((helper, String::new(), Point::ProgramWaiting)).await;
 }
 
 async fn pause_key(key: GateKey) {
@@ -409,6 +421,7 @@ impl CommandHandler for AttachedPeer {
 }
 
 struct Scene {
+    program_node: Option<(common::Added, Id)>,
     world: common::World,
     thread: Id,
     start: TurnStart,
@@ -436,6 +449,7 @@ async fn source_input_key(
     };
     use orch_access_contract::permissions::ObjectKind;
     use orch_api_contract::operations::{self, TargetResolver};
+    use orch_api_contract::routes::Endpoint as _;
     use orch_authz::TokenGrant;
     let operation = operations::for_route(&route)?
         .variants
@@ -445,8 +459,14 @@ async fn source_input_key(
         })
         .ok_or("the real plain input variant is missing")?
         .operation;
-    // Give the positive control all declared acts in one actual org, not an owner/session shortcut.
-    // The deciding cases then change only one retained stored key, after real helper startup.
+    let creation = operations::for_route(&orch_api_contract::nodes::ThreadCreate::ROUTE)?
+        .variants
+        .into_iter()
+        .next()
+        .ok_or("the thread creation control has no operation")?
+        .operation;
+    // Only the original input operation is needed. The separate creation grant is
+    // withdrawn in the case which checks that the helper inherits the input act.
     let scope = KeyScope {
         rules: vec![KeyRule {
             target: KeyTarget {
@@ -455,14 +475,16 @@ async fn source_input_key(
                 reach: KeyReach::Subtree,
             },
             resources: None,
-            allow: operations::catalogue()?
-                .into_iter()
-                .flat_map(|operation| operation.variants)
-                .map(|variant| KeyOperation {
-                    operation: variant.operation,
+            allow: vec![
+                KeyOperation {
+                    operation: operation.clone(),
                     actions: KeyAction::ALL.to_vec(),
-                })
-                .collect(),
+                },
+                KeyOperation {
+                    operation: creation,
+                    actions: KeyAction::ALL.to_vec(),
+                },
+            ],
         }],
         ..KeyScope::default()
     };
@@ -510,6 +532,13 @@ async fn source_input_key(
     Ok(prepared.admit(&caller, false)?)
 }
 
+#[derive(Clone, Copy)]
+enum InputAuthorship {
+    Session,
+    Keys,
+    Approved,
+}
+
 impl Scene {
     async fn lend_document(
         &self,
@@ -552,6 +581,17 @@ impl Scene {
         .await
     }
 
+    async fn with_approved_input() -> Proof<Self> {
+        Box::pin(Self::configured_with_authorship(
+            false,
+            false,
+            false,
+            None,
+            InputAuthorship::Approved,
+        ))
+        .await
+    }
+
     async fn configured(display: bool) -> Proof<Self> {
         Self::configured_with_web_services(display, false).await
     }
@@ -583,9 +623,30 @@ impl Scene {
         clock: Option<Arc<dyn orch_types::Clock>>,
         keyed: bool,
     ) -> Proof<Self> {
+        Box::pin(Self::configured_with_authorship(
+            display,
+            web,
+            fetch,
+            clock,
+            if keyed {
+                InputAuthorship::Keys
+            } else {
+                InputAuthorship::Session
+            },
+        ))
+        .await
+    }
+
+    async fn configured_with_authorship(
+        display: bool,
+        web: bool,
+        fetch: bool,
+        clock: Option<Arc<dyn orch_types::Clock>>,
+        authorship: InputAuthorship,
+    ) -> Proof<Self> {
         let world = match clock {
-            Some(clock) => common::World::with_clock(clock).await,
-            None => common::World::new().await,
+            Some(clock) => Box::pin(common::World::with_clock(clock)).await,
+            None => Box::pin(common::World::new()).await,
         };
         let mut descriptor = common::descriptor();
         if web {
@@ -608,6 +669,7 @@ impl Scene {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: false,
                     harness_version: "1.0.0".into(),
                     descriptor: reported.clone(),
@@ -653,6 +715,7 @@ impl Scene {
                 let dir = body.path != "web/out/result.bin";
                 Ok(CommandResult::FsStat(
                     orch_api_contract::workspace::FileStat {
+                        facts: None,
                         entry: orch_api_contract::workspace::DirEntry {
                             name: if dir { "web" } else { "result.bin" }.into(),
                             path: body.path.clone(),
@@ -705,6 +768,7 @@ impl Scene {
                 }
                 Ok(CommandResult::FsFetch(
                     orch_link_contract::commands::FsFetchResult {
+                        minimum_reach: orch_link_contract::policy::FileReach::Roots,
                         hash: blob,
                         size,
                         mtime_ns: at.get().timestamp_nanos_opt().ok_or_else(|| {
@@ -734,6 +798,8 @@ impl Scene {
                 }
                 Ok(CommandResult::FsRecord(
                     orch_link_contract::source::FsRecordResult {
+                        indexing: None,
+
                         state: orch_link_contract::source::RecordState::Unavailable,
                         tree_ref: None,
                         repository_head: None,
@@ -758,10 +824,21 @@ impl Scene {
         if display {
             declare_display(&world, directory.path()).await?;
         }
-        let (start, submitted) = if keyed {
-            Box::pin(Self::key_authored_turn(&world, thread)).await?
-        } else {
-            Self::authored_turn(&world, thread).await?
+        let (start, submitted) = match authorship {
+            InputAuthorship::Keys => Box::pin(Self::key_authored_turn(&world, thread)).await?,
+            InputAuthorship::Session => Box::pin(Self::authored_turn(&world, thread)).await?,
+            InputAuthorship::Approved => {
+                let author = world.person("image-author").await;
+                world.give(author, "interactor").await;
+                Box::pin(Self::authored_turn_by(
+                    &world,
+                    thread,
+                    &Caller::session(author),
+                    None,
+                    Some(&Caller::session(world.ada)),
+                ))
+                .await?
+            }
         };
         if display {
             let attached: bool = sqlx::query_scalar(
@@ -817,6 +894,7 @@ impl Scene {
             .ok_or("created document path missing")?
             .to_owned();
         Ok(Self {
+            program_node: None,
             world,
             thread,
             start,
@@ -837,7 +915,7 @@ impl Scene {
         world: &common::World,
         thread: Id,
     ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
-        Self::authored_turn_by(world, thread, &Caller::session(world.ada), None).await
+        Self::authored_turn_by(world, thread, &Caller::session(world.ada), None, None).await
     }
 
     async fn authored_turn_by(
@@ -845,15 +923,21 @@ impl Scene {
         thread: Id,
         author: &Caller,
         editor: Option<&Caller>,
+        runner: Option<&Caller>,
     ) -> Proof<(TurnStart, crate::inputs::Submitted)> {
-        let submitted = world
-            .engine()
-            .submit_input(
-                author,
-                thread,
-                common::queued("Original actual authored input"),
-            )
-            .await?;
+        if runner.is_some() {
+            world
+                .exec(
+                    "UPDATE environments SET status='failed',status_detail='waiting for approval'",
+                )
+                .await;
+        }
+        let submitted = Box::pin(world.engine().submit_input(
+            author,
+            thread,
+            common::queued("Original actual authored input"),
+        ))
+        .await?;
         if let Some(editor) = editor {
             world
                 .engine()
@@ -873,6 +957,30 @@ impl Scene {
                 .execute(world.pool.pool())
                 .await?;
             world.engine().preflight(thread).await?;
+        }
+        if let Some(runner) = runner {
+            world.wait_blocked(thread, "environment_unavailable").await;
+            world.access.deny(author.user());
+            common::eventually("the input waits for model approval", || async {
+                world.input_state(submitted.input.id).await
+                    == ("pending".into(), Some("model_use_required".into()))
+            })
+            .await;
+            world
+                .exec("UPDATE environments SET status='running',status_detail=NULL")
+                .await;
+            world.wait_state(thread, "idle").await;
+            let ran =
+                Box::pin(world.engine().run_input(runner, thread, submitted.input.id)).await?;
+            assert_eq!(
+                ran.author.as_ref().map(|person| person.id),
+                Some(author.user())
+            );
+            assert_eq!(
+                ran.run_as.as_ref().map(|person| person.id),
+                Some(runner.user())
+            );
+            world.access.allow(author.user());
         }
         let start = match tokio::time::timeout(common::PATIENCE, async {
             loop {
@@ -933,7 +1041,7 @@ impl Scene {
             source_input_key(world, thread, ThreadInputCreate::ROUTE, "source-author").await?;
         let editor =
             source_input_key(world, thread, ThreadInputUpdate::ROUTE, "source-editor").await?;
-        Self::authored_turn_by(world, thread, &author, Some(&editor)).await
+        Self::authored_turn_by(world, thread, &author, Some(&editor), None).await
     }
 
     /// Enumerated gates only: no free native error text, paths, SQL or input bodies.
@@ -1029,9 +1137,19 @@ impl Scene {
     ) {
         // No prepare/open helper: this is the exact already-admitted recorded native stream,
         // including when its turn is terminal and another continuation now runs.
+        let opening = orch_testkit::doubles::sessions::first_turn_opening(
+            world.pool.pool(),
+            source.thread_id,
+            source.segment_id,
+            turn,
+        )
+        .await
+        .expect("the original admitted turn command is readable")
+        .expect("this producer has an actual physical opening");
         world
             .machine
-            .publish(
+            .publish_from(
+                Some(opening),
                 &Stream::Session {
                     thread_id: source.thread_id,
                     segment_id: source.segment_id,
@@ -1459,10 +1577,19 @@ async fn fresh_old_native_calls_refuse_while_completed_answers_replay_and_the_cu
         total_tokens: 999,
         ..Default::default()
     };
+    let original_opening = orch_testkit::doubles::sessions::first_turn_opening(
+        scene.world.pool.pool(),
+        scene.thread,
+        scene.source.segment_id,
+        scene.start.turn_id,
+    )
+    .await?
+    .ok_or("the original report producer is absent")?;
     scene
         .world
         .machine
-        .publish(
+        .publish_from(
+            Some(original_opening),
             &Stream::Session {
                 thread_id: scene.thread,
                 segment_id: scene.source.segment_id,
@@ -1602,24 +1729,21 @@ async fn a_retained_native_answer_recovers_its_unfinished_receipt_after_the_answ
             )
             .await
     );
-    // The common controller supplier retains commands in its owned journal, not SQL.
-    // Reconstruct only the production dispatcher's storage half from that actual issued
-    // command, preserving every field; no synthetic answer or successful effect is invented.
+    // The production-shaped supplier already retained this exact issued answer before its owner was lost.
     let mut conn = scene.world.pool.acquire().await?;
-    assert!(
-        link::insert_command(
-            &mut conn,
-            &link::NewCommand {
-                id: command.id,
-                machine_id: machine,
-                kind: &command.kind,
-                body: &command.body,
-                serial_key: command.key.as_deref(),
-                deadline_at: command.deadline.get()
-            },
-            scene.world.clock.now()
-        )
+    let saved = link::command(&mut conn, command.id)
         .await?
+        .ok_or("the canonical issued answer was not retained")?;
+    assert_eq!(saved.machine_id, machine);
+    assert!(!saved.content_transit);
+    assert_eq!(saved.kind, command.kind);
+    assert_eq!(saved.body, command.body);
+    assert_eq!(saved.serial_key(), command.key.as_deref());
+    assert_eq!(saved.deadline_at, command.deadline.get());
+    assert_eq!(
+        orch_db::queries::session_dependencies::command_native_target(&mut conn, command.id)
+            .await?,
+        command.native_target
     );
     drop(conn);
     let before = scene.snapshot().await?;
@@ -1845,6 +1969,7 @@ async fn download_peer(
             })?;
             Ok(CommandResult::FsWrite(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: "copied-doc.md".into(),
                         path: body.path.clone(),
@@ -1899,6 +2024,7 @@ async fn download_peer(
             };
             Ok(CommandResult::FsStat(
                 orch_api_contract::workspace::FileStat {
+                    facts: None,
                     entry: orch_api_contract::workspace::DirEntry {
                         name: if is_source {
                             "result.bin"
@@ -1940,6 +2066,69 @@ async fn admitted_download(cancel_live: bool) -> Proof {
     let scene = Scene::new().await?;
     let (native, destination, _export) = download_peer(&scene, cancel_live).await?;
     let environment = scene.world.environment;
+    let observed_source = scene.directory.path().join("out/result.bin");
+    let observed_destination = destination.clone();
+    let expected_source = scene.blob;
+    let thread = scene.thread;
+    let turn = scene.start.turn_id;
+    let sealed = Mutex::new(None::<orch_link_contract::source::WorkspaceObserveResult>);
+    // This peer exposes only the original source and the download destination. Observe their
+    // real unchanged baseline before admission is released, then publish that same sealed fact.
+    scene
+        .world
+        .machine
+        .handler
+        .on(CommandKind::WorkspaceObserve, move |command| {
+            let Command::WorkspaceObserve(body) = command else {
+                return Err(CommandError::new(
+                    ErrorCode::Unsupported,
+                    "wrong native observation",
+                ));
+            };
+            if body.environment_id != environment
+                || body.thread_id != thread
+                || body.turn_id != Some(turn)
+                || body.directory != "web"
+            {
+                return Err(CommandError::new(
+                    ErrorCode::NotFound,
+                    "the native observation names another source",
+                ));
+            }
+            let mut sealed = sealed.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(requested) = &body.sealed {
+                if sealed.as_ref() != Some(requested) {
+                    return Err(CommandError::new(
+                        ErrorCode::Conflict,
+                        "the original native observation changed",
+                    ));
+                }
+                return Ok(CommandResult::WorkspaceObserve(requested.clone()));
+            }
+            if let Some(observed) = sealed.as_ref() {
+                return Ok(CommandResult::WorkspaceObserve(observed.clone()));
+            }
+            let bytes = std::fs::read(&observed_source).map_err(|_| {
+                CommandError::new(ErrorCode::NotFound, "the original native source is absent")
+            })?;
+            if Hash::of(&bytes) != expected_source
+                || !std::fs::symlink_metadata(&observed_destination)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the native download namespace changed before its original observation",
+                ));
+            }
+            let observed = orch_link_contract::source::WorkspaceObserveResult {
+                end_patch_blob: None,
+                end_manifest_blob: None,
+                changed_paths: Some(Vec::new()),
+                changed_paths_complete: true,
+            };
+            *sealed = Some(observed.clone());
+            Ok(CommandResult::WorkspaceObserve(observed))
+        });
     let call = "durably-admitted-download";
     let canonical = crate::ids::tool_result(scene.thread, call);
     let (admitted, release) = gate(scene.thread, &canonical.to_string(), Point::Native);
@@ -1959,6 +2148,22 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         "SELECT c.id,e.turn_id,e.segment_id,e.continuation_id,e.answer_id,c.deadline_at,c.created_at,c.body
          FROM thread_tool_commands e JOIN commands c ON c.id=e.command_id WHERE e.thread_id=$1 AND e.answer_id=$2")
         .bind(scene.thread).bind(canonical).fetch_one(scene.world.pool.pool()).await?;
+    // The source hold uses protected metadata even when native data names a queue.
+    // Roll back the malformed row before the actual paused native issuer resumes.
+    let mut identity = scene.world.pool.begin().await?;
+    assert!(native_hold(&mut identity, id).await?.is_some());
+    let mut native_body = body.clone();
+    native_body["$key"] = json!(environment.to_string());
+    sqlx::query("UPDATE commands SET serial_key=NULL,body=$2 WHERE id=$1")
+        .bind(id)
+        .bind(native_body)
+        .execute(&mut *identity)
+        .await?;
+    assert!(
+        native_hold(&mut identity, id).await?.is_none(),
+        "native payload fields cannot restore an absent protected queue identity"
+    );
+    identity.rollback().await?;
     let owner: Id = scene
         .world
         .scalar(
@@ -2092,10 +2297,6 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         None
     };
     scene.end_original().await?;
-    common::eventually("the genuine original end-file observation finishes before the native write is issued",||async {
-        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
-            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
-    }).await;
     let accepted = scene
         .request_selection("queued-native-effect-fence")
         .await?;
@@ -2283,6 +2484,10 @@ async fn admitted_download(cancel_live: bool) -> Proof {
         result
     };
     assert_eq!(result.thread_id, scene.thread);
+    common::eventually("the original end-file observation finishes after the admitted native effect drains",||async {
+        sqlx::query_scalar::<_,bool>("SELECT NOT files_end_due AND NOT files_work_pending AND end_work IS NULL FROM turns WHERE id=$1")
+            .bind(scene.start.turn_id).fetch_one(scene.world.pool.pool()).await.unwrap_or(false)
+    }).await;
     scene.selected(&accepted).await?;
     assert_eq!(scene.world.machine.handler.runs_of(id), 1);
     assert_eq!(
@@ -3325,8 +3530,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     };
     use orch_link_contract::commands::{EnvAttach, EnvDetach, IndexMode};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let scene = Scene::new().await?;
-    let (_unused, _destination, _export) = download_peer(&scene, false).await?;
+    let scene = Box::pin(Scene::new()).await?;
+    let (_unused, _destination, _export) = Box::pin(download_peer(&scene, false)).await?;
     let root = scene.directory.path().join("retiring-workspace");
     tokio::fs::create_dir_all(root.join("web")).await?;
     let mut settings = HostSettings::connected(
@@ -3347,6 +3552,8 @@ async fn changed_directory_generation_keeps_its_old_hold() -> Proof {
     let environment = scene.world.environment;
     host.env_attach(
         &EnvAttach {
+            workspace: Default::default(),
+
             environment_id: environment,
             workspace_root: Some(root.display().to_string()),
             resources: None,

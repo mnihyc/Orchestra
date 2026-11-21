@@ -1098,6 +1098,7 @@ impl Engine {
             .unwrap_or(DEFAULT_KEEP_HOURS);
         Ok(ExportLimits {
             max_bytes,
+            max_file_bytes: self.inner.config.export_file_max_bytes,
             max_items,
             keep_hours,
         })
@@ -1266,6 +1267,7 @@ pub struct Made {
 /// Immutable native creation operands selected on the writer's actual guarded connection.
 #[derive(Debug, Clone)]
 pub struct PreparedExportCreation {
+    source: orch_api_contract::package::PackageSource,
     selected: Selected,
     request: ExportRequest,
     user: Id,
@@ -1357,7 +1359,19 @@ impl Engine {
                 limit: self.inner.config.exports_per_user,
             });
         }
+        let deployment = &self.inner.config.deployment;
+        let addresses = orch_db::queries::public_addresses::read(
+            conn,
+            &deployment.address_seed,
+            self.inner.clock.now(),
+        )
+        .await?;
         Ok(PreparedExportCreation {
+            source: orch_api_contract::package::PackageSource {
+                name: deployment.name.clone(),
+                url: addresses.addresses.public_url,
+                version: deployment.version.clone(),
+            },
             selected,
             request: request.clone(),
             user: principal.user(),
@@ -1390,6 +1404,7 @@ impl Engine {
             serde_json::to_value(initial_progress(&the_job::PHASES)).map_err(EngineError::from)?;
         let plan = json!({
             "export": id,
+            "source": prepared.source,
             "user": user,
             "node": place,
             "credential": credential_of(caller),
@@ -1660,9 +1675,9 @@ impl PreparedExportRemoval {
     }
 }
 
-/// Exact physical cleanup accepted by the committed native archive removal.
+/// Exact content released by the committed native archive removal.
 pub struct ExportRemoval {
-    forgotten: Option<orch_types::Hash>,
+    released: Option<orch_types::Hash>,
 }
 
 /// Native archive-open operands, held on their caller's real transaction.
@@ -1795,24 +1810,24 @@ impl Engine {
             .blob
             .as_ref()
             .and_then(|text| text.parse::<orch_types::Hash>().ok());
-        let mut forgotten = None;
         if let Some(hash) = hash {
             orch_db::queries::storage::unpin_blobs(conn, &[hash], now).await?;
-            if orch_db::queries::storage::forget_blob(conn, &hash, now + chrono::Duration::days(1))
-                .await?
-            {
-                forgotten = Some(hash);
-            }
         }
-        Ok(ExportRemoval { forgotten })
+        Ok(ExportRemoval { released: hash })
     }
 
-    /// Finish only this committed removal's exact native file cleanup and wakeup.
+    /// Rechecks all owners after the committed removal before retiring its released content.
     pub async fn finish_export_removal(&self, removed: ExportRemoval) {
-        if let (Some(hash), Some(store)) = (removed.forgotten, self.blobs())
-            && let Err(error) = store.delete(&hash).await
+        if let (Some(hash), Some(store)) = (removed.released, self.blobs())
+            && let Err(error) = crate::transfers::retire_blobs(
+                self.db(),
+                store.as_ref(),
+                &[hash],
+                crate::transfers::RetirementWhen::TransferEnded(self.inner.clock.now()),
+            )
+            .await
         {
-            tracing::warn!(%error, "an archive that was removed could not be taken out of the store");
+            tracing::warn!(%error, "released archive content waits for collection");
         }
         self.kick();
     }
