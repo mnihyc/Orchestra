@@ -29,10 +29,10 @@ import type {
 export const environmentsKey = ['environments'] as const;
 export const environmentKey = (id: string) => ['environment', id] as const;
 export const environmentSettingsKey = (id: string) => ['environment-settings', id] as const;
-export const environmentMcpKey = (id: string) => ['environment-mcp', id] as const;
+export const environmentMcpKey = (id: string, threadId?: string) => threadId === undefined ? ['environment-mcp', id] as const : ['environment-mcp', id, threadId] as const;
 
 /** Current hosted server states and masked failures. */
-export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: environmentMcpKey(id), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
+export const environmentMcpQuery = (id: string, threadId?: string) => queryOptions({ queryKey: environmentMcpKey(id, threadId), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: threadId === undefined ? {} : { thread_id: threadId } }, signal })) });
 
 /** Import and optional enablement are one producer, including an accepted restricted receipt. */
 export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImportCreateBody, key: string) {

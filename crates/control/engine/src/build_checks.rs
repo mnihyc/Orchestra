@@ -162,8 +162,16 @@ const PROGRAM_CHECK: Declaration<Role> = Declaration {
 pub struct Request {
     origin: CapturedOperation,
     destination: Destination,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine: Option<Id>,
 }
 impl Request {
+    /// Bind an explicit retry to its original physical machine.
+    #[must_use]
+    pub fn on_machine(mut self, machine: Option<Id>) -> Self {
+        self.machine = machine;
+        self
+    }
     /// Capture the actual admitted operation, including the older callers of the same native checker.
     pub fn capture(caller: &Caller, destination: Destination) -> Result<Self, EngineError> {
         let origin = CapturedOperation::capture(caller).map_err(EngineError::unreadable)?;
@@ -184,6 +192,7 @@ impl Request {
         Ok(Self {
             origin,
             destination,
+            machine: None,
         })
     }
 }
@@ -335,6 +344,57 @@ pub struct Work {
     host: Option<Host>,
 }
 impl Work {
+    /// A retry started on an installed program must stay on its machine.
+    #[must_use]
+    pub fn requested_machine(&self) -> Option<Id> {
+        match &self.claim.origin {
+            Origin::Requested { request } => request.machine,
+            Origin::Scheduled => None,
+        }
+    }
+    /// Select the physical machine named by this request, or use the shared fleet for unpinned work.
+    pub async fn select_host(&self, conn: &mut Conn) -> Result<Option<HostState>, DbError> {
+        let Some(machine) = self.requested_machine() else {
+            return host_for(conn, &self.claim.build.os, &self.claim.build.arch).await;
+        };
+        let Some(id) = hosting::host_of_machine(conn, machine).await? else {
+            return Ok(None);
+        };
+        let Some(host) = hosting::host(conn, id).await? else {
+            return Ok(None);
+        };
+        Ok(self.eligible_host(conn, &host).await?.then_some(host))
+    }
+
+    async fn eligible_host(&self, conn: &mut Conn, host: &HostState) -> Result<bool, DbError> {
+        if !candidate(host, &self.claim.build.os, &self.claim.build.arch) {
+            return Ok(false);
+        }
+        let Some(org) = host.org_id else {
+            return Ok(true);
+        };
+        if management::personal_orgs(conn, &[org]).await?.is_empty() {
+            return Ok(true);
+        }
+        let Origin::Requested { request } = &self.claim.origin else {
+            return Ok(false);
+        };
+        let actor = request.origin.user();
+        if request.origin.operation() != "AdminHarnessCheck"
+            || request.machine != Some(host.machine_id)
+            || host.owner_id != Some(actor)
+        {
+            return Ok(false);
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id=$1 AND personal_org_id=$2)",
+        )
+        .bind(actor)
+        .bind(org)
+        .fetch_one(conn)
+        .await?)
+    }
+
     /// Start only from the claim actually returned by the native claimant.
     #[must_use]
     pub fn new(claim: Claim) -> Self {
@@ -419,6 +479,7 @@ pub fn checksum_trusted(value: &Json, trust_mirror: bool) -> bool {
             value.get("checksum_origin").and_then(Json::as_str),
             Some("admin" | "vendor")
         ),
+        Some("release") => value.get("checksum_origin").and_then(Json::as_str) == Some("release"),
         Some("channel") => value.get("checksum_origin").and_then(Json::as_str) == Some("vendor"),
         Some("mirror") => {
             trust_mirror && value.get("checksum_origin").and_then(Json::as_str) == Some("mirror")
@@ -467,10 +528,11 @@ async fn factual(conn: &mut Conn, work: &Work) -> Result<(), Error> {
             &host.home_id.into_iter().collect::<Vec<_>>(),
         )
         .await?;
-        if host.machine_id != old.machine
+        if work.requested_machine().is_some_and(|id| id != old.machine)
+            || host.machine_id != old.machine
             || host.home_id != old.home
             || host.org_id != old.org
-            || !eligible_host(conn, &host, &work.claim.build.os, &work.claim.build.arch).await?
+            || !work.eligible_host(conn, &host).await?
         {
             return Err(Error::Refused);
         }
@@ -489,25 +551,13 @@ async fn locks(conn: &mut Conn, work: &Work) -> Result<(), Error> {
             .fetch_one(&mut *conn)
             .await
             .map_err(DbError::from)?;
-        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+        sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
             .bind(host.machine)
             .fetch_one(&mut *conn)
             .await
             .map_err(DbError::from)?;
     }
     Ok(())
-}
-/// The original native checker eligibility, also used when retaining a selected host.
-pub async fn eligible_host(
-    conn: &mut Conn,
-    host: &HostState,
-    os: &str,
-    arch: &str,
-) -> Result<bool, DbError> {
-    Ok(candidate(host, os, arch)
-        && management::personal_orgs(conn, &host.org_id.into_iter().collect::<Vec<_>>())
-            .await?
-            .is_empty())
 }
 fn candidate(host: &HostState, os: &str, arch: &str) -> bool {
     host.online
@@ -754,6 +804,7 @@ impl CheckCommand {
         self.current_issue_callers(
             conn,
             &orch_db::queries::link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine_id,
                 kind: &command.kind,

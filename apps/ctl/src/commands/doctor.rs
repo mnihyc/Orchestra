@@ -141,7 +141,7 @@ fn line(id: &str, status: Status, said: impl Into<String>) -> Line {
 }
 
 /// The checks there are, by the name `--only` and `--skip` take.
-const CHECKS: [&str; 14] = [
+const CHECKS: [&str; 16] = [
     "config",
     "secrets",
     "database",
@@ -149,6 +149,7 @@ const CHECKS: [&str; 14] = [
     "gateway",
     "worker",
     "node",
+    "human-check",
     "edge",
     "edge-page",
     "edge-api",
@@ -156,6 +157,7 @@ const CHECKS: [&str; 14] = [
     "edge-ws",
     "edge-link",
     "edge-ports",
+    "edge-human-check",
 ];
 
 impl Options {
@@ -171,7 +173,14 @@ impl Options {
             }
         }
         let host = [
-            "config", "secrets", "database", "api", "gateway", "worker", "node",
+            "config",
+            "secrets",
+            "database",
+            "api",
+            "gateway",
+            "worker",
+            "node",
+            "human-check",
         ]
         .iter()
         .any(|id| self.wanted(id));
@@ -184,6 +193,7 @@ impl Options {
                 "edge-link",
                 "edge-endpoints",
                 "edge-ports",
+                "edge-human-check",
             ]
             .iter()
             .any(|id| self.wanted(id));
@@ -308,7 +318,7 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         ));
     }
 
-    let needs_database = ["database", "gateway", "worker", "node"]
+    let needs_database = ["database", "gateway", "worker", "node", "human-check"]
         .iter()
         .any(|id| options.wanted(id));
     let (database, database_line) = if needs_database {
@@ -341,7 +351,133 @@ async fn host_checks(options: &Options) -> Vec<Line> {
         };
         lines.push(done);
     }
+    if options.wanted("human-check") {
+        lines.push(match &database {
+            Some(db) => within("human-check", human_check(db)).await,
+            None => line(
+                "human-check",
+                Status::Skip,
+                "needs the database, which does not answer",
+            ),
+        });
+    }
     lines
+}
+
+/// What a human check that is on has, and whether its service could be asked: the last day's rows of the audit, which
+/// say how many times it could not, why, and whether people were let in or turned away.
+async fn human_check(db: &Db) -> Line {
+    use orch_api_core::sign_in::human_check::{
+        SECRET_NAME, SECRET_OWNER, WhenUnreachable, policy, secret_owner_id,
+    };
+    const ID: &str = "human-check";
+    let mut conn = match db.acquire().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return line(
+                ID,
+                Status::Fail,
+                format!("the database does not answer: {error}"),
+            );
+        }
+    };
+    let policy = match policy(&mut conn).await {
+        Ok(policy) => policy,
+        Err(error) => return line(ID, Status::Fail, format!("reading the settings: {error}")),
+    };
+    if policy.service.is_empty() {
+        return line(
+            ID,
+            Status::Ok,
+            "off: nothing is asked of people, nothing is loaded from outside and nothing is sent",
+        );
+    }
+    if !policy.active() {
+        return line(
+            ID,
+            Status::Part,
+            format!(
+                "{} is chosen and has no site key, so it asks nobody: set the site key in Management",
+                policy.service
+            ),
+        );
+    }
+    match orch_db::queries::settings::secret(
+        &mut conn,
+        SECRET_OWNER,
+        secret_owner_id(),
+        SECRET_NAME,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return line(
+                ID,
+                Status::Fail,
+                format!(
+                    "{} is on and no secret is kept for it, so it cannot be asked: set the secret in Management",
+                    policy.service
+                ),
+            );
+        }
+        Err(error) => return line(ID, Status::Fail, format!("reading the secret: {error}")),
+    }
+    let now = SystemClock.now();
+    let rows = match orch_db::queries::human_check::since(
+        &mut conn,
+        &["auth.human_check_admitted", "auth.human_check_refused"],
+        now - chrono::Duration::hours(24),
+        50,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => return line(ID, Status::Fail, format!("reading the audit: {error}")),
+    };
+    let way = match policy.when_unreachable {
+        WhenUnreachable::Admit => "people are let in without the check",
+        WhenUnreachable::Refuse => "people are turned away",
+    };
+    let Some(latest) = rows.first() else {
+        return line(
+            ID,
+            Status::Ok,
+            format!(
+                "{} is on for {} acts; its service could not be asked no time in the last 24 hours (if it cannot be, {way})",
+                policy.service,
+                policy.acts.len()
+            ),
+        );
+    };
+    let times: i64 = rows
+        .iter()
+        .map(|row| {
+            row.details
+                .get("count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1)
+        })
+        .sum();
+    let word = |name: &str| {
+        latest
+            .details
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+            .to_owned()
+    };
+    line(
+        ID,
+        Status::Fail,
+        format!(
+            "{} could not be asked {times} time(s) in the last 24 hours, last at {} ({}: {}); {way}. The audit holds a row for each hour and act; `orchctl admin human-check off` switches it off",
+            policy.service,
+            latest.at.format("%Y-%m-%d %H:%M UTC"),
+            word("why"),
+            word("detail"),
+        ),
+    )
 }
 
 /// Inspect permissions without reading or printing any credential contents.
