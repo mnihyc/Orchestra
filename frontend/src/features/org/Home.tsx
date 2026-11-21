@@ -24,7 +24,8 @@ import { orgOverviewQuery } from '@/api/orgOverview';
 import { childrenQuery, orgBySlugQuery } from '@/api/nodes';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { ActivityFeed, OrgActivity } from '@/features/org/Activity';
-import { UsageSection, useUsageBoardParams } from '@/features/usage/Board';
+import { UsageSection } from '@/features/usage/Board';
+import { useUsageBoardParams } from '@/features/usage/useBoardParams';
 import { Members } from '@/features/settings/org/Members';
 import { DepartmentCard, ProjectCard } from '@/features/org/ProjectCards';
 import { OrgWork } from '@/features/org/Work';
@@ -93,7 +94,7 @@ function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />
     <OverviewRows org={org} onTab={onTab} participating={participating} />
-    {org.readme !== null && <PlaceReadme readme={org.readme} />}
+    {org.readme !== null && <PlaceReadme readme={org.readme} nodeId={org.id} />}
   </div>;
 }
 

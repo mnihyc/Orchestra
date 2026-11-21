@@ -163,6 +163,105 @@ async fn auto_is_refused_before_opening_a_session_for_an_unproved_harness() {
         )
         .await;
     assert_eq!(blocked, "binding_invalid");
+    let detail: String = world
+        .scalar(
+            "SELECT blocked_detail FROM threads WHERE node_id=$1",
+            thread,
+        )
+        .await;
+    assert_eq!(detail, "Auto: No Auto check is available for this program.");
+    assert!(!detail.contains("does not support"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_names_the_unrun_or_failed_build_check_before_opening_any_native_session() {
+    // A machine a person connected is checked on a build host of the system; only with none online does Auto say
+    // that a build host is missing.
+    for (has_node, build_host, failed, detail) in [
+        (true, false, false, "Auto: Not proven on this machine yet."),
+        (
+            false,
+            false,
+            false,
+            "No build host is online to run the Auto approval check.",
+        ),
+        (false, true, false, "Auto: Not proven on this machine yet."),
+        (
+            false,
+            false,
+            true,
+            "Auto: Failed its check on this machine.",
+        ),
+    ] {
+        let world = World::new().await;
+        let thread = world.thread("Auto check state").await;
+        if build_host {
+            let mut conn = world.pool.acquire().await.unwrap();
+            let host = orch_db::queries::resources::access_fixtures::insert_resource(
+                &mut conn,
+                "host",
+                None,
+                None,
+                "check-host",
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE machines SET online=true WHERE id=(SELECT machine_id FROM hosts WHERE id=$1)")
+                .bind(host)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        let mut descriptor = common::descriptor();
+        descriptor["kind"] = json!("codex");
+        descriptor["approval_modes"] = json!(["on_request", "auto"]);
+        world.declares(descriptor.clone()).await;
+        sqlx::query("UPDATE harnesses SET descriptor=$2,harness_version='1.0.0' WHERE agent_id=$1")
+            .bind(world.agent)
+            .bind(descriptor)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agents SET harness_kind='codex' WHERE id=$1")
+            .bind(world.agent)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE machines SET placement='connected',roles=array_remove(roles,'node') || $3::text[],facts=facts || $2 WHERE id=$1")
+            .bind(world.machine_id)
+            .bind(json!({"policy":{"agent.harnesses":[{"kind":"codex","path":"/selected/codex"}]},
+                "harnesses":[{"kind":"codex","path":"/selected/codex","version":"1.0.0","sha256":"c".repeat(64)}]}))
+            .bind(if has_node { vec!["node"] } else { vec![] })
+            .execute(world.pool.pool()).await.unwrap();
+        let check = failed.then(|| {
+            json!({"at":world.clock.time(),"machine":"test machine","missing":[],
+            "off":["approval_modes.auto"],"error":null,"stage":"complete","cases":[{
+                "name":"auto_review","feature":"approval_modes.auto","passed":false,
+                "error":"The scripted reviewer did not answer","unsupported":null,"elapsed_ms":1}]})
+        });
+        let mut conn = world.pool.acquire().await.unwrap();
+        orch_db::queries::resources::management::put_channel_build(&mut conn, "harness_channel:auto-choice", &json!({
+            "kind":"codex","version":"1.0.0","os":"linux","arch":"x86_64",
+            "url":"https://example.com/program","sha256":"c".repeat(64),"is_default":false,"source":"channel",
+            "status":if failed {"failed"} else {"untested"},"check":check
+        }),world.clock.now()).await.unwrap();
+        drop(conn);
+        world.set(thread, keys::APPROVAL_MODE, json!("auto")).await;
+        world
+            .engine()
+            .submit_input(&Caller::session(world.ada), thread, queued("Work"))
+            .await
+            .unwrap();
+        world.wait_blocked(thread, "binding_invalid").await;
+        let actual: String = world
+            .scalar(
+                "SELECT blocked_detail FROM threads WHERE node_id=$1",
+                thread,
+            )
+            .await;
+        assert_eq!(actual, detail);
+        assert_eq!(world.ran(CommandKind::SessionOpen), 0);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

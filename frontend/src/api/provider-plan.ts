@@ -1,7 +1,7 @@
 /** Provider and thread ledger reads, native reset consumption and declared sign-in requests. */
 import { queryOptions } from '@tanstack/react-query';
 import { api, ok } from '@/api/client';
-import type { CapStatus, LoginState, Provider, ProviderResetConsumeBody, ProviderResetConsumeResponse } from '@/generated/api-types';
+import type { CapStatus, LoginState, ProviderRefreshReply, ProviderTrial, ProviderResetConsumeBody, ProviderResetConsumeResponse } from '@/generated/api-types';
 import type { PlanAnalytics } from '@/features/resources/providers/plan';
 import { ledgerPeriods } from '@/features/resources/providers/plan';
 
@@ -51,7 +51,12 @@ export async function consumeReset(id: string, body: ProviderResetConsumeBody): 
   return ok(Promise.resolve(answer));
 }
 
-export function retryProvider(id: string): Promise<Provider> {
+export function retryProvider(id: string): Promise<ProviderRefreshReply> {
   return ok(api.POST('/providers/{id}/refresh', { params: { path: { id } }, body: { retry: true } }));
 }
+
+/** An ordinary factual read; opening it never refreshes credentials or reserves another input. */
+export const providerTrialQuery = (id: string) => queryOptions({ queryKey: ['provider-trial', id] as const, retry: false,
+  queryFn: ({ signal }): Promise<ProviderTrial | null> => ok(api.GET('/providers/{id}/credential-trial', { params: { path: { id } }, signal })),
+});
 

@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use orch_link_contract::commands::{NodeToolCheck, NodeToolCheckResult, ToolInterface};
 use serde_json::Value as Json;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{ToolCache, ToolError};
@@ -104,6 +103,13 @@ const PROXIES: [&str; 6] = [
 const OUT: &str = "{out}";
 /// How much of a program's standard output is read: help text is a few kilobytes.
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+/// The file in the scratch home that takes a program's standard output. A file and not a pipe: a program that ends
+/// before its writes to a pipe are flushed (a Node.js program does, Claude Code among them) loses what was still
+/// waiting, and its help would seem to lack every name after its first write.
+const PRINTED: &str = ".printed";
+/// How often the output file of a running program is measured: a program that prints without end is stopped soon
+/// after [`MAX_TEXT_BYTES`] rather than filling the disk until its deadline.
+const MEASURE_EVERY: Duration = Duration::from_millis(100);
 /// How much of the files a program writes is read: Codex's protocol bundle is about two megabytes.
 const MAX_SCHEMA_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -197,13 +203,18 @@ async fn run(
     } else {
         tokio::process::Command::new(program)
     };
+    let printed_path = home.join(PRINTED);
+    let printed = std::fs::File::create(&printed_path).map_err(|source| ToolError::Io {
+        what: "making the file the program's output goes to".to_owned(),
+        source,
+    })?;
     command
         .args(args)
         .current_dir(home)
         .env_clear()
         .env("HOME", home)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(printed))
         .stderr(Stdio::null())
         .kill_on_drop(true);
     if let Some(path) = std::env::var_os("PATH") {
@@ -216,44 +227,55 @@ async fn run(
         what: format!("starting {}", program.display()),
         source,
     })?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ToolError::Shape("the program's output could not be read".to_owned()))?;
     let limit = Duration::from_secs(u64::from(request.timeout_secs.max(1)));
-    let work = async {
-        let mut printed = Vec::new();
-        (&mut stdout)
-            .take(MAX_TEXT_BYTES + 1)
-            .read_to_end(&mut printed)
-            .await
-            .map_err(|source| ToolError::Io {
-                what: "reading the program's output".to_owned(),
-                source,
-            })?;
-        let status = child.wait().await.map_err(|source| ToolError::Io {
-            what: "waiting for the program".to_owned(),
-            source,
-        })?;
-        Ok::<_, ToolError>((status, printed))
+    let too_much = || {
+        ToolError::Shape(format!(
+            "the program printed more than {MAX_TEXT_BYTES} bytes"
+        ))
     };
-    let (status, printed) = tokio::select! {
+    let work = async {
+        let mut measure = tokio::time::interval(MEASURE_EVERY);
+        loop {
+            tokio::select! {
+                status = child.wait() => {
+                    return status.map_err(|source| ToolError::Io {
+                        what: "waiting for the program".to_owned(),
+                        source,
+                    });
+                }
+                _ = measure.tick() => {
+                    if printed_len(&printed_path) > MAX_TEXT_BYTES {
+                        return Err(too_much());
+                    }
+                }
+            }
+        }
+    };
+    let status = tokio::select! {
         () = cancel.cancelled() => return Err(ToolError::Cancelled),
         answer = tokio::time::timeout(limit, work) => answer.map_err(|_| {
             ToolError::Shape(format!("the program did not finish within {} s", limit.as_secs()))
         })??,
     };
-    if u64::try_from(printed.len()).unwrap_or(u64::MAX) > MAX_TEXT_BYTES {
-        return Err(ToolError::Shape(format!(
-            "the program printed more than {MAX_TEXT_BYTES} bytes"
-        )));
+    if printed_len(&printed_path) > MAX_TEXT_BYTES {
+        return Err(too_much());
     }
     if !status.success() {
         return Err(ToolError::Shape(format!(
             "the program ended with {status} when asked for its interface"
         )));
     }
-    Ok(printed)
+    tokio::fs::read(&printed_path)
+        .await
+        .map_err(|source| ToolError::Io {
+            what: "reading the program's output".to_owned(),
+            source,
+        })
+}
+
+/// How long the output file is now; nothing yet when it cannot be measured.
+fn printed_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
 /// Whether this host lets a process have a network of its own, tried once: `unshare` is there and user namespaces
@@ -478,6 +500,44 @@ printf '{"title":"Params","properties":{"member":{}}}' > "$1/params.json""#,
             "{stopped:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_whole_help_of_a_program_that_exits_before_its_piped_output_is_written_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Like Claude Code, a Node.js program: it ends before its writes to a pipe are flushed, so through a pipe only
+        // the first 8,192 bytes of its help arrive, and into a file all of it does.
+        let program = script(
+            dir.path(),
+            r#"help() {
+  i=0
+  while [ "$i" -lt 300 ]; do
+    echo "  --padding-$i  an option that makes the help longer than one write to a pipe"
+    i=$((i + 1))
+  done
+  echo "  --late-flag  the option after the first 8,192 bytes"
+}
+if [ -p /dev/stdout ]; then help | head -c 8192; else help; fi"#,
+        );
+        let printed = run(
+            &program,
+            &asking(&["--help"], 10),
+            &home,
+            &home,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(printed).unwrap();
+        assert!(stands_in(&text, "--padding-0"), "{text}");
+        assert!(
+            stands_in(&text, "--late-flag"),
+            "only {} bytes of the help were read",
+            text.len()
+        );
     }
 
     #[test]

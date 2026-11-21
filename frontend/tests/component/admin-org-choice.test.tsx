@@ -204,6 +204,9 @@ for (const clear of [false, true]) it(`keeps the real IDP role/secret draft and 
   await user.click(screen.getByRole('menuitem', { name: i18n.t('admin.idp.edit') }));
   const dialog = screen.getByRole('dialog', { name: i18n.t('admin.idp.editTitle', { name: provider.name }) });
   await waitFor(() => expect(field()).toHaveValue(current.name));
+  // The saved secret shows as dots that are set; a new one is typed after Replace and stays through the other choices of the form.
+  expect(within(dialog).getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
+  await user.click(within(dialog).getByRole('button', { name: i18n.t('settingsEditors.secret.replace') }));
   await user.type(within(dialog).getByLabelText(i18n.t('admin.idp.secret')), 'replacement-secret-draft');
   if (clear) await user.click(screen.getByRole('button', { name: i18n.t('resources.bulk.clear') }));
   else {

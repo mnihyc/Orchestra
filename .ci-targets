@@ -1,0 +1,11 @@
+fmt
+clippy
+test -p orch-node-core --lib -- tool_checks::
+test -p orch-api-core --test harness_checks
+test -p orch-api-core --test threads_settings
+test -p orch-engine --test approval_review
+test -p orch-api-core --test admin_catalogue
+test -p orch-node --test program -- a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure
+web typecheck
+web lint
+web test -- tests/component/composer-approval-mode.test.tsx tests/component/adapter-regions.test.tsx tests/component/scope-mode-choices.test.tsx tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts
