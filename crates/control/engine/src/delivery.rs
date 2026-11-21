@@ -143,6 +143,15 @@ pub static NO_PLACEMENT: Placement = Placement {
 };
 
 impl Placement {
+    /// A verified unit input has its captured size and, for file delivery, a name inside scratch.
+    pub(crate) fn unit_image(&mut self, part: usize, size: i64, path: Option<String>) {
+        let slot = Slot::Image(part);
+        self.sizes.insert(slot, size);
+        if let Some(path) = path {
+            self.written.insert(slot, path);
+        }
+    }
+
     /// Where a file was written, from the thread's directory.
     #[must_use]
     pub fn path_of(&self, slot: Slot) -> Option<&str> {
@@ -567,6 +576,7 @@ impl Engine {
             machine,
             SerialKey::Environment(delivering.environment.id),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: delivering.environment.id,
                 job_id: None,
@@ -756,6 +766,7 @@ impl Phased for Delivery {
             self.machine,
             SerialKey::Environment(self.environment),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: self.environment,
                 job_id: Some(job.id()),

@@ -27,7 +27,10 @@ import type {
   FetchState,
   FileListSource,
   FileMatch,
+  FileRenameResult,
+  FileSearchNames,
   FileStat,
+  FileTransferReply,
   GitStatus,
   Job,
 } from '@/generated/api-types';
@@ -83,12 +86,12 @@ export function keepEnvironmentAwake(id: string, _door?: Door): Promise<Environm
 // ---------------------------------------------------------------- looking
 
 /** What lies directly in a directory: live when the environment is online, else from the last list of its tree. */
-export function listDirectory(door: Door, path: string, options: { source?: FileListSource; cursor?: string | null; limit?: number; signal?: AbortSignal } = {}): Promise<DirListing> {
+export function listDirectory(door: Door, path: string, options: { source?: FileListSource; cursor?: string | null; limit?: number; prefix?: string; signal?: AbortSignal } = {}): Promise<DirListing> {
   return ok(
     api.GET('/environments/{id}/files', {
       params: {
         path: pathOf(door),
-        query: { path, ...through(door), ...(options.source === undefined ? {} : { source: options.source }),
+        query: { path, ...through(door), ...(options.prefix === undefined ? {} : { prefix: options.prefix }), ...(options.source === undefined ? {} : { source: options.source }),
           ...(options.cursor === undefined ? {} : { cursor: options.cursor }), ...(options.limit === undefined ? {} : { limit: options.limit }) },
       },
       ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -96,11 +99,16 @@ export function listDirectory(door: Door, path: string, options: { source?: File
   );
 }
 
+/** The exact native source transfer, without asking a machine or reading original bytes. */
+export function fileTransfer(door: Door, signal?: AbortSignal): Promise<FileTransferReply> {
+  return ok(api.GET('/environments/{id}/files/transfer', { params: { path: pathOf(door), query: through(door) }, ...(signal === undefined ? {} : { signal }) }));
+}
+
 /** What one path is: its kind, size, time, media type and, where it is known, its hash. */
-export function statFile(door: Door, path: string, signal?: AbortSignal): Promise<FileStat> {
+export function statFile(door: Door, path: string, signal?: AbortSignal, mount?: string): Promise<FileStat> {
   return ok(
     api.GET('/environments/{id}/files/stat', {
-      params: { path: pathOf(door), query: { path, ...through(door) } },
+      params: { path: pathOf(door), query: { path, ...through(door), ...(mount === undefined ? {} : { mount }) } },
       ...(signal === undefined ? {} : { signal }),
     }),
   );
@@ -110,10 +118,10 @@ export function statFile(door: Door, path: string, signal?: AbortSignal): Promis
 export const FETCH_WAIT_SECS = 25;
 
 /** Asks that the exact version of a file be in the store, and says whether it is, with the hash that names it. */
-export function fetchFile(door: Door, path: string, signal?: AbortSignal): Promise<FetchState> {
+export function fetchFile(door: Door, path: string, signal?: AbortSignal, mount?: string): Promise<FetchState> {
   return ok(
     api.POST('/environments/{id}/files/fetch', {
-      params: { path: pathOf(door), query: { ...through(door), wait: FETCH_WAIT_SECS } },
+      params: { path: pathOf(door), query: { ...through(door), wait: FETCH_WAIT_SECS, ...(mount === undefined ? {} : { mount }) } },
       body: { path },
       ...(signal === undefined ? {} : { signal }),
     }),
@@ -128,9 +136,9 @@ export interface FileBytes {
 }
 
 /** The bytes of a version of a file, all of them or the first `limit`. */
-export async function readFileBytes(door: Door, path: string, hash: string, limit?: number, signal?: AbortSignal): Promise<FileBytes> {
+export async function readFileBytes(door: Door, path: string, hash: string, limit?: number, signal?: AbortSignal, mount?: string): Promise<FileBytes> {
   const result = await api.GET('/environments/{id}/files/content', {
-    params: { path: pathOf(door), query: { path, hash, ...through(door) } },
+    params: { path: pathOf(door), query: { path, hash, ...through(door), ...(mount === undefined ? {} : { mount }) } },
     ...(limit === undefined ? {} : { headers: { Range: `bytes=0-${limit - 1}` } }),
     parseAs: 'arrayBuffer',
     ...(signal === undefined ? {} : { signal }),
@@ -163,7 +171,7 @@ export function writeFile(door: Door, path: string, content: string | Uint8Array
 export interface UploadWriteAttempt { id: string; sent?: boolean; terminal?: boolean }
 
 /** A completed upload is a durable native job; an HTTP abort never substitutes for its stopped result. */
-export async function writeUploadedFile(door: Door, path: string, blob: string, expectedHash: string | null, signal: AbortSignal, uploadBatch?: string, report?: (work: UploadWork) => void, attempt: UploadWriteAttempt = { id: crypto.randomUUID() }): Promise<FileStat> {
+export async function writeUploadedFile(door: Door, path: string, blob: string, expectedHash: string | null, signal: AbortSignal, uploadBatch?: string, report?: (work: UploadWork) => void, attempt: UploadWriteAttempt = { id: crypto.randomUUID() }, relay?: string): Promise<FileStat> {
   signal.throwIfAborted();
   const reader = client.session.getState().readerVersion;
   const current = () => { if (client.session.getState().readerVersion !== reader) throw new DOMException('Upload reader changed', 'AbortError'); };
@@ -172,7 +180,7 @@ export async function writeUploadedFile(door: Door, path: string, blob: string, 
   // Creation must settle even when Cancel arrives before its reply; the durable identity is already known.
   const creation = ok(api.POST('/environments/{id}/files/uploads/{upload_id}/write', {
     params: { path: { ...pathOf(door), upload_id: attempt.id }, query: through(door) },
-    body: { path, blob, upload_batch: uploadBatch ?? attempt.id, ...(expectedHash === null ? {} : { expected_hash: expectedHash }) },
+    body: { path, blob, ...(relay === undefined ? {} : { relay }), upload_batch: uploadBatch ?? attempt.id, ...(expectedHash === null ? {} : { expected_hash: expectedHash }) },
     ...repeatable(attempt.id),
   }));
   let admissionRefused = false;
@@ -250,19 +258,12 @@ export async function finishWorkspaceUpload(door: Door, id: string, body: Enviro
   await ok(api.POST('/environments/{id}/files/uploads/{upload_id}/finish', { params: { path: { ...pathOf(door), upload_id: id }, query: through(door) }, body, ...repeatable(id) }));
 }
 
-/** The file as it stands, which a refused write carries so that the writer is shown the newer version. */
-export function currentOf(error: unknown): FileStat | null {
-  if (!(error instanceof ApiError) || !error.is('conflict.stale_revision')) return null;
-  const current: unknown = (error.problem as unknown as Record<string, unknown>).current;
-  return typeof current === 'object' && current !== null ? (current as FileStat) : null;
-}
-
 export async function makeDirectory(door: Door, path: string, key: string): Promise<void> {
   await accepted(api.POST('/environments/{id}/files/mkdir', { params: { path: pathOf(door), query: through(door) }, body: { path }, ...repeatable(key) }));
 }
 
 /** Moves a file or a directory; it is also how one is renamed. */
-export function renameFile(door: Door, from: string, to: string): Promise<FileStat> {
+export function renameFile(door: Door, from: string, to: string): Promise<FileRenameResult> {
   return ok(api.POST('/environments/{id}/files/rename', { params: { path: pathOf(door), query: through(door) }, body: { from, to } }));
 }
 
@@ -278,21 +279,17 @@ export function deleteFile(door: Door, path: string, recursive: boolean): Promis
 
 // ---------------------------------------------------------------- searching
 
-/** How many names the search by name lists at most: what the API holds to. */
-export const NAME_SEARCH_MAX = 200;
-/** How many lines the search inside files asks for: the API's own default. */
-export const CONTENT_SEARCH_LIMIT = 200;
+export type NameMatches = FileSearchNames;
 
-export function searchNames(door: Door, text: string, signal?: AbortSignal) {
-  return ok(
-    api.GET('/environments/{id}/files/search', {
-      params: { path: pathOf(door), query: { q: text, in: 'names', ...through(door) } },
-      ...(signal === undefined ? {} : { signal }),
-    }),
-  ) as Promise<DirListing['entries']>;
+export function searchNames(door: Door, text: string, signal?: AbortSignal, cursor?: string): Promise<NameMatches> {
+  return ok(api.GET('/environments/{id}/files/search', {
+    params: { path: pathOf(door), query: { q: text, in: 'names', ...through(door), ...(cursor === undefined ? {} : { cursor }) } },
+    ...(signal === undefined ? {} : { signal }),
+  })) as Promise<NameMatches>;
 }
 
 export interface ContentSearchOptions {
+  cursor?: string;
   /** A directory to stay in; the thread's own unless given. */
   under?: string;
   /** Which file names. */
@@ -302,6 +299,8 @@ export interface ContentSearchOptions {
 }
 
 export interface ContentMatches {
+  next_cursor?: string | null;
+  observed_from?: string | null;
   matches: FileMatch[];
   truncated: boolean;
   searched: number;
@@ -316,7 +315,7 @@ export function searchContent(door: Door, text: string, options: ContentSearchOp
         query: {
           q: text,
           in: 'content',
-          limit: CONTENT_SEARCH_LIMIT,
+          ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
           ...through(door),
           ...(options.under === undefined ? {} : { path: options.under }),
           ...(options.glob === undefined || options.glob === '' ? {} : { glob: options.glob }),
@@ -332,17 +331,14 @@ export function searchContent(door: Door, text: string, options: ContentSearchOp
 // ---------------------------------------------------------------- archives
 
 /** What an archive holds, read where the file lies and without unpacking it. */
-export const archiveQuery = (door: Door, path: string, inside: string) =>
-  queryOptions<ArchiveListing>({
-    queryKey: workspaceKeys.archive(door, path, inside),
-    queryFn: ({ signal }): Promise<ArchiveListing> =>
-      ok(
-        api.GET('/environments/{id}/files/archive', {
-          params: { path: pathOf(door), query: { path, ...(inside === '' ? {} : { inside }), ...through(door) } },
-          signal,
-        }),
-      ),
-  });
+export interface ArchivePageOptions { cursor?: string; q?: string; limit?: number }
+
+export function archivePage(door: Door, path: string, inside: string, options: ArchivePageOptions = {}, signal?: AbortSignal): Promise<ArchiveListing> {
+  return ok(api.GET('/environments/{id}/files/archive', {
+    params: { path: pathOf(door), query: { path, ...(inside === '' ? {} : { inside }), ...through(door), ...options } },
+    ...(signal === undefined ? {} : { signal }),
+  }));
+}
 
 /** One entry of an archive, for looking at it: at most the preview limit. */
 export async function readArchiveEntry(door: Door, path: string, entry: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -382,15 +378,15 @@ export const gitStatusQuery = (door: Door) =>
   });
 
 /** The unified difference of the repository at the root of the workspace (what is staged, or what is not), and whether it was cut at its limit. */
-export async function gitDiff(door: Door, staged: boolean, signal?: AbortSignal): Promise<{ text: string; truncated: boolean }> {
+export async function gitDiff(door: Door, staged: boolean, signal?: AbortSignal, cursor?: string): Promise<{ text: string; truncated: boolean; next_cursor?: string | null }> {
   const answer = await bodyOf(
     api.GET('/environments/{id}/git/diff', {
-      params: { path: pathOf(door), query: { ...through(door), ...(staged ? { staged: true } : {}) } },
+      params: { path: pathOf(door), query: { ...through(door), ...(staged ? { staged: true } : {}), ...(cursor === undefined ? {} : { cursor }) } },
       parseAs: 'text',
       ...(signal === undefined ? {} : { signal }),
     }),
   );
-  return { text: answer.data as string, truncated: answer.response.headers.get('X-Truncated') === '1' };
+  return { text: answer.data as string, truncated: answer.response.headers.get('X-Truncated') === '1', next_cursor: answer.response.headers.get('X-Next-Cursor') };
 }
 
 /** What the difference of the whole repository says of one file: its sections, in the order Git wrote them (a renamed file is in the section of its old and of its new name). */

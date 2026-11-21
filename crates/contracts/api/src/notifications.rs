@@ -523,9 +523,74 @@ pub struct NotificationRouteFailure {
     pub affected_devices: Vec<String>,
 }
 
+/// A recorded own notice evaluation; absence of the whole fact means unreported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeDecisionState {
+    /// An actual own Inbox record proves eligibility at this decision.
+    Eligible,
+    /// A captured native predicate deliberately withheld this notice.
+    Suppressed,
+    /// The operation recorded that it did not evaluate this own notice.
+    NotEvaluated,
+}
+/// Native causes captured where notification work was deliberately suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeSuppressionReason {
+    /// The turn was interrupted.
+    Interrupted,
+    /// Its failure preceded a started turn.
+    DidNotStart,
+    /// Automatic recovery owns this failure.
+    AutomaticRecovery,
+    /// The eligible input author already had the thread open.
+    AlreadyWatching,
+    /// The captured scope policy withheld subagent notices.
+    SubagentNoticesOff,
+}
+/// Only the current reader's decision, never another person's destination or presence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NoticeDecision {
+    /// The reader explicitly requested a matching notice that was withheld at decision time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requested_but_suppressed: bool,
+    /// Actual captured evaluation.
+    pub outcome: NoticeDecisionState,
+    /// Only a captured native cause.
+    pub reason: Option<NoticeSuppressionReason>,
+    /// Time of the actual decision, never a later preference edit.
+    pub evaluated_at: Time,
+}
+
+/// What durable facts establish about channel acceptance, never device display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelAcceptanceState {
+    Pending,
+    Accepted,
+    Unknown,
+}
+/// One actual route attempt or queued delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PendingDelivery {
+    /// Counted attempts including the current reservation.
+    pub attempts: i64,
+    /// Stored attempt start; absent when not captured.
+    pub last_attempt_at: Option<Time>,
+    /// Actual current eligibility, not a promise of dispatch.
+    pub next_eligible_at: Option<Time>,
+    /// Only durable acknowledgment can establish acceptance.
+    pub acceptance: ChannelAcceptanceState,
+    /// A classified safe problem; no raw notifier error bytes.
+    pub safe_problem: Option<String>,
+}
 /// How one person is told through one channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NotificationRoute {
+    /// Own captured delivery facts; absence is unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery: Option<PendingDelivery>,
     /// The route's identifier; `null` only for a route that was never made, which is off.
     pub id: Option<Id>,
     /// The channel; `null` once the channel was removed.
@@ -747,6 +812,32 @@ pub struct NotificationSummaryGetReply {
     pub seq: Seq,
     /// The caller's pause and their ways out, in the scope asked for.
     pub outside: OutsideStatus,
+}
+
+/// The caller's Inbox boundary, separate from page contents and server delivery logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NotificationRetention {
+    /// Effective current Inbox policy in days.
+    pub days: i64,
+    /// Public setting provenance, with no private loader data.
+    pub source: crate::settings::SettingSource,
+    /// Current expiry eligibility; not proof a purge has occurred.
+    pub expires_before: Time,
+    /// Null is a measured empty Inbox, not an unreported boundary.
+    pub actual_oldest_retained: Option<Time>,
+    /// When the policy and boundary were read.
+    pub measured_at: Time,
+}
+/// An Inbox page with independently measured own history facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NotificationPage {
+    /// The requested page only.
+    pub items: Vec<Notification>,
+    /// Its ordinary cursor.
+    pub next_cursor: Option<String>,
+    /// Absent on a result that did not capture boundary facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<NotificationRetention>,
 }
 
 /// Marks notifications read, in exactly one of three forms: what is listed, a node's, a chat's
@@ -1173,7 +1264,7 @@ crate::endpoints! {
             Target::PermissionObject,
         );
     /// Lists the caller's Inbox, newest first.
-    NotificationList: GET "/notifications", User, query NotificationListQuery, none, json Page<Notification>, 200,
+    NotificationList: GET "/notifications", User, query NotificationListQuery, none, json NotificationPage, 200,
         operation Op::single(Read, &[Identity(I::Notification)], Target::CurrentAccount);
     /// Counts what waits for the caller, for the badge, with their pause and their ways out in a scope.
     NotificationSummaryGet: GET "/notifications/summary", User, query NotificationSummaryGetQuery, none, json NotificationSummaryGetReply, 200,

@@ -2,9 +2,8 @@
  *
  * The nodes of each root org's tree that the reader may view, as the live feed keeps them: orgs
  * inside the org, projects, topics and threads, each a row with the sequence at which it last
- * changed. A row is replaced only by a newer one. Nothing is removed here on the page's own
- * initiative: a node that was deleted, or that the reader may no longer see, arrives as a row that
- * says so, and is then left out of what is read.
+ * changed. Open branches own their pages. A closed branch keeps its own folded row and releases
+ * its descendants; native page replacements also remove moved or revoked rows.
  *
  * Components read through the hooks at the end. The writers are for the live connection alone.
  */
@@ -12,9 +11,30 @@ import { create } from 'zustand';
 import { useStoreWithEqualityFn } from 'zustand/traditional';
 
 import { currentThreadDisplay } from '@/lib/threadDisplay';
-import type { HiddenItem, TreeNode, ThreadDisplay } from '@/generated/api-types';
+import type { HiddenItem, TreeNode, ThreadDisplay, HierarchyOrdering } from '@/generated/api-types';
+
+export interface TreeBranch {
+  ordering?:readonly HierarchyOrdering[];
+  orderStamp?:string;
+  rows: ReadonlySet<string>;
+  hidden: ReadonlySet<string>;
+  cursor: string | null;
+  ancestors?: ReadonlySet<string>;
+  pending?: boolean;
+  error?: unknown;
+}
 
 export interface OrgTree {
+  ordering?:HierarchyOrdering;
+  orderVersion?:object;
+  /** Default-open folders belong to the initial small-tree cut, never to later creations. */
+  initialOpen?:ReadonlySet<string>|null;
+  openingSeq?:number;
+  /** Identity of the current native opening, independent of names, read counts or equal tree sequences. */
+  opening?:object;
+  /** Only the pages retained by open branches; absent in the saved shell shape. */
+  branches?: ReadonlyMap<string, TreeBranch>;
+
   /** Every row the feed delivered, deleted ones included, by id. */
   nodes: ReadonlyMap<string, TreeNode>;
   /**
@@ -25,7 +45,7 @@ export interface OrgTree {
   hidden?: ReadonlyMap<string, HiddenItem>;
   /** The tree sequence the rows are as of. */
   lastSeq: number;
-  /** Whether the tree was loaded whole at least once. */
+  /** Whether the first visible level was loaded at least once. */
   loaded: boolean;
   /** What the last attempt to load it failed with, while nothing newer has succeeded. */
   error: unknown;
@@ -50,8 +70,115 @@ function update(orgId: string, change: (tree: OrgTree) => OrgTree): void {
   });
 }
 
+/** Context can own a row without replacing a newer direct projection of that same row. */
+function mergeNode(current:TreeNode|undefined,incoming:TreeNode,contextBehindDirect=false):TreeNode {
+  if(current!==undefined&&(incoming.tree_seq<current.tree_seq||contextBehindDirect&&incoming.tree_seq===current.tree_seq))return current;
+  const display=currentThreadDisplay(incoming.thread?.display,current?.thread?.display);
+  const folded=incoming.folded??current?.folded;
+  const retained=folded===undefined?incoming:{...incoming,folded};
+  return incoming.thread===null||display===undefined?retained:{...retained,thread:{...incoming.thread,display}};
+}
+
 /** The writers. Only the live connection calls them. */
 export const treeWriter = {
+  /** Replace one open level. Descendants belong to their own explicit branch readers. */
+  branch(orgId: string, parent: string, rows: readonly TreeNode[], seq: number, minimal: readonly HiddenItem[] = [], ancestors: readonly TreeNode[] = [], cursor: string | null = null,ordering:readonly HierarchyOrdering[]=[]): void {
+    update(orgId, (tree) => {
+      const branches = new Map(tree.branches);
+      const old = branches.get(parent);
+      const orderStamp=JSON.stringify(ordering),sameOrder=old?.orderStamp===orderStamp&&[...old.rows].join(',')===rows.map((row)=>row.id).join(',');
+      branches.set(parent, { ordering,orderStamp,rows: new Set(rows.map((row) => row.id)), hidden: new Set(minimal.map((row) => row.id)), ancestors: new Set(ancestors.map((row)=>row.id)), cursor });
+      const nodes = new Map(tree.nodes), hidden = new Map(tree.hidden);
+      const direct=new Set(rows.map((row)=>row.id));
+      for (const row of [...ancestors, ...rows]) {
+        const ownedDirectly=!direct.has(row.id)&&[...branches].some(([source,branch])=>source!=='path'&&branch.rows.has(row.id));
+        nodes.set(row.id,mergeNode(nodes.get(row.id),row,ownedDirectly));hidden.delete(row.id);
+      }
+      for (const row of minimal) {
+        if((nodes.get(row.id)?.tree_seq??0)>seq)continue;
+        hidden.set(row.id,row);nodes.delete(row.id);
+      }
+      const retained = new Set([...branches.values()].flatMap((branch) => [...branch.rows, ...branch.hidden, ...branch.ancestors ?? []]));
+      for (const id of old?.rows ?? []) if (!retained.has(id)) {
+        nodes.delete(id);
+        branches.delete(id);
+      }
+      for (const id of old?.hidden ?? []) if (!retained.has(id)) hidden.delete(id);
+      for (const id of nodes.keys()) if (!retained.has(id)) nodes.delete(id);
+      for (const id of hidden.keys()) if (!retained.has(id)) hidden.delete(id);
+      // A retained child must still have its parent on a retained path. A moved branch loses its old descendants.
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const [id,row] of nodes) if (id !== orgId && row.parent_id !== null && !nodes.has(row.parent_id) && !hidden.has(row.parent_id)) {
+          nodes.delete(id); branches.delete(id); changed = true;
+        }
+      }
+      const openingSeq=tree.openingSeq??seq;
+      let initialOpen=tree.initialOpen;
+      if(initialOpen===undefined && parent===orgId) {
+        const folded = nodes.get(orgId)?.folded;
+        initialOpen=folded?.small_tree===true?new Set<string>():null;
+      }
+      if(initialOpen!==undefined && initialOpen!==null) {
+        const defaults=new Set(initialOpen);
+        for(const row of nodes.values())if(row.tree_seq<=openingSeq && (row.kind==='org'||row.kind==='project'))defaults.add(row.id);
+        initialOpen=defaults;
+      }
+      const currentOrder=parent===orgId?ordering[0]:tree.ordering??ordering[0];
+      return { ...tree, branches, nodes, hidden,ordering:currentOrder,orderVersion:sameOrder?tree.orderVersion:{},opening:tree.opening??{},openingSeq,...(initialOpen===undefined?{}:{initialOpen}), lastSeq: Math.max(tree.lastSeq,seq), loaded: true, error: null };
+    });
+  },
+
+  /** Pending and failed parts keep their own line, while previously read rows remain visible. */
+  branchState(orgId:string,parent:string,pending:boolean,error:unknown):void {
+    update(orgId,(tree)=>{
+      const branches=new Map(tree.branches),held=branches.get(parent) ?? {rows:new Set<string>(),hidden:new Set<string>(),cursor:null};
+      branches.set(parent,{...held,pending,error});
+      return {...tree,branches,...(parent===orgId?{error}: {})};
+    });
+  },
+
+  /** A search page owns no collapsed descendants and can be released independently. */
+  forgetBranch(orgId:string,parent:string):void {
+    update(orgId,(tree)=>{
+      const branches=new Map(tree.branches);branches.delete(parent);
+      const ids=new Set([...branches.values()].flatMap((branch)=>[...branch.rows,...branch.hidden,...branch.ancestors ?? []]));ids.add(orgId);
+      return {...tree,branches,nodes:new Map([...tree.nodes].filter(([id])=>ids.has(id))),hidden:new Map([...tree.hidden ?? []].filter(([id])=>ids.has(id)))};
+    });
+  },
+
+  /** An address contributes only its own ancestry, never every sibling along the way. */
+  reveal(orgId: string, rows: readonly TreeNode[], seq: number): void {
+    update(orgId, (tree) => {
+      const branches=new Map(tree.branches);branches.set('path',{rows:new Set(rows.map((row)=>row.id)),hidden:new Set(),cursor:null});
+      const retained=new Set([...branches.values()].flatMap((branch)=>[...branch.rows,...branch.ancestors ?? []]));retained.add(orgId);
+      const nodes=new Map(tree.nodes);
+      for(const row of rows)nodes.set(row.id,mergeNode(nodes.get(row.id),row));
+      for(const id of nodes.keys())if(!retained.has(id))nodes.delete(id);
+      return {...tree,branches,nodes,lastSeq:Math.max(tree.lastSeq,seq)};
+    });
+  },
+
+  /** Closing a branch drops every child page and descendant row immediately. */
+  releaseBranch(orgId: string, parent: string): void {
+    update(orgId, (tree) => {
+      const remove = new Set<string>();
+      for (const id of [...tree.nodes.keys(), ...tree.hidden?.keys() ?? []]) {
+        let at: string | null | undefined = id;
+        const seen = new Set<string>();
+        while (at !== null && at !== undefined && !seen.has(at)) {
+          if (at === parent) { if (id !== parent) remove.add(id); break; }
+          seen.add(at); at = tree.nodes.get(at)?.parent_id ?? tree.hidden?.get(at)?.parent_id;
+        }
+      }
+      const nodes = new Map([...tree.nodes].filter(([id]) => !remove.has(id)));
+      const hidden = new Map([...tree.hidden ?? []].filter(([id]) => !remove.has(id)));
+      const branches = new Map([...tree.branches ?? []].filter(([id]) => id !== parent && !remove.has(id)));
+      return { ...tree, nodes, hidden, branches };
+    });
+  },
+
   /** Applies a personal icon update only to a thread this live tree already authorizes. */
   display(threadId: string, display: ThreadDisplay): void {
     for (const [orgId, tree] of useTreeStore.getState().byOrg) {
@@ -165,6 +292,14 @@ export function pathTo(tree: OrgTree, nodeId: string): TreeNode[] {
     at = at.parent_id === null ? undefined : tree.nodes.get(at.parent_id);
   }
   return path;
+}
+
+/** A reader of the owning org stays put when a node in its tree changes. */
+export function useNodeOrg(nodeId: string | null | undefined): string | null {
+  return useTreeStore(({ byOrg }) => {
+    if (nodeId !== null && nodeId !== undefined) for (const [orgId, tree] of byOrg) if (tree.nodes.has(nodeId)) return orgId;
+    return null;
+  });
 }
 
 /** The path to a node, and the root org whose tree holds it. */

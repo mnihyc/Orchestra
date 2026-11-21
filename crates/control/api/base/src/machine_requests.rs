@@ -209,8 +209,8 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
     // Filing its permission page changes authority. Take the exclusive epoch first, then pin
     // the machine and its current owner for the entire ordinary import transaction.
     transaction_guard::lock_authority(&mut tx).await?;
-    // SHARE blocks an owner/revocation change but permits the command row's foreign-key KEY SHARE.
-    let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+    // The key pin and machine source guard order owner/revocation changes while allowing observations.
+    let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
         .bind(machine)
         .fetch_optional(&mut *tx)
         .await
@@ -284,6 +284,7 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
         &principal,
         environment.id,
         EnvironmentMcpImportCreateBody {
+            origin: Some(orch_engine::environment_mcp::discovery_origin(environment.id, &serde_json::json!({"profile":request.profile,"source":request.source,"scope":request.scope,"directory":request.directory,"name":request.name}))),
             source: request.source,
             scope: request.scope,
             name: request.name,
