@@ -25,7 +25,7 @@ import { deferred } from './deferred';
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), updateInput: calls.update, cancelInput: calls.remove, resumeQueue: calls.resume }));
 const queueHelp = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => queueHelp }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => queueHelp }));
 const THREAD = 'queue-thread';
 const READ = defaultThreadRead(THREAD);
 const ADA = userRef(me(1, 'ada', 'Ada Lovelace'));
@@ -88,6 +88,55 @@ function draw(inputs: ThreadInput[], more: Partial<Thread> = {}, readOnly = fals
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); client.session.setState({ userId: null }); useComposerStore.setState({ cannotSteer: {} }); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 
 describe('the waiting-input queue', () => {
+  for (const locale of ['en', 'zh-CN'] as const) {
+    it(`uses the checked queued author beyond loaded rows and drops that observation when invalidated (${locale})`, async () => {
+      await setLocale(locale);
+      const eligibility: NonNullable<NonNullable<Thread['queue']>['eligibility']> = {
+        state: 'selected', input_ref: 'an-unloaded-input', safe_author: GRACE, safe_authority: ADA,
+        blocking_reason: 'quota_exceeded', evaluated_at: '2026-11-15T07:00:00Z', queue_revision: 1,
+      };
+      const view = draw([input('held-first', 'The loaded first row is held', '1', { state_detail: 'cap_reached' })], {
+        queue: { held: false, by: null, at: null, held_inputs: 0, revision: 1, eligibility },
+      });
+      const facts = view.container.querySelector<HTMLElement>('[data-queue-eligibility]');
+      if (facts === null) throw new Error('The queue owns its checked eligibility opening');
+      expect(facts).toHaveTextContent(locale === 'en' ? 'Eligible next:' : '当前下一位可运行者：');
+      expect(facts).toHaveTextContent(GRACE.display_name);
+      act(() => { threadWriter.patch(THREAD, (row) => ({ ...row, queue: { ...row.queue, revision: 2, eligibility: { state: 'unreported' } } })); });
+      expect(facts).not.toHaveTextContent(GRACE.display_name);
+      await userEvent.click(within(facts).getByRole('button', { name: i18n.t('common.details') }));
+      expect(await screen.findByRole('dialog', { name: i18n.t('common.details') })).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+      expect(calls.update).not.toHaveBeenCalled();
+    });
+  }
+  for (const locale of ['en', 'zh-CN'] as const) {
+    it(`keeps the recorded steering fallback distinct from a later delivery edit (${locale})`, async () => {
+      await setLocale(locale);
+      const receipt: NonNullable<ThreadInput['delivery_resolution']> = {
+        requested: 'steer', applied: 'queue', reason: 'steer_unavailable',
+        source: { kind: 'setting', value: 'next_turn', scope: 'default' }, resolved_at: '2026-11-15T05:00:00Z',
+      };
+      const original = input('fallback', 'Retain the original delivery decision', '1', { source: 'announcement', author: null, delivery_resolution: receipt });
+      draw([original], { state: 'running' });
+      expect(screen.getByText(locale === 'en' ? 'Queued · Steer unavailable' : '已排队 · 无法即时引导')).toBeVisible();
+      act(() => { threadWriter.apply(THREAD, { inputs: [{ ...original, delivery: 'interrupt', seq_updated: ++sequence }] }); });
+      await userEvent.click(within(row(1)).getByRole('button', { name: i18n.t('common.details') }));
+      const facts = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+      expect(facts).toHaveTextContent(locale === 'en' ? 'Requested' : '请求方式');
+      expect(facts).toHaveTextContent(i18n.t('composer.queue.delivery.steer'));
+      expect(facts).toHaveTextContent(i18n.t('composer.queue.delivery.queue'));
+      expect(facts).not.toHaveTextContent(i18n.t('composer.queue.delivery.interrupt'));
+      expect(within(facts).getByRole('link')).toHaveAttribute('href', expect.stringContaining('broadcast.fallback'));
+      expect(calls.update).not.toHaveBeenCalled();
+    });
+    it(`does not invent a steering failure for an old announcement without a resolution (${locale})`, async () => {
+      await setLocale(locale);
+      draw([input('unreported-fallback', 'Old retained announcement', '1', { source: 'announcement', author: null })]);
+      expect(screen.queryByText(locale === 'en' ? 'Queued · Steer unavailable' : '已排队 · 无法即时引导')).not.toBeInTheDocument();
+      await userEvent.click(within(row(1)).getByRole('button', { name: i18n.t('common.details') }));
+      expect(await screen.findByRole('dialog', { name: i18n.t('common.details') })).toHaveTextContent(i18n.t('factDisclosure.notReported'));
+    });
+  }
   for (const locale of ['en', 'zh-CN'] as const) {
     it.each(['editRow', 'moveRowUp', 'moveRowDown', 'removeRow'] as const)('explains a disabled %s while the queue change waits in '+locale, async (key) => {
       await setLocale(locale);
@@ -596,4 +645,26 @@ it.each(['en', 'zh-CN'] as const)('keeps the next native message visible while a
   expect(row(1)).toHaveAttribute('data-queued', next.id);
   expect(calls.update).not.toHaveBeenCalled();
   expect(calls.remove).not.toHaveBeenCalled();
+});
+
+for (const [locale, theme] of [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const) {
+  it.each(['cap_reached', 'owner_lacks_access', 'second_step_required', 'model_use_required'] as const)(`shows whose input waits and that eligible teammates pass until it resumes automatically for %s in ${locale}/${theme}`, async (detail) => {
+    await setLocale(locale); document.documentElement.setAttribute('data-theme', theme);
+    const native = snapshot().thread;
+    draw([input('held-author', 'Keep this authored input', '1', { author: GRACE, state_detail: detail, run_as: detail === 'cap_reached' ? ADA : null }), input('eligible', 'Another person can continue', '2')], { ...native, id: THREAD, owner: ADA });
+    const held = within(row(1));
+    expect(held.getByRole('button', { name: GRACE.display_name })).toBeVisible();
+    expect(held.getByText(locale === 'en' ? /other messages may pass.*resumes automatically/u : /其他消息可先行.*条件满足后自动继续/u)).toBeVisible();
+    if (detail === 'owner_lacks_access' || detail === 'cap_reached') expect(held.getByRole('button', { name: ADA.display_name })).toBeVisible();
+    expect(within(row(2)).getByText('Another person can continue')).toBeVisible();
+    expect(within(row(2)).queryByText(locale === 'en' ? /resumes automatically/u : /条件满足后自动继续/u)).toBeNull();
+    expect(calls.update).not.toHaveBeenCalled(); expect(calls.remove).not.toHaveBeenCalled(); expect(calls.resume).not.toHaveBeenCalled();
+  });
+}
+
+it.each(['en', 'zh-CN'] as const)('names the retained authority when an authorless input waits on its allowance in %s', async (locale) => {
+  await setLocale(locale);
+  draw([input('system-held', 'Automatic work waiting', '1', { author: null, source: 'system', state_detail: 'cap_reached' })], { ...snapshot().thread, id: THREAD, owner: ADA });
+  expect(within(row(1)).getByRole('button', { name: ADA.display_name })).toBeVisible();
+  expect(within(row(1)).getByText(locale === 'en' ? /other messages may pass.*resumes automatically/u : /其他消息可先行.*条件满足后自动继续/u)).toBeVisible();
 });

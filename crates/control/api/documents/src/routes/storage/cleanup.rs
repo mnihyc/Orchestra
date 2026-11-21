@@ -29,21 +29,86 @@ use orch_engine::jobs::cleanup::Work;
 use std::collections::HashMap;
 
 use crate::key_operations::native;
+use orch_api_contract::{
+    operation_sources::Declaration,
+    storage_sources::{self as declarations, Source},
+};
+use std::marker::PhantomData;
+
+pub(super) trait Mode: Send + Sync + 'static {
+    type Body: Clone + Send + 'static;
+    const PREVIEW: &'static Declaration<Source>;
+    const CREATE: &'static Declaration<Source>;
+    const DELETE_MOUNT: bool;
+    fn request(ctx: &Ctx, body: Self::Body) -> ApiResult<api::CleanupRequest>;
+    fn check(ctx: &Ctx, request: &api::CleanupRequest) -> ApiResult<()>;
+}
+pub(super) struct Storage;
+pub(super) struct Mount;
+impl Mode for Storage {
+    type Body = api::CleanupRequest;
+    const PREVIEW: &'static Declaration<Source> = &declarations::PREFLIGHT;
+    const CREATE: &'static Declaration<Source> = &declarations::CREATE;
+    const DELETE_MOUNT: bool = false;
+    fn request(_: &Ctx, body: Self::Body) -> ApiResult<api::CleanupRequest> {
+        Ok(body)
+    }
+    fn check(_: &Ctx, _: &api::CleanupRequest) -> ApiResult<()> {
+        Ok(())
+    }
+}
+impl Mode for Mount {
+    type Body = ();
+    const PREVIEW: &'static Declaration<Source> = &declarations::MOUNT_DELETE_PREFLIGHT;
+    const CREATE: &'static Declaration<Source> = &declarations::MOUNT_DELETE;
+    const DELETE_MOUNT: bool = true;
+    fn request(ctx: &Ctx, (): ()) -> ApiResult<api::CleanupRequest> {
+        Ok(api::CleanupRequest {
+            scope: "me".into(),
+            resource: Some(orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Mount,
+                id: ctx.id("id")?,
+            }),
+            items: Vec::new(),
+        })
+    }
+    fn check(ctx: &Ctx, request: &api::CleanupRequest) -> ApiResult<()> {
+        if request != &Self::request(ctx, ())? {
+            return Err(ApiError::not_found());
+        }
+        Ok(())
+    }
+}
 /// Binds one preview and one confirmation for every scoped cleanup.
 pub fn mount(registry: &mut Registry) {
     registry
-        .creation(api::StorageCleanupCreate, creation::replay_binding())
+        .creation(
+            api::StorageCleanupCreate,
+            creation::replay_binding::<Storage>(),
+        )
         .on_with_initial_operation(
             api::StorageCleanupPreflight,
-            native::effects::initial::<preview::Preview>,
-            native::effects::prepare::<preview::Preview>,
-            preview::run,
+            native::effects::initial::<preview::Preview<Storage>>,
+            native::effects::prepare::<preview::Preview<Storage>>,
+            preview::run::<Storage>,
         )
         .on_with_initial_operation(
             api::StorageCleanupCreate,
-            native::effects::initial::<creation::Create>,
-            native::effects::prepare::<creation::Create>,
-            creation::run,
+            native::effects::initial::<creation::Create<Storage>>,
+            native::effects::prepare::<creation::Create<Storage>>,
+            creation::run::<Storage>,
+        )
+        .on_with_initial_operation(
+            orch_api_contract::mounts::MountDeletePreflight,
+            native::effects::initial::<preview::Preview<Mount>>,
+            native::effects::prepare::<preview::Preview<Mount>>,
+            preview::run::<Mount>,
+        )
+        .on_with_initial_operation(
+            orch_api_contract::mounts::MountDelete,
+            native::effects::initial::<creation::Create<Mount>>,
+            native::effects::prepare::<creation::Create<Mount>>,
+            creation::run::<Mount>,
         );
 }
 
@@ -207,3 +272,6 @@ pub mod creation;
 
 #[path = "cleanup/preview.rs"]
 pub mod preview;
+
+#[path = "cleanup/mount_deletion.rs"]
+mod mount_deletion;

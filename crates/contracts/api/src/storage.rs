@@ -436,6 +436,9 @@ pub struct CleanupRequest {
 /// The shared destructive preview, stored in the existing expiring change-plan store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CleanupPlan {
+    /// Explicit mount uses that the caller cannot switch off. Concealed places contribute only to the count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_switch_off_blocked: Option<crate::resource_facts::DependentGroup>,
     /// The existing plan identifier.
     pub id: Id,
     /// When this observed plan must be read again.
@@ -450,6 +453,9 @@ pub struct CleanupPlan {
     pub other_people: i64,
     /// The resolved operation-notice default.
     pub notify: bool,
+    /// The same shared dependency facts, restricted to the consequences of this act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<crate::resource_facts::ResourceFacts>,
 }
 
 /// Accepted native choices without existing storage names, people or sizes.

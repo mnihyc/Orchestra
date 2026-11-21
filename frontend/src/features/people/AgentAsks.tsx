@@ -1,4 +1,5 @@
 /** The actual ordinary inputs returned by the guarded, rolled-back agent ask preview. */
+import { PathLink } from '@/shell/TrailLink';
 import { useTranslation } from 'react-i18next';
 import { ApiError } from '@/api/client';
 import { AccessRequest } from '@/features/access/AccessRequest';
@@ -35,5 +36,5 @@ export function AskedAgents({ asks }: { asks: ChatAskedAgent[] }) {
   const { t } = useTranslation();
   return <div className="flex flex-wrap gap-2 text-xs text-text-muted">{asks.map((ask) => ask.thread.redacted || ask.thread.name === null
     ? <span key={ask.input_id}>{t('people.askedThread', { thread:t('people.privateThread') })}</span>
-    : <a key={ask.input_id} href={placePath({ id:ask.thread.id, kind:'thread' })} className="text-accent-text hover:underline">{t('people.askedThread', { thread:ask.thread.name })}</a>)}</div>;
+    : <PathLink key={ask.input_id} href={placePath({ id:ask.thread.id, kind:'thread' })} className="text-accent-text hover:underline">{t('people.askedThread', { thread:ask.thread.name })}</PathLink>)}</div>;
 }

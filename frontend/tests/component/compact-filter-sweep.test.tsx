@@ -70,8 +70,8 @@ vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModu
   PageHeader: ({ title, lead, facts, actions }: { title: string; lead?: ReactNode; facts?: ReactNode; actions?: ReactNode }) => <header><h1>{title}</h1>{lead}<div>{facts}</div>{actions}</header>,
   Section: ({ title, lead, children }: { title: string; lead?: ReactNode; children?: ReactNode }) => <section><h2>{title}</h2>{lead}{children}</section>,
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
-vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav',()=>({ResourceNav:()=>null}));
 vi.mock('@/features/resources/trail',()=>({rememberList:vi.fn(),useResourceHeading:vi.fn()}));
 vi.mock('@/features/resources/ResourceList', async (original) => {
@@ -103,14 +103,14 @@ vi.mock('@/features/resources/agents/acts', () => ({ useAgentActs: () => ({ list
 vi.mock('@/features/resources/hosts/acts', () => ({ useHostActs: () => ({ list: [] }) }));
 vi.mock('@/features/resources/providers/acts', () => ({ useProviderActs: () => ({ list: [] }) }));
 vi.mock('@/features/resources/HomePicker', () => ({useViewedOrg:()=>null,useViewedOrgState:()=>({org:null,load:{isSuccess:true,isPending:false,isError:false}})}));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind }));
 vi.mock('@/features/navigation/placeLabels', async (original) => ({ ...await original<typeof PlaceLabels>(), useKnownPlaces: () => new Map() }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<typeof Places>(), usePlaceLookup: () => new Map() }));
 vi.mock('@/features/admin/SettingRows', async (original) => ({ ...await original<typeof SettingRows>(), useSystemSettings: () => ({ find: () => undefined }) }));
 vi.mock('@/features/trace/Person', () => ({ useTraceEntry: () => vi.fn(), TracePerson: ({ children }: { children: ReactNode }) => <>{children}</> }));
-vi.mock('@/realtime/live', async () => {
+vi.mock('@/realtime/live', async (loadOriginal) => {
   const { createStore } = await import('zustand/vanilla');
-  return { useUserFeed: vi.fn(), useOrgTreeFeed: vi.fn(), reloadUserFeed: vi.fn(),
+  return { ...await loadOriginal<object>(), useUserFeed: vi.fn(), useOrgTreeFeed: vi.fn(), reloadUserFeed: vi.fn(),
     socket: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })), status: createStore(() => ({ phase: 'idle' })) } };
 });
 vi.mock('@/realtime/stores/user', async (original) => ({ ...await original<typeof UserStoreModule>(), useHeldRows: () => [], useUserStore: <Value,>(read: (value: typeof fixture.user) => Value) => read(fixture.user), userWriter: { older: vi.fn(), found: vi.fn() } }));
@@ -118,10 +118,10 @@ vi.mock('@/features/settings/personal/away/live', () => ({ useAwayLive: vi.fn() 
 vi.mock('@/features/settings/personal/away/Pause', () => ({ PauseControls: () => null }));
 vi.mock('@/features/inbox/away/Grouping', async (original) => ({ ...await original<typeof Grouping>(), useInboxGrouping: () => ({ value: 'day', choose: vi.fn(), loading: false, saving: false, error: null }) }));
 vi.mock('@/features/settings/PersonalFrame', () => ({ PersonalFrame: ({ title, children }: { title: string; children: ReactNode }) => <article><h1>{title}</h1>{children}</article> }));
-vi.mock('@/shell/keys', () => ({ useKeyChoices: () => ({ single_key: false }), requestKeyList: vi.fn() }));
-vi.mock('@/features/help/KeyList', () => ({ useSaveKeys: () => ({ isPending: fixture.keyPending, variables: fixture.keyPending ? { single_key: true } : undefined, mutate: fixture.saveKeys, error: null }) }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
+vi.mock('@/shell/keys', async (loadOriginal) => ({ ...await loadOriginal<object>(), useKeyChoices: () => ({ single_key: false }), requestKeyList: vi.fn() }));
+vi.mock('@/features/help/KeyList', async (loadOriginal) => ({ ...await loadOriginal<object>(), useSaveKeys: () => ({ isPending: fixture.keyPending, variables: fixture.keyPending ? { single_key: true } : undefined, mutate: fixture.saveKeys, error: null }) }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeMenuButton: () => null }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => null }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => null }));
 vi.mock('@/features/project/ProjectStar', () => ({ ProjectStar: () => null }));
@@ -131,7 +131,7 @@ vi.mock('@/features/project/Activity', () => ({ ProjectActivity: () => null }));
 vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof UsageBoardModule>(), UsageSection: () => null }));
 vi.mock('@/features/start/QuickStart', () => ({ QuickStart: () => null }));
 vi.mock('@/features/ports/Outside', () => ({ OutsideOpenings: () => null }));
-vi.mock('@/features/access/ParticipationFilter', () => ({ ParticipationFilter: () => null }));
+vi.mock('@/features/access/ParticipationFilter', async (loadOriginal) => ({ ...await loadOriginal<object>(), ParticipationFilter: () => null }));
 
 const appearance = useAppearance.getState();
 beforeEach(() => { fixture.keyPending = false; fixture.inventory.mockClear(); fixture.saveKeys.mockClear(); fixture.user.counters.unread = 3; });
