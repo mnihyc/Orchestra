@@ -1,50 +1,36 @@
-/** The places the settings' picker offers, with what draws each as every screen does: its colour, and whether a project is a folder. */
-import { describe, expect, it } from 'vitest';
-
-import type { TreeNode } from '@/generated/api-types';
-import { placesOfTree } from '@/features/settings/PlacePicker';
-
-const row = (id: string, kind: TreeNode['kind'], name: string, parent: string | null, more: Partial<TreeNode> = {}): TreeNode =>
-  ({ id, kind, name, parent_id: parent, color: null, deleted: false, ...more }) as TreeNode;
-
-describe('the places a picker offers', () => {
-  const rows = [
-    row('org', 'org', 'Acme', null, { color: 3 }),
-    row('web', 'project', 'Web', 'org', { color: 5 }),
-    row('shop', 'project', 'Shop', 'org'),
-    row('checkout', 'project', 'Checkout', 'shop'),
-    row('login', 'topic', 'Fix login', 'web'),
-    row('main', 'thread', 'Main thread', 'login'),
-    row('gone', 'topic', 'Gone', 'web', { deleted: true }),
-  ];
-
-  it('lists orgs, projects and topics by their paths, and leaves out a thread and what was taken away', () => {
-    expect(placesOfTree(rows, ' / ').map((place) => [place.id, place.path])).toEqual([
-      ['org', 'Acme'],
-      ['shop', 'Acme / Shop'],
-      ['checkout', 'Acme / Shop / Checkout'],
-      ['web', 'Acme / Web'],
-      ['login', 'Acme / Web / Fix login'],
-    ]);
-  });
-
-  it('opts into thread paths for settings while keeping deleted nodes out', () => {
-    const places = placesOfTree(rows, ' / ', true);
-    expect(places.find((place) => place.id === 'main')?.path).toBe('Acme / Web / Fix login / Main thread');
-    expect(places.some((place) => place.id === 'gone')).toBe(false);
-  });
-
-  it('carries the colour each was given, null for the colour of its kind', () => {
-    const colours = Object.fromEntries(placesOfTree(rows, ' / ').map((place) => [place.id, place.color]));
-    expect(colours).toEqual({ org: 3, shop: null, checkout: null, web: 5, login: null });
-  });
-
-  it('says which project is a folder: one that lies in a project', () => {
-    const folders = Object.fromEntries(placesOfTree(rows, ' / ').map((place) => [place.id, place.folder]));
-    expect(folders).toEqual({ org: false, shop: false, checkout: true, web: false, login: false });
-  });
-  it('keeps a place’s own colour when making the picker’s summary', () => {
-    const own = placesOfTree([row('org', 'org', 'Acme', null), row('web', 'project', 'Web', 'org', { custom_color: '#3a7bd5' })], ' / ');
-    expect(own.find((place) => place.id === 'web')?.custom_color).toBe('#3a7bd5');
-  });
+/** Native places retain their admitted path, colours and folder meaning without a second tree read. */
+import {describe,expect,it} from 'vitest';
+import type {NameHit,NodeRef} from '@/generated/api-types';
+import {placesOfNames,placeHierarchy} from '@/features/settings/PlacePicker';
+const root:NodeRef={id:'org',kind:'org',name:'Acme',redacted:false};
+const web:NodeRef={id:'web',kind:'project',name:'Web',redacted:false};
+const hit=(id:string,kind:NameHit['kind'],name:string,path:NodeRef[],more:Partial<NameHit>={}):NameHit=>({id,kind,name,path,home_path:[],address:null,archived:false,avatar:null,color:null,custom_color:null,owner:null,recent:false,tag:null,thread_attention:null,username:null,...more});
+describe('the places a picker offers',()=>{
+ const rows=[hit('org','org','Acme',[root],{color:3}),hit('web','project','Web',[root,web],{color:5}),hit('folder','project','Folder',[root,web,{id:'folder',kind:'project',name:'Folder',redacted:false}]),hit('login','topic','Fix login',[root,web,{id:'login',kind:'topic',name:'Fix login',redacted:false}]),hit('main','thread','Main thread',[root,web,{id:'main',kind:'thread',name:'Main thread',redacted:false}])];
+ it('keeps native page order and full paths while leaving threads out unless asked',()=>{
+  expect(placesOfNames(rows,' / ','Hidden').map((place)=>[place.id,place.path])).toEqual([['org','Acme'],['web','Acme / Web'],['folder','Acme / Web / Folder'],['login','Acme / Web / Fix login']]);
+ });
+ it('opts into threads while keeping non-place kinds out',()=>{
+  expect(placesOfNames([...rows,hit('doc','document','Notes',[])],' / ','Hidden',true).map((place)=>place.id)).toEqual(['org','web','folder','login','main']);
+ });
+ it('carries each native colour, including null for the kind default',()=>{
+  expect(placesOfNames(rows,' / ','Hidden').map((place)=>place.color)).toEqual([3,5,null,null]);
+ });
+ it('recognises a project folder from its actual native parent',()=>{
+  expect(placesOfNames(rows,' / ','Hidden').map((place)=>place.folder)).toEqual([false,false,true,false]);
+ });
+ it('preserves a native custom colour',()=>{
+  expect(placesOfNames([hit('web','project','Web',[root,web],{custom_color:'#3a7bd5'})],' / ','Hidden')[0]?.custom_color).toBe('#3a7bd5');
+ });
+ it('keeps a redacted ancestor unnamed and retains the actual root identity',()=>{
+  const [place]=placesOfNames([hit('web','project','Web',[{...root,name:null,redacted:true},web])],' / ','Hidden');
+  expect(place?.path).toBe('Hidden / Web');expect(place?.rootOrgId).toBe('org');expect(place?.rootName).toBeUndefined();
+ });
+ it('keeps deep ancestry and terminates when a path repeats a parent',()=>{
+  const nodes=Array.from({length:95},(_,n)=>({id:'p'+String(n),kind:'project' as const,name:'Level '+String(n),redacted:false}));
+  const leaf=hit('end','topic','Last',[root,...nodes,nodes[0]!,{id:'end',kind:'topic',name:'Last',redacted:false}]);
+  const places=placesOfNames([leaf],' / ','Hidden');const layout=placeHierarchy([leaf],places,' / ','Hidden');
+  expect(layout).toHaveLength(nodes.length+2);expect(new Set(layout.map(row=>row.id)).size).toBe(layout.length);
+  expect(places[0]?.path).toContain('Level 94');
+ });
 });

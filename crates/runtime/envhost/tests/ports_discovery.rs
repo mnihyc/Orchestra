@@ -168,6 +168,25 @@ fn reader() -> (Processes, Ports) {
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn named_forwarding_refuses_wildcard_and_internal_tcp_listeners() {
+    let (_, ports) = reader();
+    let wildcard = Service::start(None, &["0.0.0.0"], 0, "tcp", "", None, None);
+    assert!(
+        ports_sockets::tcp_with_reach(&ports, wildcard.port, true)
+            .await
+            .is_err()
+    );
+    let loopback = Service::start(None, &["127.0.0.1"], 0, "tcp", "", None, None);
+    let _control = ports.internal_port(loopback.port, PortTransport::Tcp);
+    assert!(
+        ports_sockets::tcp_with_reach(&ports, loopback.port, true)
+            .await
+            .is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn current_tcp_listeners_and_bound_udp_are_native_scoped_ipv4_and_ipv6_observations() {
     let (processes, ports) = reader();

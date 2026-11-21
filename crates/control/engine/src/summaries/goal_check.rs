@@ -22,17 +22,8 @@ pub(crate) const GOAL_CHECK: &str = "You judge whether a coding agent has finish
 /// The key of the instruction among the model producer's replacement prompts.
 const PROMPT_KEY: &str = "goal_check";
 
-/// The most tokens the answer may take: a word and a sentence, with room for a longer reason.
-const ANSWER_TOKENS: i64 = 200;
-
-/// The most items a turn may have for it to be read and sent to the helper.
-const TURN_ITEMS_MAX: i64 = 2_000;
-
 /// What says that the older part of a turn was left in the transcript.
 const TURN_START_OMITTED: &str = "(the start of the turn is left out)\n";
-
-/// The most characters of the reason that is kept and told to the agent.
-const REASON_MAX_CHARS: usize = 600;
 
 /// What the helper made of a report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,14 +40,12 @@ pub(crate) enum Checked {
 /// provider and a model.
 pub(crate) async fn available(conn: &mut orch_db::Conn, node: Id) -> Result<bool, EngineError> {
     Ok(choice(conn, node).await?.is_some_and(|chosen: Choice| {
-        chosen.kind == "model"
-            && chosen.config["provider_id"].is_string()
-            && chosen.config["model_name"].is_string()
+        chosen.kind == "model" && Config::read(&chosen.config).is_ok()
     }))
 }
 
 /// Reads the helper's answer: the first word, then the reason.
-pub(crate) fn read_answer(answer: &str) -> Option<Checked> {
+pub(crate) fn read_answer(answer: &str, reason_chars: usize) -> Option<Checked> {
     let mut lines = answer
         .lines()
         .map(str::trim)
@@ -66,7 +55,7 @@ pub(crate) fn read_answer(answer: &str) -> Option<Checked> {
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .take(REASON_MAX_CHARS)
+        .take(reason_chars)
         .collect();
     let word: String = first
         .chars()
@@ -109,6 +98,12 @@ fn tail(text: &str, bytes: usize) -> String {
     format!("{TURN_START_OMITTED}{}", &text[start..])
 }
 
+struct FittedInput {
+    text: String,
+    start_omitted: bool,
+    last_turn_present: bool,
+}
+
 /// Fits the full condition and evidence before the newest part of the turn. Escaping and the omission notice count
 /// toward the allowance, as do the helper's instructions. A check never silently changes its condition or evidence.
 fn input_within(
@@ -117,10 +112,11 @@ fn input_within(
     evidence: &str,
     last_turn: &str,
     bytes: usize,
-) -> Option<String> {
+) -> Option<FittedInput> {
     let mut input = input_of(condition, evidence, "");
     let room = bytes.checked_sub(system.len().saturating_add(input.len()))?;
     let escaped = material(last_turn);
+    let escaped_len = escaped.len();
     let kept = if escaped.len() <= room {
         escaped
     } else if let Some(room) = room.checked_sub(TURN_START_OMITTED.len()) {
@@ -129,7 +125,11 @@ fn input_within(
         String::new()
     };
     input.insert_str(input.len() - "\n</last_turn>".len(), &kept);
-    Some(input)
+    Some(FittedInput {
+        text: input,
+        start_omitted: escaped_len > room,
+        last_turn_present: !kept.is_empty(),
+    })
 }
 
 /// Mask whole fields before escaping or cutting their tails: a partial secret no longer matches its rule.
@@ -140,7 +140,7 @@ fn masked_input_within(
     evidence: &str,
     last_turn: &str,
     bytes: usize,
-) -> Option<String> {
+) -> Option<FittedInput> {
     let mask = |text: &str| crate::raw_events::mask_text(redactor, text.to_owned());
     input_within(
         system,
@@ -174,15 +174,37 @@ pub(crate) async fn ask(
             "the summary model is not configured".to_owned(),
         ));
     };
+    let offering = config.offering().map_err(EngineError::unreadable)?;
     let system = config
         .prompts
         .get(PROMPT_KEY)
         .and_then(Option::as_deref)
         .unwrap_or(GOAL_CHECK)
         .to_owned();
-    let budget =
-        super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-            .await?;
+    let turn_items = orch_settings::get::<i64>(
+        &mut conn,
+        orch_settings::Place::Node(thread),
+        orch_settings_contract::registry::keys::SUMMARY_GOAL_TURN_ITEMS,
+    )
+    .await?
+    .unwrap_or(2000);
+    let reason_chars = orch_settings::get::<usize>(
+        &mut conn,
+        orch_settings::Place::Node(thread),
+        orch_settings_contract::registry::keys::SUMMARY_GOAL_REASON_CHARS,
+    )
+    .await?
+    .unwrap_or(600);
+    let reasons = super::budget::reasons(&mut conn, &config).await?;
+    let output = config.goal_output_reserve(reasons);
+    let budget = super::budget::input_budget(
+        &mut conn,
+        thread,
+        offering.provider,
+        &offering.offering,
+        output,
+    )
+    .await?;
     let row = orch_db::queries::threads::thread(&mut conn, thread)
         .await?
         .ok_or_else(|| EngineError::unreadable("the thread is gone"))?;
@@ -205,7 +227,7 @@ pub(crate) async fn ask(
             "the summary model's input allowance cannot hold the condition and evidence".to_owned(),
         ));
     };
-    let room = budget.bytes.saturating_sub(system.len() + fixed.len());
+    let room = budget.bytes.saturating_sub(system.len() + fixed.text.len());
     // The turn of the report is read whole, once; a turn of more items than this, or whose messages take more than
     // the place allows when written out (`thread.read_turn_bytes`, known without reading them), is not sent at
     // all, and the model judges from the condition and the evidence.
@@ -215,7 +237,7 @@ pub(crate) async fn ask(
                FROM (SELECT payload_bytes FROM items WHERE turn_id = $1 LIMIT $2) counted",
         )
         .bind(turn)
-        .bind(TURN_ITEMS_MAX + 1)
+        .bind(turn_items.saturating_add(1))
         .fetch_one(&mut *conn)
         .await
         .map_err(orch_db::DbError::from)?,
@@ -230,8 +252,8 @@ pub(crate) async fn ask(
     .unwrap_or(i64::MAX);
     let turn_text = match report.turn_ordinal {
         _ if room == 0 => String::new(),
-        _ if items > TURN_ITEMS_MAX => format!(
-            "(The turn has more than {TURN_ITEMS_MAX} items: too many to send. Judge from the evidence.)"
+        _ if items > turn_items => format!(
+            "(The turn has more than {turn_items} items: too many to send. Judge from the evidence.)"
         ),
         _ if written > readable => {
             "(The turn's messages are too large to read here. Judge from the evidence.)".to_owned()
@@ -263,6 +285,20 @@ pub(crate) async fn ask(
             "the summary model's input allowance cannot hold the condition and evidence".to_owned(),
         ));
     };
+    use orch_api_contract::summary_facts::GoalHelperCoverage;
+    let last_turn = if report.turn_ordinal.is_none() || room == 0 {
+        GoalHelperCoverage::None
+    } else if items > turn_items {
+        GoalHelperCoverage::ItemsExceeded
+    } else if written > readable {
+        GoalHelperCoverage::Oversized
+    } else if !input.last_turn_present {
+        GoalHelperCoverage::None
+    } else if input.start_omitted {
+        GoalHelperCoverage::StartOmitted
+    } else {
+        GoalHelperCoverage::Included
+    };
     let call = crate::ids::derived("goal.check", &[report.id.as_bytes().as_slice()]);
     let host = Host {
         engine: engine.clone(),
@@ -271,13 +307,29 @@ pub(crate) async fn ask(
         workflow: goal.id,
         task: "goal_check",
         resource: None,
+        goal_capture: Some(super::facts::GoalCapture {
+            report: report.id,
+            last_turn: Some(last_turn),
+        }),
     };
-    let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
+    let reasoning = match host
+        .reasoning(thread, offering.provider, &offering.offering)
+        .await
+    {
+        Ok(reasoning) => reasoning,
+        Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
+    };
+    let request = config.completion_with(
+        &reasoning,
+        system,
+        input.text,
+        config.goal_max_output_tokens,
+    );
     let answered = match host.complete(thread, request).await {
         Ok(answer) => answer,
         Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),
     };
-    let read = read_answer(&answered.text);
+    let read = read_answer(&answered.text, reason_chars);
     let mut conn = engine.db().acquire().await?;
     if read.is_some() {
         crate::calls::finish_service(
@@ -305,21 +357,21 @@ mod tests {
     #[test]
     fn the_first_word_decides_and_the_rest_is_the_reason() {
         assert_eq!(
-            read_answer("met\nThe run shows all 212 tests passing."),
+            read_answer("met\nThe run shows all 212 tests passing.", 600),
             Some(Checked::Met)
         );
         assert_eq!(
-            read_answer("not_yet\nNo test output is given.\nRun them."),
+            read_answer("not_yet\nNo test output is given.\nRun them.", 600),
             Some(Checked::NotYet(
                 "No test output is given. Run them.".to_owned()
             ))
         );
         assert_eq!(
-            read_answer("Not yet\nWhy."),
+            read_answer("Not yet\nWhy.", 600),
             Some(Checked::NotYet("Why.".to_owned()))
         );
-        assert_eq!(read_answer("maybe\nsure"), None);
-        assert_eq!(read_answer("  \n "), None);
+        assert_eq!(read_answer("maybe\nsure", 600), None);
+        assert_eq!(read_answer("  \n ", 600), None);
     }
 
     #[test]
@@ -349,7 +401,8 @@ mod tests {
         let fixed = system.len() + input_of(condition, evidence, "").len();
         let limit = fixed + TURN_START_OMITTED.len() + 120;
         let input = input_within(system, condition, evidence, &turn, limit)
-            .ok_or("the fixed material does not fit")?;
+            .ok_or("the fixed material does not fit")?
+            .text;
         assert!(system.len() + input.len() <= limit);
         assert!(input.contains(&material(condition)));
         assert!(input.contains(&material(evidence)));
@@ -358,7 +411,7 @@ mod tests {
         assert_eq!(input.matches("</last_turn>").count(), 1);
         assert!(input_within(system, condition, evidence, &turn, fixed - 1).is_none());
         assert_eq!(
-            input_within(system, condition, evidence, &turn, fixed),
+            input_within(system, condition, evidence, &turn, fixed).map(|input| input.text),
             Some(input_of(condition, evidence, ""))
         );
         Ok(())
@@ -370,11 +423,22 @@ mod tests {
         let fixed = input_of("done", "proof", "").len();
         for room in 0..100 {
             let input = input_within("", "done", "proof", &"é中".repeat(100), fixed + room)
-                .ok_or("the condition and evidence do not fit")?;
+                .ok_or("the condition and evidence do not fit")?
+                .text;
             assert!(input.len() <= fixed + room, "{room}: {input}");
             assert!(input.ends_with("\n</last_turn>"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn source_words_that_resemble_an_omission_notice_do_not_invent_a_cut() {
+        let original = format!("{TURN_START_OMITTED}These are the source's own words");
+        let fitted = input_within("Judge", "Done", "Proof", &original, 10_000).unwrap();
+        assert!(!fitted.start_omitted);
+        assert!(fitted.last_turn_present);
+        let cut = input_within("Judge", "Done", "Proof", &original.repeat(100), 400).unwrap();
+        assert!(cut.start_omitted);
     }
 
     #[test]
@@ -402,7 +466,8 @@ mod tests {
                 &turn,
                 fixed + room,
             )
-            .ok_or("the masked fixed material does not fit")?;
+            .ok_or("the masked fixed material does not fit")?
+            .text;
             assert!(input.len() + "Judge.".len() <= fixed + room);
             assert!(input.contains("Finish [masked]"));
             assert!(input.contains("Checked [masked]"));
