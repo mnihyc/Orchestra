@@ -177,3 +177,46 @@ async fn an_api_token_cannot_revoke_its_persons_other_browsers() {
         200
     );
 }
+
+#[tokio::test]
+async fn an_api_key_never_acquires_browser_session_provenance_from_its_suspended_person() {
+    let world = World::new().await;
+    let ada = world.person("ada").await;
+    let signed = world.sign_in(&ada).await;
+    let key = world
+        .app
+        .call(MeTokenCreate, &[])
+        .token(signed.token())
+        .body(&ApiTokenCreateBody {
+            rules: None,
+            name: "automation".to_owned(),
+            scopes: Some(vec!["*".to_owned()]),
+            node_id: None,
+            expires_at: None,
+            proof: Some(SensitiveProof {
+                password: Some(PASSWORD.to_owned()),
+                ..SensitiveProof::default()
+            }),
+        })
+        .send()
+        .await
+        .full_token()
+        .ok()
+        .token
+        .unwrap();
+    world.suspend(&ada).await;
+    let refused = world
+        .app
+        .call(MeGet, &[])
+        .token(&key)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthSuspended);
+    assert!(
+        serde_json::to_value(refused)
+            .unwrap()
+            .get("session_end")
+            .is_none()
+    );
+}

@@ -1,4 +1,5 @@
 /** Both unit pools show applicable values, provenance, apply timing and guarded editors, including commands after start. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -101,7 +102,7 @@ export function UnitCommandFailure({ jobId, detail, href = '#unit-after-up', onO
   const diagnostic=typeof error.message==='string'?error.message:typeof error.detail==='string'?error.detail:commandAt<0?'':status.slice(commandAt);
   const lines=diagnostic.split('\n');
   return <><InlineAlert tone="warning" action={
-    <a href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</a>
+    <PathLink href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</PathLink>
   }>{failureText({ code: COMMAND_FAILURE_CODE }).message}</InlineAlert>
     {diagnostic!=='' && <ResourceDetails label={t('unitConfiguration.commandOutput')}><Preview more={lines.length>COMMAND_FAILURE_PREVIEW_LINES}>{(expanded)=><pre className="text-sm wrap-anywhere whitespace-pre-wrap">{(expanded?lines:lines.slice(0,COMMAND_FAILURE_PREVIEW_LINES)).join('\n')}</pre>}</Preview></ResourceDetails>}
   </>;
