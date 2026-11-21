@@ -8,6 +8,8 @@
 #[path = "call_recovery/auxiliary.rs"]
 mod auxiliary;
 mod common;
+#[path = "call_recovery/pools.rs"]
+mod pools;
 #[path = "call_recovery/session_loss.rs"]
 mod session_loss;
 
@@ -219,14 +221,8 @@ async fn a_place_lock_controls_the_rules_and_guard_of_its_threads() {
 #[test]
 fn embeddings_never_fail_over_to_an_incomparable_model_or_dimension() {
     use orch_provider_contract::calls::{Candidate, compatible_embedding};
-    let mut candidate = Candidate {
-        route: None,
-        provider_id: Id::nil(),
-        model: "same-model".to_owned(),
-        agent_id: None,
-        params: json!({}),
-        dimensions: Some(256),
-    };
+    let mut candidate = Candidate::model(Id::nil(), "same-model");
+    candidate.dimensions = Some(256);
     assert!(compatible_embedding(&candidate, "same-model", 256));
     assert!(!compatible_embedding(&candidate, "other-model", 256));
     candidate.dimensions = Some(768);
@@ -240,7 +236,7 @@ async fn a_configured_model_failover_returns_at_the_next_turn_even_when_recovery
         let thread = world.thread("A temporary model").await;
         sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by) SELECT $1,provider_id,'fallback-model','Fallback',parameters,true,'manual',created_by FROM provider_models WHERE provider_id=$2 AND model_name=$3")
         .bind(orch_types::new_id()).bind(world.provider).bind(common::MODEL).execute(world.pool.pool()).await.unwrap();
-        world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}},{"type":"wait","until":"person"}]}])).await;
+        world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{"kind":"model_refused"},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"fallback-model"},"config":{}}}},"params":{}}},{"type":"wait","until":"person"}]}])).await;
         world
             .engine()
             .submit_input(
@@ -317,7 +313,7 @@ async fn a_service_recovery_can_fail_over_but_embeddings_refuse_a_different_iden
     let world = World::new().await;
     let thread = world.thread("Service policy").await;
     world.engine().stop();
-    world.set(world.topic,"calls.rules",json!([{"id":"service-fallback","when":{},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","dimensions":256,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+    world.set(world.topic,"calls.rules",json!([{"id":"service-fallback","when":{},"steps":[{"type":"failover","candidate":{"target":{"type":"single","resource":{"kind":"model","backend":{"route":"generation.model","offering":{"provider":world.provider,"offering":"fallback-model"},"config":{}}}},"dimensions":256,"params":{}}},{"type":"wait","until":"person"}]}])).await;
     for purpose in [Purpose::Summary, Purpose::Embedding] {
         let root = orch_types::new_id();
         let reference = orch_types::new_id();
@@ -361,7 +357,16 @@ async fn a_service_recovery_can_fail_over_but_embeddings_refuse_a_different_iden
                 },
             ) => {
                 assert_ne!(call, root);
-                assert_eq!(candidate.model, "fallback-model");
+                assert_eq!(
+                    candidate
+                        .backend()
+                        .unwrap()
+                        .offering
+                        .as_ref()
+                        .unwrap()
+                        .offering,
+                    "fallback-model"
+                );
             }
             (Purpose::Embedding, ServicePlan::Paused) => {
                 let paused = orch_engine::calls::read(&mut conn, thread, purpose)
@@ -439,8 +444,14 @@ async fn a_selected_candidate_keeps_its_chain_when_failure_kind_changes_for_ever
         } else {
             "second-fallback"
         };
-        let mut first = json!({"provider_id":world.provider,"model":first_model,"params":{}});
-        let mut second = json!({"provider_id":world.provider,"model":second_model,"params":{}});
+        let mut first = json!(orch_provider_contract::calls::Candidate::model(
+            world.provider,
+            first_model
+        ));
+        let mut second = json!(orch_provider_contract::calls::Candidate::model(
+            world.provider,
+            second_model
+        ));
         if purpose == Purpose::Embedding {
             first["dimensions"] = json!(256);
             second["dimensions"] = json!(256);
@@ -471,6 +482,20 @@ async fn a_selected_candidate_keeps_its_chain_when_failure_kind_changes_for_ever
             (second.clone(), "model_refused", 2),
         ] {
             // This is the existing durable producer seam after its selected destination actually starts.
+            let intent: orch_provider_contract::calls::Candidate =
+                serde_json::from_value(candidate).unwrap();
+            let offering = intent.backend().unwrap().offering.as_ref().unwrap();
+            let candidate = orch_engine::calls::SelectedCandidate {
+                provider_id: offering.provider,
+                model: offering.offering.clone(),
+                route: None,
+                agent_id: intent.agent_id,
+                params: intent.params.clone(),
+                dimensions: intent.dimensions,
+                choice_id: None,
+                intent,
+            };
+            let candidate = json!(candidate);
             sqlx::query("UPDATE model_call_recovery SET state='running',context=jsonb_set(context,'{candidate}',$4) WHERE node_id=$1 AND purpose=$2 AND call_key=$3")
                 .bind(thread).bind(purpose.as_str()).bind(reserved.call_key).bind(&candidate).execute(&mut *conn).await.unwrap();
             let mut actual = context.clone();

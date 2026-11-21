@@ -380,7 +380,14 @@ async fn native_cancellation(kind: CopyKind, stop_by: StopBy) {
     let cancel = CancellationToken::new();
     let role = rig.role();
     let call = Call {
+        work_deadline: None,
         context: CommandContext {
+            authority_deadline: None,
+            native_members: None,
+            native_revision: None,
+
+            native_fences: None,
+            native_target: None,
             id: command,
             key: None,
             deadline: rig.deadline(),
@@ -436,7 +443,14 @@ async fn native_cancellation(kind: CopyKind, stop_by: StopBy) {
         labels: BTreeMap::new(),
     };
     let call = Call {
+        work_deadline: None,
         context: CommandContext {
+            authority_deadline: None,
+            native_members: None,
+            native_revision: None,
+
+            native_fences: None,
+            native_target: None,
             id: new_id(),
             key: None,
             deadline: rig.deadline(),

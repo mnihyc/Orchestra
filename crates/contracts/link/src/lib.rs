@@ -34,8 +34,12 @@ pub mod local_ports;
 pub mod mcp_import;
 pub mod policy;
 pub mod ports;
+pub mod program_work;
 pub mod session;
 pub mod source;
 pub mod streams;
+pub mod tool_sessions;
 pub mod tunnels;
 pub mod version;
+
+pub mod native_target;

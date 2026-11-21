@@ -152,6 +152,10 @@ pub(super) struct Rows {
 }
 
 impl Rows {
+    pub(super) fn set_output_capture_bytes(&mut self, bytes: u64) {
+        self.mapper.set_output_capture_bytes(bytes);
+    }
+
     pub(super) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
         self.mapper.set_image_outputs(directory);
     }

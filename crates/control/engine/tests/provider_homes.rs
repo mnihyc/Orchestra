@@ -227,7 +227,7 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
     let target = ScriptedHost::on(&world, "Destination", 16384).await;
     sqlx::query("UPDATE providers SET runtime_config=runtime_config || $2 WHERE id=$1")
         .bind(provider)
-        .bind(json!({"runtime.host_id":target.id}))
+        .bind(json!({"runtime.host_id":orch_provider_contract::pools::Target::host(target.id)}))
         .execute(world.pool.pool())
         .await
         .unwrap();
@@ -402,6 +402,10 @@ async fn the_harness_of_a_unit_the_system_made_is_told_to_keep_a_home_made_by_or
             .on(K::AgentStart, move |command: &Command| {
                 recorded.lock().unwrap().push(command.body().unwrap());
                 Ok(CommandResult::AgentStart(AgentStartResult {
+                    home: Some(orch_driver_contract::runtime::HarnessHome {
+                        path: Some("/actually-started/provider-home".into()),
+                        source: orch_driver_contract::runtime::HarnessHomeSource::Runtime,
+                    }),
                     reused: false,
                     harness_version: "1.0.0".to_owned(),
                     descriptor: serde_json::from_value(common::descriptor()).unwrap(),
@@ -441,4 +445,37 @@ async fn the_harness_of_a_unit_the_system_made_is_told_to_keep_a_home_made_by_or
             "{body}"
         );
     }
+    eventually("the actual home report", || async {
+        sqlx::query_scalar::<_, Option<Json>>(
+            "SELECT home FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3",
+        )
+        .bind(provider)
+        .bind(world.agent)
+        .bind(unit.id)
+        .fetch_optional(world.pool.pool())
+        .await
+        .unwrap()
+        .flatten()
+        .is_some()
+    })
+    .await;
+    world
+        .set(
+            world.root,
+            "runtime.home",
+            json!({"kind":"existing_directory","path":"/later-choice"}),
+        )
+        .await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let reports = orch_db::queries::resources::routes::harness_processes(&mut conn, &[provider])
+        .await
+        .unwrap();
+    assert_eq!(
+        reports
+            .iter()
+            .find(|report| report.machine_id == unit.id)
+            .unwrap()
+            .home,
+        Some(json!({"path":"/actually-started/provider-home","source":"runtime"}))
+    );
 }
