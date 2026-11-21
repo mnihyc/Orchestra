@@ -5,6 +5,7 @@
  * brought back, and the button that does. What comes back comes back archived, with everything that
  * was under it, and the notice that says so offers to bring it back to use at once.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Eye, History, RotateCcw } from 'lucide-react';
 import { useState } from 'react';
@@ -81,7 +82,7 @@ function DeletedRow({ entry, place }: { entry: KeptNode; place: PlaceRef }) {
           </span>
         </div>
         <div className="col-start-2 flex flex-wrap gap-2 sm:col-start-3">
-          {entry.can_inspect === true && <Button size="sm" asChild><a href={inspectionHref(entry.kind, entry.node.id)}><Eye aria-hidden />{t('trace.inspect')}</a></Button>}
+          {entry.can_inspect === true && <Button size="sm" asChild><PathLink href={inspectionHref(entry.kind, entry.node.id)}><Eye aria-hidden />{t('trace.inspect')}</PathLink></Button>}
           {entry.can_restore === true && <Button size="sm" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => setConfirming(true)}>{t('trace.restore')}</Button>}
         </div>
       </div>

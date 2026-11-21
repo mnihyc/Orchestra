@@ -13,7 +13,7 @@ use orch_config::ServerConfig;
 use orch_db::Db;
 use orch_db::secrets::MasterKey;
 use orch_notifier_email::EmailNotifier;
-use orch_notifier_push::{PushNotifier, Vapid};
+use orch_notifier_push::{Contact, PushNotifier, Vapid, installation_contact};
 use orch_notifier_telegram::TelegramNotifier;
 use orch_notifier_webhook::WebhookNotifier;
 use orch_telemetry::{LogFormat, Readings};
@@ -61,14 +61,50 @@ fn newest_migration(dir: &Path) -> anyhow::Result<i64> {
     newest.with_context(|| format!("{} holds no migrations", dir.display()))
 }
 
+/// The sender contact of each delivery: the configured `[system] web_push_contact`, or else the
+/// installation's current public address when it is HTTPS, or else none (a local HTTP installation).
+fn public_address_contact(db: &Db, config: &ServerConfig) -> Contact {
+    let db = db.clone();
+    let seed = config.system.address_seed();
+    let configured = config.system.web_push_contact.trim().to_owned();
+    Contact::new(move || {
+        let db = db.clone();
+        let seed = seed.clone();
+        let configured = configured.clone();
+        async move {
+            if !configured.is_empty() {
+                return Ok(configured);
+            }
+            let unavailable = |_| {
+                orch_notifier_contract::delivery::DeliverError::temporary(
+                    "message",
+                    "The effective public address cannot be read",
+                )
+            };
+            let mut conn = db.acquire().await.map_err(unavailable)?;
+            let public_url =
+                orch_db::queries::public_addresses::read(&mut conn, &seed, SystemClock.now())
+                    .await
+                    .map_err(unavailable)?
+                    .addresses
+                    .public_url;
+            Ok(installation_contact(&public_url, ""))
+        }
+    })
+}
+
 /// The notifiers of this deployment. Web Push is among them where the
 /// deployment has a key for it.
-fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifiers> {
+fn notifiers(
+    secrets_dir: &Path,
+    contact: Contact,
+    configured_contact: &str,
+) -> anyhow::Result<Notifiers> {
     let mut notifiers = Notifiers::new();
     notifiers.register(Arc::new(EmailNotifier::new()))?;
     notifiers.register(Arc::new(WebhookNotifier::new()))?;
     notifiers.register(Arc::new(TelegramNotifier::new()))?;
-    match web_push(config, secrets_dir) {
+    match web_push(secrets_dir, contact, configured_contact) {
         Ok(Some(push)) => notifiers.register(Arc::new(push))?,
         Ok(None) => tracing::info!("there is no key for Web Push, so browsers are not notified"),
         // A key that is wrong takes Web Push away, not the mail and the bots.
@@ -78,18 +114,25 @@ fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifi
 }
 
 /// Web Push signed with the deployment's key, which is told to a push service
-/// together with the address of the system.
-fn web_push(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Option<PushNotifier>> {
+/// together with the sender contact when the installation has one.
+fn web_push(
+    secrets_dir: &Path,
+    contact: Contact,
+    configured_contact: &str,
+) -> anyhow::Result<Option<PushNotifier>> {
     let file = secrets_dir.join(VAPID_KEY_FILE);
     if !file.is_file() {
         return Ok(None);
     }
     let secret = orch_config::read_secret(&file)?;
     let key = std::str::from_utf8(secret.expose()).context("the key is not text")?;
-    let vapid = Vapid::read(key, &config.system.public_url).context(
-        "the key, with [system] public_url as the sender's address, which must start with https://",
-    )?;
-    Ok(Some(PushNotifier::new(vapid)))
+    let vapid = Vapid::read(key).context("reading the Web Push signing key")?;
+    if !configured_contact.trim().is_empty() {
+        Vapid::check_contact(configured_contact).context(
+            "the [system] web_push_contact, which must be an https:// or mailto: address",
+        )?;
+    }
+    Ok(Some(PushNotifier::new(vapid, contact)))
 }
 
 /// What the process has measured, for a collector to read.
@@ -132,11 +175,6 @@ pub async fn run(
         orch_config::read_secret_hex::<32>(&launch.secrets_dir.join(MASTER_KEY_FILE))
             .context("reading the master key")?,
     );
-    let notifiers = notifiers(&config, launch.secrets_dir)?;
-    tracing::info!(
-        notifiers = ?notifiers.descriptors().iter().map(|each| each.name.as_str()).collect::<Vec<_>>(),
-        "the ways out of the application"
-    );
 
     let readings = orch_telemetry::install_metrics().context("keeping measurements")?;
     let stop = CancellationToken::new();
@@ -162,6 +200,16 @@ pub async fn run(
     )
     .await
     .context("connecting to the database")?;
+    let notifiers = notifiers(
+        launch.secrets_dir,
+        public_address_contact(&db, &config),
+        &config.system.web_push_contact,
+    )?;
+    tracing::info!(
+        notifiers = ?notifiers.descriptors().iter().map(|each| each.name.as_str()).collect::<Vec<_>>(),
+        "the ways out of the application"
+    );
+
     // The API applies the schema; a worker that started first waits for it.
     let migrations = Path::new(&config.database.migrations_dir);
     let shipped = newest_migration(migrations).unwrap_or_else(|error| {
@@ -184,6 +232,13 @@ pub async fn run(
         orch_db::migrations::ensure_partitions(&mut conn, clock.now())
             .await
             .context("making partitions")?;
+        orch_db::queries::public_addresses::read(
+            &mut conn,
+            &config.system.address_seed(),
+            clock.now(),
+        )
+        .await
+        .context("reading the effective public addresses")?;
     }
 
     let who = Identity::begin(build.version, &*clock);
@@ -264,32 +319,70 @@ mod tests {
     }
 
     #[test]
-    fn web_push_is_there_only_with_a_key_and_an_https_address_to_sign_it_with() {
+    fn a_local_worker_uses_the_same_browser_key_as_an_https_installation() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ServerConfig::default();
-        config.system.public_url = "https://orch.example".to_owned();
         assert!(
-            web_push(&config, dir.path()).unwrap().is_none(),
+            web_push(
+                dir.path(),
+                Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+                ""
+            )
+            .unwrap()
+            .is_none(),
             "no key, no Web Push"
         );
         let key = "IQ9Ur0ykXoHS9gzfYX0aBjy9lvdrjx_PFUXmie9YRcY";
         std::fs::write(dir.path().join(VAPID_KEY_FILE), format!("{key}\n")).unwrap();
-        let push = web_push(&config, dir.path())
-            .unwrap()
-            .expect("a key is enough");
+        let push = web_push(
+            dir.path(),
+            Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+            "",
+        )
+        .unwrap()
+        .expect("a key is enough");
         assert_eq!(
             push.public_key(),
             "BMjQIp55pdbU8pfCBKyXcZjlmER_mXt5LqNrN1hrXbdBS5EnhIbMu3Au-RV53iIpztzNXkGI56BFB1udQ8Bq_H4"
         );
-        config.system.public_url = "http://localhost:8080".to_owned();
+        // The key is the installation's, whatever its address: a local HTTP installation offers
+        // browsers the same key, and the effective contact is read when signing a delivery.
+        let local = web_push(dir.path(), Contact::new(|| async { Ok(String::new()) }), "")
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.public_key(), push.public_key());
         assert!(
-            web_push(&config, dir.path()).is_err(),
-            "a push service is told who sends; an address without TLS says nothing"
+            web_push(
+                dir.path(),
+                Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+                "mailto:ops@orch.example"
+            )
+            .is_ok(),
+            "the file is only a seed; the effective contact is read when signing a delivery"
+        );
+        assert!(
+            web_push(
+                dir.path(),
+                Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+                "ops@orch.example"
+            )
+            .is_err(),
+            "a configured contact is an https:// or mailto: address"
         );
         std::fs::write(dir.path().join(VAPID_KEY_FILE), "not a key").unwrap();
-        config.system.public_url = "https://orch.example".to_owned();
-        assert!(web_push(&config, dir.path()).is_err());
-        let all = notifiers(&config, dir.path()).unwrap();
+        assert!(
+            web_push(
+                dir.path(),
+                Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+                ""
+            )
+            .is_err()
+        );
+        let all = notifiers(
+            dir.path(),
+            Contact::new(|| async { Ok("https://orch.example".to_owned()) }),
+            "",
+        )
+        .unwrap();
         let names: Vec<_> = all
             .descriptors()
             .into_iter()
