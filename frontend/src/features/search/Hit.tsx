@@ -4,6 +4,7 @@
  * the message. It is a real link, so that a click opens it here and a click with the usual key or a middle
  * click opens it in a new tab of the browser.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { CachedHitSummary } from '@/features/summaries/SearchSummaries';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import { useRouter } from '@tanstack/react-router';
@@ -63,11 +64,11 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField, org }: HitPro
   const heading = <div className="flex min-w-0 flex-wrap items-center gap-x-1 pr-8 text-sm text-text-muted">
     {org !== undefined && <span data-search-org>{org === null ? t('search.org.unavailable') : <KnownNodeChip node={org} />}</span>}
     {where !== '' && <span className="min-w-0 wrap-anywhere">{`${where}${WAY_SEPARATOR}`}</span>}
-    {named ? <ReferenceCard reference={reference} label={name}>{(keep) => <a href={chipHref} title={name}
+    {named ? <ReferenceCard reference={reference} label={name}>{(keep) => <PathLink href={chipHref} title={name}
       onClick={(event) => {if(isPlainClick(event)){event.preventDefault();keep();}}}
       className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-sm bg-bg-muted px-1 font-medium text-text hover:bg-border">
       {hit.kind === 'item' ? <ThreadStateIcon display={hit.thread.thread_display} /> : hit.kind === 'name' && hit.node.kind === 'thread' ? <ThreadStateIcon display={hit.node.thread_display} /> : <Icon aria-hidden className="size-4 shrink-0 text-text-muted"/>}<span className="truncate">{name}</span>
-    </a>}</ReferenceCard> : <span className="min-w-0 truncate">{name}</span>}
+    </PathLink>}</ReferenceCard> : <span className="min-w-0 truncate">{name}</span>}
     <AsAdminMark of={adminAccessOf(hit)?.place} />
   </div>;
   const body = <p className="mt-1 line-clamp-4 text-base wrap-anywhere whitespace-pre-line text-text">
@@ -116,7 +117,7 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField, org }: HitPro
   return (
     <li className={classes}>
       {heading}
-      <a
+      <PathLink
         href={href}
         aria-label={hit.snippet || name}
         className={contentClasses}
@@ -132,7 +133,7 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField, org }: HitPro
         }}
       >
         {body}
-      </a>
+      </PathLink>
       <CachedHitSummary hit={hit} />
       {attribution}
       <SearchFiles hit={hit} />

@@ -1,4 +1,5 @@
 /** Counts for Ports viewers and bounded live caller/inside-peer details for current managers. */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -26,7 +27,7 @@ export function PortConnections({ opening, environmentId, port, count, manage }:
  const callerName=(caller:PortCaller|null)=>caller===null||caller.kind==='address'?t('ports.addressCaller'):caller.kind==='person'?caller.user.display_name:t('ports.linkCaller',{label:caller.label});
  useEffect(()=>{if(!manage) cache.removeQueries({queryKey:['port-connection-facts',environment,openingId]});},[cache,manage,environment,openingId]);
  if(!manage) return <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted"><span>{knownCount===null?t('ports.countsUnknown'):t('ports.connections',{count:knownCount})}</span><span>{t('ports.callersManageOnly')}</span></span>;
- return <details open={connectionsOpen} onToggle={(event) => setConnectionsOpen(event.currentTarget.open)} className="rounded-md border border-border p-2"><summary className="cursor-pointer text-sm inline-flex items-center gap-2"><ActionIcon action={connectionsOpen ? 'hide' : 'show'} />{t('ports.connectionTitle')} ({query.data?.counts.active??knownCount??t('ports.unreported')})</summary><div className="mt-2 flex flex-col gap-2">
+ return <details open={connectionsOpen} onToggle={(event) => { if (event.currentTarget.open !== connectionsOpen) setConnectionsOpen(event.currentTarget.open); }} className="rounded-md border border-border p-2"><summary className="cursor-pointer text-sm inline-flex items-center gap-2"><ActionIcon action={connectionsOpen ? 'hide' : 'show'} />{t('ports.connectionTitle')} ({query.data?.counts.active??knownCount??t('ports.unreported')})<DeviceChoiceWriterException writer={setConnectionsOpen} /></summary><DeviceExpansionFacts writer={setConnectionsOpen} open={connectionsOpen} /><div className="mt-2 flex flex-col gap-2">
   <Input type="number" min={1} max={65535} label={t('ports.insidePort')} optional value={inside} onChange={(event)=>setInside(event.target.value)} />
   {query.isPending?<SkeletonRows read={query} rows={2}/>:query.isError?<PortFault error={query.error} onRefresh={()=>void query.refetch()}/>:<>
    <p className="text-xs text-text-muted">{t('ports.recentConnections',{limit:RECENT_ROWS})}</p>
