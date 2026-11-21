@@ -1,34 +1,35 @@
-# Resource library accounting
+# Read the resource library's counts and set paste delivery
 
-Library lists return current giving and reported use with their ordinary page read.
-The same facts service supplies resource pages and the consequences shown in plans.
-Changing a list's view does not change a resource's permissions or admit work on it.
+Know what the **Giving** and **Used** figures in the resource lists count, and where they come from, and set how pasted text is delivered. At the end you can explain a count to a person who asks, and pasted text goes to agents the way you chose.
 
-Provider, profile and environment turns use the existing consumption ledger and
-immutable execution segments. MCP calls and skill invocations keep stable native
-identities within the Orch-started turn that reported them. Turn closure removes
-its replay receipts and temporary server mapping in the same transaction. Counts
-and captured-person memberships remain. A resumed or imported closed history cannot
-recreate a receipt or add another use.
+People read the lists as described in [Resource library](../user/resource-library.md). Changing a list's view changes no permission and admits no work.
 
-Successful environment and provider creation keeps one logical membership for each
-template or host. Recreating the same resource updates its last use. Moving it to a
-different host or template establishes a membership there. Failed candidates add
-no committed creation. These memberships survive removal of the original runtime.
+## Before you start
 
-Summary reads use subject indexes. All-time rows keep lifetime totals; UTC day rows
-serve the thirty-day window. Ingestion discards older day rows while retaining the
-lifetime row. Captured people retain one membership per subject and version, with
-their latest use, so daily distinct counts are never added together.
+You need to be a system administrator to change the paste setting. Reading the counts needs nothing.
 
-**Recorded since** marks partial history. **Not recorded** means no reliable source
-exists. Counts include only what an agent program reports; offering or loading a
-skill does not prove its invocation. A returned tool error can count as a call, while
-a local refusal and a replay of a closed turn cannot. Private names are filtered
-when the reader opens the list or count.
+## What the counts mean
 
-Pasted-text delivery is controlled by **Pasted text in the message**. Its shipped
-share is 25%. The endpoints are **Always as a file** (0) and **Always in the message**
-(100), with an individual choice on each paste. Native automatic compaction remains
-enabled. A provider's whole-window refusal is shown on the failed turn with
-**Send as a file**.
+The lists return current giving and reported use with their ordinary page read. The same facts also serve resource pages and the consequences shown in plans.
+
+- **Recorded since** marks a partial history. **Not recorded** means there is no reliable source.
+- Counts include only what an agent program reports. Offering or loading a skill does not prove that it was used. A tool error that came back can count as a call; a refusal made locally, and the replay of a closed turn, cannot.
+- Turns of providers, profiles and environments use the usage ledger and the immutable execution segments. MCP calls and skill invocations keep stable identities inside the turn Orch started that reported them. When the turn closes, its replay receipts and temporary server mapping are removed in the same transaction. The counts and the people captured stay. A resumed or imported history that is already closed cannot create a receipt or add another use.
+- A successful creation of an environment or a provider keeps one membership for each template or host. Creating the same resource again updates its last use. Moving it to another host or template starts a membership there. A failed attempt adds no creation. These memberships outlast the removal of the original runtime.
+- Summaries are read from indexes by subject. All-time rows keep lifetime totals, and UTC day rows serve the thirty-day window; older day rows are dropped as new use is recorded, and the lifetime row stays. The people captured keep one membership for each subject and version with their latest use, so daily counts of distinct people are never added together.
+- Private names are filtered when the reader opens the list or a count.
+
+## Set paste delivery
+
+**Pasted text in the message** decides how much pasted text goes into the message and how much goes as a file. Its shipped share is 25%.
+
+1. Open the setting at the place you manage.
+2. Choose **Always as a file** (0) or **Always in the message** (100), or a share in between. Each paste can still be chosen on its own.
+3. Automatic compaction by the agent program stays on. When a provider refuses the whole window, the failed turn shows **Send as a file**.
+
+## If it does not work
+
+| You see | What to do |
+|---|---|
+| A count looks too low | Check **Recorded since**: the history is partial. A skill only offered, or a call refused locally, is not counted |
+| A person cannot see a name in a list | Private names are filtered for each reader |

@@ -5,18 +5,20 @@
  * its own at the end of the line, and under them its sections, each with a heading of its own.
  */
 import { ResourceLibrary, hasLibrary } from '@/features/resources/Library';
-import { ArrowLeft } from 'lucide-react';
-import { createContext, type ReactNode, useContext } from 'react';
+import { ArrowLeft, ChevronDown } from 'lucide-react';
+import { createContext, type ReactNode, useContext, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { TrailPart } from '@/shell/screen';
 import { TrailLink } from '@/shell/TrailLink';
 import { cx } from '@/ui/cx';
 import type { AdminAccess } from '@/generated/api-types';
-import { AsAdminMark, privateAdminAccess } from '@/ui/AsAdminMark';
+import { PrivateOpeningMark, privateAdminAccess } from '@/ui/AsAdminMark';
 import { ResourceOwner, type ResourceOwnership } from '@/features/resources/ResourceOwner';
 import { useAdminOpening } from '@/features/access/opening';
 import { ScrollArea } from '@/ui/ScrollArea';
+import { IconButton } from '@/ui/IconButton';
+import { ResourceHeaderExpanded } from '@/features/resources/headerContext';
 import { compactControls } from '@/ui/FilterBar';
 
 /** The scrolling column of a screen. It is as wide as reading is comfortable, and keeps a margin on a small screen. */
@@ -32,6 +34,8 @@ export interface PageHeaderProps {
   /** The mark of the place: its avatar or its icon. */
   mark?: ReactNode;
   title: ReactNode;
+  /** A resource leads with its name, first status fact and primary action. */
+  compactResource?: boolean;
   /** Help for the screen belongs beside its title, separate from field/action rows. */
   help?: ReactNode;
   headingId?: string;
@@ -51,32 +55,41 @@ export interface PageHeaderProps {
   opening?: { kind: string; id: string };
 }
 
-export function PageHeader({ mark, title, help, headingId, titleInContext = false, lead, facts = [], actions, back, adminAccess, private: privatePage = false, ownership, opening }: PageHeaderProps) {
+export function PageHeader({ compactResource = false, mark, title, help, headingId, titleInContext = false, lead, facts = [], actions, back, adminAccess, private: privatePage = false, ownership, opening }: PageHeaderProps) {
   const { t } = useTranslation();
-  useAdminOpening(opening?.kind ?? '', opening?.id, adminAccess !== null && adminAccess !== undefined);
-  if (titleInContext && mark === undefined && back === undefined && help === undefined && (adminAccess === null || adminAccess === undefined) && !privatePage && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
+  const reached = adminAccess !== null && adminAccess !== undefined;
+  useAdminOpening(opening?.kind ?? '', opening?.id, reached);
+  const privateReach = reached && (privatePage || privateAdminAccess(adminAccess));
+  if (titleInContext && mark === undefined && back === undefined && help === undefined && !privateReach && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
+  const privateMark = privateReach ? <PrivateOpeningMark of={adminAccess.place} /> : null;
+  const backLink = back === undefined ? null : (
+    <TrailLink
+      part={back}
+      className="focus-inset -mr-2 inline-flex h-[1.875rem] w-(--control-sm) shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-muted hover:text-text md:hidden"
+    >
+      <ArrowLeft aria-hidden />
+      <span className="sr-only">{t('screens.heading.back', { place: back.label })}</span>
+    </TrailLink>
+  );
+  const metadata = <>
+    {ownership !== undefined && <div className="flex items-center gap-2 text-sm text-text-muted"><span className="shrink-0">{t('resources.listOwner')}</span><ResourceOwner {...ownership} /></div>}
+    {lead !== undefined && lead !== null && <div className="max-w-prose text-base wrap-anywhere text-text-muted">{lead}</div>}
+    {opening !== undefined && hasLibrary(opening.kind) && !privatePage && <ResourceLibrary object={{kind:opening.kind,id:opening.id}} />}
+  </>;
+  if (compactResource) return <CompactResourceHeader key={opening?.id} title={title} headingId={headingId} back={backLink} mark={mark}
+    privateMark={privateMark} state={facts[0]} actions={actions} details={<>{help}{metadata}{facts.slice(1)}</>} />;
   return (
     <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
       <div className="flex min-w-0 flex-1 basis-[min(100%,14rem)] items-start gap-4">
-        {back !== undefined && (
-          <TrailLink
-            part={back}
-            className="focus-inset -mr-2 inline-flex h-[1.875rem] w-(--control-sm) shrink-0 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-muted hover:text-text md:hidden"
-          >
-            <ArrowLeft aria-hidden />
-            <span className="sr-only">{t('screens.heading.back', { place: back.label })}</span>
-          </TrailLink>
-        )}
+        {backLink}
         {mark !== undefined && <div className="flex h-[1.875rem] shrink-0 items-center">{mark}</div>}
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           {(!titleInContext || help !== undefined) && <div className="flex min-w-0 items-start gap-1">
             {!titleInContext && <h1 id={headingId} className="min-w-0 text-2xl leading-[1.875rem] font-semibold wrap-anywhere text-text">{title}</h1>}
             {help !== undefined && <span className="flex h-[1.875rem] shrink-0 items-center">{help}</span>}
           </div>}
-          <AsAdminMark of={adminAccess?.place} sentence private={privatePage || privateAdminAccess(adminAccess)} />
-          {ownership !== undefined && <div className="flex items-center gap-2 text-sm text-text-muted"><span className="shrink-0">{t('resources.listOwner')}</span><ResourceOwner {...ownership} /></div>}
-          {lead !== undefined && lead !== null && <div className="max-w-prose text-base wrap-anywhere text-text-muted">{lead}</div>}
-          {opening !== undefined && hasLibrary(opening.kind) && !privatePage && <ResourceLibrary object={{kind:opening.kind,id:opening.id}} />}
+          {privateMark}
+          {metadata}
           {facts.length > 0 && (
             <ul className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted">
               {facts.map((fact, index) => (
@@ -92,6 +105,34 @@ export function PageHeader({ mark, title, help, headingId, titleInContext = fals
       {actions !== undefined && <div data-page-actions className={cx('flex min-h-[1.875rem] max-w-full flex-wrap items-center gap-2', compactControls)}>{actions}</div>}
     </header>
   );
+}
+
+function CompactResourceHeader({ title, headingId, back, mark, privateMark, state, actions, details }: {
+  title: ReactNode; headingId: string | undefined; back: ReactNode; mark: ReactNode; privateMark: ReactNode; state: ReactNode; actions: ReactNode; details: ReactNode;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const body = useId();
+  return <header className="flex min-w-0 flex-col gap-2">
+    <div className="flex min-w-0 items-center gap-2">
+      {back}
+      {mark !== undefined && <span className="hidden shrink-0 md:inline-flex">{mark}</span>}
+      <h1 id={headingId} className="min-w-0 flex-1 truncate text-lg font-semibold text-text">{title}</h1>
+      {privateMark}
+      {state !== undefined && <span className="min-w-0 max-w-1/3 truncate text-sm text-text-muted">{state}</span>}
+      {!expanded && <div data-page-actions className={cx('flex min-w-0 max-w-1/3 items-center', compactControls)}>
+        <ResourceHeaderExpanded value={false}>{actions}</ResourceHeaderExpanded>
+      </div>}
+      <IconButton size="sm" label={t('common.details')} icon={<ChevronDown aria-hidden className={expanded ? 'rotate-180' : undefined} />}
+        aria-expanded={expanded} aria-controls={body} onClick={() => setExpanded(!expanded)} />
+    </div>
+    <div id={body} hidden={!expanded}>
+      {expanded && <div className="flex min-w-0 flex-col items-start gap-2 text-sm text-text-muted">
+        {details}
+        {actions !== undefined && <div data-page-actions className={cx('flex max-w-full flex-wrap items-center gap-2', compactControls)}>{actions}</div>}
+      </div>}
+    </div>
+  </header>;
 }
 
 /** The square a place's icon stands in, where it has no avatar: the same weight as an avatar of the largest size.
