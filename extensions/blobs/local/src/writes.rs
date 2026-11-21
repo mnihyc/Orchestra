@@ -75,6 +75,7 @@ pub(crate) async fn put(
     hash: &Hash,
     size: Option<i64>,
     mut content: ByteStream,
+    publication: &orch_blob_contract::lifetime::Publication,
 ) -> Result<Stored, BlobError> {
     let (file, unfinished) = create_incoming(inner).await?;
     let mut writer = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
@@ -112,19 +113,35 @@ pub(crate) async fn put(
     drop(file);
     make_read_only(&unfinished.path).await;
     let target = inner.path_of(hash);
-    let created = install(&unfinished.path, &target, durable)
-        .await
-        .map_err(|error| io_error("putting a blob in place", &error))?;
-    Ok(Stored { meta, created })
+    let publication = publication.clone();
+    tokio::spawn(async move {
+        let _publication = publication;
+        let created = install(&unfinished.path, &target, durable)
+            .await
+            .map_err(|error| io_error("putting a blob in place", &error))?;
+        Ok(Stored::new(meta, created))
+    })
+    .await
+    .map_err(|error| BlobError::Io(format!("the physical publication task failed: {error}")))?
 }
 
 /// Removes the file of a blob; see `BlobStore::delete`.
-pub(crate) async fn delete(inner: &Inner, hash: &Hash) -> Result<bool, BlobError> {
-    match tokio::fs::remove_file(inner.path_of(hash)).await {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(io_error("removing a blob", &error)),
-    }
+pub(crate) async fn delete(
+    inner: &Inner,
+    hash: &Hash,
+    retirement: &orch_blob_contract::lifetime::Retirement,
+) -> Result<bool, BlobError> {
+    let (path, retirement) = (inner.path_of(hash), retirement.clone());
+    tokio::spawn(async move {
+        let _retirement = retirement;
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_error("removing a blob", &error)),
+        }
+    })
+    .await
+    .map_err(|error| BlobError::Io(format!("the physical retirement task failed: {error}")))?
 }
 
 /// Removes the unfinished writes that have been silent for longer than the options allow.

@@ -18,7 +18,7 @@ test.beforeEach(async () => {
 
 const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation', exact: true });
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Orgs and your own places' });
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const row = (page: Page, name: string): Locator => tree(page).getByRole('treeitem', { name: new RegExp(`^(Waiting for approval |Blocked |Running |Starting |Idle )?${name}( |$)`) });
 
 async function viewMenu(page: Page): Promise<Locator> {

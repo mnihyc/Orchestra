@@ -16,6 +16,7 @@ import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { useForkNow } from './forkNow';
+import { useThreadPart } from '@/realtime/stores/thread';
 
 function CurrentAudience({ thread, summary }: { thread: Thread; summary: AccessSummary | undefined }) {
   const { t } = useTranslation();
@@ -50,18 +51,38 @@ export function ImmediateForkChoice({ thread, through, onConfirm, onClose }: {
 }
 
 /** Fork entrances mount this one dialog; closed owners run no creation readers. */
-export function useImmediateFork(thread: Thread | null) {
+function ProgramConfirmation({ thread, through, close }: { thread: Thread; through: number | undefined; close: () => void }) {
   const navigate = useNavigate();
+  return <ForkProgram thread={thread} through={through} onClose={close}
+    onKept={(id) => { close(); void navigate({ to: '/thread/$threadId', params: { threadId: id } }); }} />;
+}
+
+function useForkOpening(threadId: string | null) {
   const actor = useStore(client.session, (state) => state.userId);
   const readerVersion = useStore(client.session, (state) => state.readerVersion ?? 0);
-  const fork = useForkNow(thread?.id ?? '');
   const [opening, setOpening] = useState<{ actor: string | null; readerVersion: number; thread: string; through: number | undefined } | null>(null);
-  const shown = thread !== null && opening?.actor === actor && opening.readerVersion === readerVersion && opening.thread === thread.id ? opening : null;
-  return { pending: fork.pending, start: (through?: number) => { if (thread !== null) setOpening({ actor, readerVersion, thread: thread.id, through }); },
+  const shown = opening !== null && opening.actor === actor && opening.readerVersion === readerVersion && opening.thread === threadId ? opening : null;
+  return { shown, close: () => setOpening(null), start: (through?: number) => { if (threadId !== null) setOpening({ actor, readerVersion, thread: threadId, through }); } };
+}
+
+function ItemProgramConfirmation({ id, through, close }: { id: string; through: number | undefined; close: () => void }) {
+  const thread = useThreadPart(id, (view) => view.closed === null ? view.thread : null);
+  return thread?.program?.id === 'orch' ? <ProgramConfirmation thread={thread} through={through} close={close} /> : null;
+}
+
+/** The item menu sends native forks to their planner. Only a chosen built-in fork needs this dialog. */
+export function useItemProgramFork(threadId: string) {
+  const { shown, start, close } = useForkOpening(threadId);
+  return { start, confirmation: shown === null ? null : <ItemProgramConfirmation key={threadId} id={threadId} through={shown.through} close={close} /> };
+}
+
+export function useImmediateFork(thread: Thread | null) {
+  const { shown, start, close } = useForkOpening(thread?.id ?? null);
+  const fork = useForkNow(thread?.id ?? '');
+  return { pending: fork.pending, start,
     confirmation: shown === null || thread === null ? null : thread.program?.id === 'orch'
-      ? <ForkProgram key={thread.id} thread={thread} through={shown.through} onClose={() => setOpening(null)}
-        onKept={(id) => { setOpening(null); void navigate({ to: '/thread/$threadId', params: { threadId: id } }); }} />
+      ? <ProgramConfirmation key={thread.id} thread={thread} through={shown.through} close={close} />
       : <ImmediateForkChoice key={thread.id} thread={thread} through={shown.through}
-        onClose={() => setOpening(null)} onConfirm={(choice) => { fork.start(shown.through, choice); setOpening(null); }} />,
+        onClose={close} onConfirm={(choice) => { fork.start(shown.through, choice); close(); }} />,
   };
 }

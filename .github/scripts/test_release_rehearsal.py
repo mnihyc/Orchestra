@@ -34,11 +34,11 @@ class RehearsalTests(unittest.TestCase):
     def test_only_ci_for_this_snapshot_ref_and_sha_qualifies_a_rehearsal(self):
         green = {"id": 1, "head_sha": HEAD, "head_branch": "release-rehearsal", "event": "workflow_dispatch",
                  "status": "completed", "conclusion": "success"}
-        self.assertEqual(status("release-rehearsal", HEAD, [green])["id"], 1)
-        self.assertIsNone(status("release-rehearsal", HEAD, [{**green, "head_branch": "main"}]))
-        self.assertIsNone(status("release-rehearsal", HEAD, [{**green, "head_sha": "b" * 40}]))
-        # A branch's green rehearsal can never qualify the later release tag.
-        self.assertIsNone(status("v1.2.3", HEAD, [green]))
+        self.assertEqual(status("release-rehearsal", HEAD, [green], same_ref=True)["id"], 1)
+        self.assertIsNone(status("release-rehearsal", HEAD, [{**green, "head_branch": "main"}], same_ref=True))
+        self.assertIsNone(status("release-rehearsal", HEAD, [{**green, "head_sha": "b" * 40}], same_ref=True))
+        # The same commit can subsequently be tagged using this completed check.
+        self.assertEqual(status("v1.2.3", HEAD, [green])["id"], 1)
 
     def test_the_branch_push_ci_qualifies_a_rehearsal_because_the_scenarios_are_the_release_workflows_own_job(self):
         # The deployment scenarios used to be a job of the manual CI run only. They run in the release workflow now, against
@@ -46,10 +46,10 @@ class RehearsalTests(unittest.TestCase):
         manual = {"id": 1, "head_sha": HEAD, "head_branch": "release-rehearsal", "event": "workflow_dispatch",
                   "status": "completed", "conclusion": "success"}
         push = {**manual, "id": 2, "event": "push"}
-        self.assertEqual(status("release-rehearsal", HEAD, [manual, push])["id"], 2)
-        self.assertIsNone(status("release-rehearsal", HEAD, [manual, {**push, "status": "in_progress", "conclusion": None}]))
+        self.assertEqual(status("release-rehearsal", HEAD, [manual, push], same_ref=True)["id"], 2)
+        self.assertIsNone(status("release-rehearsal", HEAD, [manual, {**push, "status": "in_progress", "conclusion": None}], same_ref=True))
         with self.assertRaisesRegex(ValueError, "failure"):
-            status("release-rehearsal", HEAD, [manual, {**push, "conclusion": "failure"}])
+            status("release-rehearsal", HEAD, [manual, {**push, "conclusion": "failure"}], same_ref=True)
 
 
 if __name__ == "__main__":

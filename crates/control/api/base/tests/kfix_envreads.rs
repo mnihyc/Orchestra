@@ -252,10 +252,10 @@ async fn library_read(scene: &Scene, token: &str) -> orch_api_core::testing::Raw
 }
 
 async fn scoped_token(scene: &Scene, scope: &str, node: Option<Id>) -> (Id, String) {
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token};
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     create_api_token(
         &mut *scene.world.conn().await,
         &NewApiToken {
@@ -623,7 +623,8 @@ async fn a_topic_and_its_environment_cards_agree_on_a_bound_thread_cut_and_hide_
         .token(&scene.people.viewer.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].base.id, scene.environment.base.id);
     assert!(cards[0].workspace_root.is_empty() && cards[0].facts == json!({}));
@@ -652,7 +653,8 @@ async fn a_topic_and_its_environment_cards_agree_on_a_bound_thread_cut_and_hide_
         .token(&scene.people.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(all.len(), 2);
 }
 
@@ -678,7 +680,8 @@ async fn explicit_topic_bindings_are_not_limited_to_the_first_global_resource_pa
         .token(&scene.people.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(cards.len(), count);
     let node = scene
         .world
