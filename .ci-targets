@@ -1,0 +1,2 @@
+test -p orch-api-core --test account_native_scopes --test admin_person_credentials --test documents --test everything_resources --test giving
+test -p orch-api-core --test hidden_rows --test imports --test kfix_envreads

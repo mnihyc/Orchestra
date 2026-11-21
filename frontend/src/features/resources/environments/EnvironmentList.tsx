@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Boxes, Cpu, Laptop, Plus } from 'lucide-react';
 import { useState } from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
 import { resourceReaders } from '@/features/resources/inventory';
@@ -19,8 +19,8 @@ import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnv
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
 import { RegisterEnvironmentDialog } from '@/features/resources/machines/RegisterEnvironment';
 import { ResourceList, useSearchText } from '@/features/resources/ResourceList';
-import { oneOf } from '@/features/resources/search';
-import type { Environment, EnvironmentStatus, Machine } from '@/generated/api-types';
+import { ENVIRONMENT_KINDS, ENVIRONMENT_STATUSES, type EnvironmentsSearch, oneOf } from '@/features/resources/search';
+import type { Environment as FullEnvironment, EnvironmentListRow as Environment, Machine } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { UpdateMark } from '@/features/resources/ComponentUpdate';
 import { Button } from '@/ui/Button';
@@ -33,18 +33,10 @@ import { UserChip } from '@/ui/UserChip';
 import { StatusDot } from '@/ui/StatusDot';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Tooltip } from '@/ui/Tooltip';
+import { FactDisclosure } from '@/ui/FactDisclosure';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
-
-export type EnvironmentKind = 'machine' | 'template';
-
-export const ENVIRONMENT_KINDS: readonly EnvironmentKind[] = ['machine', 'template'];
-export const ENVIRONMENT_STATUSES: readonly EnvironmentStatus[] = ['running', 'provisioning', 'recreating', 'moving', 'stopped', 'none', 'offline', 'failed', 'disabled', 'lost'];
-
-export interface EnvironmentsSearch {
-  q?: string;
-  kind?: EnvironmentKind;
-  status?: EnvironmentStatus;
-}
 
 export function EnvironmentLink({ environment, label = environment.name }: { environment: Pick<Environment, 'id' | 'name'> & Partial<Environment>; label?: string }) {
   return (
@@ -54,14 +46,26 @@ export function EnvironmentLink({ environment, label = environment.name }: { env
   );
 }
 
-export function EnvironmentStatusText({ environment }: { environment: Pick<Environment, 'status'> & Partial<Pick<Environment, 'removal' | 'remove_at' | 'job'>> }) {
+export function EnvironmentStatusText({ environment }: { environment: Pick<Environment, 'status'> & Partial<Pick<FullEnvironment, 'removal' | 'remove_at' | 'job' | 'placement' | 'attach_retry'>> }) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const phase = environmentRemovalPhase(environment);
   if (phase !== undefined) {
     const state = <StatusDot tone={phase === 'restoring' ? 'info' : phase === 'kept' || phase === 'purged' ? 'idle' : 'warning'} label={t(`environments.lifecycle.${phase}`)} showLabel />;
     return phase === 'scheduled' && environment.remove_at ? <Tooltip content={<RelativeTime at={environment.remove_at} />}><span tabIndex={0} className="inline-flex rounded-sm">{state}</span></Tooltip> : state;
   }
-  return <EnvironmentDot status={environmentDisplayStatus(environment)} showLabel />;
+  const retry = environment.attach_retry;
+  return <span className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1">
+    <EnvironmentDot status={environmentDisplayStatus(environment)} showLabel />
+    {environment.placement === 'connected' && environment.status === 'failed' && <FactDisclosure
+      fragment={retry === null || retry === undefined ? undefined : <Trans i18nKey="placeFacts.attachRetry" components={{ when: <RelativeTime at={retry.next_eligible_at} /> }} />}
+      groups={[{ key: 'attach', kind: 'recorded_outcome', facts: [
+        { key: 'attempt', label: t('placeFacts.lastAttempt'), value: retry === null || retry === undefined ? null : <RelativeTime at={retry.last_attempt_at} /> },
+        { key: 'eligible', label: t('placeFacts.nextEligible'), value: retry === null || retry === undefined ? null : <RelativeTime at={retry.next_eligible_at} /> },
+        { key: 'reason', label: t('placeFacts.reason'), value: retry?.last_problem },
+        { key: 'revision', label: t('placeFacts.revision'), value: retry === null || retry === undefined ? null : formatNumber(retry.revision, locale) },
+      ] }]} />}
+  </span>;
 }
 
 export function EnvironmentList({ search, onSearch }: { search: EnvironmentsSearch; onSearch: (patch: Partial<EnvironmentsSearch>) => void }) {

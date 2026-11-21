@@ -177,10 +177,10 @@ test('a shell that is open on another screen says so and can be taken, and the s
   await signIn(other, PEOPLE.ada);
   await other.goto(`/thread/${MAIN}`);
   await showView(other, /^Terminal/);
-  await expect(other.getByText('This shell is open in another window')).toBeVisible();
+  await expect(other.getByText('This terminal is open in another window')).toBeVisible();
   await other.getByRole('button', { name: 'Take it here' }).click();
   await expect(other.locator('.xterm-rows')).toContainText('first screen');
-  await expect(page.getByText('This shell was taken by another window.')).toBeVisible();
+  await expect(page.getByText('This terminal was taken by another window.')).toBeVisible();
   await page.getByRole('button', { name: 'Take it here' }).click();
   await expect(screen(page)).toContainText('first screen');
   await other.close();
@@ -223,7 +223,7 @@ test('where the environment\'s own limit is reached by other people\'s shells th
   await openThread(page);
   await showView(page, /^Terminal/);
   await page.getByRole('button', { name: 'Open a new shell' }).first().click();
-  const dialog = page.getByRole('dialog', { name: 'No room for another shell' });
+  const dialog = page.getByRole('dialog', { name: 'No room for another terminal' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('checkbox')).toHaveCount(0);
 });
@@ -233,7 +233,7 @@ test('opening is refused with the reason in words: the environment\'s switch, th
   await openThread(page);
   await showView(page, /^Terminal/);
   await expect(page.getByRole('button', { name: 'Open a new shell' }).first()).toBeDisabled();
-  await expect(page.getByText('Shells are turned off for this environment. Whoever manages it can turn them on in the Environment view.').first()).toBeVisible();
+  await expect(page.getByText('Terminals are turned off for this environment. Whoever manages it can turn them on in the Environment view.').first()).toBeVisible();
   await workspace('/environment', { environment: MAIN_ENVIRONMENT, patch: { terminal: true } });
   await workspace('/terminal-gate', { reason: 'machine_policy' });
   // Another person repaired the known environment gate; reload reads the reported switch again.

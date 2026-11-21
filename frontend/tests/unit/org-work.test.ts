@@ -104,7 +104,7 @@ it.each(['en', 'zh-CN'] as const)('uses current authority and distinct question/
   const question = thread(ACME.repro, 'Question', { waiting: { kind: 'answer', for_caller: true } });
   expect(workReason(question, t)).toBe(locale === 'en' ? 'Waiting for your answer' : '等待你回答');
   expect(workReason(thread(ACME.repro, 'Question', { waiting: { kind: 'answer', for_caller: false } }), t)).toBe(t('places.org.work.answer'));
-  expect(workReason(thread(ACME.idleThread, 'Sandbox', { state: 'blocked', blocked_reason: 'binding_invalid', blocked_cause: 'sandbox' }), t)).toBe(locale === 'en' ? 'Blocked: no suitable sandbox' : '已阻塞：没有适用的沙箱');
+  expect(workReason(thread(ACME.idleThread, 'Sandbox', { state: 'blocked', blocked_reason: 'binding_invalid', blocked_cause: 'sandbox' }), t)).toBe(locale === 'en' ? 'Blocked: no suitable environment' : '已阻塞：没有适用的环境');
   const reasons = ['unbound', 'agent_offline', 'agent_disabled', 'provider_unavailable', 'provider_exhausted', 'environment_unavailable', 'binding_invalid', 'provider_not_allowed', 'model_not_set', 'model_not_allowed', 'quota_exceeded', 'attachments', 'workspace_trust', 'switching', 'error'] as const;
   for (const blocked_reason of reasons) {
     const text = workReason(thread(ACME.idleThread, 'Blocked', { state: 'blocked', blocked_reason }), t);
