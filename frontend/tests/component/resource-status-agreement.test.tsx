@@ -30,7 +30,7 @@ vi.mock('@/api/adoption', async (load) => { const actual = await load<typeof Ado
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useNavigate: () => vi.fn(),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string> }) => <a {...attributes} href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, value), to)}>{children}</a> }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefined }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/providers/acts', () => ({ useProviderActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), dialogs: null }) }));
 vi.mock('@/features/resources/providers/Threads', () => ({ ProviderThreads: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
@@ -46,8 +46,32 @@ beforeEach(() => {
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); document.documentElement.classList.toggle('dark', wasDark); if (oldTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = oldTheme; await setLocale('en'); });
 function draw(content: ReactNode) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
-  return { ...show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>), cache };
+  const view = show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>);
+  return { ...view, cache, rerender: (next: ReactNode) => view.rerender(<QueryClientProvider client={cache}>{next}</QueryClientProvider>) };
 }
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps an attach attempt's captured eligibility separate from later edits and retires withdrawn facts (${locale})`, async () => {
+  await setLocale(locale);
+  const retry = { last_attempt_at: '2026-10-24T10:00:00Z', next_eligible_at: '2026-10-24T10:00:30Z', last_problem: 'The directory is outside the allowed root', revision: 7 };
+  const environment = { ...detailEnvironment, placement: 'connected' as const, status: 'failed' as const, updated_at: '2026-10-25T10:00:00Z', attach_retry: retry };
+  const view = draw(<EnvironmentStatusText environment={environment} />);
+  expect(screen.queryByText(retry.last_problem)).not.toBeInTheDocument();
+  expect(calls.read).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+  const body = await screen.findByRole('dialog', { name: i18n.t('common.details') });
+  expect(body).toHaveTextContent(retry.last_problem);
+  expect(body.querySelector(`time[datetime="${retry.last_attempt_at}"]`)).not.toBeNull();
+  expect(body.querySelector(`time[datetime="${retry.next_eligible_at}"]`)).not.toBeNull();
+  expect(body.querySelector(`time[datetime="${environment.updated_at}"]`)).toBeNull();
+  expect(calls.read).not.toHaveBeenCalled();
+  const missing = { ...environment, attach_retry: null };
+  view.rerender(<EnvironmentStatusText environment={missing} />);
+  await waitFor(() => expect(body).not.toHaveTextContent(retry.last_problem));
+  expect(body).toHaveTextContent(locale === 'en' ? 'Not reported' : '尚未报告');
+  const recovered = { ...missing, status: 'running' as const };
+  view.rerender(<EnvironmentStatusText environment={recovered} />);
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`keeps Activity's header consistent with failures and the accepted recovery (${locale}/${theme})`, async () => {

@@ -13,6 +13,8 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { StateLine } from '@/ui/StateLine';
 import { refreshThread } from '@/realtime/live';
 import { PortsPanel } from './Ports';
+import { portDisplayOpener } from './PortDisplayAction';
+import { revealView } from '@/features/workbench/openView';
 
 export function PortsView() {
   const { t } = useTranslation();
@@ -27,7 +29,10 @@ export function PortsView() {
   if (!allowed) return <StateLine compact role="status" className="px-3" title={t('ports.view.denied')} />;
   if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
-  return <div className="h-full overflow-auto"><PortsPanel environment={query.data} browser={portsBrowser(query.data, showBrowserBeside)} /></div>;
+  const openDisplay = state.access.thread.environment_permissions.includes('vnc.view')
+    ? portDisplayOpener(thread, () => revealView('vnc'))
+    : undefined;
+  return <div className="h-full overflow-auto"><PortsPanel key={thread} environment={query.data} onOpenDisplay={openDisplay} browser={portsBrowser(query.data, showBrowserBeside)} /></div>;
 }
 
 /** Removing the served door removes its entry without granting anything from Thread View. */

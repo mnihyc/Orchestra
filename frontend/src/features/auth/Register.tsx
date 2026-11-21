@@ -4,6 +4,7 @@
  * invitation it first says what the invitation is. Without one it shows the form where anybody may
  * register, and otherwise says in one sentence how people get in here.
  */
+import { READ_NOW } from '@/api/freshness';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useRouter } from '@tanstack/react-router';
 import { CircleCheck, DoorClosed, MailCheck, Ticket } from 'lucide-react';
@@ -14,13 +15,14 @@ import { metaQuery, nameAvailabilityQuery, PASSWORD_MIN_CHARS, register, resendC
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import { invitationQuery } from '@/api/users';
 import { AuthCard } from '@/features/auth/Frame';
+import { HumanCheckNotice, HumanCheckWidget, useHumanCheck } from '@/features/auth/HumanCheck';
 import { CreatedAccount } from '@/features/auth/CreatedAccount';
 import { InvitationTermsChoice, termsRefused, useInvitationTerms } from '@/features/auth/Terms';
 import { IdentityProviders } from '@/features/auth/IdentityProviders';
 import { acceptedDestination } from '@/features/auth/accepted';
 import { useIdentityRules } from '@/features/auth/identityRules';
 import { InvitationSkeleton, InvitationSpent, InvitationSummary, isSpent } from '@/features/auth/Invitation';
-import type { InvitationAcceptReply, InvitationPreview } from '@/generated/api-types';
+import type { HumanCheckAct, InvitationAcceptReply, InvitationPreview } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
 import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
@@ -29,6 +31,11 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input, PasswordInput } from '@/ui/Input';
 import { linkButtonClasses, linkClasses } from '@/ui/link';
+
+/** What the form of this screen asks the human check for. */
+const REGISTERING: readonly HumanCheckAct[] = ['register'];
+/** What the screen that waits for the address to be confirmed asks it for. */
+const CONFIRMING: readonly HumanCheckAct[] = ['resend'];
 
 /** How a registration ended, as this screen goes on from it. */
 type Ended =
@@ -108,7 +115,7 @@ export function Register({ invitation, acceptedTermsHash = null }: { invitation:
       <RegisterForm key={invitation ?? 'open'} invitation={good === null ? null : invitation} preview={good} onEnded={setEnded} termsReady={good === null || terms.ready} acceptedTermsHash={terms.hash} onTermsError={terms.handleError} />
       <IdentityProviders providers={meta.identity_providers} redirect="/" registration
         invitation={good === null ? null : invitation} acceptInvitation={good !== null && good.kind !== 'system'}
-        acceptedTermsHash={terms.hash} blocked={good !== null && !terms.ready} beforeStart={good === null || invitation === null ? undefined : async () => terms.review(await cache.query({ ...invitationQuery(invitation), staleTime: 0 }))} />
+        acceptedTermsHash={terms.hash} blocked={good !== null && !terms.ready} beforeStart={good === null || invitation === null ? undefined : async () => terms.review(await cache.query({ ...invitationQuery(invitation), ...READ_NOW }))} />
     </AuthCard>
   );
 }
@@ -138,6 +145,7 @@ function RegisterForm({ invitation, preview, onEnded, termsReady, acceptedTermsH
     },
   );
   const actKey = useActKey();
+  const check = useHumanCheck(REGISTERING);
   const publicName = useDebounced(form.values.username);
   const checksName = publicName === form.values.username && USERNAME_PATTERN.test(publicName);
   const availability = useQuery({...nameAvailabilityQuery(publicName),enabled:checksName});
@@ -158,7 +166,16 @@ function RegisterForm({ invitation, preview, onEnded, termsReady, acceptedTermsH
         accept_invitation: preview !== null && preview.kind !== 'system',
         ...(acceptedTermsHash === undefined ? {} : { accepted_terms_hash: acceptedTermsHash }),
       };
-      const outcome = await register(body, actKey(body));
+      // A token serves one request: it is asked for at each try, and counted as used whatever came of it.
+      const token = await check.take('register');
+      let outcome: Awaited<ReturnType<typeof register>>;
+      try {
+        outcome = await (token === null ? register(body, actKey(body)) : register(body, actKey(body), token));
+      } catch (error) {
+        check.spend(true);
+        throw error;
+      }
+      check.spend(false);
       if (!outcome.signedIn && outcome.alreadyCreated) return { as: 'already' };
       if (!outcome.signedIn) return { as: 'confirm', login: values.username, email };
       return { as: 'in', accepted: outcome.accepted, invited: invitation !== null,
@@ -224,9 +241,11 @@ function RegisterForm({ invitation, preview, onEnded, termsReady, acceptedTermsH
       {error !== null && !placed && !otherAddress && (
         <ErrorAlert error={error} message={termsRefused(error) ? t('orgTerms.changed') : taken ? t('auth.register.taken') : undefined} />
       )}
-      <Button type="submit" variant="primary" block pending={create.isPending} disabled={!termsReady}>
+      <HumanCheckWidget check={check} act="register" />
+      <Button type="submit" variant="primary" block pending={create.isPending} disabled={!termsReady || check.waiting('register')} reason={termsReady && check.waiting('register') ? t('auth.humanCheck.waiting') : undefined}>
         {t(preview?.kind === 'org' ? 'auth.register.submitJoin' : preview !== null && preview.kind !== 'system' ? 'auth.register.submitAccept' : 'auth.register.submit')}
       </Button>
+      <HumanCheckNotice check={check} act="register" />
     </form>
   );
 }
@@ -264,7 +283,17 @@ function Welcome({ ended }: { ended: Extract<Ended, { as: 'in' }> }) {
 /** What somebody reads whose address has to be confirmed before they can sign in. */
 function ConfirmFirst({ login, email, mail }: { login: string; email: string; mail: boolean }) {
   const { t } = useTranslation();
-  const again = useMutation({ mutationFn: () => resendConfirmation(login) });
+  const check = useHumanCheck(CONFIRMING);
+  const again = useMutation({
+    mutationFn: async () => {
+      const token = await check.take('resend');
+      try {
+        await (token === null ? resendConfirmation(login) : resendConfirmation(login, token));
+      } finally {
+        check.spend(false);
+      }
+    },
+  });
   return (
     <AuthCard
       title={t('auth.register.confirmTitle')}
@@ -285,9 +314,11 @@ function ConfirmFirst({ login, email, mail }: { login: string; email: string; ma
       ) : (
         <div className="flex flex-col items-center gap-2 text-sm">
           {again.error !== null && <ErrorAlert error={again.error} className="self-stretch" />}
-          <button type="button" className={linkButtonClasses} disabled={again.isPending} onClick={() => again.mutate()}>
+          <HumanCheckWidget check={check} act="resend" />
+          <button type="button" className={linkButtonClasses} disabled={again.isPending || check.waiting('resend')} onClick={() => again.mutate()}>
             {t('auth.verify.resend')}
           </button>
+          <HumanCheckNotice check={check} act="resend" />
         </div>
       )}
     </AuthCard>

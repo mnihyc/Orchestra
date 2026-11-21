@@ -83,6 +83,7 @@ impl Default for StoreOptions {
 pub(crate) struct Inner {
     pub(crate) root: PathBuf,
     pub(crate) options: StoreOptions,
+    pub(crate) lifetimes: orch_blob_contract::lifetime::Lifetimes,
 }
 
 impl Inner {
@@ -126,6 +127,7 @@ impl LocalBlobStore {
             inner: Arc::new(Inner {
                 root: root.into(),
                 options,
+                lifetimes: orch_blob_contract::lifetime::Lifetimes::default(),
             }),
         };
         tokio::fs::create_dir_all(store.inner.root.join("blobs"))
@@ -163,13 +165,19 @@ impl LocalBlobStore {
 
 #[async_trait]
 impl BlobStore for LocalBlobStore {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        &self.inner.lifetimes
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         content: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        writes::put(&self.inner, hash, size, content).await
+        publication.check(self.lifetimes(), hash)?;
+        writes::put(&self.inner, hash, size, content, publication).await
     }
 
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
@@ -189,7 +197,12 @@ impl BlobStore for LocalBlobStore {
         }
     }
 
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        writes::delete(&self.inner, hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        writes::delete(&self.inner, hash, retirement).await
     }
 }
