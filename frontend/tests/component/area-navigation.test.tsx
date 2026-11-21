@@ -1,8 +1,9 @@
 /** Page sections remain inside their page while the global navigation keeps the chosen org. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type * as Router from '@tanstack/react-router';
+import type * as NodesApi from '@/api/nodes';
 import type * as LiveModule from '@/realtime/live';
-import { cleanup, fireEvent, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, within, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { useState } from 'react';
@@ -20,13 +21,17 @@ import { placeSettingsSections, settingsNavigation, type PlaceSettingsNavigation
 import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
+import { useScreenHeading,clearScreenHeading } from '@/shell/screen';
+import { hierarchyFeed } from '@/api/hierarchyFeed';
+import { treeWriter,useTreeStore } from '@/realtime/stores/tree';
+import { treeNode } from '../doubles/tree-node';
 import { useSelectedOrg } from '@/shell/org';
 import { me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
 const world = vi.hoisted(() => {
   const search: Record<string, unknown> = {};
-  return { path: '/settings/profile', search, tree: vi.fn(), chats: vi.fn(), followed: vi.fn() };
+  return { path: '/settings/profile', search, pages:vi.fn<(root:string,selection:NodesApi.TreeSelection,signal?:AbortSignal)=>Promise<NodesApi.TreeReply>>(), tree: vi.fn(), chats: vi.fn(), followed: vi.fn() };
 });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(),
   useRouterState: ({ select }: { select: (state: { location: { pathname: string; search: Record<string, unknown> } }) => unknown }) => select({ location: { pathname: world.path, search: world.search } }),
@@ -36,6 +41,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
     return <a {...props} href={href} onClick={(event) => { onClick?.(event); event.preventDefault(); world.followed(href); }}>{children}</a>;
   },
 }));
+vi.mock('@/api/nodes',async(load)=>({...await load<typeof NodesApi>(),fetchTreePage:world.pages}));
 vi.mock('@/realtime/live', async (load) => {
   const actual = await load<typeof LiveModule>();
   return { ...actual, useOrgTreeFeed: world.tree };
@@ -64,7 +70,7 @@ function draw(ui: ReactNode = <Sidebar />, asAdmin = true) {
   useSelectedOrg.setState({ orgId: remembered.id });
   return show(<QueryClientProvider client={cache}>{ui}</QueryClientProvider>);
 }
-afterEach(async () => { cleanup(); for (const cache of clients.splice(0)) cache.clear(); useSelectedOrg.setState({ orgId: null }); useAppearance.setState(appearance); world.search = {}; vi.clearAllMocks(); await setLocale('en'); });
+afterEach(async () => { cleanup();treeWriter.clear();clearScreenHeading();world.pages.mockReset(); for (const cache of clients.splice(0)) cache.clear(); useSelectedOrg.setState({ orgId: null }); useAppearance.setState(appearance); world.search = {}; vi.clearAllMocks(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`keeps the chosen org navigation across local page sections at ${locale}/${theme}`, async () => {
@@ -79,7 +85,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const nav = screen.getByRole('navigation', { name: i18n.t('views.navigation.title') });
       expect(within(nav).getByRole('button', { name: i18n.t('navigation.projects') })).toBeVisible();
       expect(screen.queryByRole('navigation', { name: label })).not.toBeInTheDocument();
-      expect(world.tree).toHaveBeenCalledWith(remembered.id);
+      expect(world.tree).toHaveBeenCalledWith(remembered.id,expect.any(String));
       expect(world.tree.mock.calls.every(([id]) => id === remembered.id)).toBe(true);
       view.unmount();
     }
@@ -137,7 +143,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
     expect(nav.querySelector(`[data-section-id="${scope.current}"]`)).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('navigation', { name: i18n.t('views.navigation.title') })).toBeVisible();
-    expect(world.tree).toHaveBeenCalledWith(remembered.id);
+    expect(world.tree).toHaveBeenCalledWith(remembered.id,expect.any(String));
     const draft = screen.getByRole('textbox', { name: 'Retained setting draft' });
     await user.type(draft, 'Unsaved words');
     await user.click(screen.getByRole('button', { name: 'Toggle navigation' }));
@@ -158,4 +164,24 @@ it('keeps Settings explicit, preserves exact setting links and org aliases, and 
   expect(settingsNavigation('/org/acme/settings/destinations')).toEqual({ kind: 'org', address: 'acme', current: 'channels' });
   expect(navigationRoot('/topic/topic', [remembered], remembered.id, { node: remembered.id })).toBe(remembered.id);
   expect(navigationRoot('/topic/topic', [remembered], remembered.id, { node: remembered.id })).toBe(remembered.id);
+});
+
+
+it('reveals a deep address after its held path read meets the first root answer and later live changes',async()=>{
+  world.path='/topic/topic';
+  const root=treeNode({id:remembered.id,kind:'org',parent_id:null,name:remembered.name,folded:{has_children:true,small_tree:false,waiting:0,unread:false,mentions:0,urgency:null}});
+  const folder=treeNode({id:project.id,kind:'project',parent_id:root.id,name:project.name,folded:{has_children:true,waiting:0,unread:false,mentions:0,urgency:null}});
+  const leaf=treeNode({id:topic.id,kind:'topic',parent_id:folder.id,name:topic.name});
+  let finish!:(page:NodesApi.TreeReply)=>void;
+  const held=new Promise<NodesApi.TreeReply>((resolve)=>{finish=resolve;});
+  world.pages.mockImplementation((_root,selection)=>selection.path_to!==undefined?held:Promise.resolve({nodes:selection.parent_id===folder.id?[leaf]:[],ancestors:[root,folder],hidden:[],seq:20,since:null,complete:true,feed:hierarchyFeed()}));
+  function Address(){useScreenHeading({title:leaf.name,nodeId:leaf.id});return <Sidebar/>;}
+  draw(<Address/>);
+  await waitFor(()=>expect(world.pages.mock.calls.some(([,selection])=>selection.path_to===leaf.id)).toBe(true));
+  act(()=>treeWriter.branch(root.id,root.id,[folder],10,[],[root]));
+  act(()=>treeWriter.branch(root.id,root.id,[{...folder,name:'Web current',tree_seq:20}],20,[],[root]));
+  await act(async()=>{finish({nodes:[root,folder,leaf],ancestors:[],hidden:[],seq:10,since:null,complete:true,feed:hierarchyFeed()});await Promise.resolve();});
+  await waitFor(()=>expect(useTreeStore.getState().byOrg.get(root.id)?.nodes.has(leaf.id)).toBe(true));
+  expect(await screen.findByRole('treeitem',{name:new RegExp(leaf.name)})).toBeVisible();
+  expect(useTreeStore.getState().byOrg.get(root.id)?.nodes.get(folder.id)?.name).toBe('Web current');
 });

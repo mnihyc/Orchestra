@@ -4,7 +4,7 @@ use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity;
@@ -19,7 +19,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> (Id, String) {
     let selected: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(selected.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -355,6 +355,7 @@ async fn host_plan(
 ) -> PortOpeningPlan {
     port_policy(world, "port_host", "ask").await;
     let policy = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(HostPorts {
             incoming_address: "scoped-create-publisher.example.test".into(),
@@ -496,7 +497,7 @@ async fn create_refreshes_its_exact_key_after_the_native_environment_and_publish
                 pid,
                 &pending,
                 if publisher {
-                    "%SELECT id FROM machines%FOR NO KEY UPDATE%"
+                    "%SELECT id FROM machines%FOR KEY SHARE%"
                 } else {
                     "%SELECT id FROM environments%FOR UPDATE%"
                 },

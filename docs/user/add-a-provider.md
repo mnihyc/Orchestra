@@ -3,10 +3,12 @@ group: getting-started
 title: Add a provider of any kind
 screens: /resources/providers, /resources/machines, /thread/$threadId, /topic/$topicId
 keywords: provider, subscription, API key, custom endpoint, GPU, adapter, Chat Completions, Responses, Messages, source, 提供方, 订阅, 密钥, 自有模型
-summary: Connect a model endpoint or program sign-in, then choose credentials, models and runtime.
+summary: Connect a model endpoint or program sign-in, then choose credentials, models and container.
 ---
 
 # Add a provider of any kind
+
+A provider is the source of a model and of its credential. This page shows how to connect a model endpoint or the sign-in of a program, choose its credential and machine, say who reports its models and limits, and use it.
 
 ## 1. Choose how the model is reached
 
@@ -15,24 +17,20 @@ Use **Fill from an example** at the top to fill the same fields, or enter your o
 Choose **API address** for a model endpoint, including your own model on a GPU machine.
 Give its base address and the API it speaks: Messages, Responses, Chat Completions or Embeddings.
 For a subscription, choose **A program's own sign-in** and its sign-in program.
-An unavailable program stays in the list with its reason. **Add agent profile** opens the existing
-profile flow here; a program installed on a machine still has to report its sign-in support.
-You can register it from that machine, or run an unread profile once. The unfinished provider is kept.
+A program that is unavailable stays in the list with its reason. **Add agent profile** opens the usual flow for a profile here. A program that is installed on a machine still has to report that it supports signing in. You can register it from that machine, or run a profile whose support has not been read yet once. The provider you were adding is kept, unfinished.
 
 ## 2. Choose the credential and machine
 
 An address can use **API key** or **No credential**; a subscription uses its program's sign-in.
-Choose the provider's home, then continue to the machines and data sources. **Keep the key on**
-or **Keep the sign-in on** selects its keeper; without a credential, **Connect from** selects the
-machine that reaches the model. Its local policy must allow that address. `localhost` means
+Choose the home of the provider, then continue to the machines and sources of data. **Keep the key on** or **Keep the sign-in on** chooses the machine that keeps it. Without a credential, **Connect from** chooses the machine that reaches the model. Its local policy must allow that address. `localhost` means
 that machine, not your browser. **Run the connection on** is a separate choice; both can use
 the same machine or the new container.
 Only choose a sign-in program on a machine that offers it.
+A new container carries the programs in its image. An agent that needs a separate program is available after the container reports it installed, or after a hosted unit installs an explicitly declared build. Managed provider containers have no local policy to configure.
 
 ## Key proposals
 
-You can paste a **Key** while adding an API provider. A known format proposes an
-existing example and **Key role**, marked **From key format**. Choose **Use** to
+You can paste a **Key** while adding an API provider. A format that is known proposes an example that exists and a **Key role**, marked **From key format**. Choose **Use** to
 fill the example's fields; **From catalogue** identifies that example. You can
 edit either choice. An unknown or ambiguous format leaves the provider choice
 to you. A proposal does not verify a key, a capability, a price or a limit.
@@ -50,7 +48,7 @@ no vendor request; the unsaved key stays in this form until you choose to save.
 
 ## 3. Choose who reports models and limits
 
-Known vendors have built-in readers. For your own adapter, select a **program on a machine**
+Vendors that are known have readers built in. For your own adapter, select a **program on a machine**
 or a **source address** for models, limits and usage. A source address implements the provider-source
 interface; it is separate from the model's API address. Register a missing program inline or
 from the machine's **Programs** section. [Register your program](register-your-program.md)
@@ -79,7 +77,7 @@ The [source interface guide](/help/provider-readme) explains how to implement yo
 ## Local embeddings
 
 Choose **Local embeddings** in the ordinary example list to run the shipped embedding model in the provider's
-runtime. It fills the protocol, loopback address, model and 256 dimensions. The runtime template is an ordinary
+container. It fills the protocol, loopback address, model and 256 dimensions. The provider's template is an ordinary
 Dockerfile template: find it in **Resources → Templates** to edit or remove it. Removing it does not turn it into
 a hidden built-in; a later addition makes a fresh template when needed.
 

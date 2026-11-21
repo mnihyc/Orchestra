@@ -277,6 +277,7 @@ impl Request {
             request_hash: String,
             kind: String,
             created_by: Option<Id>,
+            #[sqlx(try_from = "orch_db::storage::OptionalJson")]
             origin: Option<Json>,
             planned_export: Option<String>,
             planned_node: Option<String>,
@@ -1318,7 +1319,7 @@ async fn locks(conn: &mut Conn, value: &Value) -> Result<(), Error> {
         .fetch_all(&mut *conn)
         .await
         .map_err(DbError::from)?;
-    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
+    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE")
         .bind(ids(ObjectKind::Machine))
         .fetch_all(&mut *conn)
         .await
