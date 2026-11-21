@@ -35,8 +35,11 @@ pub struct Memberships {
 impl Memberships {
     /// The memberships of `user`.
     pub async fn load(conn: &mut Conn, user: Id) -> Result<Self, Error> {
-        let rows = access::memberships(conn, user).await?;
-        Ok(Self {
+        Ok(Self::from_rows(access::memberships(conn, user).await?))
+    }
+
+    pub(crate) fn from_rows(rows: Vec<access::MembershipRow>) -> Self {
+        Self {
             trees: rows
                 .into_iter()
                 .map(|row| Membership {
@@ -45,7 +48,7 @@ impl Memberships {
                     path: row.domain_path,
                 })
                 .collect(),
-        })
+        }
     }
 
     /// Memberships as they are given.

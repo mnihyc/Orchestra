@@ -2,16 +2,28 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { i18n, setLocale } from '@/i18n';
 import { menuCommands } from '@/features/finder/menuCommands';
-import { commandEntries, commandRows, helpCommands } from '@/features/finder/local';
+import { commandEntries, commandRows, helpCommands, settingEntries, settingRows } from '@/features/finder/local';
+import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { settingsDestinations } from '@/features/finder/settingsCommands';
 import { assemble, type Env, type Scored } from '@/features/finder/rows';
 import { shortcutMatches } from '@/features/help/shortcutSearch';
-import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
+import { sideAvailable, sideRefusal } from '@/features/side-threads/availability';
 import type { Thread } from '@/generated/api-types';
 import type { MenuEntry } from '@/ui/Menu';
 import { Pencil } from 'lucide-react';
 
 afterEach(async () => { await setLocale('en'); });
+
+it.each(['email', 'templates', 'mcp', 'defaults', 'rates'])('finds an implemented Management %s destination through its settings', (section) => {
+  const def = SETTINGS_REGISTRY.find((entry) => entry.key === 'system.banner');
+  if (def === undefined) throw new Error('The registry must include the system banner.');
+  const env: Env = { t: i18n.t, go: vi.fn(), orgSlug: null, exists: () => true, showCard: vi.fn() };
+  const path = `/admin/${section}`;
+  const rows = settingRows(settingEntries([def]), '', env, { resolved: new Map(), place: () => ({ to: path }) });
+  expect(rows).toHaveLength(1);
+  rows[0]?.row.run('here');
+  expect(env.go).toHaveBeenCalledWith({ to: path }, 'here');
+});
 
 for (const locale of ['en', 'zh-CN'] as const) it(`finds a native switch and honors a newer refusal or handler (${locale})`, async () => {
   await setLocale(locale);
@@ -45,7 +57,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`omits an unsupported side-thr
     sides: { allowed: true, mode: null, reason } } as unknown as Thread;
   const ask = vi.fn(); const fork = vi.fn(); const forkTo = vi.fn();
   const entries: MenuEntry[] = [
-    ...(sideReadingAvailable(thread) ? [{ id: 'side-ask', label: t('side.menu.ask'), disabled: sideRefusal(thread, t), onSelect: ask }] : []),
+    ...(sideAvailable(thread) ? [{ id: 'side-ask', label: t('side.menu.ask'), disabled: sideRefusal(thread, t, thread.sides?.acting === true), onSelect: ask }] : []),
     { id: 'change-fork-now', label: t('duplicate.now'), onSelect: fork },
     { id: 'change-fork', label: t('duplicate.to'), onSelect: forkTo },
   ];
@@ -53,7 +65,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`omits an unsupported side-thr
   const env: Env = { t, go: vi.fn(), orgSlug: null, exists: () => true, showCard: vi.fn() };
   const aside = commandRows(commandEntries(commands, t), locale === 'en' ? 'ask side' : '侧问', env);
   expect(aside).toHaveLength(0);
-  expect(sideRefusal(thread, t)).toBe(t('side.unavailable.readOnly'));
+  expect(sideRefusal(thread, t, thread.sides?.acting === true)).toBe(t('side.unavailable.readOnly'));
   expect(ask).not.toHaveBeenCalled();
   const branches = commandRows(commandEntries(commands, t), locale === 'en' ? 'duplicate' : '副本', env);
   expect(branches).toHaveLength(2);

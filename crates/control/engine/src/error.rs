@@ -18,17 +18,23 @@ pub enum EngineError {
     /// A capability returned a safe reported refusal, including its actual allowance reset.
     #[error("{0}")]
     Capability(Box<crate::tools::capability_service::CapabilityFailure>),
+    /// The temporary packet for this receipt is absent. Its consumer may already own the result.
+    #[error("The accepted result packet is no longer retained.")]
+    CapabilityPacketUnavailable(Box<crate::tools::capability_service::CapabilityResultReceipt>),
     /// A prepared capability follows an existing call-rule pause without an accepted result.
     #[error("The capability is paused under its current call rules.")]
     CapabilityPaused(Box<crate::tools::capability_service::CapabilityPause>),
-    /// Ask's configured window cannot hold its required reserves.
-    #[error(
-        "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves."
-    )]
-    AskContextNoRoom,
     /// Even a summary and the current question cannot fit the selected model.
     #[error("This conversation is too long for {0}; start a new one or keep it as a thread.")]
     AskContextTooLong(String),
+    /// The current question and what it read cannot fit the selected model, with no earlier message at all.
+    #[error(
+        "This question and what it read are too long for {0}; ask a narrower question or start with fewer sources."
+    )]
+    AskTurnTooLong(String),
+    /// A running Ask turn keeps the same named, safe refusal as interactive admission.
+    #[error("{message}")]
+    AskRefused { reason: String, message: String },
     /// A lifecycle change must first review and end the thread's live native work.
     #[error(
         "Background tasks are still running. Review and end them before changing this session."
@@ -72,6 +78,35 @@ pub enum EngineError {
 }
 
 impl EngineError {
+    /// A deterministic refusal of this stored representation, never a transient outage.
+    pub fn data_code(&self) -> Option<&str> {
+        match self {
+            Self::Db(error)
+            | Self::Authz(orch_authz::Error::Db(error))
+            | Self::Settings(orch_settings::Error::Db(error)) => return error.data_code(),
+            _ => {}
+        }
+        let first: &(dyn std::error::Error + 'static) = match self {
+            Self::BeforeEffect(error) => error.as_ref(),
+            _ => self,
+        };
+        let mut source = Some(first);
+        while let Some(error) = source {
+            if let Some(code) = error.downcast_ref::<DbError>().and_then(DbError::data_code) {
+                return Some(code);
+            }
+            if let Some(orch_authz::Error::Db(error)) = error.downcast_ref::<orch_authz::Error>() {
+                return error.data_code();
+            }
+            if let Some(orch_settings::Error::Db(error)) =
+                error.downcast_ref::<orch_settings::Error>()
+            {
+                return error.data_code();
+            }
+            source = error.source();
+        }
+        None
+    }
     /// A stored value or a machine's word that does not read.
     pub fn unreadable(what: impl std::fmt::Display) -> Self {
         Self::Unreadable(what.to_string())

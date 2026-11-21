@@ -176,7 +176,7 @@ export const CONTEXT_DEF = {
   key: CONTEXT,
   title: 'Context',
   description:
-    "How much of a conversation the agent keeps, in tokens, up to the largest the model's managers opened. Codex shortens the conversation before it reaches that size, keeping room for the answer and for what it adds to every request: at about 828 000 for a context of 1 000 000.",
+    "How much of a thread the agent keeps, in tokens, up to the largest the model's managers opened. Codex shortens the conversation before it reaches that size, keeping room for the answer and for what it adds to every request: at about 828 000 for a context of 1 000 000.",
   group: 'model',
   type: 'integer',
   range: { min: CONTEXT_LEAST, max: { from_model: 'context_max' } },

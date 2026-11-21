@@ -125,8 +125,8 @@ pub async fn mark_batch_read(
     at: DateTime<Utc>,
 ) -> Result<i64, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications WHERE user_id = $1 AND read_at IS NULL AND id = ANY($2))
       RETURNING inbox_seq",
     )
@@ -162,8 +162,8 @@ pub async fn undo_batch(
     readable: &[Id],
 ) -> Result<i64, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications WHERE user_id = $1 AND read_batch_id = $2 AND id = ANY($3))
       RETURNING inbox_seq",
     )
@@ -212,7 +212,7 @@ pub struct Counts {
 
 /// Serializes a grouped read against announcements and renewals that allocate an Inbox sequence.
 pub async fn lock_sequence(conn: &mut Conn, user: Id) -> Result<(), DbError> {
-    sqlx::query("SELECT inbox_seq FROM users WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT inbox_seq FROM user_inboxes WHERE user_id = $1 FOR UPDATE")
         .bind(user)
         .execute(conn)
         .await?;
@@ -224,7 +224,7 @@ pub async fn counts(conn: &mut Conn, user: Id) -> Result<Option<Counts>, DbError
     Ok(sqlx::query_as(
         "SELECT (SELECT count(*) FROM notifications WHERE user_id = $1 AND read_at IS NULL) AS unread,
                 u.inbox_seq AS seq
-           FROM users u WHERE u.id = $1",
+           FROM user_inboxes u WHERE u.user_id = $1",
     )
     .bind(user)
     .fetch_optional(conn)
@@ -255,8 +255,8 @@ pub async fn mark_read(
     at: DateTime<Utc>,
 ) -> Result<Option<i64>, DbError> {
     let moved: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND EXISTS (
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND EXISTS (
                 SELECT 1 FROM notifications
                  WHERE user_id = $1 AND read_at IS NULL
                    AND (id = ANY($2) OR node_id = $3::uuid OR chat_id = $4::uuid OR created_at <= $5::timestamptz))
@@ -317,6 +317,66 @@ pub async fn settle_approval(
     settle_request(conn, RequestSource::Approval(approval), at).await
 }
 
+/// Queue recipient effects without sharing a key or lock with a worker's receipt.
+pub async fn defer_approval_settlement(
+    conn: &mut Conn,
+    approval: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO approval_notification_settlements (id,approval_id,settled_at) VALUES ($1,$2,$3)")
+        .bind(orch_types::new_id()).bind(approval).bind(at).execute(conn).await?;
+    Ok(())
+}
+
+/// An immutable recipient-work identity, separate from both interactive rows.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ApprovalSettlement {
+    /// Private receipt.
+    pub id: Id,
+    /// Its approval.
+    pub approval_id: Id,
+    /// The accepted decision or withdrawal time.
+    pub settled_at: DateTime<Utc>,
+}
+
+/// The sweep reads only the pending private receipts, in accepted order.
+pub async fn pending_approval_settlements(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar("SELECT id FROM approval_notification_settlements WHERE done_at IS NULL ORDER BY settled_at,id LIMIT $1")
+        .bind(limit).fetch_all(conn).await?)
+}
+
+/// Only recipient workers acquire these locks; no producer locks or updates an existing receipt.
+pub async fn lock_approval_settlement(
+    conn: &mut Conn,
+    id: Id,
+) -> Result<Option<ApprovalSettlement>, DbError> {
+    let row: Option<ApprovalSettlement> = sqlx::query_as("SELECT id,approval_id,settled_at FROM approval_notification_settlements WHERE id=$1 AND done_at IS NULL FOR UPDATE")
+        .bind(id).fetch_optional(&mut *conn).await?;
+    if let Some(row) = &row {
+        // Repeated terminal observations may enqueue the same approval. Serialize only their recipient
+        // effects so the existing idempotent Inbox writer advances each person's sequence once.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('approval_recipients:' || $1::uuid::text,0))")
+            .bind(row.approval_id).execute(conn).await?;
+    }
+    Ok(row)
+}
+
+/// The receipt and every recipient sequence commit together, so retrying cannot repeat their effects.
+pub async fn finish_approval_settlement(
+    conn: &mut Conn,
+    id: Id,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE approval_notification_settlements SET done_at=$2 WHERE id=$1 AND done_at IS NULL",
+    )
+    .bind(id)
+    .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// The source identity of any request with several possible deciders.
 #[derive(Debug, Clone, Copy)]
 pub enum RequestSource {
@@ -359,8 +419,8 @@ pub async fn settle_request(
             SELECT DISTINCT user_id FROM notifications WHERE approval_id=$1
               AND data ->> '_orch_approval_settled' IS DISTINCT FROM 'true'
          ), bumped AS (
-            UPDATE users u SET inbox_seq = u.inbox_seq + 1 FROM affected a WHERE u.id = a.user_id
-            RETURNING u.id, u.inbox_seq
+            UPDATE user_inboxes u SET inbox_seq = u.inbox_seq + 1 FROM affected a WHERE u.user_id = a.user_id
+            RETURNING u.user_id AS id, u.inbox_seq
          )
          UPDATE notifications n SET read_at = COALESCE(n.read_at, $2), read_batch_id = NULL, inbox_seq = b.inbox_seq,
             data = (CASE WHEN jsonb_typeof(n.data) = 'object' THEN n.data ELSE jsonb_build_object('_orch_legacy', n.data) END)
@@ -579,6 +639,16 @@ pub async fn approvals_always_of(
         .iter()
         .map(|user| (*user, chosen.get(user).copied().unwrap_or(true)))
         .collect())
+}
+
+/// The actual oldest stored row for the caller, independent of the list's cursor and filters.
+pub async fn oldest_retained(conn: &mut Conn, user: Id) -> Result<Option<DateTime<Utc>>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT min(created_at) FROM notifications WHERE user_id=$1")
+            .bind(user)
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 #[cfg(test)]

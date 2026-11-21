@@ -4,6 +4,7 @@ import { api, ok } from '@/api/client';
 import { record } from '@/api/cache';
 import type { Change } from '@/api/acts';
 import type { EnrollmentProgress } from '@/generated/api-types';
+import { readAgain } from '@/api/readAgain';
 import { resourceFollowing } from '@/realtime/resourceFollowing';
 
 export const ENROLLMENT_PROGRESS = 'enrollment-progress';
@@ -21,14 +22,24 @@ export function enrollmentChanges(cache: QueryClient, change: EnrollmentChange['
   for (const kind of ['machine', 'host'] as const) {
     const row = data[kind], before = record(held) ? held[kind] : undefined;
     if (!record(row) || typeof row.id !== 'string' || !record(row.access)) continue;
-    if (record(before) && before.id === row.id && resourceFollowing(kind, row.id)) data[kind] = before;
-    else rows.push({ row: { kind, id: row.id, value: row, insert: true } });
+    if (record(before) && before.id === row.id && resourceFollowing(kind, row.id)) {
+      const previously = kind === 'host' && record(before.machine) ? before.machine : before;
+      const incoming = kind === 'host' && record(row.machine) ? row.machine : row;
+      if (previously.online === false && incoming.online === true) {
+        // The acknowledgement can arrive before the first resource row. Read current
+        // presence once if the two streams disagree during this handoff.
+        return [{ missing: [{ key, exact: true }], cancelPending: true }];
+      }
+      data[kind] = before;
+    } else rows.push({ row: { kind, id: row.id, value: row, insert: true } });
   }
   return [{ value: { key, data } }, ...rows];
 }
 
 export const enrollmentProgressQuery = (receipt: string) => queryOptions({
   queryKey: enrollmentProgressKey(receipt), staleTime: Infinity, retry: false,
+  // The machine's arrival is told over the live connection, once. Until it is online the dialog reads again by itself.
+  refetchInterval: readAgain<EnrollmentProgress>((progress) => !(progress?.machine?.online === true || progress?.host?.machine.online === true)),
   // The cache owns this read across transient mounts. Native events cancel its pending result
   // before applying a newer receipt/resource, so a delayed answer cannot roll progress back.
   queryFn: async (): Promise<EnrollmentProgress> => {

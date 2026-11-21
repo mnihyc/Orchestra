@@ -8,7 +8,7 @@
  * chat is not read-only and every thread they can see, narrowed by what they typed, and at most ten may
  * be chosen.
  */
-import type { Chat, ForwardDestination, NodeKind, ThreadState, ThreadDisplay, TreeNode, UserRef } from '@/generated/api-types';
+import type { Chat, ForwardDestination, NodeKind, ThreadDisplay, NameHit, UserRef } from '@/generated/api-types';
 
 /** The most places one forward goes to, as the contract says. */
 export const MOST_DESTINATIONS = 10;
@@ -16,31 +16,27 @@ export const MOST_DESTINATIONS = 10;
 export type Destination =
   | { key: string; kind: 'node'; chatId: string; label: string; detail: string | null; nodeKind: NodeKind; display?: ThreadDisplay }
   | { key: string; kind: 'group'; chatId: string; label: string; detail: string | null }
-  | { key: string; kind: 'person'; userId: string; label: string; detail: string | null }
-  | { key: string; kind: 'thread'; threadId: string; label: string; detail: string | null; state?: ThreadState; display?: ThreadDisplay };
+  | { key: string; kind: 'person'; userId: string; person?: UserRef; label: string; detail: string | null }
+  | { key: string; kind: 'thread'; threadId: string; label: string; detail: string | null; display?: ThreadDisplay };
 
 const matches = (text: string, query: string): boolean => text.toLowerCase().includes(query.trim().toLowerCase());
 
-/** The chats of the places of a tree, the most recently active first, narrowed by name; archived and deleted places take no message. */
-export function nodeDestinations(nodes: Iterable<TreeNode>, query: string, pathOf: (node: TreeNode) => string | null): Destination[] {
-  return [...nodes]
-    .filter((node) => !node.deleted && !node.archived && (query.trim() === '' || matches(node.name, query)))
-    .sort((one, other) => other.chat.seq - one.chat.seq || one.name.localeCompare(other.name))
-    .map((node) => ({ key: `chat:${node.chat.id}`, kind: 'node' as const, chatId: node.chat.id, label: node.name, detail: pathOf(node), nodeKind: node.kind, ...(node.thread?.display === undefined ? {} : { display: node.thread.display }) }));
+/** Current readable, writable place chats in their native search order. */
+export function nodeDestinations(chats: Iterable<Chat>): Destination[] {
+  return [...chats].flatMap((chat): Destination[] => chat.kind !== 'node' || !chat.can.send || chat.node === null || chat.node.redacted ? [] : [{
+    key: `chat:${chat.id}`, kind: 'node', chatId: chat.id, label: chat.node.name ?? chat.name ?? '', nodeKind: chat.node.kind,
+    detail: chat.home?.redacted === false ? chat.home.name : null,
+    ...(chat.node.thread_display === null || chat.node.thread_display === undefined ? {} : { display: chat.node.thread_display }),
+  }]);
 }
 
-/** The agents' threads of a tree, the most recently active first, narrowed by name: what is forwarded there is queued as an
- * input of the sender's. Archived and deleted threads take none, and the thread the items come from is not offered. */
-export function threadDestinations(
-  nodes: Iterable<TreeNode>,
-  query: string,
-  pathOf: (node: TreeNode) => string | null,
-  except: string | null = null,
-): Destination[] {
-  return [...nodes]
-    .filter((node) => node.kind === 'thread' && !node.deleted && !node.archived && node.id !== except && (query.trim() === '' || matches(node.name, query)))
-    .sort((one, other) => (other.thread?.activity_seq ?? 0) - (one.thread?.activity_seq ?? 0) || one.name.localeCompare(other.name))
-    .map((node) => ({ key: `thread:${node.id}`, kind: 'thread' as const, threadId: node.id, label: node.name, detail: pathOf(node), ...(node.thread?.state === undefined ? {} : { state: node.thread.state }), ...(node.thread?.display === undefined ? {} : { display: node.thread.display }) }));
+/** Native thread names retain their readable paths and state; this forward's source is never its own agent destination. */
+export function threadDestinations(hits: Iterable<NameHit>, except: string | null = null): Destination[] {
+  return [...hits].filter((hit) => hit.kind === 'thread' && !hit.archived && hit.id !== except).map((hit) => ({
+    key: `thread:${hit.id}`, kind: 'thread', threadId: hit.id, label: hit.name,
+    detail: hit.path.slice(0, -1).flatMap((place) => place.redacted || place.name === null ? [] : [place.name]).join(' / ') || null,
+    ...(hit.thread_display === null || hit.thread_display === undefined ? {} : { display: hit.thread_display }),
+  }));
 }
 
 /** The groups the person is in, narrowed by name or by the names of their people. */
@@ -62,7 +58,7 @@ export function groupLabel(chat: Pick<Chat, 'name' | 'members'>, me: string | nu
 export function personDestinations(people: readonly UserRef[], me: string | null): Destination[] {
   return people
     .filter((user) => user.id !== me && user.kind === 'human')
-    .map((user) => ({ key: `user:${user.id}`, kind: 'person' as const, userId: user.id, label: user.display_name, detail: `@${user.username}` }));
+    .map((user) => ({ key: `user:${user.id}`, kind: 'person' as const, userId: user.id, person: user, label: user.display_name, detail: `@${user.username}` }));
 }
 
 /** The request's destinations for the ones chosen. */
