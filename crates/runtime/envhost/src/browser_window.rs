@@ -50,6 +50,13 @@ impl Windows {
             .write()
             .unwrap_or_else(PoisonError::into_inner) = launcher;
     }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn launcher(&self) -> Vec<String> {
+        self.launcher
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
     /// A registry that starts no process until a window is requested.
     #[must_use]
     pub fn new(variables: BTreeMap<String, String>) -> Arc<Self> {

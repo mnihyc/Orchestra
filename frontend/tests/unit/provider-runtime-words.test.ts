@@ -7,7 +7,7 @@ it.each(['en','zh-CN'] as const)('names a new runtime and keeps an unknown marke
   await setLocale(locale);
   try {
     const t=i18n.getFixedT(locale);
-    expect(providerRuntimeState('creating',t)).toBe(locale==='en'?'Creating runtime':'正在创建运行时');
+    expect(providerRuntimeState('creating',t)).toBe(locale==='en'?'Creating container':'正在创建容器');
     const unknown=providerRuntimeState('future_internal_state',t);
     expect(unknown).toBe(locale==='en'?'State unavailable':'状态暂不可用');
     expect(unknown).not.toContain('future_internal_state');

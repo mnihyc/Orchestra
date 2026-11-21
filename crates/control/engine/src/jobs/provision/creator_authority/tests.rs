@@ -189,12 +189,55 @@ impl Fixture {
             self.world.machine_id,
             SerialKey::Environment(self.world.environment),
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: self.world.environment,
                 mount: None,
                 path: "web".into(),
             },
         )?)
     }
+}
+
+#[tokio::test]
+async fn lifecycle_evidence_is_not_mistaken_for_missing_creator_evidence_and_still_requires_its_own_source()
+-> TestResult {
+    let s = Fixture::new().await?;
+    let mut row = s.job.row().await?;
+    row.plan = json!({"environment_lifecycle_required":true});
+    assert!(
+        is_retained(&row),
+        "the shared command writer still requires original authority"
+    );
+    assert!(
+        read(&row)?.is_none(),
+        "a different evidence family is not a damaged creator payload"
+    );
+    let mut tx = s.world.pool.begin().await?;
+    assert!(
+        lock_parent(
+            &mut tx,
+            &row,
+            s.world.clock.as_ref(),
+            s.world.access.as_ref()
+        )
+        .await
+        .is_err(),
+        "a missing lifecycle payload must remain closed at its actual shared source guard"
+    );
+    tx.rollback().await?;
+    for member in [VERSION, COMMANDS] {
+        row.plan[member] = json!(null);
+        assert!(
+            read(&row).is_err(),
+            "known creator evidence cannot disappear behind another source family"
+        );
+        row.plan
+            .as_object_mut()
+            .ok_or("plan is not an object")?
+            .remove(member);
+    }
+    s.engine.stop();
+    Ok(())
 }
 
 #[tokio::test]
@@ -242,6 +285,7 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         s.world.machine_id,
         SerialKey::Environment(s.world.environment),
         &FsSnapshot {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: s.world.environment,
             job_id: s.job.id(),
@@ -267,6 +311,8 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
             .is_some_and(|value| value > 0)
     );
     let canonical = Outgoing {
+        content_transit: false,
+        native_target: None,
         id,
         machine: s.world.machine_id,
         kind: CommandKind::FsSnapshot,
@@ -274,6 +320,8 @@ async fn actual_outgoing_work_report_is_retained_before_issue_and_old_results_st
         body: actual.body.clone(),
         deadline: Some(actual.deadline),
         authority: None,
+        input_facts: None,
+        session_offer: None,
     };
     assert!(s.allows(&canonical).await?);
     let mut conn = s.world.pool.acquire().await?;
@@ -403,6 +451,7 @@ async fn revoked_creator_refuses_new_forward_work_but_owned_make_compensation_st
         s.world.clock.now(),
     )
     .await?;
+    crate::jobs::runtime_commands::capture(&mut tx, s.job.id(), runtime).await?;
     jobs::merge_plan(
         &mut tx,
         s.job.id(),

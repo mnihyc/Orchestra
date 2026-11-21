@@ -735,6 +735,21 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
             .items
             .is_empty()
     );
+    rig::eventually("the answered question reaches the timeline", || async {
+        s.rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&thread])
+            .token(&s.cai.token)
+            .query(&ThreadSyncGetQuery::default())
+            .send()
+            .await
+            .ok()
+            .items
+            .iter()
+            .any(|item| item.kind() == ItemKind::Approval && item.status == ItemStatus::Answered)
+    })
+    .await;
     let sync = s
         .rig
         .world
@@ -764,4 +779,137 @@ async fn a_question_keeps_invalid_answers_pending_and_exposes_answered_in_every_
         .problem();
     assert_eq!(late.code, ErrorCode::ApprovalAlreadyDecided);
     assert_eq!(late.extra["current"]["state"], "answered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_lost_during_approval_ends_in_both_the_opening_and_a_followers_sync() {
+    use orch_api_contract::threads::{
+        Delivery, ItemPayload, ItemStatus, ThreadOpeningGet, ThreadOpeningGetQuery, TurnState,
+    };
+    use orch_link_contract::events::Event;
+
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let start = asking(&s, thread, &["one"]).await;
+    let sync = |since| {
+        s.rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&thread])
+            .token(&s.ada.token)
+            .query(&ThreadSyncGetQuery {
+                since,
+                ..Default::default()
+            })
+    };
+    let live = sync(None).send().await.ok();
+    assert_eq!(live.thread.pending_approvals, 1);
+    let loss = || {
+        Event::decode(
+            "turn.lost",
+            json!({"turn_id":start.turn_id, "reason":"The exact turn could not be reattached."}),
+        )
+        .unwrap()
+    };
+    s.rig.say(thread, loss()).await;
+    s.rig.wait_turn(start.turn_id, "failed").await;
+    let opening = s
+        .rig
+        .world
+        .app
+        .call(ThreadOpeningGet, &[&thread])
+        .token(&s.ada.token)
+        .query(&ThreadOpeningGetQuery::default())
+        .send()
+        .await
+        .ok();
+    let changes = sync(Some(live.seq)).send().await.ok();
+    assert!(changes.complete);
+    for read in [&opening.sync, &changes] {
+        assert_eq!(read.thread.current_turn_id, None);
+        assert_eq!(read.thread.pending_approvals, 0);
+        assert_eq!(read.thread.state, ThreadState::Idle);
+        let ended = read
+            .turns
+            .iter()
+            .find(|turn| turn.id == start.turn_id)
+            .unwrap();
+        assert_eq!(ended.state, TurnState::Failed);
+        assert!(ended.completed_at.is_some());
+        assert_eq!(ended.error.as_ref().unwrap().code, "turn_lost");
+        let (item, approval) = read
+            .items
+            .iter()
+            .find_map(|item| match &item.payload {
+                ItemPayload::Approval(row) => Some((item, row.approval.as_ref().unwrap())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(item.status, ItemStatus::Cancelled);
+        assert_eq!(approval.state, ApprovalState::Cancelled);
+        assert!(!approval.can_decide);
+        assert!(approval.decided_at.is_some());
+        assert!(
+            read.items
+                .iter()
+                .all(|item| item.status != ItemStatus::InProgress)
+        );
+    }
+    assert_eq!(s.rig.turn_starts(thread).len(), 1);
+    // A repeated loss cannot end the next admitted turn of the same session.
+    s.say(&s.ada, thread, "Carry on", Delivery::Queue, "after-loss")
+        .await
+        .ok();
+    let next = s.rig.turn_start(thread, 1).await;
+    s.rig.say(thread, turn_began(next.turn_id)).await;
+    s.rig.say(thread, loss()).await;
+    s.rig
+        .say(thread, message_began(next.turn_id, "after-loss"))
+        .await;
+    s.rig
+        .say(thread, rig::message_done("after-loss", "Back at work"))
+        .await;
+    rig::eventually("the next turn continues after the repeated loss", || async {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM items WHERE turn_id=$1 AND native_ref='after-loss' AND status='completed')")
+            .bind(next.turn_id).fetch_one(s.rig.db.pool()).await.unwrap()
+    }).await;
+    assert_eq!(s.rig.turn_state(next.turn_id).await, "running");
+}
+
+#[tokio::test]
+async fn losing_an_admitted_turn_before_its_first_event_never_resends_its_words() {
+    use orch_api_contract::threads::Delivery;
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let first = s
+        .say(&s.ada, thread, "Once only", Delivery::Queue, "first")
+        .await
+        .ok()
+        .input;
+    let admitted = s.rig.turn_start(thread, 0).await;
+    s.rig
+        .say(
+            thread,
+            orch_link_contract::events::Event::decode(
+                "turn.lost",
+                json!({"turn_id":admitted.turn_id,"reason":"Unconfirmed after restart"}),
+            )
+            .unwrap(),
+        )
+        .await;
+    s.rig.wait_turn(admitted.turn_id, "failed").await;
+    let delivery: (String, bool) = sqlx::query_as("SELECT i.state,t.native_end_confirmed FROM thread_inputs i JOIN turns t ON t.input_id=i.id WHERE i.id=$1 AND t.id=$2")
+        .bind(first.id).bind(admitted.turn_id).fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(delivery, ("failed".into(), false));
+    s.say(&s.ada, thread, "New instructions", Delivery::Queue, "next")
+        .await
+        .ok();
+    let next = s.rig.turn_start(thread, 1).await;
+    assert!(next.text.contains("New instructions"));
+    let next_input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
+        .bind(next.turn_id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_ne!(next_input, first.id);
 }

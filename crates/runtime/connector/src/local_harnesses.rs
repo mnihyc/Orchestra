@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
 use futures::future::join_all;
@@ -29,6 +29,66 @@ struct Snapshot {
     kinds: Vec<String>,
     configured: BTreeMap<String, String>,
     found: Vec<Found>,
+    fingerprints: BTreeMap<PathBuf, Arc<OnceLock<Fingerprint>>>,
+}
+
+/// The file identity at observation time. A replacement invalidates the digest until the next refresh.
+#[derive(Debug)]
+struct Fingerprint {
+    metadata: std::fs::Metadata,
+    sha256: String,
+}
+
+impl Fingerprint {
+    fn read(path: &Path) -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        use std::io::BufRead;
+        let file = std::fs::File::open(path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        let mut reader = std::io::BufReader::new(file);
+        loop {
+            let chunk = reader.fill_buf().ok()?;
+            if chunk.is_empty() {
+                break;
+            }
+            digest.update(chunk);
+            let count = chunk.len();
+            reader.consume(count);
+        }
+        let result = Self {
+            metadata: meta,
+            sha256: hex::encode(digest.finalize()),
+        };
+        result.matches(path).then_some(result)
+    }
+
+    fn matches(&self, path: &Path) -> bool {
+        let Ok(meta) = path.metadata() else {
+            return false;
+        };
+        let Ok(modified) = self.metadata.modified() else {
+            return false;
+        };
+        if meta.len() != self.metadata.len() || meta.modified().ok() != Some(modified) {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            meta.dev() == self.metadata.dev()
+                && meta.ino() == self.metadata.ino()
+                && meta.ctime() == self.metadata.ctime()
+                && meta.ctime_nsec() == self.metadata.ctime_nsec()
+        }
+        #[cfg(not(unix))]
+        {
+            meta.created().ok() == self.metadata.created().ok()
+        }
+    }
 }
 
 /// The latest local observations, kept separate from the local authorization policy.
@@ -127,7 +187,7 @@ impl Discovery {
         };
         #[cfg(not(test))]
         let directories = search_directories(&search, configured.len() < kinds.len()).await;
-        let found = join_all(kinds.iter().map(|kind| {
+        let found: Vec<Found> = join_all(kinds.iter().map(|kind| {
             let names = self.programs[kind].iter().map(String::as_str).collect();
             discover_in(
                 kind,
@@ -143,6 +203,23 @@ impl Discovery {
         .into_iter()
         .flatten()
         .collect();
+        let fingerprints = found
+            .iter()
+            .filter(|f| configured.contains_key(&f.kind))
+            .map(|f| {
+                let path = f.path.clone();
+                let slot = Arc::new(OnceLock::new());
+                let pending = Arc::clone(&slot);
+                let changes = self.changes.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Some(fingerprint) = Fingerprint::read(&path) {
+                        let _ = pending.set(fingerprint);
+                        changes.send_replace(());
+                    }
+                });
+                (f.path.clone(), slot)
+            })
+            .collect();
         *self
             .snapshot
             .write()
@@ -151,6 +228,7 @@ impl Discovery {
             kinds,
             configured,
             found,
+            fingerprints,
         };
         self.changes.send_replace(());
     }
@@ -193,6 +271,12 @@ impl Discovery {
                             version: selected
                                 .map_or("unknown", |found| found.version.as_str())
                                 .into(),
+                            sha256: selected.and_then(|found| {
+                                let fingerprint = snapshot.fingerprints.get(&found.path)?.get()?;
+                                fingerprint
+                                    .matches(&found.path)
+                                    .then(|| fingerprint.sha256.clone())
+                            }),
                             daemon: false,
                         });
                 }
@@ -206,6 +290,7 @@ impl Discovery {
                             kind: kind.clone(),
                             path: found.path.to_string_lossy().into_owned(),
                             version: found.version.clone(),
+                            sha256: None,
                             daemon: false,
                         }),
                 );
@@ -513,6 +598,29 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("executable");
         path
+    }
+
+    #[test]
+    fn replacing_a_selected_program_invalidates_its_check_even_when_size_and_modification_time_match()
+     {
+        use std::fs::{File, FileTimes};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selected");
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&path, b"abc").unwrap();
+        let first = Fingerprint::read(&path).unwrap();
+        assert_eq!(
+            first.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        std::fs::write(&replacement, b"xyz").unwrap();
+        let modified = path.metadata().unwrap().modified().unwrap();
+        File::open(&replacement)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(!first.matches(&path));
     }
 
     fn quoted(path: &Path) -> String {
@@ -863,6 +971,10 @@ mod tests {
         let selected = codex.display().to_string();
         *discovery.snapshot.write().unwrap() = Snapshot {
             observed: true,
+            fingerprints: BTreeMap::from([(
+                codex.clone(),
+                Arc::new(OnceLock::from(Fingerprint::read(&codex).unwrap())),
+            )]),
             kinds: vec!["codex".into(), "claude-code".into()],
             configured: BTreeMap::from([("codex".into(), selected.clone())]),
             found: vec![
@@ -884,6 +996,7 @@ mod tests {
             .push(orch_link_contract::policy::PolicyHarness {
                 kind: "codex".into(),
                 path: selected,
+                confirmation: None,
             });
         let machine = |policy| {
             crate::facts::machine_facts(
@@ -901,6 +1014,12 @@ mod tests {
         };
         let mut facts = machine(policy.clone());
         discovery.apply(&mut facts);
+        assert!(facts.harnesses[0].sha256.is_some());
+        assert!(
+            facts.discovered_harnesses.as_ref().unwrap()[0]
+                .sha256
+                .is_none()
+        );
         assert_eq!(
             facts
                 .harnesses
