@@ -148,8 +148,6 @@ use orch_db::DbError;
 
 use orch_engine::environments::StopError;
 
-use orch_engine::environments::StopReason;
-
 use orch_settings::Place;
 
 use orch_settings::get as setting;
@@ -714,6 +712,7 @@ pub(crate) async fn show_inventory_prepared(
                 .cloned()
                 .unwrap_or_else(|| amounts(&row.declared));
             Ok(Host {
+                bundled_with_server: row.bundled_with_server,
                 provenance: orch_api_contract::resource_groups::ResourceProvenance {
                     origin_machine: machines.get(&row.machine_id).cloned(),
                     availability: Vec::new(),
@@ -922,8 +921,8 @@ async fn token_create(
     (): (),
     body: api::HostEnrollmentTokenCreateBody,
 ) -> ApiResult<EnrollmentToken> {
-    let (installation, name_hint) = enrollment::validate(&ctx, &body)?;
     let (ctx, mut conn, principal) = begin_mutation(&ctx).await?;
+    let (_, name_hint) = enrollment::validate(&ctx, &mut conn, &body).await?;
     if let Some(home) = body.home_id {
         let (_, kind) = placed(&mut conn, home).await?;
         if kind != NodeKind::Org {
@@ -1031,6 +1030,7 @@ async fn token_create(
     current
         .check_deadline(ctx.app.clock.as_ref())
         .map_err(enrollment::mapped)?;
+    let installation = super::machines::installation_config(&ctx, &mut conn).await?;
     conn.commit().await.map_err(DbError::from)?;
     current
         .check_deadline(ctx.app.clock.as_ref())
@@ -1437,16 +1437,70 @@ async fn runtime_list(
     runtime_views(&ctx, &mut conn, found).await
 }
 
+/// What a request to force the stop or the removal of an environment's unit is told: that is for a provider's unit,
+/// and nothing is changed.
+fn force_is_for_providers() -> ApiError {
+    ApiError::new(
+        ErrorCode::PlanBlocked,
+        "Stopping or deleting by force is for a provider's runtime; the unit of an environment is stopped or deleted without it.",
+    )
+    .with("reason", "force_environment")
+    .with("can_force", false)
+}
+
 /// Stops the selected unit on the host, returning credentials and respecting active work.
-async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiResult<Runtime> {
+async fn runtime_stop(
+    ctx: Ctx,
+    (): (),
+    body: api::HostRuntimeStopBody,
+) -> ApiResult<api::HostRuntimeStopResponse> {
     let host = ctx.id("id")?;
     let runtime = ctx.id("runtime_id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     let row = runtime_of_host(&mut tx, host, runtime).await?;
-    if row.kind == "provider" {
+    let caller = orch_engine::commands::host_unit::admit(&mut tx, principal.caller(), host)
+        .await
+        .map_err(ApiError::engine)?;
+    let principal = Principal::load(&mut tx, caller, principal.now())
+        .await
+        .map_err(orch_engine::EngineError::from)
+        .map_err(ApiError::engine)?;
+    let captured =
+        orch_authz::CapturedOperation::capture(principal.caller()).map_err(ApiError::internal)?;
+    let http =
+        crate::key_operations::native::http_origin::capture_operation(&ctx, &mut tx, &captured)
+            .await?;
+    let selected = runtime_reply::Input::capture(&mut tx, &row).await?;
+    let accepted = principal.caller().clone();
+    http.scope(async {
+        if row.kind == "provider" {
+            ctx.app
+                .engine
+                .stop_host_provider_unit_in(
+                    tx,
+                    &principal,
+                    &crate::sign_in::origin(&ctx),
+                    host,
+                    runtime,
+                    body.interrupt,
+                    body.force == Some(true),
+                )
+                .await
+                .map_err(super::provider_runtime::refused)?;
+            return Ok(());
+        }
+        if row.environment_id.is_none() || row.kind != "environment" {
+            return Err(ApiError::new(
+                ErrorCode::PlanBlocked,
+                "this unit has no environment or provider",
+            ));
+        }
+        if body.force == Some(true) {
+            return Err(force_is_for_providers());
+        }
         ctx.app
             .engine
-            .stop_host_provider_unit_in(
+            .stop_host_environment_unit_in(
                 tx,
                 &principal,
                 &crate::sign_in::origin(&ctx),
@@ -1455,56 +1509,28 @@ async fn runtime_stop(ctx: Ctx, (): (), body: api::HostRuntimeStopBody) -> ApiRe
                 body.interrupt,
             )
             .await
-            .map_err(super::provider_runtime::refused)?;
-        let mut conn = ctx.app.db.acquire().await?;
-        let row = runtime_of_host(&mut conn, host, runtime).await?;
-        return runtime_views(&ctx, &mut conn, vec![row])
-            .await?
-            .pop()
-            .ok_or_else(|| ApiError::internal("a runtime was read and is not shown"));
-    }
-    let Some(environment) = row.environment_id.filter(|_| row.kind == "environment") else {
-        return Err(ApiError::new(
-            ErrorCode::PlanBlocked,
-            "this unit has no environment or provider",
-        ));
-    };
-    let user = ctx.user()?.id();
-    ctx.app
-        .engine
-        .stop_environment_in(
-            tx,
-            &principal,
-            &crate::sign_in::origin(&ctx),
-            environment,
-            body.interrupt,
-            StopReason::Person(user),
-        )
-        .await
-        .map_err(|error| match error {
-            StopError::NotFound => ApiError::not_found(),
-            StopError::NotManaged => ApiError::new(ErrorCode::PlanBlocked, error.to_string()),
-            StopError::Busy(turns) => ApiError::new(
-                ErrorCode::ResourceInUse,
-                "turns run in the environment; stop it with interrupt to end them first",
-            )
-            .with("turns", turns),
-            StopError::Unavailable(status) => ApiError::new(
-                ErrorCode::PlanBlocked,
-                format!("the environment is {status}"),
-            ),
-            StopError::CredentialReturnFailed(why) => {
-                ApiError::new(ErrorCode::CredentialReturnFailed, why)
-            }
-            StopError::Host(why) => ApiError::new(ErrorCode::EnvironmentUnavailable, why),
-            StopError::Internal(error) => ApiError::engine(error),
-        })?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let row = runtime_of_host(&mut conn, host, runtime).await?;
-    runtime_views(&ctx, &mut conn, vec![row])
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::internal("a runtime was read and is not shown"))
+            .map_err(|error| match error {
+                StopError::NotFound => ApiError::not_found(),
+                StopError::NotManaged => ApiError::new(ErrorCode::PlanBlocked, error.to_string()),
+                StopError::Busy(turns) => ApiError::new(
+                    ErrorCode::ResourceInUse,
+                    "turns run in the environment; stop it with interrupt to end them first",
+                )
+                .with("turns", turns),
+                StopError::Unavailable(status) => ApiError::new(
+                    ErrorCode::PlanBlocked,
+                    format!("the environment is {status}"),
+                ),
+                StopError::CredentialReturnFailed(why) => {
+                    ApiError::new(ErrorCode::CredentialReturnFailed, why)
+                }
+                StopError::Host(why) => ApiError::new(ErrorCode::EnvironmentUnavailable, why),
+                StopError::Internal(error) => ApiError::engine(error),
+            })?;
+        Ok(())
+    })
+    .await?;
+    runtime_reply::render(&ctx, &accepted, selected).await
 }
 
 /// Takes this exact environment or provider unit away from its host. Provider removal uses its
@@ -1528,6 +1554,7 @@ async fn runtime_delete(ctx: Ctx, query: api::HostRuntimeDeleteQuery, (): ()) ->
                 host,
                 runtime,
                 query.volumes == Some(true),
+                query.force == Some(true),
             )
             .await
             .map_err(super::provider_runtime::refused);
@@ -1538,6 +1565,9 @@ async fn runtime_delete(ctx: Ctx, query: api::HostRuntimeDeleteQuery, (): ()) ->
             "this unit has no environment or provider",
         ));
     };
+    if query.force == Some(true) {
+        return Err(force_is_for_providers());
+    }
     if !orch_db::queries::jobs::open_of_environment(&mut tx, environment)
         .await?
         .is_empty()
@@ -1636,6 +1666,9 @@ pub mod enrollment;
 
 #[path = "hosts/read.rs"]
 pub mod read;
+
+#[path = "hosts/runtime_reply.rs"]
+mod runtime_reply;
 
 #[path = "hosts/update_now.rs"]
 pub mod update_now;

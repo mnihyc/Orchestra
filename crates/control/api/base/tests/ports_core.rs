@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "ports_core/named_listeners.rs"]
+mod named_listeners;
 #[path = "ports_core/opening_operation_scopes.rs"]
 mod opening_operation_scopes;
 mod places;
@@ -145,6 +147,7 @@ async fn a_directory_reviews_and_reserves_a_public_number_on_its_machine_and_rec
         }],
     };
     let ports = orch_link_contract::policy::MachinePorts {
+        loopback_tcp: Default::default(),
         allowed: vec![PortOpeningKind::Host],
         publish: Some(declaration.clone()),
         limits: None,
@@ -1128,6 +1131,29 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         "a refusal stands for an hour"
     );
     assert_eq!(replayed.opening.state, PortOpeningState::Refused);
+    let until: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT max(refused_until) FROM port_open_requests WHERE opening_id=$1")
+            .bind(replayed.opening.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(&replayed.opening).unwrap()["refused_until"],
+        serde_json::to_value(orch_types::Time::new(until)).unwrap()
+    );
+    let history = world
+        .app
+        .call(orch_api_contract::approvals::ApprovalGet, &[&card.id])
+        .token(&manager.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&history).unwrap()["request"]["opening"]["refused_until"],
+        serde_json::to_value(orch_types::Time::new(until)).unwrap(),
+        "the settled request keeps the exact retry time"
+    );
+
     let cards: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE kind = 'port'")
         .fetch_one(&world.db.pool)
         .await
@@ -1768,7 +1794,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
             json!("bypass"),
         )
         .await;
-    world.set("requests.expiry_hours", json!(2)).await;
+    world.set("requests.expiry_minutes", json!(120)).await;
     let thread = asking_thread(&world, &manager, project, env).await;
     let made = world
         .app
@@ -1794,7 +1820,7 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
     let off = expires.get() - (world.now() + chrono::Duration::hours(2));
     assert!(
         off.num_seconds().abs() <= 1,
-        "requests.expiry_hours, not a port setting of its own: {off}"
+        "requests.expiry_minutes, not a port setting of its own: {off}"
     );
     world.advance(chrono::Duration::hours(2) + chrono::Duration::seconds(2));
     assert_eq!(reconcile(&world, env).await, vec![made.opening.id]);
@@ -1804,4 +1830,37 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
         .await
         .unwrap();
     assert_eq!(state, "expired");
+}
+
+#[tokio::test]
+async fn newly_requested_port_assertion_keys_name_the_committed_issuer_without_restarting_the_api()
+{
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let world = World::new().await;
+    let keys_before = world.app.call(PortAssertionKeysGet, &[]).send().await.ok();
+    let seed = world.app.app.config.system.address_seed();
+    let before = public_addresses::read(&mut *world.conn().await, &seed, world.now())
+        .await
+        .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut *world.conn().await,
+            &candidate,
+            before.revision,
+            None,
+            world.now()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let after = world.app.call(PortAssertionKeysGet, &[]).send().await.ok();
+    assert_eq!(after.issuer, "https://changed.example.test");
+    assert_eq!(after.keys, keys_before.keys);
+    assert_eq!(keys_before.issuer, "https://orch.test");
 }

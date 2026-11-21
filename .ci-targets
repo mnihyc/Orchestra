@@ -1,0 +1,10 @@
+clippy
+fmt
+test -p orch-engine --lib -- jobs::provider_provision::
+test -p orch-engine --test provider_runtime --test provider_updates
+test -p orch-api-core --test hosted_environments
+test -p orch-api-core --test runtime_updates -- recovery_source::
+test -p orch-api-core --features test-support --test provider_managed --test hosts
+web typecheck
+web lint
+web test

@@ -75,7 +75,7 @@ fn part<T>(ctx: &Ctx, answer: ApiResult<T>, bounded: bool) -> OverviewPart<T> {
             };
             let (problem, retry_after) = error.into_parts_for(&ctx.request_id);
             OverviewPart::Failed {
-                problem,
+                problem: Box::new(problem),
                 retry_after,
             }
         }
