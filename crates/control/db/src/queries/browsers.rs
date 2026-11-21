@@ -156,12 +156,26 @@ pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<BrowserRow>, DbError>
 }
 
 /// Open browsers first, then the browsers closed since the supplied cutoff, by latest use.
-pub async fn list(
+pub async fn list(conn: &mut Conn, environment: Id) -> Result<Vec<BrowserRow>, DbError> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM browser_sessions WHERE environment_id=$1 AND state<>'closed' ORDER BY last_used_at DESC,id DESC"))).bind(environment).fetch_all(conn).await?)
+}
+
+/// One selected state and literal search, with stable continuation and no hidden age cutoff.
+pub async fn page(
     conn: &mut Conn,
     environment: Id,
-    since: DateTime<Utc>,
+    closed: bool,
+    query: &str,
+    after: Option<Id>,
+    limit: i64,
 ) -> Result<Vec<BrowserRow>, DbError> {
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM browser_sessions WHERE environment_id=$1 AND (state<>'closed' OR closed_at >= $2) ORDER BY (state='closed'), last_used_at DESC,id DESC"))).bind(environment).bind(since).fetch_all(conn).await?)
+    let state = if closed {
+        "state='closed'"
+    } else {
+        "state<>'closed'"
+    };
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {COLUMNS} FROM browser_sessions WHERE environment_id=$1 AND {state} AND ($2='' OR position(lower($2) in lower(COALESCE(profile,'')||' '||COALESCE(note,'')||' '||COALESCE(program,'')))>0) AND ($3::uuid IS NULL OR id<$3) ORDER BY id DESC LIMIT $4")))
+        .bind(environment).bind(query).bind(after).bind(limit).fetch_all(conn).await?)
 }
 
 /// Every browser an environment ever had, open or closed.

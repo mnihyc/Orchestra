@@ -64,13 +64,21 @@ impl From<DbError> for SkillError {
 }
 
 /// A version ready to be recorded: checked, with its archive in the store.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Prepared {
     /// What was made of the files.
     pub built: Built,
     /// The archive's hash in the store.
     pub archive: Hash,
+    // Preparation keeps its physical bytes alive until the caller records the version.
+    _publication: orch_blob_contract::store::Stored,
 }
+impl PartialEq for Prepared {
+    fn eq(&self, other: &Self) -> bool {
+        self.built == other.built && self.archive == other.archive
+    }
+}
+impl Eq for Prepared {}
 
 /// What a version is made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +159,7 @@ pub async fn prepare_files(
 async fn keep(store: &Arc<dyn BlobStore>, built: Built) -> Result<Prepared, SkillError> {
     let archive = Hash::of(&built.archive);
     let size = i64::try_from(built.archive.len()).unwrap_or(i64::MAX);
-    store
+    let publication = store
         .put(
             &archive,
             Some(size),
@@ -159,7 +167,11 @@ async fn keep(store: &Arc<dyn BlobStore>, built: Built) -> Result<Prepared, Skil
         )
         .await
         .map_err(|error| SkillError::Store(error.to_string()))?;
-    Ok(Prepared { built, archive })
+    Ok(Prepared {
+        built,
+        archive,
+        _publication: publication,
+    })
 }
 
 /// Records a prepared version inside the caller's transaction: for a new skill the skill itself,

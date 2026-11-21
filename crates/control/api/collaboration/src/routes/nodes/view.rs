@@ -120,6 +120,8 @@ pub use orch_api_base::routes::nodes::view::ReferenceDisclosure;
 pub use orch_api_base::routes::nodes::view::ReferenceAuthority;
 
 pub use orch_api_base::routes::nodes::view::named_admin_access;
+#[path = "automatic_fields.rs"]
+mod automatic_fields;
 /// A word of one contract as the same word of another.
 fn same<A: Serialize, B: DeserializeOwned>(word: &A) -> Option<B> {
     serde_json::to_value(word)
@@ -183,23 +185,13 @@ struct Standing<'p> {
 
 /// Reads what is needed to say what the caller holds on `ids` and on every
 /// node above them.
-async fn stand<'p>(
+async fn reference_standing<'p>(
     conn: &mut Conn,
     principal: &'p Principal,
     ids: &[Id],
     policy: Policy,
 ) -> ApiResult<Standing<'p>> {
-    stand_with_participation(conn, principal, ids, policy, true).await
-}
-
-async fn stand_with_participation<'p>(
-    conn: &mut Conn,
-    principal: &'p Principal,
-    ids: &[Id],
-    policy: Policy,
-    participation: bool,
-) -> ApiResult<Standing<'p>> {
-    stand_with_name_sources(conn, principal, ids, policy, participation, None).await
+    stand_with_name_sources(conn, principal, ids, policy, false, None).await
 }
 
 /// The same standing producer with an additional trusted disclosure bound on protected node names.
@@ -265,11 +257,23 @@ async fn reference_frame<'p>(
         .filter_map(|node| graph.site_of(node.id))
         .collect();
     let wanted = every_permission(&sites);
-    let frame = if participation {
-        Frame::load(conn, principal, policy, graph, &sites, &wanted).await
+    // Ancestors supply names and permission paths. Only the addressed nodes
+    // carry a NodeAccess value with a participation flag.
+    let participating: Vec<_> = if participation {
+        ids.iter().filter_map(|id| graph.site_of(*id)).collect()
     } else {
-        Frame::load_with_participation(conn, principal, policy, graph, &sites, &wanted, &[]).await
-    }
+        Vec::new()
+    };
+    let frame = Frame::load_with_participation(
+        conn,
+        principal,
+        policy,
+        graph,
+        &sites,
+        &wanted,
+        &participating,
+    )
+    .await
     .map_err(ApiError::internal)?;
     Ok((frame, sites))
 }
@@ -360,7 +364,7 @@ pub(crate) async fn reference_authority(
     id: Id,
     policy: Policy,
 ) -> ApiResult<ReferenceAuthority> {
-    let (frame, sites) = reference_frame(conn, principal, &[id], policy, true).await?;
+    let (frame, sites) = reference_frame(conn, principal, &[id], policy, false).await?;
     let site = sites
         .iter()
         .find(|site| site.id == id)
@@ -719,8 +723,17 @@ async fn build_with_name_sources(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let standing =
-        stand_with_name_sources(conn, principal, ids, policy, true, name_sources).await?;
+    // Organization creation also projects its new node on the request worker. Keep
+    // the permission walk and the kind-specific readers out of the outer future.
+    let standing = Box::pin(stand_with_name_sources(
+        conn,
+        principal,
+        ids,
+        policy,
+        true,
+        name_sources,
+    ))
+    .await?;
     let wanted: Vec<Id> = ids
         .iter()
         .copied()
@@ -732,11 +745,16 @@ async fn build_with_name_sources(
         .map(|detail| (detail.id, detail))
         .collect();
     let used: Vec<&NodeDetail> = wanted.iter().filter_map(|id| details.get(id)).collect();
-    let extras = extras(conn, &used, principal, now, topic_sources).await?;
+    let extras = Box::pin(extras(conn, &used, principal, now, topic_sources)).await?;
+    let nodes_with_readmes: Vec<_> = used
+        .iter()
+        .filter(|detail| detail.readme_document_id.is_some())
+        .map(|detail| detail.id)
+        .collect();
     let readmes = Box::pin(readmes_for(
         conn,
         principal,
-        &wanted,
+        &nodes_with_readmes,
         now,
         policy,
         readme_sources,
@@ -748,6 +766,7 @@ async fn build_with_name_sources(
     for detail in &used {
         people.push(detail.owner_id);
         people.extend(detail.archived_by);
+        people.extend(automatic_fields::people(detail));
     }
     let people = user_refs(conn, &people).await?;
     let mut on_the_ways: Vec<Id> = used
@@ -764,6 +783,8 @@ async fn build_with_name_sources(
             .collect();
 
     let mut built = Vec::new();
+    let mut thread_bases = Vec::new();
+    let mut thread_positions = Vec::new();
     for id in wanted {
         let (Some(detail), Some(site)) = (details.get(&id), standing.sites.get(&id)) else {
             continue;
@@ -782,6 +803,9 @@ async fn build_with_name_sources(
             .filter_map(|place| standing.refs.get(place).cloned())
             .collect();
         let access = access_of(&standing, site, &detail.path, &subscriptions);
+        let automatic_fields = viewable(&standing, site)
+            .then(|| automatic_fields::project(detail, &path, &people))
+            .flatten();
         let common = Common {
             id,
             detail,
@@ -792,8 +816,15 @@ async fn build_with_name_sources(
             archived: site.is_archived(),
             archived_by: detail.archived_by.and_then(|by| people.get(&by).cloned()),
             access,
+            automatic_fields,
             tags: tags_of(detail.id, &extras, &standing),
         };
+        if node_kind(&detail.kind) == Some(NodeKind::Thread) {
+            thread_positions.push((built.len(), id, viewable(&standing, site)));
+            thread_bases.push(common.base(ThreadKind::Thread));
+            built.push(None);
+            continue;
+        }
         let node = match node_kind(&detail.kind) {
             Some(NodeKind::Org) => org(common.base(OrgKind::Org), detail, &extras, name_sources),
             Some(NodeKind::Project) => Node::Project(Project {
@@ -802,26 +833,50 @@ async fn build_with_name_sources(
                 project_count: extras.project_counts.get(&id).copied().unwrap_or_default(),
             }),
             Some(NodeKind::Topic) => topic(common.base(TopicKind::Topic), detail, &extras),
-            Some(NodeKind::Thread) => Node::Thread(
-                // The generic node reader carries this branch even when showing an org.
-                // Its binding/input/environment futures must not enlarge every node request.
-                Box::pin(crate::routes::threads::view::thread_with_name_sources(
-                    conn,
-                    principal,
-                    common.base(ThreadKind::Thread),
-                    now,
-                    name_sources,
-                ))
-                .await?,
-            ),
-            None => continue,
+            _ => continue,
         };
-        built.push(Built {
+        built.push(Some(Built {
             node,
             viewable: viewable(&standing, site),
-        });
+        }));
     }
-    Ok(built)
+    if !thread_bases.is_empty() {
+        // The generic reader carries this future even for an org-only page.
+        // Keep the native thread projection behind the same boxed family boundary.
+        let threads = Box::pin(crate::routes::threads::view::threads_with_name_sources(
+            conn,
+            principal,
+            thread_bases,
+            now,
+            name_sources,
+        ))
+        .await?;
+        if threads.len() != thread_positions.len() {
+            return Err(ApiError::internal(
+                "the native thread page omitted a requested projection",
+            ));
+        }
+        for ((position, id, viewable), thread) in thread_positions.into_iter().zip(threads) {
+            if thread.base.id != id {
+                return Err(ApiError::internal(
+                    "the native thread page changed its order",
+                ));
+            }
+            let slot = built
+                .get_mut(position)
+                .ok_or_else(|| ApiError::internal("the native thread position disappeared"))?;
+            *slot = Some(Built {
+                node: Node::Thread(thread),
+                viewable,
+            });
+        }
+    }
+    built
+        .into_iter()
+        .map(|row| {
+            row.ok_or_else(|| ApiError::internal("the native node page has an unfinished thread"))
+        })
+        .collect()
 }
 
 /// The READMEs the nodes `ids` name that are still their own documents and that the caller may read, as a list
@@ -895,6 +950,7 @@ struct Common<'a> {
     archived: bool,
     archived_by: Option<UserRef>,
     access: Access,
+    automatic_fields: Option<orch_api_contract::summary_facts::AutomaticFields>,
     tags: Vec<Tag>,
 }
 
@@ -919,6 +975,7 @@ impl Common<'_> {
             tags: self.tags.clone(),
             tags_source: source(detail.tags_source.as_deref().unwrap_or("auto")),
             auto_updated_at: detail.auto_updated_at.map(time),
+            automatic_fields: self.automatic_fields.clone(),
             page: self.page,
             chat_id: detail.chat_id.unwrap_or_else(Id::nil),
             archived: self.archived,
@@ -1200,7 +1257,7 @@ pub(crate) async fn ways_with_name_sources(
     allowed: &BTreeSet<Id>,
 ) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
     let standing =
-        stand_with_name_sources(conn, principal, ids, policy, true, Some(allowed)).await?;
+        stand_with_name_sources(conn, principal, ids, policy, false, Some(allowed)).await?;
     Ok(ids
         .iter()
         .filter_map(|id| {
@@ -1224,7 +1281,7 @@ pub(crate) async fn viewable_ways(
     ids: &[Id],
     policy: Policy,
 ) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
-    let standing = stand(conn, principal, ids, policy).await?;
+    let standing = reference_standing(conn, principal, ids, policy).await?;
     Ok(viewable_paths(&standing, ids))
 }
 
@@ -1237,7 +1294,7 @@ pub(crate) async fn viewable_ways_with_name_sources(
     allowed: &BTreeSet<Id>,
 ) -> ApiResult<HashMap<Id, Vec<NodeRef>>> {
     let standing =
-        stand_with_name_sources(conn, principal, ids, policy, true, Some(allowed)).await?;
+        stand_with_name_sources(conn, principal, ids, policy, false, Some(allowed)).await?;
     Ok(viewable_paths(&standing, ids))
 }
 
@@ -1270,7 +1327,7 @@ pub async fn ways_with_admin(
     HashMap<Id, Vec<NodeRef>>,
     HashMap<Id, orch_api_contract::access::AdminAccess>,
 )> {
-    let standing = stand(conn, principal, ids, policy).await?;
+    let standing = reference_standing(conn, principal, ids, policy).await?;
     let paths = ids
         .iter()
         .filter_map(|id| {
@@ -1305,7 +1362,7 @@ pub async fn refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let standing = stand_with_participation(conn, principal, ids, policy, false).await?;
+    let standing = reference_standing(conn, principal, ids, policy).await?;
     Ok(ids
         .iter()
         .filter_map(|id| standing.refs.get(id).map(|node| (*id, node.clone())))
@@ -1344,7 +1401,7 @@ pub async fn qualified_refs(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let standing = stand_with_participation(conn, principal, ids, policy, false).await?;
+    let standing = reference_standing(conn, principal, ids, policy).await?;
     Ok(ids
         .iter()
         .filter_map(|id| qualified_of(&standing, *id).map(|node| (*id, node)))
