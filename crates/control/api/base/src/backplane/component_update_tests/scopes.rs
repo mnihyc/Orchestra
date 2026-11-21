@@ -2,10 +2,6 @@
 
 use super::*;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
-
 use crate::middleware::authentication::token_hash;
 
 use crate::support::World;
@@ -45,9 +41,10 @@ fn rule(operation: &str, kind: &str, id: Id, actions: &[&str]) -> Json {
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
+    let issued_key_id = orch_types::new_id();
     let key = Key {
-        id: orch_types::new_id(),
-        secret: new_token(API_TOKEN_PREFIX),
+        id: issued_key_id,
+        secret: crate::middleware::authentication::new_api_token(issued_key_id),
     };
     identity::create_api_token_scoped(
         &mut *world.conn().await,

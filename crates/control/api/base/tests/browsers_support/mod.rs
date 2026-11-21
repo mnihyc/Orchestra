@@ -37,10 +37,11 @@ pub struct Peer {
     /// Its private command and tunnel socket.
     pub path: PathBuf,
     name: String,
+    desktop: bool,
 }
 
 impl Peer {
-    async fn start(id: Id) -> Option<Arc<Self>> {
+    async fn start(id: Id, desktop: bool) -> Option<Arc<Self>> {
         if std::env::var_os("ORCH_BROWSER_PEER_PROGRAM").is_none() {
             eprintln!(
                 "skipped: build the static browser_peer fixture and set ORCH_BROWSER_PEER_PROGRAM"
@@ -50,6 +51,7 @@ impl Peer {
         let dir = tempfile::tempdir().unwrap();
         let peer = Arc::new(Self {
             path: dir.path().join("peer.sock"),
+            desktop,
             dir,
             name: format!("orch-browser-peer-{}", orch_types::new_id().simple()),
         });
@@ -59,6 +61,11 @@ impl Peer {
 
     async fn launch(&self, id: Id, generation: i64) {
         let binary = std::env::var_os("ORCH_BROWSER_PEER_PROGRAM").unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let directory = self.dir.path().metadata().unwrap();
+        let owner = format!("{}:{}", directory.uid(), directory.gid());
+        let image = std::env::var("ORCH_BROWSER_PEER_IMAGE")
+            .unwrap_or_else(|_| "orch-env-base:image-final".into());
         let output = tokio::process::Command::new("docker")
             .args([
                 "run",
@@ -71,7 +78,9 @@ impl Peer {
                 "--ulimit",
                 "core=0:-1",
                 "--user",
-                "1000:1000",
+                &owner,
+                "--env",
+                "HOME=/peer/home",
                 "--mount",
             ])
             .arg(format!(
@@ -83,12 +92,14 @@ impl Peer {
                 "type=bind,src={},dst=/tmp/browser-peer,readonly",
                 PathBuf::from(binary).display()
             ))
+            .args(self.desktop.then_some("--env=DISPLAY=:99"))
             .args([
-                "orch-env-base:image-final",
+                image.as_str(),
                 "/tmp/browser-peer",
                 "/peer/peer.sock",
                 &id.to_string(),
                 &generation.to_string(),
+                if self.desktop { "desktop" } else { "unit" },
             ])
             .output()
             .await
@@ -184,13 +195,45 @@ pub struct Floor {
 impl Floor {
     /// Connects one fresh database to one real browser environment.
     pub async fn new() -> Option<Self> {
+        Self::with_desktop(false).await
+    }
+
+    /// A connected directory with a real local X session in its private network namespace.
+    pub async fn desktop() -> Option<Self> {
+        Self::with_desktop(true).await
+    }
+
+    async fn with_desktop(desktop: bool) -> Option<Self> {
         let scene = Scene::new().await;
         let environment = scene.on.environment;
-        let peer = Peer::start(environment).await?;
+        let peer = Peer::start(environment, desktop).await?;
         let looked =
             peer.rpc(json!({"command":{"k":"screen.look","b":{"environment_id":environment}}}));
         let mut conn = scene.rig.db.acquire().await.unwrap();
-        sqlx::query("UPDATE environments SET browser=true,vnc=true,terminal=true,status='running',placement='managed',facts=jsonb_set(jsonb_set(facts,'{browser}',$2),'{vnc}',$3) WHERE id=$1").bind(environment).bind(looked["ok"]["b"]["browser"].clone()).bind(looked["ok"]["b"]["vnc"].clone()).execute(&mut *conn).await.unwrap();
+        sqlx::query("UPDATE environments SET browser=true,vnc=true,terminal=true,status='running',placement=$4,facts=jsonb_set(jsonb_set(facts,'{browser}',$2),'{vnc}',$3) WHERE id=$1").bind(environment).bind(looked["ok"]["b"]["browser"].clone()).bind(looked["ok"]["b"]["vnc"].clone()).bind(if desktop { "connected" } else { "managed" }).execute(&mut *conn).await.unwrap();
+        if desktop {
+            sqlx::query("UPDATE environments SET template_id=NULL WHERE id=$1")
+                .bind(environment)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy}',COALESCE(facts->'policy','{}')||$2) WHERE id=$1")
+                .bind(scene.rig.machine_id).bind(json!({"environment.vnc":true})).execute(&mut *conn).await.unwrap();
+        } else {
+            let host = orch_db::queries::resources::access_fixtures::insert_resource(
+                &mut conn,
+                "host",
+                Some(scene.ada.id()),
+                Some(scene.tree.org.base.id),
+                "Display host",
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE environments SET config=jsonb_set(config,'{env.host_id}',to_jsonb($2::uuid)) WHERE id=$1")
+                .bind(environment).bind(host).execute(&mut *conn).await.unwrap();
+            sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy}',COALESCE(facts->'policy','{}')||$2) WHERE id=(SELECT machine_id FROM hosts WHERE id=$1)")
+                .bind(host).bind(json!({"environment.vnc":true,"environment.browser":true})).execute(&mut *conn).await.unwrap();
+        }
         drop(conn);
         for kind in [
             CommandKind::BrowserOpen,
