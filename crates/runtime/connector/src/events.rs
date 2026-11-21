@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use orch_agent_contract::adapter::AdapterEvent;
 use orch_agent_contract::events::{ItemDelta, SessionEvent};
-use orch_agent_contract::facts::HarnessStatus;
+use orch_agent_contract::facts::{HarnessState, HarnessStatus};
 use orch_link::machine::MachineLink;
 use orch_link::streams::PublishError;
 use orch_link_contract::events::{self as link, Event};
@@ -75,69 +75,152 @@ pub enum ConvertError {
     Shape(#[from] orch_link_contract::commands::CatalogueError),
 }
 
-/// The stream an event of the harness process of `provider_id` and `agent_id` goes on, and the event as
-/// the link carries it.
+fn stream_of(provider_id: Id, agent_id: Id, event: &AdapterEvent) -> Stream {
+    match event {
+        AdapterEvent::ModelRequest(report) => Stream::Session {
+            thread_id: report.thread_id,
+            segment_id: report.segment_id,
+        },
+        AdapterEvent::Session {
+            thread_id,
+            segment_id,
+            ..
+        } => Stream::Session {
+            thread_id: *thread_id,
+            segment_id: *segment_id,
+        },
+        AdapterEvent::Login(_) | AdapterEvent::Facts(_) => Stream::Provider { provider_id },
+        AdapterEvent::Descriptor(_) | AdapterEvent::Status(_) => Stream::Harness {
+            provider_id,
+            agent_id,
+        },
+    }
+}
+
+/// The stream and wire representation of an adapter event.
 pub fn convert(
     provider_id: Id,
     agent_id: Id,
     event: &AdapterEvent,
 ) -> Result<(Stream, Event), ConvertError> {
-    Ok(match event {
-        AdapterEvent::ModelRequest(report) => (
-            Stream::Session {
-                thread_id: report.thread_id,
-                segment_id: report.segment_id,
-            },
-            Event::ModelRequest(orch_link_contract::events::ModelRequest {
-                turn_id: report.turn_id,
-                request: report.request.clone(),
-            }),
-        ),
-        AdapterEvent::Session {
-            thread_id,
-            segment_id,
-            event,
-        } => {
+    let stream = stream_of(provider_id, agent_id, event);
+    let event = match event {
+        AdapterEvent::ModelRequest(report) => Event::ModelRequest(link::ModelRequest {
+            turn_id: report.turn_id,
+            request: report.request.clone(),
+        }),
+        AdapterEvent::Session { event, .. } => {
             let written = serde_json::to_value(event)?;
-            let kind = event.kind();
-            let body = written.get("body").cloned().unwrap_or(Json::Null);
-            (
-                Stream::Session {
-                    thread_id: *thread_id,
-                    segment_id: *segment_id,
-                },
-                Event::decode(kind, body)?,
-            )
+            Event::decode(
+                event.kind(),
+                written.get("body").cloned().unwrap_or(Json::Null),
+            )?
         }
-        AdapterEvent::Login(state) => (
-            Stream::Provider { provider_id },
-            Event::ProviderLogin(state.clone()),
+        AdapterEvent::Login(state) => Event::ProviderLogin(state.clone()),
+        AdapterEvent::Facts(facts) => Event::ProviderFacts(facts.clone()),
+        AdapterEvent::Descriptor(descriptor) => {
+            Event::HarnessDescriptor(descriptor.as_ref().clone())
+        }
+        AdapterEvent::Status(status) => Event::HarnessStatus(harness_status(status)),
+    };
+    Ok((stream, event))
+}
+
+/// Why the process of a harness is dead, when what the adapter reported says so: the harness failed, or its
+/// process was lost and the adapter says why. An adapter that ended its process on purpose, to start it again
+/// with a sign-in it was given, reports it offline and has nothing to say; that is not a death, and what the
+/// adapter reports after it (the sign-in that completed) must still be heard.
+pub(super) fn death_of(status: &HarnessStatus) -> Option<String> {
+    match status.status {
+        HarnessState::Error => Some(
+            status
+                .detail
+                .clone()
+                .unwrap_or_else(|| "the harness process is gone".to_owned()),
         ),
-        AdapterEvent::Facts(facts) => (
-            Stream::Provider { provider_id },
-            Event::ProviderFacts(facts.clone()),
-        ),
-        AdapterEvent::Descriptor(descriptor) => (
-            Stream::Harness {
-                provider_id,
-                agent_id,
-            },
-            Event::HarnessDescriptor(descriptor.as_ref().clone()),
-        ),
-        AdapterEvent::Status(status) => (
-            Stream::Harness {
-                provider_id,
-                agent_id,
-            },
-            Event::HarnessStatus(harness_status(status)),
-        ),
-    })
+        HarnessState::Offline => status.detail.clone(),
+        _ => None,
+    }
+}
+
+/// Deliver each stream in order. An outstanding receipt holds only its stream's batch and capacity.
+/// Queued and in-flight records keep their original permits from the adapter's bounded event sink.
+pub(crate) async fn deliver_streams<F, D>(
+    mut input: orch_agent_contract::adapter::EventStream,
+    provider: Id,
+    agent: Id,
+    deliver: F,
+) -> Option<String>
+where
+    F: Fn(Vec<AdapterEvent>) -> D,
+    D: Future<Output = bool>,
+{
+    use futures::stream::{FuturesUnordered, StreamExt};
+    use std::collections::btree_map::{BTreeMap, Entry};
+
+    let mut running = FuturesUnordered::new();
+    // An entry exists exactly while this stream has a delivery in flight or ready to launch.
+    let mut queued =
+        BTreeMap::<Stream, Vec<(AdapterEvent, orch_agent_contract::flow::Capacity)>>::new();
+    let mut closed = false;
+    let mut death = None;
+    while !closed || !running.is_empty() {
+        let mut ready = Vec::new();
+        tokio::select! {
+            Some(completed) = running.next(), if !running.is_empty() => {
+                let (key, current): (Stream, bool) = completed;
+                if !current {
+                    return None;
+                }
+                if queued.get(&key).is_some_and(Vec::is_empty) {
+                    queued.remove(&key);
+                } else {
+                    ready.push(key);
+                }
+            }
+            next = input.recv_held(), if !closed => {
+                let Some(first) = next else { closed = true; continue };
+                let burst = std::iter::once(first).chain(std::iter::from_fn(|| input.try_recv_held().ok()))
+                    .take(orch_agent_contract::flow::QUEUE_ITEMS);
+                for item in burst {
+                    if death.is_none() && let AdapterEvent::Status(status) = &item.0 {
+                        death = death_of(status);
+                    }
+                    let key = stream_of(provider, agent, &item.0);
+                    match queued.entry(key) {
+                        Entry::Occupied(mut entry) => entry.get_mut().push(item),
+                        Entry::Vacant(entry) => {
+                            ready.push(key);
+                            entry.insert(vec![item]);
+                        }
+                    }
+                }
+                // Drain already admitted output before registering the death and restarting the harness.
+                if death.is_some() {
+                    input.close();
+                }
+            }
+        }
+        for key in ready {
+            if let Some(batch) = queued.get_mut(&key) {
+                let (events, permits): (Vec<_>, Vec<_>) = std::mem::take(batch).into_iter().unzip();
+                let delivery = deliver(coalesce(events));
+                running.push(async move {
+                    let current = delivery.await;
+                    drop(permits);
+                    (key, current)
+                });
+            }
+        }
+    }
+    death
 }
 
 /// A status of the harness process in the form the stream carries.
 #[must_use]
 pub fn harness_status(status: &HarnessStatus) -> link::HarnessStatus {
     link::HarnessStatus {
+        home: status.home.clone(),
         status: serde_json::to_value(status.status)
             .ok()
             .and_then(|state| state.as_str().map(str::to_owned))
@@ -206,6 +289,50 @@ mod tests {
             segment_id: segment,
             event: SessionEvent::ItemDelta(ItemDelta::text(item, DeltaField::Text, offset, data)),
         }
+    }
+
+    #[tokio::test]
+    async fn a_waiting_provider_report_leaves_session_output_free_to_finish() {
+        let (sink, stream) = orch_agent_contract::adapter::EventSink::channel();
+        let provider_started = tokio::sync::Notify::new();
+        let session_finished = tokio::sync::Notify::new();
+        let release_provider = tokio::sync::Notify::new();
+        let (thread, segment) = (new_id(), new_id());
+        let producer = async {
+            sink.emit(AdapterEvent::Login(
+                orch_agent_contract::login::LoginState::idle(),
+            ))
+            .await
+            .unwrap();
+            provider_started.notified().await;
+            sink.emit(delta(thread, segment, "answer", 0, "done"))
+                .await
+                .unwrap();
+            session_finished.notified().await;
+            release_provider.notify_one();
+            drop(sink);
+        };
+        let delivery = deliver_streams(stream, new_id(), new_id(), |events| {
+            let (started, finished, release) =
+                (&provider_started, &session_finished, &release_provider);
+            async move {
+                match &events[..] {
+                    [AdapterEvent::Login(_)] => {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    [AdapterEvent::Session { .. }] => finished.notify_one(),
+                    _ => panic!("each producer has its own delivery"),
+                }
+                true
+            }
+        });
+        let (_, death) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(producer, delivery)
+        })
+        .await
+        .unwrap();
+        assert_eq!(death, None);
     }
 
     fn data_of(event: &AdapterEvent) -> (&str, i64, i64) {
@@ -316,6 +443,7 @@ mod tests {
             }
         );
         let status = AdapterEvent::Status(HarnessStatus {
+            home: None,
             status: orch_agent_contract::facts::HarnessState::Error,
             detail: Some("it died".into()),
             harness_version: None,

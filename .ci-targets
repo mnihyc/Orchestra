@@ -1,0 +1,9 @@
+clippy
+contracts
+test -p orch-api-contract -p orch-settings-contract --lib
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-db --lib --test released_migrations
+web typecheck
+web lint
+web test

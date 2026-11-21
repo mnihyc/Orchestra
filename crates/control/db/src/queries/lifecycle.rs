@@ -85,7 +85,7 @@ pub async fn cancel_delivery(
 /// Pending lifecycle controls, with an interrupt before a close made by the same act.
 pub async fn controls(conn: &mut Conn, limit: i64) -> Result<Vec<CommandRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT id,machine_id,kind,body,serial_key,state,result,error,attempts,deadline_at,created_at,updated_at
+        "SELECT id,machine_id,kind,body,serial_key,content_transit,key_phase,state,result,error,attempts,deadline_at,created_at,updated_at
          FROM commands c WHERE state IN ('queued','sent','accepted')
           AND (kind IN ('turn.interrupt','lease.close','session.close','session.close.fenced','session.continuation.close','node.runtime.stop','provider.stop','env.detach','mcp.forget')
             OR (kind='approval.resolve' AND EXISTS(SELECT 1 FROM approvals a WHERE a.state='cancelled'
@@ -104,7 +104,7 @@ pub async fn busy_registration_detaches(
     now: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<CommandRow>, DbError> {
-    Ok(sqlx::query_as("SELECT c.id,c.machine_id,c.kind,c.body,c.serial_key,c.state,c.result,c.error,c.attempts,
+    Ok(sqlx::query_as("SELECT c.id,c.machine_id,c.kind,c.body,c.serial_key,c.state,c.key_phase,c.result,c.error,c.attempts,
         c.deadline_at,c.created_at,c.updated_at FROM commands c JOIN environments e ON e.id::text=c.body->>'environment_id'
         WHERE c.kind='env.detach' AND c.state='failed' AND c.error @> '{\"code\":\"busy\",\"retryable\":true}'::jsonb
         AND c.error#>>'{details,retry_command}' IS NULL AND c.updated_at<=$1 AND c.deadline_at>$2
@@ -254,7 +254,10 @@ pub async fn removal_promise(conn: &mut Conn, environment: Id) -> Result<Option<
     .bind(environment)
     .fetch_optional(conn)
     .await?;
-    Ok(plan.filter(|plan| plan.get("withdrawn").and_then(Json::as_bool) != Some(true)))
+    Ok(plan
+        .map(orch_types::storable::decode_exact)
+        .transpose()?
+        .filter(|plan| plan.get("withdrawn").and_then(Json::as_bool) != Some(true)))
 }
 
 /// The exact nodes newly deleted by the current deletion, including under a held clock.
