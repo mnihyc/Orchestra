@@ -23,16 +23,18 @@ use super::plan::{self, Change, Made};
 use super::vectors;
 use crate::engine::Engine;
 use crate::error::EngineError;
+use orch_api_contract::admin::{SemanticIndexRetry, SemanticRetryNext};
 use orch_db::queries::semantic as rows;
 use orch_db::{Conn, DbError};
 use orch_settings_contract::registry::keys;
-use orch_types::{Id, new_id};
+use orch_types::{Id, Time, new_id};
 use serde_json::json;
 use std::time::Instant;
 
 struct FillBudget {
     started: Instant,
     span: std::time::Duration,
+    claimant: Id,
 }
 
 /// The texts whose vectors show whether two endpoints serve the same model: a few short sentences of
@@ -319,7 +321,16 @@ impl Engine {
         let started = Instant::now();
         let mut rate: Option<f64> = None;
         let outcome = self
-            .index_turn(&chosen, work.as_ref(), started, budget, &mut rate)
+            .index_turn(
+                &chosen,
+                work.as_ref(),
+                FillBudget {
+                    started,
+                    span: budget,
+                    claimant,
+                },
+                &mut rate,
+            )
             .await;
         let standing = match outcome {
             Ok(standing) => standing,
@@ -352,8 +363,7 @@ impl Engine {
         &self,
         chosen: &Choice,
         work: Option<&Work>,
-        started: Instant,
-        budget: std::time::Duration,
+        budget: FillBudget,
         rate: &mut Option<f64>,
     ) -> Result<Standing, EngineError> {
         let org = chosen.org;
@@ -545,10 +555,7 @@ impl Engine {
             named,
             &target,
             generation_work.as_ref(),
-            FillBudget {
-                started,
-                span: budget,
-            },
+            budget,
             rate,
         )
         .await
@@ -748,6 +755,7 @@ impl Engine {
         let FillBudget {
             started,
             span: budget,
+            claimant,
         } = budget;
         let org = chosen.org;
         let tuning = chosen.tuning;
@@ -814,7 +822,7 @@ impl Engine {
             }
             tx.commit().await.map_err(DbError::from)?;
         }
-        let (pending, mut sizes) = {
+        let (pending, mut sizes, mut last_retry) = {
             let mut conn = self.db().acquire().await?;
             let pending =
                 rows::sources_to_embed(&mut conn, org, target.id, chosen.tuning.source_batch)
@@ -857,7 +865,16 @@ impl Engine {
                     ));
                 }
             }
-            (pending, sizes)
+            let retry = rows::index(&mut conn, org)
+                .await?
+                .and_then(|row| row.retry.map(|retry| retry.0))
+                .filter(|retry| {
+                    retry.generation_id == target.id
+                        && retry.provider_id == named.provider_id
+                        && retry.model_name == named.model_name
+                        && retry.next != SemanticRetryNext::Finished
+                });
+            (pending, sizes, retry)
         };
         let mut limit = tuning.batch_tokens.max(1);
         for source in &pending {
@@ -945,6 +962,14 @@ impl Engine {
                 let asked = Instant::now();
                 match self.embed_texts_for(org, named, texts, work).await {
                     Ok(made) => {
+                        if let Some(retry) = &mut last_retry {
+                            retry.batch_pieces = i64::try_from(take).unwrap_or(i64::MAX);
+                            retry.next = SemanticRetryNext::Finished;
+                            retry.next_eligible_at = None;
+                            retry.observed_at = Time::new(self.inner.clock.now());
+                            let mut conn = self.db().acquire().await?;
+                            rows::record_index_retry(&mut conn, org, claimant, retry).await?;
+                        }
                         let seconds = asked.elapsed().as_secs_f64();
                         if seconds > 0.0 {
                             let measured = tokens as f64 / seconds;
@@ -968,10 +993,60 @@ impl Engine {
                     }) if take > 1 => {
                         // A request too large for the endpoint's time: the same pieces in halves.
                         limit = (tokens / 2).max(1);
+                        let now = self.inner.clock.now();
+                        let immediate = started.elapsed() < budget;
+                        let retry = SemanticIndexRetry {
+                            provider_id: named.provider_id,
+                            model_name: named.model_name.clone(),
+                            generation_id: target.id,
+                            batch_pieces: i64::try_from(take).unwrap_or(i64::MAX),
+                            reason: "timeout".to_owned(),
+                            next: if immediate {
+                                SemanticRetryNext::Immediate
+                            } else {
+                                SemanticRetryNext::IndexerPass
+                            },
+                            next_eligible_at: immediate.then(|| Time::new(now)),
+                            observed_at: Time::new(now),
+                        };
+                        let mut conn = self.db().acquire().await?;
+                        rows::record_index_retry(&mut conn, org, claimant, &retry).await?;
+                        last_retry = Some(retry);
                     }
-                    Err(error) => return standing_of(error),
+                    Err(error) => {
+                        let reason = match &error {
+                            EmbedError::Unavailable { reason, .. } => *reason,
+                            EmbedError::Failed {
+                                timed_out: true, ..
+                            } => "timeout",
+                            EmbedError::Failed { .. } => "provider",
+                            EmbedError::Engine(_) => "error",
+                        };
+                        let retry = SemanticIndexRetry {
+                            provider_id: named.provider_id,
+                            model_name: named.model_name.clone(),
+                            generation_id: target.id,
+                            batch_pieces: i64::try_from(take).unwrap_or(i64::MAX),
+                            reason: reason.to_owned(),
+                            next: SemanticRetryNext::IndexerPass,
+                            next_eligible_at: None,
+                            observed_at: Time::new(self.inner.clock.now()),
+                        };
+                        let mut conn = self.db().acquire().await?;
+                        rows::record_index_retry(&mut conn, org, claimant, &retry).await?;
+                        return standing_of(error);
+                    }
                 }
                 if started.elapsed() >= budget && !rest.is_empty() {
+                    if let Some(retry) = &mut last_retry
+                        && retry.next == SemanticRetryNext::Immediate
+                    {
+                        retry.next = SemanticRetryNext::IndexerPass;
+                        retry.next_eligible_at = None;
+                        retry.observed_at = Time::new(self.inner.clock.now());
+                        let mut conn = self.db().acquire().await?;
+                        rows::record_index_retry(&mut conn, org, claimant, retry).await?;
+                    }
                     return Ok(Standing::because(
                         "indexing",
                         "more",

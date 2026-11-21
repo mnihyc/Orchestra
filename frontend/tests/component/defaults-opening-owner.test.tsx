@@ -12,7 +12,7 @@ import { ProjectSettings, ScopeEditor } from '@/features/settings/ScopeSettings'
 import { makeGroup, makeTab, setTabTarget, type Tab } from '@/features/workbench/layout';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
 import { useWorkbench } from '@/features/workbench/store';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import { clearViewOpenings, forgetViewOpening, openingForView, showViewOpening, ViewOpening } from '@/features/workbench/viewOpening';
 import { i18n } from '@/i18n';
 import type { NodeChatOpening, NodeDefaultsOpening, Provider, ResolvedSetting, SettingDef } from '@/generated/api-types';
@@ -29,7 +29,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), us
   Link: ({ to, params, children, activeOptions: _activeOptions, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string>; children?: ReactNode; activeOptions?: unknown }) => <a {...props} href={to.replace(/\$(\w+)/g, (_match: string, key: string) => params?.[key] ?? '')}>{children}</a>,
   useRouterState: ({ select }: { select: (state: { location: typeof route.location }) => unknown }) => select({ location: route.location }),
   useRouter: () => ({ state: { location: route.location }, history: { replace: vi.fn() } }) }));
-vi.mock('@/shell/FrameReadiness', () => ({ useFrameReady: () => true }));
+vi.mock('@/shell/FrameReadiness', async (loadOriginal) => ({ ...await loadOriginal<object>(), useFrameReady: () => true }));
 vi.mock('@/features/chat/ChatView', () => ({ ChatView: ({ chatId }: { chatId: string }) => <output aria-label="Visible chat">{chatId}</output> }));
 
 const world = new World(), ada = world.people.get('ada')!;
@@ -46,8 +46,8 @@ function Editor({ id }: { id: string }) {
 function draw({ contentShown = true, chatShown = true }: { contentShown?: boolean; chatShown?: boolean } = {}) {
   return show(<QueryClientProvider client={cache}>
     <FocusedContentMetadata />
-    <ViewOpening view={content.id} route={openingForView(content.id)}><ViewInstanceContext.Provider value={{ id: content.id, root: { current: null }, target: null, headingOwner: content.id, content: true, focusedContent: true }}><Editor id={metadata.node.id} /></ViewInstanceContext.Provider></ViewOpening>
-    <ViewOpening view={chat.id} route={openingForView(chat.id)}><ViewInstanceContext.Provider value={{ id: chat.id, root: { current: null }, target: null, headingOwner: content.id, content: false, focusedContent: false }}><ChatPanel tab={chat} area="main" /></ViewInstanceContext.Provider></ViewOpening>
+    <ViewOpening view={content.id} route={openingForView(content.id)}><ViewInstanceProvider value={{ id: content.id, root: { current: null }, target: null, headingOwner: content.id, content: true, focusedContent: true }}><Editor id={metadata.node.id} /></ViewInstanceProvider></ViewOpening>
+    <ViewOpening view={chat.id} route={openingForView(chat.id)}><ViewInstanceProvider value={{ id: chat.id, root: { current: null }, target: null, headingOwner: content.id, content: false, focusedContent: false }}><ChatPanel tab={chat} area="main" /></ViewInstanceProvider></ViewOpening>
     {contentShown && <Slot tab={content} />}{chatShown && <Slot tab={chat} />}
   </QueryClientProvider>);
 }

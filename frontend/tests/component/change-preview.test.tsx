@@ -35,14 +35,14 @@ describe('what a change reaches, as the server says it', () => {
   it('counts the pages that follow the rows, and the orgs they are in where the server says how many', () => {
     draw({ pages: 12, orgs: 3, gaining: [], losing: [], more: 0 });
 
-    expect(screen.getByText(/12 pages follow these rows\./)).toHaveTextContent('They are in 3 orgs.');
+    expect(screen.getByText(/12 pages follow these rows\./)).toHaveTextContent('They are in 3 organizations.');
     expect(screen.getByText('Nobody gains or loses anything.')).toBeInTheDocument();
   });
 
   it('does not say how many orgs where the server does not', () => {
     draw({ pages: 12, orgs: null, gaining: [], losing: [], more: 0 });
 
-    expect(screen.getByText(/12 pages follow these rows\./)).not.toHaveTextContent('orgs');
+    expect(screen.getByText(/12 pages follow these rows\./)).not.toHaveTextContent('organization');
   });
 
   it('keeps the names behind the counts until they are asked for, with what each gains or loses', async () => {
