@@ -19,7 +19,7 @@ use orch_api_contract::documents::{
     DocumentVersionList, DocumentVersionListQuery, Inline, InlineRefKind,
 };
 use orch_api_contract::nodes::DeletedInspectionQuery;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Id, Json, new_id};
@@ -118,7 +118,7 @@ async fn key(desk: &Desk, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {

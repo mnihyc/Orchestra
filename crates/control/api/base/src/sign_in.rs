@@ -16,6 +16,7 @@
 //!   per address.
 //! - [`proofs`] checks a password, a mailed code and an authenticator's code,
 //!   and says what a person's set of proofs lacks.
+//! - [`human_check`] asks a person who has no session to prove they are not a program, where the system asks it.
 //! - [`login`] is the sign-in itself and the request for a code by mail.
 //! - [`accounts`] makes a person with the org that is theirs.
 //! - [`reset_links`] makes a link that sets a new password by hand, for a person
@@ -403,6 +404,17 @@ pub async fn open_session(
     ctx: &Ctx,
     conn: &mut Conn,
     user: &UserRow,
+    how: Json,
+) -> ApiResult<Opened> {
+    // Setup and password login each carry their own transaction and credential
+    // checks while this session is created. Keep its future out of both callers.
+    Box::pin(create_session(ctx, conn, user, how)).await
+}
+
+async fn create_session(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    user: &UserRow,
     mut how: Json,
 ) -> ApiResult<Opened> {
     let user = orch_db::queries::transaction_guard::lock_person(conn, user.id)
@@ -480,6 +492,10 @@ pub mod codes;
 #[path = "sign_in/fresh.rs"]
 pub mod fresh;
 
+/// The human check asked of a person before they sign in, register or have mail sent.
+#[path = "sign_in/human_check.rs"]
+pub mod human_check;
+
 #[path = "sign_in/login.rs"]
 pub mod login;
 
@@ -503,6 +519,9 @@ pub mod reset_links;
 
 #[path = "sign_in/second_step.rs"]
 pub mod second_step;
+
+#[path = "sign_in/session_restore.rs"]
+pub mod session_restore;
 
 #[path = "sign_in/throttle.rs"]
 pub mod throttle;

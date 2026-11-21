@@ -1,5 +1,5 @@
 /** Pure content validation shared by the build and regression tests. A missing link or real control is a failure. */
-import { checkReferenceCoverage } from './referenceCoverage';
+import { checkReferenceCoverage, documentedReferences } from './referenceCoverage';
 import { articleAvailable, belongsTo, slugOf, type Guide } from './guide';
 import { screenAbout } from '../features/help/screenWords';
 import { GUIDANCE } from './guidance';
@@ -39,10 +39,24 @@ const routeName = (route: string) => route === '/' ? '/' : route.replace(/\/$/, 
 
 export function checkHelpContent(input: HelpContentInput): string[] {
   const failures: string[] = checkReferenceCoverage(input.guide, input.userArticles, input.references);
+  const stateAnchors = new Map<string, Set<string>>();
+  const hasStateAnchor = (body: string, anchor: string) => {
+    let anchors = stateAnchors.get(body);
+    if (anchors === undefined) {
+      anchors = new Set(documentedReferences(body).map((entry) => entry.id));
+      stateAnchors.set(body, anchors);
+    }
+    return anchors.has(anchor);
+  };
   const article = (id: string, heading?: string, language = 'en') => {
     const found = input.guide.articles.find((one) => one.id === id);
     if (found === undefined || !articleAvailable(found)) failures.push(`article.missing: ${id}`);
-    else if (heading !== undefined && !(found.translations?.[language]?.headings ?? found.headings).some((one) => one.id === heading || slugOf(one.text) === heading)) failures.push(`heading.missing: ${id}#${heading}`);
+    else if (heading !== undefined) {
+      const localized = found.translations?.[language] ?? found;
+      const matches = localized.headings.some((one) => one.id === heading || slugOf(one.text) === heading)
+        || (id === 'state-reference' && heading.startsWith('state:') && hasStateAnchor(localized.body, heading));
+      if (!matches) failures.push(`heading.missing: ${id}#${heading}`);
+    }
   };
   const text = (key: string) => input.catalogues.forEach((catalogue, locale) => {
     if (contentWord(catalogue, key) === null) failures.push(`text.missing: ${locale}:${key}`);
@@ -110,8 +124,8 @@ export function checkHelpContent(input: HelpContentInput): string[] {
         if (match[1] !== undefined && screenAbout(match[1]) === undefined) failures.push(`screen.words_missing: ${match[1]}`);
       }
     }
-    for (const link of code.matchAll(/article:\s*'([\w-]+)'(?:\s*,\s*heading:\s*'([\w-]+)')?/g)) if (link[1] !== undefined) article(link[1], link[2]);
-    for (const link of code.matchAll(/\barticle="([\w-]+)"(?:\s+heading="([\w-]+)")?/g)) if (link[1] !== undefined) article(link[1], link[2]);
+    for (const link of code.matchAll(/article:\s*'([\w-]+)'(?:\s*,\s*heading:\s*'([\w.:-]+)')?/g)) if (link[1] !== undefined) article(link[1], link[2]);
+    for (const link of code.matchAll(/\barticle="([\w-]+)"(?:\s+heading="([\w.:-]+)")?/g)) if (link[1] !== undefined) article(link[1], link[2]);
     // A localized anchor must exist in that language's authored article, including non-Latin headings.
     for (const pattern of [
       /<TaskGuideLink\s+guide="([\w-]+)"\s+heading=\{t\('([\w.-]+)'\)\}/g,

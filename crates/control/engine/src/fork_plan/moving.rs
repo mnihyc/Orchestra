@@ -214,7 +214,7 @@ pub async fn require<I: super::operation::Intent>(
     Ok(())
 }
 /// Hold the original native cascade before the fork writes any of its own source markers.
-pub(crate) async fn prepare_ending(
+pub async fn prepare_ending(
     engine: &Engine,
     conn: &mut Conn,
     principal: &Principal,
@@ -257,7 +257,7 @@ pub async fn review_sides(
     Ok(sides)
 }
 /// Consume that held native Delete after the independent conversation is complete, in the same commit.
-pub(crate) async fn finish(
+pub async fn finish(
     engine: &Engine,
     conn: &mut Conn,
     prepared: &deletion::Prepared,
@@ -284,15 +284,15 @@ pub(crate) async fn finish(
     Ok(())
 }
 
-/// The bounded native explicit-notice audience, read once with the preflight's original source.
+/// Every eligible contributor, read once with the preflight's original source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Audience {
     pub people: Vec<Id>,
     pub count: u64,
 }
-/// Existing explicit notices admit at most two hundred current eligible people in one synchronous act.
-pub const NOTICE_LIMIT: u32 = 200;
+// Author reads page independently of the complete reviewed recipient set.
+const AUTHOR_PAGE_SIZE: i64 = 200;
 /// Select actual authors of the copied active lineage, then the existing personal preferences and Source View.
 /// This runs once outside snapshot retries, never in source/command rechecks.
 pub async fn audience(
@@ -308,7 +308,7 @@ pub async fn audience(
     let mut people = Vec::new();
     let mut count = 0_u64;
     loop {
-        let page:Vec<Id>=sqlx::query_scalar("WITH owners AS(SELECT $2::uuid AS owner,0::bigint AS first_seq,9223372036854775807::bigint AS last_seq UNION ALL SELECT owner_continuation_id,first_seq,last_seq FROM thread_continuation_spans WHERE continuation_id=$2) SELECT DISTINCT i.author_id FROM owners o JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner AND i.seq_created BETWEEN o.first_seq AND o.last_seq JOIN users u ON u.id=i.author_id WHERE u.kind='human' AND u.status='active' AND i.author_id<>$3 AND i.kind NOT IN ('marker','announcement') AND ($4::uuid IS NULL OR i.author_id>$4) ORDER BY i.author_id LIMIT $5").bind(source).bind(thread.active_continuation_id).bind(by).bind(cursor).bind(i64::from(NOTICE_LIMIT)).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        let page:Vec<Id>=sqlx::query_scalar("WITH owners AS(SELECT $2::uuid AS owner,0::bigint AS first_seq,9223372036854775807::bigint AS last_seq UNION ALL SELECT owner_continuation_id,first_seq,last_seq FROM thread_continuation_spans WHERE continuation_id=$2) SELECT DISTINCT i.author_id FROM owners o JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner AND i.seq_created BETWEEN o.first_seq AND o.last_seq JOIN users u ON u.id=i.author_id WHERE u.kind='human' AND u.status='active' AND i.author_id<>$3 AND i.kind NOT IN ('marker','announcement') AND ($4::uuid IS NULL OR i.author_id>$4) ORDER BY i.author_id LIMIT $5").bind(source).bind(thread.active_continuation_id).bind(by).bind(cursor).bind(AUTHOR_PAGE_SIZE).fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
         let Some(last) = page.last().copied() else {
             break;
         };
@@ -347,12 +347,10 @@ pub async fn audience(
                 count = count
                     .checked_add(1)
                     .ok_or_else(|| EngineError::unreadable("the native notice count overflowed"))?;
-                if people.len() < NOTICE_LIMIT as usize {
-                    people.push(user);
-                }
+                people.push(user);
             }
         }
-        if page.len() < NOTICE_LIMIT as usize {
+        if i64::try_from(page.len()).map_err(EngineError::unreadable)? < AUTHOR_PAGE_SIZE {
             break;
         }
     }

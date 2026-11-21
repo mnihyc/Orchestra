@@ -194,6 +194,80 @@ async fn directory_choices_on_a_machine_without_a_host_return_its_roots_and_unre
 }
 
 #[tokio::test]
+async fn directory_choices_reach_a_registration_holder_but_not_a_machine_viewer_without_use() {
+    use orch_db::queries::resources::access_fixtures;
+    let world = World::new().await;
+    let people = company(&world).await;
+    let machine = access_fixtures::insert_persons_machine(
+        &mut *world.conn().await,
+        people.admin.id(),
+        "Shared directory machine",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(json!({"policy":{"environment.roots":["/srv/shared"]}}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.view",
+        people.stranger.id(),
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    let entry = name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.use",
+        people.stranger.id(),
+    )
+    .await;
+    let roots = world
+        .app
+        .call(MachineEnvironmentDataGet, &[&machine])
+        .token(&people.stranger.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(roots.roots.len(), 1);
+    assert_eq!(roots.roots[0].path, "/srv/shared");
+    assert!(roots.roots[0].uses.is_empty());
+    sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
 async fn a_machines_mounts_are_scoped_to_that_machine_and_its_owner_and_only_offer_manageable_additions()
  {
     use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
