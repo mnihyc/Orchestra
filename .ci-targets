@@ -1,0 +1,8 @@
+test -p orch-node-core --lib -- tool_checks::
+test -p orch-api-core --test harness_checks -- a_connected_machines_program_is_checked_on_a_build_host_of_the_system
+test -p orch-api-core --test threads_settings -- an_unchecked_or_failed_build_has_the_same_exact_auto_reason_in_the_chip_and_setting
+test -p orch-engine --test approval_review -- auto_names_the_unrun_or_failed_build_check_before_opening_any_native_session
+test -p orch-api-core --test machines -- a_machine_manager_runs_an_installed_programs_own_check_and_the_machine_keeps_what_it_found
+test -p orch-api-core --test connected_program_versions
+test -p orch-connector-core --lib -- dispatch::tests::the_selected_program_is_checked_on_its_machine_and_what_it_lacks_is_reported
+web test -- tests/component/composer-approval-mode.test.tsx tests/component/program-versions.test.tsx

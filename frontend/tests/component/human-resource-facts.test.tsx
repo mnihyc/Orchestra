@@ -46,18 +46,21 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const trigger = screen.getByRole('combobox', { name: i18n.t('start.where.title') });
     expect(trigger).toHaveValue(blocked.environment.name);
     await userEvent.click(trigger);
-    const list = await screen.findByRole('listbox');
+    const list = await screen.findByRole('dialog', { name: i18n.t('start.where.title') });
     const off = within(list).getByRole('option', { name: blocked.environment.name });
+    const reason = i18n.t('start.where.closed');
     expect(off).toHaveAttribute('aria-disabled', 'true');
-    expect(off).toHaveAccessibleDescription();
-    expect(within(off).getByText(i18n.t('start.where.closed'))).toBeVisible();
+    expect(off).toHaveAccessibleDescription(expect.stringContaining(reason));
+    expect(within(list).getByText(reason)).toBeVisible();
     expect(within(list).queryByText(i18n.t('start.topicDefault'))).toBeNull();
-    expect(within(list).getByRole('option', { name: available.environment.name })).not.toHaveAttribute('aria-disabled', 'true');
+    const ready = within(list).getByRole('option', { name: available.environment.name });
+    expect(ready).not.toHaveAttribute('aria-disabled', 'true');
+    expect(ready).not.toHaveAccessibleDescription(expect.stringContaining(reason));
     expect(list).not.toHaveTextContent(available.environment.address);
     expect(list).not.toHaveTextContent(blocked.environment.address);
     await userEvent.click(off);
     expect(choose).not.toHaveBeenCalled();
-    await userEvent.click(within(list).getByRole('option', { name: available.environment.name }));
+    await userEvent.click(ready);
     expect(choose).toHaveBeenCalledExactlyOnceWith(available.environment.id);
   });
 

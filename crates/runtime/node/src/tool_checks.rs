@@ -480,6 +480,44 @@ printf '{"title":"Params","properties":{"member":{}}}' > "$1/params.json""#,
         assert!(started.elapsed() < Duration::from_secs(20));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_whole_help_of_a_program_that_exits_before_its_piped_output_is_written_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // Like Claude Code, a Node.js program: it ends before its writes to a pipe are flushed, so through a pipe only
+        // the first 8,192 bytes of its help arrive, and into a file all of it does.
+        let program = script(
+            dir.path(),
+            r#"help() {
+  i=0
+  while [ "$i" -lt 300 ]; do
+    echo "  --padding-$i  an option that makes the help longer than one write to a pipe"
+    i=$((i + 1))
+  done
+  echo "  --late-flag  the option after the first 8,192 bytes"
+}
+if [ -p /dev/stdout ]; then help | head -c 8192; else help; fi"#,
+        );
+        let printed = run(
+            &program,
+            &asking(&["--help"], 10),
+            &home,
+            &home,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8(printed).unwrap();
+        assert!(stands_in(&text, "--padding-0"), "{text}");
+        assert!(
+            stands_in(&text, "--late-flag"),
+            "only {} bytes of the help were read",
+            text.len()
+        );
+    }
+
     #[test]
     fn a_method_is_a_string_of_the_bundle_and_a_member_a_property_of_its_definition() {
         let mut schema = Schema::default();

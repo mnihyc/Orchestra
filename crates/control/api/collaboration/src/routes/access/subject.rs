@@ -195,6 +195,7 @@ const fn viewing(kind: ObjectKind) -> Option<Permission> {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
         ObjectKind::Document | ObjectKind::DocumentContainer => Permission::DocView,
         _ => return None,
     })

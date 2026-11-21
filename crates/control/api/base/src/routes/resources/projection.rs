@@ -17,6 +17,7 @@ pub use super::mounts;
 
 pub use super::providers;
 
+pub use super::pools;
 pub use super::skills;
 
 pub use super::templates;
@@ -72,6 +73,7 @@ pub enum View {
     Machine(machines::PreparedInventory),
     Mount(mounts::PreparedInventory),
     Skill(skills::PreparedInventory),
+    Pool(pools::Prepared),
 }
 
 pub struct Prepared {
@@ -100,6 +102,7 @@ pub enum Rendered {
     Machine(Vec<orch_api_contract::resources::Machine>),
     Mount(Vec<orch_api_contract::mounts::Mount>),
     Skill(Vec<orch_api_contract::skills::Skill>),
+    Pool(Vec<orch_api_contract::pools::Pool>),
 }
 
 impl Prepared {
@@ -132,6 +135,7 @@ impl Prepared {
             | (View::Template(_), View::Template(_))
             | (View::Mcp(..), View::Mcp(..))
             | (View::Skill(_), View::Skill(_)) => true,
+            (View::Pool(old), View::Pool(current)) => old.preserves_sources(current),
             _ => false,
         }
     }
@@ -147,6 +151,7 @@ impl Prepared {
             View::Machine(_) => ResourceKind::Machine,
             View::Mount(_) => ResourceKind::Mount,
             View::Skill(_) => ResourceKind::Skill,
+            View::Pool(_) => ResourceKind::Pool,
         }
     }
 
@@ -172,6 +177,7 @@ impl Prepared {
             View::Machine(prepared) => prepared.bound_names(bounds),
             View::Mount(prepared) => prepared.bound_names(bounds),
             View::Skill(prepared) => prepared.bound_names(bounds),
+            View::Pool(prepared) => prepared.bound_names(bounds),
         }
     }
 
@@ -258,6 +264,9 @@ impl Prepared {
             View::Skill(prepared) => {
                 Rendered::Skill(skills::show_inventory_prepared(conn, principal, prepared).await?)
             }
+            View::Pool(prepared) => {
+                Rendered::Pool(pools::show_inventory_prepared(conn, principal, prepared).await?)
+            }
             View::Host(prepared) => Rendered::Host(
                 hosts::show_inventory_prepared(ctx, conn, principal, prepared).await?,
             ),
@@ -322,6 +331,7 @@ pub async fn prepare(
             View::Mount(mounts::prepare_inventory(ctx, conn, principal, &ids).await?)
         }
         ResourceKind::Skill => View::Skill(skills::prepare_inventory(conn, seen).await?),
+        ResourceKind::Pool => View::Pool(pools::prepare_inventory(conn, seen).await?),
         ResourceKind::Host => {
             View::Host(hosts::prepare_inventory(ctx, conn, principal, seen).await?)
         }
@@ -369,6 +379,7 @@ impl Prepared {
                 prepared.name_sources().clone()
             }
             View::Skill(prepared) => prepared.name_sources().clone(),
+            View::Pool(prepared) => prepared.name_sources().clone(),
             View::Host(prepared) => {
                 retained.extend(prepared.retained_name_sources().iter().map(|id| ObjectRef {
                     kind: ObjectKind::Environment,
