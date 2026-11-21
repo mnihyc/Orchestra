@@ -23,7 +23,7 @@ use orch_blob_contract::store::read_all;
 
 use orch_blob_contract::store::stream_of;
 
-use orch_db::Db;
+use orch_db::Conn;
 
 use orch_db::secrets::MasterKey;
 
@@ -47,24 +47,25 @@ use std::sync::Arc;
 /// Where the last output of shells is put away.
 pub struct KeptOutput {
     store: Arc<dyn BlobStore>,
-    db: Db,
     master: Option<MasterKey>,
 }
 
 impl KeptOutput {
-    /// The place that keeps recordings in `store`, and opens the secrets of environments (which are
-    /// stored in `db`, sealed) with `master` where the program has one.
+    /// Keeps recordings in `store` and opens environment secrets with `master` on the caller's connection.
     #[must_use]
-    pub fn new(store: Arc<dyn BlobStore>, db: Db, master: Option<MasterKey>) -> Self {
-        Self { store, db, master }
+    pub fn new(store: Arc<dyn BlobStore>, master: Option<MasterKey>) -> Self {
+        Self { store, master }
     }
 
     /// The values of the secrets the commands of `environment` find; none where it has none.
-    async fn secrets_of(&self, environment: Id) -> Result<Vec<String>, RecordingFault> {
+    async fn secrets_of(
+        &self,
+        conn: &mut Conn,
+        environment: Id,
+    ) -> Result<Vec<String>, RecordingFault> {
         let fault = |error: &dyn std::fmt::Display| RecordingFault(error.to_string());
-        let mut conn = self.db.acquire().await.map_err(|error| fault(&error))?;
         let owner = Owner::Environment(environment);
-        let named = secrets::list(&mut conn, owner)
+        let named = secrets::list(conn, owner)
             .await
             .map_err(|error| fault(&error))?;
         if named.is_empty() {
@@ -76,7 +77,7 @@ impl KeptOutput {
                     .to_owned(),
             ));
         };
-        Ok(secrets::open_resolved(&mut conn, master, owner)
+        Ok(secrets::open_resolved(conn, master, owner)
             .await
             .map_err(|error| fault(&error))?
             .into_iter()
@@ -85,20 +86,21 @@ impl KeptOutput {
     }
 }
 
-/// Gives the engine the place that keeps the last output of shells, once, at start: in `store`, with the
-/// secrets of environments opened from `db` with `master` where there is one. False where it had one
-/// already.
-pub fn install(store: Arc<dyn BlobStore>, db: Db, master: Option<MasterKey>) -> bool {
-    orch_engine::shells::install_recordings(Arc::new(KeptOutput::new(store, db, master)))
+/// Installs the recording store once. Secret masking and metadata registration borrow the caller's
+/// connection, so concurrent recordings never reserve a second pool connection.
+pub fn install(store: Arc<dyn BlobStore>, master: Option<MasterKey>) -> bool {
+    orch_engine::shells::install_recordings(Arc::new(KeptOutput::new(store, master)))
 }
 
 #[async_trait]
 impl Recordings for KeptOutput {
     async fn keep(
         &self,
+        conn: &mut Conn,
         environment: Id,
         kept: BlobRef,
         mask: bool,
+        at: chrono::DateTime<chrono::Utc>,
     ) -> Result<BlobRef, RecordingFault> {
         if !mask {
             return Ok(kept);
@@ -108,7 +110,7 @@ impl Recordings for KeptOutput {
                 "the output is longer than may be put away".to_owned(),
             ));
         }
-        let values = self.secrets_of(environment).await?;
+        let values = self.secrets_of(conn, environment).await?;
         if values.is_empty() {
             return Ok(kept);
         }
@@ -127,8 +129,12 @@ impl Recordings for KeptOutput {
         }
         let hash = Hash::of(&masked);
         let size = i64::try_from(masked.len()).unwrap_or(i64::MAX);
-        self.store
+        let _publication = self
+            .store
             .put(&hash, Some(size), stream_of(vec![masked.into()]))
+            .await
+            .map_err(|error| RecordingFault(error.to_string()))?;
+        orch_db::queries::storage::register_owned_blob(conn, &hash, size, at)
             .await
             .map_err(|error| RecordingFault(error.to_string()))?;
         Ok(BlobRef { hash, size })
