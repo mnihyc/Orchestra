@@ -545,3 +545,73 @@ async fn a_blob_larger_than_a_read_piece_comes_back_exactly_in_many_pieces() {
     assert!(count > 1);
     assert_eq!(Hash::of(&got), hash);
 }
+
+#[tokio::test]
+async fn content_being_published_for_an_owner_is_not_unlinked_by_a_concurrent_removal() {
+    let (_directory, store) = store().await;
+    let hash = Hash::of(b"a publication still needs to register its owner");
+    let pending = store
+        .put(
+            &hash,
+            None,
+            pieces(b"a publication still needs to register its owner", 10),
+        )
+        .await
+        .unwrap();
+    let deleting = store.clone();
+    let mut removed = tokio::spawn(async move { deleting.delete(&hash).await });
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut removed)
+            .await
+            .is_err(),
+        "physical removal waits for the writer's publication receipt"
+    );
+    assert_eq!(
+        read_all(store.get(&hash, None).await.unwrap().body)
+            .await
+            .unwrap(),
+        b"a publication still needs to register its owner".as_slice()
+    );
+    drop(pending);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), removed)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    assert!(!store.exists(&hash).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_second_writer_can_finish_while_cleanup_waits_for_the_first_owners_publication() {
+    let (_directory, store) = store().await;
+    let bytes = b"several writers may publish the same content";
+    let hash = Hash::of(bytes);
+    let first = store.put(&hash, None, pieces(bytes, 10)).await.unwrap();
+    let deleting = store.clone();
+    let mut removed = tokio::spawn(async move { deleting.delete(&hash).await });
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut removed)
+            .await
+            .is_err()
+    );
+    let second = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.put(&hash, None, pieces(bytes, 10)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!second.created);
+    assert!(store.exists(&hash).await.unwrap());
+    drop(first);
+    drop(second);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), removed)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+}

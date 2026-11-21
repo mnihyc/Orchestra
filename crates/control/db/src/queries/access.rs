@@ -97,7 +97,11 @@ pub struct HolderPlaceRow {
 }
 
 /// Places whose current names may match a locator; permissions are cut before anything is returned.
-pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbError> {
+/// People-only fields need organization addresses, without traversing the project/topic inventory.
+pub async fn holder_places(
+    conn: &mut Conn,
+    orgs_only: bool,
+) -> Result<Vec<HolderPlaceRow>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.org_id AS root, n.kind, n.path, n.name AS leaf_name,
                 string_agg(p.name, ' > ' ORDER BY a.position) AS name,
@@ -105,9 +109,9 @@ pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbErr
                 (array_agg(p.id ORDER BY a.position DESC) FILTER (WHERE p.kind = 'org'))[1] AS org
            FROM nodes n CROSS JOIN LATERAL unnest(n.path) WITH ORDINALITY a(id, position)
            JOIN nodes p ON p.id = a.id LEFT JOIN orgs o ON o.node_id = p.id
-          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL
+          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL AND (NOT $1::boolean OR n.kind='org')
           GROUP BY n.id ORDER BY n.org_id, n.id")
-        .fetch_all(conn).await?)
+        .bind(orgs_only).fetch_all(conn).await?)
 }
 
 /// Current person addresses with their domains; the API cuts domains before exposing their names.
@@ -2800,6 +2804,7 @@ pub type Trial<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 /// and asking, without leaving it made.
 pub async fn begin_trial(conn: &mut Conn) -> Result<Trial<'_>, DbError> {
     use sqlx::Connection;
+    crate::pool::discard_read_facts();
     Ok(conn.begin().await?)
 }
 
@@ -5220,6 +5225,267 @@ mod tests {
             .await
             .unwrap();
         assert!(roots.iter().all(|(_, root)| *root == w.root));
+    }
+
+    #[tokio::test]
+    async fn implicit_role_views_follow_local_inheritance_locks_and_expiry() {
+        async fn check(conn: &mut Conn, w: &World, at: DateTime<Utc>, visible: bool) {
+            let identities: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM access_holders($1,$2,false) WHERE id=$3 ORDER BY kind",
+            )
+            .bind(w.bo)
+            .bind(at)
+            .bind(w.project)
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+            if visible {
+                assert_eq!(identities, ["reachable", "role", "visible"]);
+            } else {
+                assert_eq!(identities, ["role"]);
+            }
+            holder_graph_matches_initial_function(conn, at).await;
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        give_role(
+            &mut conn,
+            w.project,
+            "user",
+            w.bo,
+            "interactor",
+            w.ada,
+            None,
+        )
+        .await
+        .unwrap();
+        let system = PageKey::new("system", SYSTEM_ID, "defaults");
+        let parent = PageKey::new("node", w.department, "defaults");
+        let leaf = live(w.project);
+        add_entry(
+            &mut conn,
+            &system,
+            "any",
+            "project.view",
+            ("role", None, Some("viewer")),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        add_entry(
+            &mut conn,
+            &system,
+            "any",
+            "doc.edit",
+            ("role", None, Some("developer")),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+
+        check(&mut conn, &w, at, true).await;
+        set_row(&mut conn, &parent, "any", "project.view", false, false)
+            .await
+            .unwrap();
+        check(&mut conn, &w, at, false).await;
+        let end = at + Duration::minutes(1);
+        add_entry(
+            &mut conn,
+            &leaf,
+            "any",
+            "project.view",
+            ("role", None, Some("interactor")),
+            Some(end),
+            at,
+        )
+        .await
+        .unwrap();
+        check(&mut conn, &w, at, true).await;
+        check(&mut conn, &w, end, false).await;
+        set_row(&mut conn, &system, "any", "project.view", true, true)
+            .await
+            .unwrap();
+        check(&mut conn, &w, end, true).await;
+    }
+
+    #[tokio::test]
+    async fn named_and_creation_grants_follow_changes_and_ancestor_restoration_on_one_connection() {
+        async fn visible(conn: &mut Conn, person: Id, place: Id, at: DateTime<Utc>) -> bool {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h WHERE h.kind='visible' AND h.id=$3)",
+            )
+            .bind(person)
+            .bind(at)
+            .bind(place)
+            .fetch_one(conn)
+            .await
+            .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        let direct = add_entry(
+            &mut conn,
+            &live(w.project),
+            "any",
+            "project.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        assert!(remove_entry(&mut conn, direct, w.ada, at).await.unwrap());
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        add_entry(
+            &mut conn,
+            &live(w.department),
+            "any",
+            "org.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        let created = add_entry(
+            &mut conn,
+            &live(w.project),
+            "any",
+            "project.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE permission_entries SET source='creation' WHERE id=$1")
+            .bind(created)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.root)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+            .bind(w.root)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        assert!(remove_entry(&mut conn, created, w.ada, at).await.unwrap());
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+    }
+
+    #[tokio::test]
+    async fn path_state_reads_current_deleted_and_archived_ancestors_without_needing_every_node() {
+        async fn state(conn: &mut Conn, path: &[Id]) -> (bool, bool) {
+            sqlx::query_as("SELECT live,archived FROM orch_path_state($1)")
+                .bind(path)
+                .fetch_one(conn)
+                .await
+                .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let path = [w.root, w.department, w.project];
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        sqlx::query("UPDATE nodes SET archived_at=$2 WHERE id=$1")
+            .bind(w.department)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, true));
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.root)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (false, true));
+        sqlx::query("UPDATE nodes SET deleted_at=NULL,archived_at=NULL WHERE id=ANY($1)")
+            .bind(path.as_slice())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        assert_eq!(state(&mut conn, &[]).await, (true, false));
+        assert_eq!(state(&mut conn, &[new_id()]).await, (true, false));
+    }
+
+    #[tokio::test]
+    async fn repeated_navigation_reads_keep_current_grants_people_suspensions_and_expiry() {
+        async fn can_develop(conn: &mut Conn, person: Id, place: Id, at: DateTime<Utc>) -> bool {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h
+                  WHERE h.kind='role' AND h.id=$3 AND h.role IN ('developer','admin'))",
+            )
+            .bind(person)
+            .bind(at)
+            .bind(place)
+            .fetch_one(conn)
+            .await
+            .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        give_role(
+            &mut conn,
+            w.department,
+            "user",
+            w.bo,
+            "developer",
+            w.ada,
+            Some(at + Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        let outsider = new_id();
+        insert_user(&mut conn, outsider, "outsider").await.unwrap();
+        assert!(!can_develop(&mut conn, outsider, w.project, at).await);
+        assert!(!can_develop(&mut conn, w.bo, w.project, at + Duration::seconds(2)).await);
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        suspend_in(&mut conn, w.department, w.bo, w.ada)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        lift_suspension(&mut conn, w.department, w.bo)
+            .await
+            .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+        suspend(&mut conn, w.bo).await.unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
     }
 
     #[tokio::test]

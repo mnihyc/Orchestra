@@ -108,6 +108,7 @@ pub(crate) async fn idle(
     };
     shared
         .sink
+        .for_opening(live.spec.opening_id)
         .session(
             live.thread_id,
             live.segment_id,

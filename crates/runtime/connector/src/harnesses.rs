@@ -44,14 +44,15 @@ use orch_agent_contract::facts::{AgentProfile, HarnessState, HarnessStatus};
 use orch_agent_contract::loopback::Loopback as AdapterLoopback;
 use orch_agent_contract::session::ThreadId;
 use orch_link_contract::commands::{
-    AgentStart, CommandError, ErrorCode, Secret as LinkSecret, SecretOrText,
+    AgentStart, AgentStartResult, CommandError, ErrorCode, SandboxMode, Secret as LinkSecret,
+    SecretOrText,
 };
-use orch_link_contract::events::{Event, RawFrame};
+use orch_link_contract::events::{Event, RawFrame, SessionSandbox};
 use orch_link_contract::session::MachineFactsAdapter;
 use orch_link_contract::streams::Stream;
 use orch_types::{Clock, Field, Id, Json};
 
-use crate::events::{coalesce, convert, harness_status};
+use crate::events::{convert, deliver_streams, harness_status};
 use crate::facts::FactsDraft;
 use crate::ledger::{HostedHarness, HostedSession, Ledger};
 use crate::loopback::{Grant, SessionBinding, Tickets};
@@ -67,6 +68,14 @@ struct RuntimeEnvironment {
 
 fn runtime_environment_name(provider: Id, agent: Id) -> String {
     format!("harness-runtime-{provider}-{agent}")
+}
+
+/// Native sign-ins live with the environment home, separately from replaceable connector identity.
+fn environment_connection_home(root: &Path, provider: Id, agent: Id) -> PathBuf {
+    root.join(".orch")
+        .join("provider-connections")
+        .join(provider.to_string())
+        .join(agent.to_string())
 }
 
 fn process_environment(services: &Services, mut start: AdapterStart) -> AdapterStart {
@@ -281,6 +290,12 @@ fn unavailable(detail: impl Into<String>) -> CommandError {
     CommandError::new(ErrorCode::HarnessUnavailable, detail)
 }
 
+fn unavailable_by_policy(key: orch_link_contract::policy::PolicyKey, detail: &str) -> CommandError {
+    let mut error = unavailable(format!("{key}: {detail}"));
+    error.details = Some(serde_json::json!({"policy_key":key.as_str()}));
+    error
+}
+
 type Key = (Id, Id);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -291,6 +306,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 // A process
 
 struct OpenSession {
+    opening_id: Id,
+    opening_epoch: i64,
+    native_environment: Option<Id>,
+    directory: String,
+    cwd: String,
     segment_id: Id,
     native_session_ref: String,
     continuation_fenced: bool,
@@ -301,6 +321,25 @@ struct OpenSession {
 }
 
 impl OpenSession {
+    fn configuration_directories(
+        &self,
+        environment: Id,
+        root: &str,
+    ) -> std::collections::BTreeSet<String> {
+        if self.native_environment != Some(environment) {
+            return std::collections::BTreeSet::new();
+        }
+        let mut found =
+            std::collections::BTreeSet::from([self.directory.clone(), self.cwd.clone()]);
+        for directory in Path::new(&self.cwd)
+            .ancestors()
+            .take_while(|directory| directory.starts_with(root))
+        {
+            found.insert(directory.to_string_lossy().into_owned());
+        }
+        found
+    }
+
     fn operation(&self, expected: Option<Id>) -> Result<(), CommandError> {
         if expected.is_some_and(|id| id != self.segment_id)
             || expected.is_none() && self.continuation_fenced
@@ -376,27 +415,13 @@ struct State {
 struct Context {
     services: Arc<Services>,
     ledger: Arc<Ledger>,
-    threads: Mutex<HashMap<ThreadId, Key>>,
+    threads: Mutex<HashMap<ThreadId, (Key, Id)>>,
+    mcp_changed: Arc<tokio::sync::Notify>,
     restarts: u32,
     window: Duration,
 }
 
-/// Why the process of a harness is dead, when what the adapter reported says so: the harness failed, or its
-/// process was lost and the adapter says why. An adapter that ended its process on purpose, to start it again
-/// with a sign-in it was given, reports it offline and has nothing to say; that is not a death, and what the
-/// adapter reports after it (the sign-in that completed) must still be heard.
-fn death_of(status: &HarnessStatus) -> Option<String> {
-    match status.status {
-        HarnessState::Error => Some(
-            status
-                .detail
-                .clone()
-                .unwrap_or_else(|| "the harness process is gone".to_owned()),
-        ),
-        HarnessState::Offline => status.detail.clone(),
-        _ => None,
-    }
-}
+type Scratch = HashMap<(Option<Id>, Id), Vec<Id>>;
 
 /// One harness process: an adapter, its home, its sessions.
 pub struct Process {
@@ -409,6 +434,7 @@ pub struct Process {
     ctx: Arc<Context>,
     request: Mutex<AgentStart>,
     adapter: tokio::sync::Mutex<Box<dyn AgentAdapter>>,
+    interrupt: Mutex<Option<orch_agent_contract::adapter::Interrupt>>,
     output_directory: Mutex<Option<PathBuf>>,
     adapter_start: AdapterStart,
     resource_group: Option<orch_envhost::process_limits::UserGroup>,
@@ -418,7 +444,7 @@ pub struct Process {
     stopping: AtomicBool,
     generation: AtomicU64,
     /// The commands whose files a turn is still using, by the turn.
-    scratch: Mutex<HashMap<Id, Vec<Id>>>,
+    scratch: Mutex<Scratch>,
 }
 
 impl std::fmt::Debug for Process {
@@ -503,8 +529,11 @@ impl Process {
 
     /// Keeps the files that `command` fetched until the turn `turn` ends: the harness reads them while
     /// it works.
-    pub fn keep_for_turn(&self, turn: Id, command: Id) {
-        lock(&self.scratch).entry(turn).or_default().push(command);
+    pub fn keep_for_turn(&self, opening_id: Option<Id>, turn: Id, command: Id) {
+        lock(&self.scratch)
+            .entry((opening_id, turn))
+            .or_default()
+            .push(command);
     }
 
     /// How many sessions are open in it.
@@ -574,24 +603,73 @@ impl Process {
             .map(|session| session.native_session_ref.clone())
     }
 
-    /// Runs one call of the adapter. Calls are one at a time: the adapter is `&mut`.
+    /// Runs one call of the actual process, without borrowing its replacement after waiting for the adapter.
     pub async fn call<R>(
         &self,
         work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
     ) -> Result<R, CommandError> {
-        if self.state().status != HarnessState::Online {
+        self.call_at(self.generation(), work).await
+    }
+
+    fn serves_generation(&self, generation: u64) -> bool {
+        self.generation() == generation
+            && !self.stopping.load(Ordering::SeqCst)
+            && self.state().status == HarnessState::Online
+    }
+
+    /// Executes only on the captured process generation, including after the adapter's queue wait.
+    pub async fn call_at<R>(
+        &self,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        if !self.serves_generation(generation) {
             return Err(unavailable(
-                "the harness process is not running; it is being started again, or gave up",
+                "the native process changed before this call could begin",
             ));
         }
         let mut adapter = self.adapter.lock().await;
-        work(adapter.as_mut())
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this call was waiting",
+            ));
+        }
+        let result = work(adapter.as_mut()).await;
+        *lock(&self.interrupt) = adapter.interrupt_handle();
+        result.map_err(|error| command_error(&error))
+    }
+
+    /// Stops one exact turn without joining an adapter call that may be exporting or replaying history.
+    pub async fn interrupt(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        thread: ThreadId,
+        turn: Id,
+    ) -> Result<(), CommandError> {
+        let generation = self.generation();
+        let handle = lock(&self.interrupt).clone();
+        if let Some(handle) = handle {
+            self.check_call_target(context, generation, None).await?;
+            return handle(thread, turn)
+                .await
+                .map_err(|error| command_error(&error));
+        }
+        self.call_target(context, |adapter| adapter.interrupt(thread, turn))
             .await
-            .map_err(|error| command_error(&error))
     }
 
     async fn publish(&self, stream: Stream, event: Event) {
-        if let Err(error) = self.ctx.services.publisher.publish(stream, event).await {
+        self.publish_from(None, stream, event).await;
+    }
+
+    async fn publish_from(&self, native_opening_id: Option<Id>, stream: Stream, event: Event) {
+        if let Err(error) = self
+            .ctx
+            .services
+            .publisher
+            .publish_from(native_opening_id, stream, event)
+            .await
+        {
             tracing::warn!(%error, "an event could not be put in the spool");
         }
     }
@@ -616,6 +694,7 @@ impl Process {
         };
         self.state().detail = detail.clone();
         let report = HarnessStatus {
+            home: Some(self.home_fact()),
             status,
             detail,
             harness_version: Some(version),
@@ -714,41 +793,273 @@ impl Process {
         }
     }
 
+    /// The actual process generation a native call is about to use.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     /// A session opened in the adapter: it is kept, in the process and on disk.
-    pub fn session_opened(&self, binding: &SessionBinding, native_session_ref: &str) {
-        self.state().sessions.insert(
-            binding.thread_id,
+    pub fn session_opened(
+        &self,
+        session_key: &str,
+        session: HostedSession,
+        opening_epoch: i64,
+        generation: u64,
+        native_environment: Option<Id>,
+    ) -> Result<(), CommandError> {
+        let mut state = self.state();
+        if generation != self.generation()
+            || self.stopping.load(Ordering::SeqCst)
+            || state.status != HarnessState::Online
+        {
+            return Err(unavailable(
+                "the process that opened this session has already ended",
+            ));
+        }
+        state.sessions.insert(
+            session.thread_id,
             OpenSession {
-                segment_id: binding.segment_id,
-                native_session_ref: native_session_ref.to_owned(),
+                opening_id: session.opening_id,
+                opening_epoch,
+                native_environment,
+                directory: session.directory.clone(),
+                cwd: session.cwd.clone(),
+                segment_id: session.segment_id,
+                native_session_ref: session.native_session_ref.clone(),
                 continuation_fenced: false,
-                session_key: binding.session_key.clone(),
-                running_turn: None,
-                background: std::collections::HashSet::new(),
+                session_key: session_key.to_owned(),
+                running_turn: session.running_turn,
+                background: Default::default(),
                 awaiting_native: false,
             },
         );
-        lock(&self.ctx.threads).insert(binding.thread_id, self.key());
-        self.ctx.ledger.session_opened(
-            self.provider_id,
-            self.agent_id,
-            HostedSession {
-                thread_id: binding.thread_id,
-                segment_id: binding.segment_id,
-                native_session_ref: native_session_ref.to_owned(),
-                running_turn: None,
-            },
-        );
+        if native_environment.is_some() {
+            self.ctx.mcp_changed.notify_one();
+        }
+        lock(&self.ctx.threads).insert(session.thread_id, (self.key(), session.opening_id));
+        self.ctx
+            .ledger
+            .session_opened(self.provider_id, self.agent_id, session);
+        Ok(())
+    }
+
+    /// The exact physical slot, captured before an operation waits elsewhere.
+    #[must_use]
+    pub fn session_target(
+        &self,
+        thread: ThreadId,
+    ) -> Option<orch_link_contract::commands::SessionTarget> {
+        self.state().sessions.get(&thread).map(|session| {
+            orch_link_contract::commands::SessionTarget {
+                thread_id: thread,
+                segment_id: Some(session.segment_id),
+                opening_id: Some(session.opening_id),
+                opening_epoch: Some(session.opening_epoch),
+            }
+        })
+    }
+
+    /// Rechecks a physical pin after the adapter queue; an absent or superseded close is a no-op.
+    pub async fn call_session<R>(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<Option<R>, CommandError> {
+        if target.opening_id.is_none() {
+            return Ok(None);
+        }
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Ok(None);
+        }
+        work(adapter.as_mut())
+            .await
+            .map(Some)
+            .map_err(|error| command_error(&error))
+    }
+
+    /// Applies a session operation only to its accepted physical slot after the adapter queue.
+    pub async fn call_target<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        self.call_target_checked(context, None, work).await
+    }
+
+    pub async fn call_config<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        action: orch_link_contract::native_target::SessionAction,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        self.call_target_checked(context, Some(action), work).await
+    }
+
+    async fn call_target_checked<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        action: Option<orch_link_contract::native_target::SessionAction>,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let generation = self.generation();
+        let mut adapter = self.adapter.lock().await;
+        self.check_call_target(context, generation, action).await?;
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
+    }
+
+    async fn check_call_target(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        generation: u64,
+        action: Option<orch_link_contract::native_target::SessionAction>,
+    ) -> Result<(), CommandError> {
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native session"));
+        };
+        if !self.serves_generation(generation)
+            || self.session_target(target.thread_id).as_ref() != Some(target)
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session ended while this call was waiting",
+            ));
+        }
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let captured = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            if !fences.tool_control().1 {
+                return Ok(false);
+            }
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Use,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live
+            || !self.serves_generation(generation)
+            || self.session_target(captured.thread_id).as_ref() != Some(&captured)
+            || context.cancel.is_cancelled()
+        {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical session was retired while this call was waiting",
+            ));
+        }
+        if let Some(action) = action {
+            let current = self.session_key(captured.thread_id).is_some_and(|key| {
+                context.native_members.as_ref().is_some_and(|members| {
+                    self.ctx
+                        .services
+                        .loopback
+                        .configuration_current(&key, action, members)
+                })
+            });
+            if !current {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the accepted session configuration was superseded",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks an opening's persistent order after queued preparation and before native creation.
+    pub async fn call_opening<R>(
+        &self,
+        context: &orch_link::commands::CommandContext,
+        generation: u64,
+        work: impl for<'a> FnOnce(&'a mut dyn AgentAdapter) -> BoxFuture<'a, Result<R, AdapterError>>,
+    ) -> Result<R, CommandError> {
+        let mut adapter = self.adapter.lock().await;
+        if !self.serves_generation(generation) {
+            return Err(unavailable(
+                "the native process changed while this opening was waiting",
+            ));
+        }
+        let Some(orch_link_contract::commands::NativeTarget::Session(target)) =
+            context.native_target.as_ref()
+        else {
+            return Err(unavailable("the command has no captured native opening"));
+        };
+        let fences = context
+            .native_fences
+            .clone()
+            .ok_or_else(|| unavailable("the native ordering store is unavailable"))?;
+        let target = target.clone();
+        let live = tokio::task::spawn_blocking(move || {
+            if !fences.tool_control().1 {
+                return Ok(false);
+            }
+            fences.observe_session(
+                &target,
+                orch_link_contract::native_target::SessionAction::Open,
+            )
+        })
+        .await
+        .map_err(|_| unavailable("the native ordering check failed"))?
+        .map_err(|_| unavailable("the native ordering marker cannot be read"))?;
+        if !live || !self.serves_generation(generation) || context.cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::SessionNotFound,
+                "the captured physical opening was retired while waiting",
+            ));
+        }
+        work(adapter.as_mut())
+            .await
+            .map_err(|error| command_error(&error))
     }
 
     /// A session ended: everything kept of it goes.
     pub fn session_closed(&self, thread: ThreadId) {
-        let removed = self.state().sessions.remove(&thread);
-        lock(&self.ctx.threads).remove(&thread);
-        self.ctx.ledger.session_closed(thread);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
+        let opening = self
+            .state()
+            .sessions
+            .get(&thread)
+            .map(|session| session.opening_id);
+        if let Some(opening) = opening {
+            self.session_closed_if(thread, opening);
         }
+    }
+
+    /// Removes only this physical opening, keeping a replacement's slot, ledger and local key intact.
+    pub fn session_closed_if(&self, thread: ThreadId, opening_id: Id) {
+        let mut state = self.state();
+        if !state
+            .sessions
+            .get(&thread)
+            .is_some_and(|session| session.opening_id == opening_id)
+        {
+            return;
+        }
+        let Some(session) = state.sessions.remove(&thread) else {
+            return;
+        };
+        let mut threads = lock(&self.ctx.threads);
+        if threads.get(&thread) == Some(&(self.key(), opening_id)) {
+            threads.remove(&thread);
+        }
+        self.ctx.ledger.session_closed_if(thread, opening_id);
+        if session.native_environment.is_some() {
+            self.ctx.mcp_changed.notify_one();
+        }
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Removes only the matching native history's local slot, preserving a successor or another home.
@@ -764,17 +1075,19 @@ impl Process {
         {
             return;
         }
-        let removed = state.sessions.remove(&source.thread_id);
+        let Some(session) = state.sessions.remove(&source.thread_id) else {
+            return;
+        };
         let mut threads = lock(&self.ctx.threads);
-        if threads.get(&source.thread_id) == Some(&self.key()) {
+        if threads.get(&source.thread_id) == Some(&(self.key(), session.opening_id)) {
             threads.remove(&source.thread_id);
-            self.ctx.ledger.session_closed(source.thread_id);
+            self.ctx
+                .ledger
+                .session_closed_if(source.thread_id, session.opening_id);
         }
         drop(threads);
         drop(state);
-        if let Some(session) = removed {
-            self.ctx.services.loopback.unbind(&session.session_key);
-        }
+        self.ctx.services.loopback.unbind(&session.session_key);
     }
 
     /// Reserves a just-admitted turn before the adapter can return ahead of its TurnStarted event.
@@ -782,7 +1095,9 @@ impl Process {
         let mut state = self.state();
         if let Some(session) = state.sessions.get_mut(&thread) {
             session.running_turn = turn;
-            self.ctx.ledger.turn_running(thread, turn);
+            self.ctx
+                .ledger
+                .turn_running(thread, session.opening_id, turn);
         }
     }
 
@@ -793,34 +1108,20 @@ impl Process {
         tokio::spawn(async move { process.pump(stream, generation).await });
     }
 
-    async fn pump(self: Arc<Self>, mut stream: EventStream, generation: u64) {
-        loop {
-            let Some((first, capacity)) = stream.recv_held().await else {
-                break;
-            };
-            let mut batch = vec![first];
-            let mut capacities = vec![capacity];
-            // Keep admission charged until this bounded batch reaches the spool. Draining a live
-            // producer into an unbounded Vec would undo the sink's byte and node backpressure.
-            while batch.len() < orch_agent_contract::flow::QUEUE_ITEMS {
-                let Ok((more, capacity)) = stream.try_recv_held() else {
-                    break;
-                };
-                batch.push(more);
-                capacities.push(capacity);
-            }
-            let current = self.deliver_all(coalesce(batch), generation).await;
-            drop(capacities);
-            if !current {
-                return;
-            }
-        }
+    async fn pump(self: Arc<Self>, stream: EventStream, generation: u64) {
+        let reason = deliver_streams(stream, self.provider_id, self.agent_id, |batch| {
+            self.deliver_all(batch, generation)
+        })
+        .await;
         if !self.stopping.load(Ordering::SeqCst)
             && self.generation.load(Ordering::SeqCst) == generation
         {
             let process = Arc::clone(&self);
             process
-                .died(generation, "the harness stopped reporting".to_owned())
+                .died(
+                    generation,
+                    reason.unwrap_or_else(|| "the harness stopped reporting".to_owned()),
+                )
                 .await;
         }
     }
@@ -874,14 +1175,13 @@ impl Process {
     /// and given up). Says whether the process is still the one they are of.
     async fn deliver_all(self: &Arc<Self>, events: Vec<AdapterEvent>, generation: u64) -> bool {
         let mut kept = Vec::with_capacity(events.len());
-        let mut deaths = Vec::new();
+        let mut observations = BTreeMap::new();
         let mut current = true;
         for event in events {
             if self.generation.load(Ordering::SeqCst) != generation {
                 current = false;
                 break;
             }
-            let mut death = None;
             let event = match event {
                 AdapterEvent::Status(mut status) => {
                     // How many sessions are open is for the connector to say: it opened them.
@@ -889,38 +1189,111 @@ impl Process {
                     if status.harness_version.is_none() {
                         status.harness_version = Some(self.state().version.clone());
                     }
-                    death = death_of(&status);
                     AdapterEvent::Status(status)
                 }
                 other => other,
             };
-            self.observe(&event);
+            self.observe_before_publication(&event);
             match convert(self.provider_id, self.agent_id, &event) {
                 Ok(converted) => {
-                    if !self.keep_output_blobs(&converted.1, generation).await {
+                    if !self.keep_output_blobs(&converted.event, generation).await {
                         current = false;
                         break;
                     }
+                    if matches!(
+                        &event,
+                        AdapterEvent::Session {
+                            event: SessionEvent::TurnCompleted(_)
+                                | SessionEvent::SessionLost(_)
+                                | SessionEvent::BackgroundTasks(_),
+                            ..
+                        }
+                    ) {
+                        observations.insert(kept.len(), event);
+                    }
                     kept.push(converted);
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "an event of the adapter was not given to the link")
+                Err(_) => {
+                    tracing::warn!("an event of the adapter could not be converted for publication")
                 }
             }
-            if let Some(reason) = death {
-                deaths.push(reason);
+        }
+        let mut pending: Vec<_> = kept.into_iter().enumerate().collect();
+        let mut warned = false;
+        while !pending.is_empty() {
+            if self.stopping.load(Ordering::SeqCst)
+                || self.generation.load(Ordering::SeqCst) != generation
+            {
+                return false;
+            }
+            let batch = pending.iter().map(|(_, event)| event.clone()).collect();
+            let mut receipts = self
+                .ctx
+                .services
+                .publisher
+                .publish_all(batch)
+                .await
+                .into_iter();
+            pending.retain(|(index, (_, event))| match receipts.next() {
+                Some(Ok(())) => false,
+                Some(Err(error)) if error.is_permanent_refusal() => {
+                    tracing::warn!(kind = event.kind().as_str(), %error, "the link refused this native event");
+                    observations.remove(index);
+                    false
+                }
+                _ => true,
+            });
+            if !pending.is_empty() {
+                if !warned {
+                    tracing::warn!("native output on this stream waits for durable publication");
+                    warned = true;
+                }
+                tokio::time::sleep(RESTART_FIRST_PAUSE).await;
             }
         }
-        for answer in self.ctx.services.publisher.publish_all(kept).await {
-            if let Err(error) = answer {
-                tracing::warn!(%error, "an event could not be put in the spool");
+        if self.generation.load(Ordering::SeqCst) == generation {
+            for observation in observations.into_values() {
+                self.observe(&observation);
             }
         }
-        for reason in deaths {
-            let process = Arc::clone(self);
-            tokio::spawn(async move { process.died(generation, reason).await });
+        current && self.generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Native running identity is retained immediately; terminal retirement waits for a durable receipt.
+    fn observe_before_publication(&self, event: &AdapterEvent) {
+        match event {
+            AdapterEvent::Session {
+                native_opening_id,
+                thread_id,
+                segment_id,
+                event: SessionEvent::BackgroundTasks(report),
+                ..
+            } => {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && Some(session.opening_id) == *native_opening_id
+                    && session.segment_id == *segment_id
+                {
+                    for task in &report.tasks {
+                        if task.state
+                            == orch_agent_contract::background::BackgroundTaskState::Running
+                        {
+                            session
+                                .background
+                                .insert(serde_json::json!([task.id, task.run_id]).to_string());
+                        }
+                    }
+                    if report.self_waking && report.tasks.iter().any(|task| task.state.wakes()) {
+                        session.awaiting_native = true;
+                    }
+                }
+            }
+            AdapterEvent::Login(_)
+            | AdapterEvent::Session {
+                event: SessionEvent::TurnStarted(_),
+                ..
+            } => self.observe(event),
+            _ => {}
         }
-        current
     }
 
     fn observe(&self, event: &AdapterEvent) {
@@ -929,6 +1302,7 @@ impl Process {
             return;
         }
         let AdapterEvent::Session {
+            native_opening_id,
             thread_id,
             segment_id,
             event,
@@ -937,10 +1311,14 @@ impl Process {
         else {
             return;
         };
+        let Some(opening_id) = *native_opening_id else {
+            return;
+        };
         match event {
             SessionEvent::BackgroundTasks(report) => {
                 if let Some(session) = self.state().sessions.get_mut(thread_id)
                     && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
                 {
                     for task in &report.tasks {
                         let key = serde_json::json!([task.id, task.run_id]).to_string();
@@ -961,20 +1339,43 @@ impl Process {
                 }
             }
             SessionEvent::TurnStarted(started) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
+                    && session
+                        .running_turn
+                        .is_none_or(|turn| turn == started.turn_id)
+                {
                     session.running_turn = Some(started.turn_id);
                     session.awaiting_native = false;
+                    self.ctx.ledger.turn_running(
+                        *thread_id,
+                        session.opening_id,
+                        Some(started.turn_id),
+                    );
                 }
-                self.ctx
-                    .ledger
-                    .turn_running(*thread_id, Some(started.turn_id));
+                self.ctx.ledger.turn_native(
+                    *thread_id,
+                    opening_id,
+                    started.turn_id,
+                    &started.native_turn_ref,
+                );
             }
             SessionEvent::TurnCompleted(completed) => {
-                if let Some(session) = self.state().sessions.get_mut(thread_id) {
+                if let Some(session) = self.state().sessions.get_mut(thread_id)
+                    && session.segment_id == *segment_id
+                    && session.opening_id == opening_id
+                    && session.running_turn == Some(completed.turn_id)
+                {
                     session.running_turn = None;
+                    self.ctx.ledger.turn_running_if(
+                        *thread_id,
+                        session.opening_id,
+                        Some(completed.turn_id),
+                        None,
+                    );
                 }
-                self.ctx.ledger.turn_running(*thread_id, None);
-                let commands = lock(&self.scratch).remove(&completed.turn_id);
+                let commands = lock(&self.scratch).remove(&(Some(opening_id), completed.turn_id));
                 if let Some(commands) = commands {
                     let content = Arc::clone(&self.ctx.services.content);
                     tokio::spawn(async move {
@@ -984,7 +1385,9 @@ impl Process {
                     });
                 }
             }
-            SessionEvent::SessionLost(_) => self.session_closed(*thread_id),
+            SessionEvent::SessionLost(lost) if lost.opening_id == opening_id => {
+                self.session_closed_if(*thread_id, opening_id)
+            }
             _ => {}
         }
     }
@@ -1007,16 +1410,31 @@ impl Process {
             return;
         }
         tracing::warn!(provider = %self.provider_id, agent = %self.agent_id, %reason, "a harness process died");
-        let lost: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
+        let lost: Vec<(ThreadId, OpenSession)> = {
+            let mut state = self.state();
+            state.status = HarnessState::Error;
+            state.detail = Some(reason.clone());
+            state.sessions.drain().collect()
+        };
         for (thread, session) in lost {
-            lock(&self.ctx.threads).remove(&thread);
-            self.ctx.ledger.session_closed(thread);
+            {
+                let mut threads = lock(&self.ctx.threads);
+                if threads.get(&thread) == Some(&(self.key(), session.opening_id)) {
+                    threads.remove(&thread);
+                }
+            }
+            self.ctx
+                .ledger
+                .session_closed_if(thread, session.opening_id);
             self.ctx.services.loopback.unbind(&session.session_key);
             let stream = Stream::Session {
                 thread_id: thread,
                 segment_id: session.segment_id,
             };
             let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+                expected: false,
+                opening_id: session.opening_id,
+                uncertain: false,
                 reason: format!("the harness process died: {reason}"),
             });
             if let Ok(body) = serde_json::to_value(&event)
@@ -1025,7 +1443,8 @@ impl Process {
                     body.get("body").cloned().unwrap_or(Json::Null),
                 )
             {
-                self.publish(stream, converted).await;
+                self.publish_from(Some(session.opening_id), stream, converted)
+                    .await;
             }
         }
         self.state().status = HarnessState::Error;
@@ -1095,6 +1514,7 @@ impl Process {
             .await
             .map_err(|error| command_error(&error))?;
         let output_directory = adapter.output_directory();
+        *lock(&self.interrupt) = adapter.interrupt_handle();
         drop(adapter);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         *lock(&self.output_directory) = output_directory;
@@ -1116,8 +1536,11 @@ impl Process {
         self.stopping.store(true, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
         let sessions: Vec<(ThreadId, OpenSession)> = self.state().sessions.drain().collect();
-        for (thread, _) in &sessions {
-            lock(&self.ctx.threads).remove(thread);
+        for (thread, session) in &sessions {
+            let mut threads = lock(&self.ctx.threads);
+            if threads.get(thread) == Some(&(self.key(), session.opening_id)) {
+                threads.remove(thread);
+            }
         }
         self.ctx.services.loopback.revoke(self.grant.id);
         {
@@ -1143,6 +1566,7 @@ pub struct Hosting {
     registry: Arc<AdapterRegistry>,
     processes: Mutex<HashMap<Key, Arc<Process>>>,
     orch_calls: Arc<crate::orch_tools::OrchCalls>,
+    fetched: Mutex<BTreeMap<String, crate::builds::Installed>>,
 }
 
 impl std::fmt::Debug for Hosting {
@@ -1170,11 +1594,13 @@ impl Hosting {
                 services,
                 ledger,
                 threads: Mutex::new(HashMap::new()),
+                mcp_changed: Arc::new(tokio::sync::Notify::new()),
                 restarts,
                 window,
             }),
             registry,
             processes: Mutex::new(HashMap::new()),
+            fetched: Mutex::new(BTreeMap::new()),
             orch_calls,
         })
     }
@@ -1218,11 +1644,38 @@ impl Hosting {
     pub fn process_of(&self, thread: ThreadId) -> Result<Arc<Process>, CommandError> {
         let key = lock(&self.ctx.threads).get(&thread).copied();
         match key {
-            Some((provider, agent)) => self.process(provider, agent),
+            Some(((provider, agent), _)) => self.process(provider, agent),
             None => Err(CommandError::new(
                 ErrorCode::SessionNotFound,
                 "no session of that thread is open on this machine",
             )),
+        }
+    }
+
+    /// Finds only the captured physical owner, including an older process awaiting its actual close.
+    pub fn process_for_target(
+        &self,
+        target: &orch_link_contract::commands::SessionTarget,
+    ) -> Option<Arc<Process>> {
+        lock(&self.processes)
+            .values()
+            .find(|process| process.session_target(target.thread_id).as_ref() == Some(target))
+            .cloned()
+    }
+
+    /// A newer admitted opening retires older local keys before its preparation can wait.
+    pub fn retire_older_session_keys(&self, target: &orch_link_contract::commands::SessionTarget) {
+        let Some(epoch) = target.opening_epoch else {
+            return;
+        };
+        let processes = lock(&self.processes).values().cloned().collect::<Vec<_>>();
+        for process in processes {
+            let state = process.state();
+            if let Some(session) = state.sessions.get(&target.thread_id)
+                && session.opening_epoch < epoch
+            {
+                self.ctx.services.loopback.unbind(&session.session_key);
+            }
         }
     }
 
@@ -1281,6 +1734,42 @@ impl Hosting {
     ) -> Result<Option<PathBuf>, CommandError> {
         let services = &self.ctx.services;
         let source = Self::home_source(request, profile);
+        if request
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.environment_home)
+        {
+            if !services.policy.is_managed()
+                || !services
+                    .config
+                    .connector
+                    .roles
+                    .iter()
+                    .any(|role| role == "environment")
+            {
+                return Err(unavailable(
+                    "this connector has no managed environment home",
+                ));
+            }
+            if let Some(orch_agent_contract::facts::EnvironmentDataSource::ExistingDirectory {
+                path,
+            }) = &source
+            {
+                let path = PathBuf::from(path);
+                crate::policy::writable_environment_directory(&path)?;
+                return Ok(Some(path));
+            }
+            let root = std::env::var_os("ORCH_HOME_DIR")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    unavailable("this environment has not reported its persistent home")
+                })?;
+            return Ok(Some(environment_connection_home(
+                &root,
+                request.provider_id,
+                request.agent_id,
+            )));
+        }
         if let Ok(mapped) = std::env::var("ORCH_HARNESS_HOME") {
             let actual: orch_agent_contract::facts::EnvironmentDataSource =
                 std::env::var("ORCH_HARNESS_HOME_SOURCE")
@@ -1303,6 +1792,11 @@ impl Hosting {
         if let Some(orch_agent_contract::facts::EnvironmentDataSource::ExistingDirectory { path }) =
             &source
         {
+            if !orch_envhost::RUNTIME_VERIFIED {
+                return Err(unavailable(
+                    "this native harness cannot retain a borrowed home through process retirement on this system; it can use its own home",
+                ));
+            }
             let policy=services.policy.policy().ok_or_else(||unavailable("an existing harness home needs a checked runtime binding; apply the provider runtime update"))?;
             let directory = crate::policy::inspect_environment_directory(&policy, Path::new(path))?;
             let path = PathBuf::from(directory.path);
@@ -1370,11 +1864,12 @@ impl Hosting {
             })
     }
 
-    fn binary_of(
+    async fn binary_of(
         &self,
         request: &AgentStart,
         profile: &AgentProfile,
         registration: &AdapterRegistration,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, CommandError> {
         let named = profile
             .attach
@@ -1397,19 +1892,99 @@ impl Hosting {
                 .map(|path| path.display().to_string())
             }));
         };
-        let listed = policy.harness(&request.harness_kind).ok_or_else(|| {
-            unavailable(format!(
-                "agent.harnesses: this machine lists no program for {}",
-                request.harness_kind
-            ))
-        })?;
-        match named {
-            Some(wanted) if wanted != listed.path => Err(unavailable(format!(
-                "agent.harnesses: the profile names {wanted}, which is not the program this machine lists for {}",
-                request.harness_kind
-            ))),
-            _ => Ok(Some(listed.path.clone())),
+        if let Some(listed) = policy.harness(&request.harness_kind) {
+            return match named {
+                Some(wanted) if wanted != listed.path => Err(unavailable_by_policy(
+                    orch_link_contract::policy::PolicyKey::AgentHarnesses,
+                    &format!(
+                        "the profile names {wanted}, which is not the program this machine lists for {}",
+                        request.harness_kind
+                    ),
+                )),
+                _ => Ok(Some(listed.path.clone())),
+            };
         }
+        if named.is_some() {
+            return Err(unavailable_by_policy(
+                orch_link_contract::policy::PolicyKey::AgentHarnesses,
+                "confirm this local program on the machine's Policy page, or remove the profile's explicit program path",
+            ));
+        }
+        if !policy.agent_programs {
+            return Err(unavailable_by_policy(
+                orch_link_contract::policy::PolicyKey::AgentPrograms,
+                "allow program management on the machine's Policy page to use a system-listed harness build",
+            ));
+        }
+        let cache = self.ctx.services.build_cache.as_ref().ok_or_else(|| unavailable(
+            "this connector cannot fetch named harness builds; update its connector or confirm an installed program in agent.harnesses"
+        ))?;
+        let build = request
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.build.as_ref())
+            .ok_or_else(|| {
+                unavailable(
+                    "no system-listed build was selected for this harness and machine platform",
+                )
+            })?;
+        if build.name != request.harness_kind
+            || build.job_id.is_some()
+            || profile
+                .harness_version
+                .as_ref()
+                .is_some_and(|pin| pin != &build.version)
+        {
+            return Err(unavailable(
+                "the selected harness build differs from this profile's required program",
+            ));
+        }
+        let directory = cache.ensure(build, &self.ctx.services, cancel).await?;
+        if cancel.is_cancelled() {
+            return Err(CommandError::new(
+                ErrorCode::Timeout,
+                "the harness start was cancelled",
+            ));
+        }
+        if !self
+            .ctx
+            .services
+            .policy
+            .policy()
+            .is_some_and(|policy| policy.agent_programs)
+        {
+            return Err(unavailable_by_policy(
+                orch_link_contract::policy::PolicyKey::AgentPrograms,
+                "program management was withdrawn on the machine's Policy page",
+            ));
+        }
+        // The cache returns the selected version's directory, not an arbitrary program path.
+        let parent = directory
+            .parent()
+            .ok_or_else(|| unavailable("the verified build has no tools directory"))?;
+        let version = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| unavailable("the verified build has no version directory"))?;
+        let program = crate::builds::find_program(
+            parent,
+            version,
+            &self.registry.programs_of(&request.harness_kind),
+        )
+        .ok_or_else(|| {
+            unavailable(
+                "the verified build contains no executable named by this harness's manifest",
+            )
+        })?;
+        lock(&self.fetched).insert(
+            request.harness_kind.clone(),
+            crate::builds::Installed {
+                kind: request.harness_kind.clone(),
+                version: build.version.clone(),
+                program: program.clone(),
+            },
+        );
+        Ok(Some(program.display().to_string()))
     }
 
     /// Starts the process an `agent.start` asks for, or finds it running as asked.
@@ -1417,7 +1992,22 @@ impl Hosting {
         self: &Arc<Self>,
         command: Option<Id>,
         request: &AgentStart,
-    ) -> Result<(String, AgentDescriptor, bool), CommandError> {
+    ) -> Result<AgentStartResult, CommandError> {
+        self.start_cancellable(
+            command,
+            request,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Command-owned acquisition and launch stop together when the command is cancelled.
+    pub async fn start_cancellable(
+        self: &Arc<Self>,
+        command: Option<Id>,
+        request: &AgentStart,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<AgentStartResult, CommandError> {
         let key = (request.provider_id, request.agent_id);
         let existing = lock(&self.processes).get(&key).cloned();
         let previous_group = lock(&self.processes)
@@ -1461,7 +2051,12 @@ impl Hosting {
                 }
                 let (version, descriptor) = process.started();
                 return match descriptor {
-                    Some(descriptor) => Ok((version, descriptor, true)),
+                    Some(descriptor) => Ok(AgentStartResult {
+                        home: Some(process.home_fact()),
+                        harness_version: version,
+                        descriptor,
+                        reused: true,
+                    }),
                     None => Err(unavailable("the harness did not say what it is")),
                 };
             }
@@ -1491,7 +2086,9 @@ impl Hosting {
                 })
                 .home = Some(source);
         }
-        let mut binary = self.binary_of(request, &profile, &registration)?;
+        let mut binary = self
+            .binary_of(request, &profile, &registration, cancel)
+            .await?;
         profile
             .env
             .extend(self.runtime_environment(command, request, true)?);
@@ -1561,6 +2158,7 @@ impl Hosting {
             }
         };
         let output_directory = adapter.output_directory();
+        let interrupt = adapter.interrupt_handle();
         let process = Arc::new(Process {
             provider_id: request.provider_id,
             agent_id: request.agent_id,
@@ -1568,6 +2166,7 @@ impl Hosting {
             ctx: Arc::clone(&self.ctx),
             request: Mutex::new(request.clone()),
             adapter: tokio::sync::Mutex::new(adapter),
+            interrupt: Mutex::new(interrupt),
             output_directory: Mutex::new(output_directory),
             adapter_start,
             resource_group,
@@ -1593,7 +2192,12 @@ impl Hosting {
         lock(&self.processes).insert(key, Arc::clone(&process));
         process.publish_status(HarnessState::Online, None).await;
         process.publish_descriptor().await;
-        Ok((started.harness_version, started.descriptor, false))
+        Ok(AgentStartResult {
+            home: Some(process.home_fact()),
+            harness_version: started.harness_version,
+            descriptor: started.descriptor,
+            reused: false,
+        })
     }
 
     /// Stops the process of a provider and an agent profile, and the sessions in it.
@@ -1661,6 +2265,30 @@ impl Hosting {
     /// What the processes and the registry add to the machine's facts.
     pub fn contribute(&self, draft: &mut FactsDraft) {
         draft.adapters.extend(self.registry.facts());
+        if self.ctx.services.build_cache.is_some() {
+            draft.build_fetch = Some(orch_driver_contract::descriptor::OperationSupport {
+                supported: true,
+                reason: None,
+            });
+        }
+        draft.harnesses.extend(
+            lock(&self.fetched)
+                .values()
+                .filter(|program| {
+                    !self.ctx.services.installed.iter().any(|installed| {
+                        installed.kind == program.kind
+                            && installed.version == program.version
+                            && installed.program == program.program
+                    })
+                })
+                .map(|program| orch_link_contract::session::MachineFactsHarness {
+                    kind: program.kind.clone(),
+                    path: program.program.display().to_string(),
+                    version: program.version.clone(),
+                    sha256: None,
+                    daemon: false,
+                }),
+        );
         if let Some(policy) = self.ctx.services.policy.policy() {
             draft
                 .harnesses
@@ -1669,6 +2297,7 @@ impl Hosting {
                         kind: harness.kind.clone(),
                         path: harness.path.clone(),
                         version: "unknown".to_owned(),
+                        sha256: None,
                         daemon: false,
                     }
                 }));
@@ -1681,12 +2310,67 @@ impl Hosting {
         self.ctx.ledger.hosted()
     }
 
-    /// Reports that a clamp of the machine's ceilings lowered what a session was asked to be, as a
-    /// diagnostic of the session's stream.
-    pub async fn report_clamps(&self, thread: ThreadId, segment: Id, clamps: &[Clamp]) {
+    /// Keeps the applied sandbox with its native command before returning its successful result.
+    pub async fn report_sandbox(
+        &self,
+        session: (ThreadId, Id),
+        turn: Option<Id>,
+        command: Id,
+        applied: SandboxMode,
+        native_opening_id: Option<Id>,
+        clamps: &[Clamp],
+    ) -> Result<(), CommandError> {
+        // Managed runtimes bypass this gate; their template's selection is not a machine-policy fact.
+        if self.ctx.services.policy.policy().is_none() {
+            return Ok(());
+        }
+        let (thread, segment) = session;
+        let mode = |value: &str| {
+            serde_json::from_value(Json::String(value.to_owned())).map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox could not be recorded.",
+                )
+            })
+        };
+        let requested = clamps
+            .iter()
+            .find(|clamp| clamp.key == "agent.max_sandbox")
+            .map_or(applied.as_str(), |clamp| clamp.asked.as_str());
+        let resolution = orch_api_contract::threads::SandboxResolution {
+            requested: mode(requested)?,
+            applied: mode(applied.as_str())?,
+            governing_policy: orch_api_contract::environment::SandboxLimitSource::MachinePolicy,
+            command_id: command,
+            at: self.ctx.services.clock.time(),
+        };
+        self.ctx
+            .services
+            .publisher
+            .publish_from(
+                native_opening_id,
+                Stream::Session {
+                    thread_id: thread,
+                    segment_id: segment,
+                },
+                Event::SessionSandbox(SessionSandbox {
+                    turn_id: turn,
+                    resolution,
+                }),
+            )
+            .await
+            .map_err(|_| {
+                CommandError::new(
+                    ErrorCode::Internal,
+                    "The applied sandbox is waiting for durable publication.",
+                )
+                .retryable()
+            })?;
         for clamp in clamps {
             tracing::warn!(key = clamp.key, asked = %clamp.asked, used = %clamp.used, "a request was lowered to the machine's ceiling");
             let frame = Event::RawFrame(RawFrame {
+                text: Vec::new(),
+                text_complete: true,
                 n: 0,
                 direction: "connector".to_owned(),
                 payload: serde_json::json!({
@@ -1697,7 +2381,8 @@ impl Hosting {
                 .ctx
                 .services
                 .publisher
-                .publish(
+                .publish_from(
+                    native_opening_id,
                     Stream::Session {
                         thread_id: thread,
                         segment_id: segment,
@@ -1709,17 +2394,19 @@ impl Hosting {
                 tracing::warn!(%error, "a diagnostic could not be put in the spool");
             }
         }
+        Ok(())
     }
 
     /// The segment a thread's session serves, if it is open here.
     #[must_use]
     pub fn segment_of(&self, thread: ThreadId) -> Option<Id> {
-        let key = lock(&self.ctx.threads).get(&thread).copied()?;
+        let (key, opening) = lock(&self.ctx.threads).get(&thread).copied()?;
         let process = lock(&self.processes).get(&key).cloned()?;
         let state = process.state();
         state
             .sessions
             .get(&thread)
+            .filter(|session| session.opening_id == opening)
             .map(|session| session.segment_id)
     }
 
@@ -1727,18 +2414,20 @@ impl Hosting {
     pub fn bind(
         &self,
         process: &Process,
-        thread: ThreadId,
-        segment: Id,
+        target: &orch_link_contract::native_target::SessionTarget,
         tickets: Tickets,
-    ) -> Arc<SessionBinding> {
-        self.ctx.services.loopback.bind(
-            process.grant.id,
-            thread,
-            segment,
-            process.provider_id,
-            process.agent_id,
-            tickets,
-        )
+    ) -> Result<Arc<SessionBinding>, CommandError> {
+        self.ctx
+            .services
+            .loopback
+            .bind_native(
+                process.grant.id,
+                process.provider_id,
+                process.agent_id,
+                target,
+                tickets,
+            )
+            .ok_or_else(|| unavailable("the native binding has no physical target"))
     }
 
     /// Registers a process that was started again by [`crate::reconciliation`], with the record it had.
@@ -1814,6 +2503,37 @@ impl Hosting {
 }
 
 impl Process {
+    /// The actual running process's home and the choice that produced it.
+    #[must_use]
+    pub fn home_fact(&self) -> orch_driver_contract::runtime::HarnessHome {
+        use orch_driver_contract::runtime::{HarnessHome, HarnessHomeSource};
+        let request = lock(&self.request);
+        let source = if request
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.home.as_ref())
+            .is_some()
+        {
+            HarnessHomeSource::Runtime
+        } else if request
+            .profile
+            .attach
+            .as_ref()
+            .and_then(|attach| attach.home.as_ref())
+            .is_some()
+        {
+            HarnessHomeSource::Profile
+        } else if self.adapter_start.home.is_some() {
+            HarnessHomeSource::Managed
+        } else {
+            HarnessHomeSource::Native
+        };
+        HarnessHome {
+            path: self.adapter_start.home.clone(),
+            source,
+        }
+    }
+
     /// Whether the resolved home is a private home made by the connector, rather than a person's home.
     #[must_use]
     pub const fn home_owned(&self) -> bool {
@@ -1840,30 +2560,48 @@ impl Process {
         ))
     }
 
-    /// Lists the sessions the adapter holds, by their native references.
-    pub async fn native_refs(&self) -> Option<Vec<String>> {
-        let capable = self
-            .state()
-            .descriptor
-            .as_ref()
-            .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
-        if !capable {
-            return None;
-        }
-        self.call(|adapter| Box::pin(async move { adapter.discover_sessions().await }))
-            .await
-            .ok()
-            .map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| session.native_session_ref)
-                    .collect()
+    /// Inspects only the exact admitted native turn; no model input, resume or interruption is submitted.
+    pub async fn recover_recorded_turn(
+        &self,
+        session: &HostedSession,
+    ) -> Result<bool, CommandError> {
+        let Some(turn) = session.running_turn else {
+            let native = session.native_session_ref.clone();
+            self.call(move |adapter| {
+                Box::pin(async move { adapter.read_session(&native, false).await })
             })
+            .await?;
+            return Ok(true);
+        };
+        let source = orch_agent_contract::history::NativePrefixSource {
+            thread_id: session.thread_id,
+            segment_id: session.segment_id,
+            native_session_ref: session.native_session_ref.clone(),
+        };
+        let source = orch_agent_contract::history::RecoverySource {
+            session: source,
+            opening_id: session.opening_id,
+        };
+        let native = session.native_turn_ref.clone();
+        let directory = session.directory.clone();
+        let cwd = session.cwd.clone();
+        let capture = session.output_capture_bytes;
+        self.call(move |adapter| {
+            Box::pin(async move {
+                adapter
+                    .recover_turn(source, turn, native, directory, cwd, capture)
+                    .await
+            })
+        })
+        .await
     }
 
     /// Reports a session of this process as lost, to the stream of its session.
-    pub async fn report_lost(&self, thread: ThreadId, segment: Id, reason: &str) {
+    pub async fn report_lost(&self, thread: ThreadId, segment: Id, opening_id: Id, reason: &str) {
         let event = SessionEvent::SessionLost(orch_agent_contract::events::SessionLost {
+            expected: false,
+            opening_id,
+            uncertain: false,
             reason: reason.to_owned(),
         });
         if let Ok(body) = serde_json::to_value(&event)
@@ -1872,7 +2610,8 @@ impl Process {
                 body.get("body").cloned().unwrap_or(Json::Null),
             )
         {
-            self.publish(
+            self.publish_from(
+                Some(opening_id),
                 Stream::Session {
                     thread_id: thread,
                     segment_id: segment,
@@ -1890,6 +2629,30 @@ impl Process {
 }
 
 impl Hosting {
+    /// Session changes wake native discovery without waiting for its periodic file check.
+    #[must_use]
+    pub fn mcp_changes(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.ctx.mcp_changed)
+    }
+
+    /// Only directories of local sessions actually attached to this environment are inspected here.
+    #[must_use]
+    pub fn mcp_directories(&self, environment: Id, root: &str) -> Vec<String> {
+        lock(&self.processes)
+            .values()
+            .flat_map(|process| {
+                process
+                    .state()
+                    .sessions
+                    .values()
+                    .flat_map(|session| session.configuration_directories(environment, root))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// The harness processes that are online and whose adapters can say which tool servers their harness
     /// has configured, in the order of their identifiers.
     #[must_use]
@@ -1914,9 +2677,34 @@ impl Hosting {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::death_of;
+
+    #[test]
+    fn environment_connections_keep_distinct_native_homes_on_the_environment_home_volume() {
+        let provider = orch_types::new_id();
+        let agent = orch_types::new_id();
+        let root = Path::new("/persistent/environment-home");
+        let home = environment_connection_home(root, provider, agent);
+        assert!(home.starts_with(root));
+        assert_eq!(home, environment_connection_home(root, provider, agent));
+        assert_ne!(
+            home,
+            environment_connection_home(root, orch_types::new_id(), agent)
+        );
+        assert_ne!(
+            home,
+            environment_connection_home(root, provider, orch_types::new_id())
+        );
+        assert!(!home.starts_with("/connector-state"));
+    }
 
     fn idle_lane() -> OpenSession {
         OpenSession {
+            opening_id: orch_types::new_id(),
+            opening_epoch: 1,
+            native_environment: None,
+            directory: String::new(),
+            cwd: String::new(),
             segment_id: orch_types::new_id(),
             native_session_ref: "synthetic-native-source".into(),
             continuation_fenced: true,
@@ -1925,6 +2713,40 @@ mod tests {
             background: std::collections::HashSet::new(),
             awaiting_native: false,
         }
+    }
+
+    #[test]
+    fn a_local_session_discovers_its_directory_chain_only_in_its_actual_environment() {
+        let environment = orch_types::new_id();
+        let mut lane = idle_lane();
+        assert!(
+            lane.configuration_directories(environment, "/workspace")
+                .is_empty()
+        );
+        lane.native_environment = Some(environment);
+        lane.directory = "/workspace/project".into();
+        lane.cwd = "/workspace/project/api/src".into();
+        assert_eq!(
+            lane.configuration_directories(environment, "/workspace")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [
+                "/workspace",
+                "/workspace/project",
+                "/workspace/project/api",
+                "/workspace/project/api/src"
+            ]
+        );
+        assert!(
+            lane.configuration_directories(orch_types::new_id(), "/workspace")
+                .is_empty()
+        );
+        lane.native_environment = None;
+        assert!(
+            lane.configuration_directories(environment, "/workspace")
+                .is_empty(),
+            "a remote executor's directory is never inspected on the program's machine"
+        );
     }
 
     #[test]
@@ -2006,6 +2828,7 @@ mod tests {
 
     fn status(state: HarnessState, detail: Option<&str>) -> HarnessStatus {
         HarnessStatus {
+            home: None,
             status: state,
             detail: detail.map(str::to_owned),
             harness_version: None,

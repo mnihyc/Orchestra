@@ -1,0 +1,7 @@
+clippy
+test -p orch-api-core --features test-support --lib
+test -p orch-api-core --features test-support --test kguard_engine --test kmounts_files --test kmounts_mcp
+test -p orch-api-core --features test-support --test providers --test hosts --test machines --test provider_managed --test ports_core
+test -p orch-api-core --features test-support --test kvnc_core
+test -p orch-api-core --features test-support --test admin_system --test admin_token_inventory --test kadmin_tokens --test koidc --test directory --test notifications_routes
+test -p orch-worker-core --test channel_setup
