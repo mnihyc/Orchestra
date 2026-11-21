@@ -52,6 +52,101 @@ fn unreachable() -> DeliverError {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_queued_grouped_operation_does_not_disclose_a_withdrawn_source() {
+    use orch_db::queries::access::{PageKey, remove_entry, testing::add_entry};
+    use orch_db::queries::notifications::{
+        operations,
+        people::{self, NewNotification},
+        routes,
+    };
+    let notifier = Scripted::new("email", Reaches::Email);
+    let world = World::new(only(&notifier)).await;
+    let person = world.person("former-reader").await;
+    let org = world.org("Private org").await;
+    let thread = world.node("thread", org, "Private thread").await;
+    let channel = world.channel(Of::System, "email", json!({}), &[]).await;
+    let route = world.route_on(person, &channel).await;
+    let operation = new_id();
+    let mut conn = world.test.pool.acquire().await.unwrap();
+    sqlx::query("INSERT INTO org_members(org_id,user_id,domain_id) VALUES($1,$2,$1)")
+        .bind(org)
+        .bind(person)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let grant = add_entry(
+        &mut conn,
+        &PageKey::new("node", thread, "live"),
+        "any",
+        "thread.view",
+        ("user", Some(person), None),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    operations::save(&mut conn, operation, &json!({
+        "id": operation, "kind": "recover", "name": "Private thread", "notify": true,
+        "path": format!("/thread/{thread}"), "subject": ["thread", thread],
+        "recipients": [{"user": person, "environments": [], "providers": [], "resources": [], "defaults": [], "threads": [thread]}]
+    }), world.now()).await.unwrap();
+    let data = json!({"operation_id": operation, "operation_version": 1, "operation_roots": [org], "operation_kind": "recover", "name": "Private thread", "state": "done", "environment_ids": [], "thread_count": 1, "default_topics": [], "provider_ids": [], "resource_ids": [], "path": format!("/thread/{thread}"), "loss": false, "default_lost": false, "at": world.now()});
+    let announced = operations::publish(
+        &mut conn,
+        operation,
+        &NewNotification {
+            user_id: person,
+            kind: "environment.attention",
+            node_id: None,
+            thread_id: None,
+            approval_id: None,
+            chat_id: None,
+            title: "Private thread: recover",
+            body: "done",
+            data: &data,
+            dedupe_key: "operation:private-thread",
+            at: world.now(),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let snapshot = routes::unread_rows_of(&mut conn, person, &[announced.id])
+        .await
+        .unwrap()
+        .remove(0)
+        .snapshot();
+    let source = orch_person_notices::load(&mut conn, &world.clock, person, &snapshot)
+        .await
+        .unwrap();
+    assert!(
+        matches!(source, orch_person_notices::Loaded::Source(_)),
+        "the current reader is admitted before withdrawal"
+    );
+    drop(conn);
+    world.queue_for_route(&route, "email", &[snapshot]).await;
+    assert!(
+        remove_entry(
+            &mut world.test.pool.acquire().await.unwrap(),
+            grant,
+            world.admin,
+            world.now()
+        )
+        .await
+        .unwrap()
+    );
+    // Their account and route remain active; the accepted thread is no longer readable.
+    assert!(
+        people::recipient(&mut world.test.pool.acquire().await.unwrap(), person)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    world.outbox().run().await.unwrap();
+    assert_eq!(notifier.deliveries(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_delivery_that_fails_is_retried_on_the_schedule_and_given_up_at_the_end() {
     let notifier = Scripted::new("email", Reaches::Email);
     notifier.answer(std::iter::repeat_with(|| Err(unreachable())).take(6));

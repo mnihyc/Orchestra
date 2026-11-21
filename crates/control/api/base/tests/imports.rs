@@ -747,7 +747,7 @@ async fn import_limits_follow_exports_until_overridden_and_each_null_restores_th
         .await
         .unwrap();
     let mut conn = world.conn().await;
-    blobs.register(&mut conn, meta, world.now()).await.unwrap();
+    blobs.register(&mut conn, &meta, world.now()).await.unwrap();
     orch_db::queries::uploads::remember(&mut conn, by.id(), &meta.hash, world.now())
         .await
         .unwrap();
@@ -830,7 +830,7 @@ async fn all_five_import_routes_serve_through_the_debug_registry_with_reviewed_a
         .await
         .unwrap();
     let mut conn = world.conn().await;
-    blobs.register(&mut conn, meta, world.now()).await.unwrap();
+    blobs.register(&mut conn, &meta, world.now()).await.unwrap();
     orch_db::queries::uploads::remember(&mut conn, by.id(), &meta.hash, world.now())
         .await
         .unwrap();
