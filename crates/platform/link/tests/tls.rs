@@ -492,7 +492,7 @@ fn auth_for(world: &World, nonce: &str, host: &str) -> Auth {
         endpoints: None,
         hosted_endpoints: None,
         machine_id: world.machine_id,
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
         connector_version: "0.1.0".to_owned(),
         platform: Platform {
             os: Os::Linux,

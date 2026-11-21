@@ -12,13 +12,14 @@ import { i18n, setLocale } from '@/i18n';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailMachine } from './resource-detail-fixtures';
+import { GRACE } from '../doubles/chat-rows';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<MachinePrograms>>(), write: vi.fn<(id: string, body: MachineProgramsCommand) => Promise<MachinePrograms>>() }));
 vi.mock('@/api/machinePrograms', () => ({ machineProgramsKey: (id: string) => ['machine-programs', id], machineProgramsQuery: (id: string) => ({ queryKey: ['machine-programs', id], queryFn: calls.read }), changeMachinePrograms: calls.write }));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude Code' : 'Other agent' }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude Code' : 'Other agent' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/machines/Enrollment', () => ({ AddMachineDialog: () => null }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/machine?tab=policy">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/machine?tab=policy">{children}</a> }));
 
 const program = { kind: 'codex', path: '/opt/agent bins/codex', version: '0.164.0', daemon: true };
 const command = '"/opt/Orch Connector" --data "/var/instance" policy';
@@ -29,7 +30,7 @@ function machine(facts: Record<string, unknown>): Machine {
 }
 const policy = { 'agent.harnesses': [], 'policy.delegated': ['agent.harnesses'] };
 const confirmedPolicy = { ...policy, 'agent.harnesses': [{ kind: program.kind, path: program.path }] };
-function snapshot(canManage = true, view?: Machine): MachinePrograms { return { entries: [], capabilities: [], config_file: '/var/instance/config.toml', can_manage: canManage, ...(view === undefined ? {} : { machine_view: view }) }; }
+function snapshot(canManage = true, view?: Machine): MachinePrograms { return { approvals: [], entries: [], capabilities: [], config_file: '/var/instance/config.toml', can_manage: canManage, ...(view === undefined ? {} : { machine_view: view }) }; }
 function draw(initial: Machine) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   function Host() { const row = useQuery({ queryKey: machineKey(initial.id), initialData: initial, enabled: false }); return <MachineProgramsTab machine={row.data} />; }
@@ -83,6 +84,54 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(calls.write).not.toHaveBeenCalled();
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the current program approver and recorded time to a viewer (${locale})`, async () => {
+    await setLocale(locale);
+    const acknowledgement = { ...snapshot(false), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.read.mockResolvedValue(acknowledgement);
+    const view = draw(machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+    const person = await screen.findByRole('button', { name: GRACE.display_name });
+    expect(person).toBeVisible();
+    expect(person.closest('label')).toBeNull();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(screen.queryByRole('button', { name: locale === 'en' ? 'Remove' : '移除' })).not.toBeInTheDocument();
+    expect(calls.write).not.toHaveBeenCalled();
+  });
+
+  it(`shows only the acknowledged approver after Use and sends no invented author (${locale})`, async () => {
+    await setLocale(locale);
+    const initial = machine({ harnesses: [], discovered_harnesses: [program], searched_harness_kinds: ['codex'], policy });
+    const updated = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
+    const acknowledgement = { ...snapshot(true, updated), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.write.mockResolvedValue(acknowledgement);
+    const user = userEvent.setup(), view = draw(initial);
+    await user.click(await screen.findByRole('button', { name: locale === 'en' ? 'Use' : '使用' }));
+    expect(await screen.findByRole('button', { name: GRACE.display_name })).toBeVisible();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(calls.write).toHaveBeenCalledExactlyOnceWith('machine', { action: 'confirm_harness', kind: program.kind, path: program.path });
+    expect(calls.read).toHaveBeenCalledTimes(1);
+  });
+}
+
+it('does not attribute a replacement path or a discovered program to an old confirmation', async () => {
+  const acknowledgement = { ...snapshot(), approvals: [{
+    subject: { kind: 'program' as const, harness_kind: program.kind, path: '/old/codex' },
+    by: GRACE, at: '2026-10-31T00:00:00Z',
+  }] };
+  calls.read.mockResolvedValue(acknowledgement);
+  const view = draw(machine({ harnesses: [program], discovered_harnesses: [{ ...program, path: '/old/codex' }], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+  await screen.findByText('Confirmed', { exact: true });
+  expect(screen.queryByRole('button', { name: GRACE.display_name })).not.toBeInTheDocument();
+  expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeNull();
+  expect(calls.write).not.toHaveBeenCalled();
+});
 
 it('keeps a different canonical path distinct when the acknowledged discovery replaces a removed tuple', async () => {
   const initial = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
@@ -144,8 +193,21 @@ it('shows the actual local policy command after a current native refusal', async
 it('does not call an unreported policy a local refusal', async () => {
   draw(machine({}));
   await screen.findByText('This machine has not reported agent program discovery.');
-  expect(screen.getByText('This machine has not reported its current harness policy and command.')).toBeVisible();
+  expect(screen.getByText('This machine has not reported its current agent program policy and command.')).toBeVisible();
   expect(screen.queryByText('Agent programs are kept in this machine’s local policy.')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument();
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+
+it('lets a viewer find one native program in a long machine list without issuing a command', async () => {
+  const programs = Array.from({ length: 12 }, (_, index) => ({ ...program, kind: `program-${index}`, path: `/opt/agents/program-${index}` }));
+  calls.read.mockResolvedValue(snapshot(false));
+  draw(machine({ harnesses: programs, discovered_harnesses: [], searched_harness_kinds: programs.map((entry) => entry.kind),
+    policy: { ...policy, 'agent.harnesses': programs.map(({ kind, path }) => ({ kind, path })) } }));
+  const user = userEvent.setup();
+  await user.type(await screen.findByRole('textbox', { name: i18n.t('programList.search') }), 'program-11');
+  expect(screen.getByText('…/agents/program-11')).toBeVisible();
+  expect(screen.queryByText('…/agents/program-0')).not.toBeInTheDocument();
   expect(calls.write).not.toHaveBeenCalled();
 });

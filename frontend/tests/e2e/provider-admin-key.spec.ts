@@ -42,14 +42,16 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
   const savedReply=arrived(page.waitForResponse((reply)=>reply.request().method()==='PUT'&&new URL(reply.url()).pathname===path+'/sources'));
   await page.getByRole('button',{name:words.providerSources.save,exact:true}).click();
   expect(await (await savedReply).text()).not.toContain('fixture-admin-only');
-  await expect(field).toHaveValue('');expect(writes[0]?.facts?.secrets).toEqual({admin_key:'fixture-admin-only'});
+  // The key is saved now: it shows as dots that are set, never as the empty box it was typed in.
+  await expect(field).toHaveValue('\u2022'.repeat(12));await expect(group.getByText(words.settingsEditors.secret.set,{exact:true})).toBeVisible();
+  expect(writes[0]?.facts?.secrets).toEqual({admin_key:'fixture-admin-only'});
   for(const width of [1440,400]){
     await page.setViewportSize({width,height:900});await expect(field).toBeVisible();
     const box=await field.boundingBox();expect(box).not.toBeNull();if(box!==null){expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width);}
     await info.attach(`source-admin-${locale}-${theme}-${width}`,{body:await page.screenshot({fullPage:true}),contentType:'image/png'});
   }
-  await group.getByRole('button',{name:words.providerSources.removeSavedKey,exact:true}).click();
-  await expect(group.getByText(words.providerSources.keyWillBeRemoved,{exact:true})).toBeVisible();
+  await group.getByRole('button',{name:words.settingsEditors.secret.remove,exact:true}).click();
+  await expect(group.getByText(words.settingsEditors.secret.removed,{exact:true})).toBeVisible();
   const removedReply=page.waitForResponse((reply)=>reply.request().method()==='PUT'&&new URL(reply.url()).pathname===path+'/sources');
   await page.getByRole('button',{name:words.providerSources.save,exact:true}).click();await removedReply;
   expect(writes[1]?.facts?.secrets).toEqual({admin_key:null});

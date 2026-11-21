@@ -8,7 +8,7 @@
 //!
 //! The node therefore **changes nothing here**: it looks and tells. What it tells is only what is new since
 //! it last told (a full account at start, then differences), and a runtime a command is being carried out
-//! for is left alone, because the command tells the system what became of it when it ends.
+//! for is left alone, except that a terminal observation can finish an in-flight stop.
 //!
 //! A unit the node has no record of, which carries the system's label, is told with the note that this node
 //! does not know it; the unit stays, and so does everything it stands on. The system's label has no one value
@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use orch_driver_contract::units::{UnitRef, UnitState, UnitStateKind};
 use orch_link_contract::commands::NodeProbeUnit;
+use orch_link_contract::native_target::RuntimeSource;
 use orch_types::Id;
 
 use crate::drivers::DriverHost;
@@ -78,6 +79,8 @@ pub async fn locate(
 /// A runtime as one pass of the reconciliation found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
+    /// The original native producer captured before asynchronous inspection.
+    pub source: RuntimeSource,
     /// The runtime.
     pub runtime_id: Id,
     /// The driver that holds its unit.
@@ -165,6 +168,19 @@ impl Reconciler {
             let Some(driver) = self.drivers.get(&found.driver) else {
                 continue;
             };
+            let original = self.ledger.get(found.unit.runtime_id);
+            if original
+                .as_ref()
+                .is_some_and(|record| record.unit != found.unit)
+            {
+                continue;
+            }
+            let source = RuntimeSource {
+                incarnation: original.as_ref().and_then(|record| record.incarnation.id()),
+            };
+            let original_identity = original
+                .as_ref()
+                .map(|record| (record.unit.clone(), record.incarnation));
             let state = match driver.contract().inspect(&found.unit).await {
                 Ok(state) => state,
                 Err(error) => {
@@ -172,9 +188,18 @@ impl Reconciler {
                     continue;
                 }
             };
+            if self
+                .ledger
+                .get(found.unit.runtime_id)
+                .map(|record| (record.unit, record.incarnation))
+                != original_identity
+            {
+                continue;
+            }
             observed.push(Observed {
+                source,
                 runtime_id: found.unit.runtime_id,
-                known: self.ledger.get(found.unit.runtime_id).is_some(),
+                known: original.is_some(),
                 driver: found.driver,
                 state,
             });
@@ -188,6 +213,9 @@ impl Reconciler {
                 continue;
             }
             observed.push(Observed {
+                source: RuntimeSource {
+                    incarnation: record.incarnation.id(),
+                },
                 runtime_id: record.runtime_id,
                 driver: record.driver,
                 state: UnitState::of(UnitStateKind::Absent),
@@ -206,10 +234,12 @@ impl Reconciler {
     pub async fn pass(&self) -> usize {
         let mark = self.reports.mark();
         let observed = self.observe().await;
-        let busy = self.busy.ids();
         let mut told = 0;
         for runtime in observed {
-            if busy.contains(&runtime.runtime_id) {
+            if self.busy.blocks_observation(
+                runtime.runtime_id,
+                runtime.state.state != UnitStateKind::Running,
+            ) {
                 continue;
             }
             let (state, mut detail) = runtime.told();
@@ -221,7 +251,7 @@ impl Reconciler {
             }
             if self
                 .reports
-                .runtime_if_changed_since(mark, runtime.runtime_id, state, detail)
+                .runtime_if_changed_since(mark, runtime.runtime_id, runtime.source, state, detail)
                 .await
             {
                 told += 1;
@@ -250,6 +280,7 @@ mod tests {
     #[test]
     fn a_unit_the_node_has_no_record_of_is_told_with_the_note_and_its_own_words() {
         let unit = Observed {
+            source: RuntimeSource::untracked(),
             runtime_id: orch_types::new_id(),
             driver: "memory".into(),
             state: UnitState {

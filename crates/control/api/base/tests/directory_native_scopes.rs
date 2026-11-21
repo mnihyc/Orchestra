@@ -22,7 +22,7 @@ use orch_api_contract::directory::{
     OrgServiceAccountCreate, OrgServiceAccountCreateBody, OrgServiceAccountList, TagDelete,
     TagUpdate,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
@@ -53,7 +53,7 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -483,11 +483,12 @@ async fn legacy_directory_writers_keep_the_native_full_reply_under_current_permi
         vec!["org.manage".to_owned(), "members.manage".to_owned()],
     ] {
         let s = Scene::new().await;
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let secret = new_api_token(issued_key_id);
         identity::create_api_token(
             &mut *s.world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: s.boss.id(),
                 name: "Legacy directory scope fixture",
                 token_hash: &token_hash(&secret),

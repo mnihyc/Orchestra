@@ -114,6 +114,7 @@ pub async fn may_make(
         ResourceKind::McpServer => Permission::McpManage,
         ResourceKind::Mount => Permission::MountManage,
         ResourceKind::Skill => Permission::SkillManage,
+        ResourceKind::Pool => Permission::PoolManage,
         ResourceKind::Environment => return Ok(Making::Refused(Why::NotMadeThisWay)),
     };
     let Some(home) = home else {
@@ -136,8 +137,10 @@ pub async fn may_make(
     let node = graph.get(home).ok_or(Error::NotFound(home))?.clone();
     let site = graph.site_of(home).ok_or(Error::NotFound(home))?;
     // Providers and skills can belong to the project whose work they serve.
-    let project_home = matches!(kind, ResourceKind::Skill | ResourceKind::Provider)
-        && node.kind == NodeKind::Project;
+    let project_home = matches!(
+        kind,
+        ResourceKind::Skill | ResourceKind::Provider | ResourceKind::Pool
+    ) && node.kind == NodeKind::Project;
     if node.kind != NodeKind::Org && !project_home {
         return Ok(Making::Refused(Why::HomeIsNoOrg));
     }
@@ -310,6 +313,7 @@ pub(crate) async fn first_for_new_page(
                 ResourceKind::McpServer => Permission::McpManage,
                 ResourceKind::Mount => Permission::MountManage,
                 ResourceKind::Skill => Permission::SkillManage,
+                ResourceKind::Pool => Permission::PoolManage,
             };
             (row.home_id, manage)
         }
