@@ -10,7 +10,7 @@ use crate::places::{Who, admin, make_org, person};
 use crate::support::World;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::routes::Endpoint;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::testing as user_rows;
 use orch_db::secrets::MasterKey;
 use orch_types::{Id, Json};
@@ -45,11 +45,16 @@ pub async fn cast(world: &World) -> Cast {
 
 /// An API token of `who`, which never expires.
 pub async fn api_token(world: &World, who: &Who) -> String {
-    let token = new_token(API_TOKEN_PREFIX);
+    let token = new_api_token(orch_types::new_id());
     let mut conn = world.conn().await;
-    user_rows::insert_api_token(&mut conn, who.id(), &token_hash(&token))
-        .await
-        .unwrap();
+    user_rows::insert_api_token(
+        &mut conn,
+        orch_api_contract::api_keys::key_id(&token).unwrap(),
+        who.id(),
+        &token_hash(&token),
+    )
+    .await
+    .unwrap();
     token
 }
 

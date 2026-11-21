@@ -12,9 +12,7 @@ use crate::rig::Scene;
 
 use crate::support::World;
 
-use orch_api_core::middleware::authentication::API_TOKEN_PREFIX;
-
-use orch_api_core::middleware::authentication::new_token;
+use orch_api_core::middleware::authentication::new_api_token;
 
 use orch_api_core::middleware::authentication::token_hash;
 
@@ -40,7 +38,7 @@ pub struct Legacy {
 
 pub async fn legacy(world: &World, user: Id) -> Proof<Legacy> {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

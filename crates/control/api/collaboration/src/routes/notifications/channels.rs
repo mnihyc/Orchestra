@@ -411,6 +411,7 @@ pub(super) struct PreparedChannel {
     route: Option<route_rows::RouteRow>,
     needs: Option<orch_notifier_contract::descriptor::Needs>,
     waiting_count: i64,
+    pending_delivery: Option<orch_api_contract::notifications::PendingDelivery>,
     link: Option<orch_api_contract::notifications::NotificationRouteLink>,
 }
 
@@ -430,14 +431,18 @@ impl PreparedViews {
                     can_edit: ready.can_edit,
                     secrets_set: ready.secrets_set.clone(),
                     enabled_route_count: ready.enabled_route_count,
-                    route: views::route_view(views::RouteFacts {
-                        channel_id: Some(ready.row.id),
-                        channel: Some(ready.route_channel.clone()),
-                        route: ready.route.as_ref(),
-                        needs: ready.needs,
-                        waiting_count: ready.waiting_count,
-                        link: ready.link.clone(),
-                    }),
+                    route: {
+                        let mut shown = views::route_view(views::RouteFacts {
+                            channel_id: Some(ready.row.id),
+                            channel: Some(ready.route_channel.clone()),
+                            route: ready.route.as_ref(),
+                            needs: ready.needs,
+                            waiting_count: ready.waiting_count,
+                            link: ready.link.clone(),
+                        });
+                        shown.pending_delivery = ready.pending_delivery.clone();
+                        shown
+                    },
                 })
             })
             .collect()
@@ -572,6 +577,19 @@ pub(super) async fn prepare_views(
             Some(route) => own_link(conn, route, ctx_now(principal)).await?,
             None => None,
         };
+        let pending_delivery = match &route {
+            Some(route) => {
+                super::views::pending_delivery(
+                    conn,
+                    principal.user(),
+                    route.id,
+                    ctx_now(principal),
+                    !route.enabled || !row.enabled || needs.is_some(),
+                )
+                .await?
+            }
+            None => None,
+        };
         shown.push(PreparedChannel {
             owner: views::owner_view(row, &orgs),
             can_edit,
@@ -582,6 +600,7 @@ pub(super) async fn prepare_views(
             route,
             needs,
             waiting_count,
+            pending_delivery,
             link,
         });
     }
