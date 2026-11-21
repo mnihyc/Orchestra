@@ -64,6 +64,7 @@ pub(super) fn href(
         "host" => format!("/resources/hosts/{id}"),
         "mount" => format!("/resources/mounts/{id}"),
         "template" => format!("/resources/templates/{id}"),
+        "pool" => format!("/resources/pools/{id}"),
         "skill" => format!("/resources/skills/{id}"),
         _ => return None,
     })

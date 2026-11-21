@@ -15,10 +15,11 @@ use orch_agent_contract::session::{SessionSpec, TurnStart};
 use orch_link_contract::commands::{Command, CommandKind, OrchToolResult};
 use orch_types::{Id, Json};
 use serde_json::json;
+pub(crate) use source::active as active_tool_turn;
 
 /// Calls with the tool's complete arguments, including its optional note and first address.
 pub async fn call(floor: &Floor, thread: Id, arguments: Json) -> OrchToolResult {
-    let turn = source::active(&floor.scene, thread)
+    let turn = active_tool_turn(&floor.scene, thread)
         .await
         .expect("an actual admitted tool source");
     call_on(floor, thread, turn, arguments).await
@@ -80,10 +81,17 @@ pub struct Agent {
 impl Agent {
     /// Opens the fake session beside a thread in the fixture's environment.
     pub async fn start(floor: &Floor, thread: Id) -> Self {
-        let _turn = source::active(&floor.scene, thread)
+        let turn = active_tool_turn(&floor.scene, thread)
             .await
             .expect("an actual admitted tool source");
-        let segment = floor.scene.rig.segment_of(thread).await;
+        let (segment, opening): (Id, Id) = sqlx::query_as(
+            "SELECT segment_id, native_opening_id FROM turns WHERE id=$1 AND thread_id=$2",
+        )
+        .bind(turn)
+        .bind(thread)
+        .fetch_one(floor.scene.rig.db.pool())
+        .await
+        .unwrap();
         let home = tempfile::tempdir().unwrap();
         let mut adapter = FakeAdapter::new(floor.app.clock.clone());
         let (sink, events) = EventSink::channel();
@@ -94,10 +102,10 @@ impl Agent {
         })).unwrap();
         adapter.start(start, sink).await.unwrap();
         let spec: SessionSpec = serde_json::from_value(json!({
-            "agent_id":floor.scene.on.agent,"thread_id":thread,"segment_id":segment,
-                "mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"directory":home.path().display().to_string(),"cwd":home.path().display().to_string(),
-                "mounts":[],"model":"fake-large","effort":null,"params":{},"approval_mode":"on_request","sandbox_mode":"workspace","instructions":"Browser test.",
-                "memory":null,"arrangement":"together","orch_tools":[],"raw_events":false,
+            "agent_id":floor.scene.on.agent,"thread_id":thread,"segment_id":segment,"opening_id":opening,
+                "mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":home.path().display().to_string(),"instruction_root_marker":false,"directory":home.path().display().to_string(),"cwd":home.path().display().to_string(),
+                "mounts":[],"model":"fake-large","effort":null,"params":{},"approval_mode":"on_request","web_action_wait_secs":120,"sandbox_mode":"workspace","instructions":"Browser test.",
+                "memory":null,"arrangement":"together","orch_tools":[],"output_capture_bytes":67108864, "raw_events":false,
             "session_key":"s".repeat(32),"archive":null,"history":null,"provider":{"path":"native","provider_id":floor.scene.on.provider},
             "exec":{"executor":null,"tool_set":null,"environment_id":floor.environment,"generation":1},"mcp":[]
         })).unwrap();
@@ -112,7 +120,7 @@ impl Agent {
 
     /// Runs a directive, returns its tool reply and verifies the fake also says it.
     pub async fn run(&mut self, floor: &Floor, line: &str) -> OrchToolResult {
-        let admitted = source::active(&floor.scene, self.thread)
+        let admitted = active_tool_turn(&floor.scene, self.thread)
             .await
             .expect("the admitted directive source");
         let turn: TurnStart = serde_json::from_value(json!({
@@ -178,6 +186,7 @@ impl Agent {
                     };
                     let result = if let Some(error) = &reply.error {
                         Err(orch_agent_contract::session::ToolError {
+                            rate_limit: error.rate_limit.clone(),
                             code: error.code.clone(),
                             message: error.message.clone(),
                         })

@@ -1,0 +1,5 @@
+test -p orch-api-core --test access --test access_everything --test account_key_proofs --test account_native_scopes --test activity_depth --test admin_catalogue --test admin_messages --test admin_mode --test admin_native_scopes
+test -p orch-api-core --test admin_person_credentials --test admin_system --test admin_token_inventory --test chat_list_scopes --test chats_people --test chats_resource_visibility --test credential_collections --test custom_color --test directory
+test -p orch-api-core --test directory_native_scopes --test document_discovery --test documents --test everything_resources --test folders --test giving --test group_list_scopes --test group_operation_scopes --test hidden_rows
+test -p orch-api-core --test holder_model --test holder_search_native_scopes --test hosted_environments --test hosts --test imports --test invitation_operation_scopes --test kadmin_tokens --test kfix_envreads --test kfix_private_pages
+test -p orch-api-core --test kfix_resource_readers --test kmounts_files --test kmounts_mcp --test links --test links_scale --test machine_get_scopes
