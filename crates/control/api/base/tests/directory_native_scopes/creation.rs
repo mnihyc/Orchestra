@@ -149,6 +149,10 @@ impl Creation {
                 StatusCode::OK,
             ),
         };
+        let rows = match self {
+            Self::Group => &rows["items"],
+            Self::Service => &rows["items"],
+        };
         rows.as_array()
             .unwrap()
             .iter()

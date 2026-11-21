@@ -1,10 +1,14 @@
-import { ResourcePicker } from '@/ui/ResourcePicker';
+import { ResourcePicker, ResourcePickerLookup } from '@/ui/ResourcePicker';
 /** One destination environment, existing or made once, for every member of a switch batch. */
 import { Hint } from '@/features/help/Hint';
 import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { environmentsQuery } from '@/api/environments';
 import { hostsQuery } from '@/api/resources';
+import { poolQuery } from '@/api/pools';
+import { HOST_POOL_PREFIX, hostChoiceTarget, hostPoolId, singleHostId } from '@/features/resources/pools/hostTarget';
+import { usePoolTargetChoices } from '@/features/resources/pools/targetChoices';
 import type { ForkEnvironment } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -17,6 +21,11 @@ export function BatchDestination({ value, onChange, sources = [], allowSame = tr
   const environments = useQuery(environmentsQuery(null));
   const hosts = useQuery({ ...hostsQuery(null), enabled: value !== undefined && 'new' in value });
   const mode = value === undefined || 'same' in value ? (allowSame ? 'keep' : '') : 'new' in value ? 'new' : `use:${value.use}`;
+  const [hostOpen,setHostOpen] = useState(false), [typed,setTyped] = useState('');
+  const pools=usePoolTargetChoices('host',hostOpen && mode==='new',typed);
+  const target=value !== undefined && 'new' in value ? value.new.host_id : undefined;
+  const poolId=hostPoolId(target), hostId=singleHostId(target);
+  const selectedPool=useQuery({ ...poolQuery(poolId ?? ''), enabled:poolId !== undefined,retry:false });
   const rawConfig = value !== undefined && 'new' in value ? value.new.config : undefined;
   const config = typeof rawConfig === 'object' && rawConfig !== null && !Array.isArray(rawConfig) ? rawConfig : {};
   const temporary = 'env.lifetime' in config && config['env.lifetime'] === 'temporary';
@@ -29,7 +38,13 @@ export function BatchDestination({ value, onChange, sources = [], allowSame = tr
     {environments.error !== null && <ErrorAlert error={environments.error} />}
     {value !== undefined && 'new' in value && <div className="grid gap-2 sm:grid-cols-2">
       <Input label={t('change.where.name')} optional value={value.new.name ?? ''} onChange={(event) => onChange({ new: { ...value.new, name: event.target.value } })} />
-      <ResourcePicker pickerKey="change.BatchDestination.change.where.place" label={t('change.where.place')} value={value.new.host_id ?? 'automatic'} onValueChange={(id) => onChange({ new: { ...value.new, host_id: id === 'automatic' ? null : id } })} options={[{ value: 'automatic', name: t('changeCompact.automatic') }, ...(hosts.data ?? []).filter((host) => host.machine.online && host.lost_at === undefined).map((host) => ({ value: host.id, name: host.name, ...resourceChoice({ kind: 'host', host }) }))]} />
+      <ResourcePickerLookup pickerKey="change.BatchDestination.change.where.place" label={t('change.where.place')}
+        query={typed} onQueryChange={setTyped} open={hostOpen} onOpenChange={(open)=>{setHostOpen(open);if(!open)setTyped('');}}
+        initialActiveValue={poolId === undefined ? hostId ?? 'automatic' : `${HOST_POOL_PREFIX}${poolId}`}
+        displayValue={poolId !== undefined ? selectedPool.data?.name ?? t('resourceGroups.selectionUnavailable') : hostId === undefined ? t('changeCompact.automatic') : hosts.data?.find((host)=>host.id===hostId)?.name ?? t('resourceGroups.selectionUnavailable')}
+        onSelect={(option) => {onChange({ new: { ...value.new, host_id: option.value === 'automatic' ? null : hostChoiceTarget(option.value) } });setHostOpen(false);setTyped('');}}
+        groups={[{id:'hosts',label:'',options:[{ value: 'automatic',label:t('changeCompact.automatic'),text:t('changeCompact.automatic') }, ...(hosts.data ?? []).filter((host) => host.machine.online && host.lost_at === undefined).map((host) => ({ value: host.id,label:host.name,text:host.name,...resourceChoice({ kind: 'host', host }) }))]},
+          {id:'pools',label:t('screens.pools.title'),options:pools.options}]} footer={pools.footer} />
       <TemporaryChoice checked={temporary} forThread={false} onChange={(checked) => {
         const changed: Record<string, unknown> = { ...config };
         if (checked) changed['env.lifetime'] = 'temporary';

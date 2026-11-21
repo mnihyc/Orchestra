@@ -10,7 +10,7 @@
 //! orgs', the root org of the request's place, and of every node a decision reads)
 //! in the statement that locks the identity, before any permission fact; the
 //! commit checks them as its last statement and refuses, retryably
-//! (`conflict.stale_revision`), when a change of authority committed meanwhile.
+//! (`conflict.concurrent_change`), when a change of authority committed meanwhile.
 //! Roles, permission pages/defaults, memberships, groups, standing, moves and
 //! shared availability/policy move those epochs at their own commit: the request's
 //! root org for a change about one place, the system's otherwise. Ordinary content,
@@ -444,6 +444,12 @@ pub async fn current_http_identity(
             }
             rows::lock_identity_for_write(conn, original.id(), credential, authority_change, place)
                 .await?
+        }
+        HttpIdentityMode::Read if ctx.ordinary_browser_opening() => {
+            let Credential::Session { id, hash } = credential else {
+                return Err(invalid_token());
+            };
+            rows::opening_session(conn, original.id(), id, hash).await?
         }
         HttpIdentityMode::Read => {
             rows::lock_identity(conn, original.id(), credential, false).await?

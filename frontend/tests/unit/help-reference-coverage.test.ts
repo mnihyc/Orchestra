@@ -6,6 +6,45 @@ import { checkReferenceCoverage, documentedReferences, requiredHelpReferences, s
 import { readArticle, type Guide } from '@/help/guide';
 
 const content = readHelpContent();
+it('limits the model-add and default-delivery promises to their actual choices in both languages', () => {
+  const article = content.guide.articles.find((entry) => entry.id === 'settings-reference');
+  for (const language of ['en', 'zh-CN'] as const) {
+    const body = language === 'en' ? article?.body : article?.translations?.[language]?.body;
+    if (body === undefined) throw new Error('Both setting references must ship.');
+    const entries = documentedReferences(body);
+    const models = entries.find((entry) => entry.id === 'setting:models.add_switches_on')?.explanation ?? '';
+    const delivery = entries.find((entry) => entry.id === 'setting:collab.default_delivery')?.explanation ?? '';
+    expect(models).toContain(language === 'en' ? 'context sizes, speeds and access programs' : '上下文大小、速度和访问计划');
+    expect(models).toContain(language === 'en' ? 'configured separately' : '单独配置');
+    expect(models).not.toContain(language === 'en' ? 'everything it offers' : '它提供的全部内容');
+    expect(delivery).not.toMatch(/interrupt|中断/iu);
+    expect(delivery).toContain(language === 'en' ? 'steer' : '送入当前运行');
+  }
+});
+
+it('explains stopping and session reopening facts in both shipped languages', () => {
+  const references = [
+    'state:StopState.stopping', 'state:StopState.stopped', 'state:BlockedReason.source_failed',
+    'state:MarkerKind.session_reopened',
+    ...['unknown', 'instructions', 'limits', 'configuration', 'mcp', 'tools', 'skills', 'program_reloads', 'side_history']
+      .map((reason) => `state:SessionReopenReason.${reason}`),
+    'option:ThreadInterruptBody.turn_id', 'option:ThreadStop.state', 'option:ThreadStop.requested_at',
+    'option:ThreadStop.turn', 'option:Thread.stopping', 'option:ThreadStop.stopping', 'option:Turn.interrupted_at',
+    ...['version', 'requested_at', 'pending', 'thread_seq', 'state_seq'].map((field) => `option:ThreadStopping.${field}`),
+    'option:MarkerSessionReopened.reason',
+  ];
+  for (const language of ['en', 'zh-CN'] as const) {
+    const entries = content.guide.articles.filter((article) => content.userArticles.includes(article.id))
+      .flatMap((article) => documentedReferences(language === 'en' ? article.body : article.translations?.[language]?.body ?? ''));
+    for (const reference of references) {
+      const entry = entries.find((entry) => entry.id === reference);
+      expect(entry, `${language}:${reference}`).toBeDefined();
+      expect(entry?.explanation.trim().length).toBeGreaterThan(0);
+      if (language === 'zh-CN') expect(entry?.explanation).toMatch(/\p{Script=Han}/u);
+    }
+  }
+});
+
 it('covers every currently declared setting, nested option, state and API error in the shipped guide', () => {
   expect(content.references).toContain('setting:threads.offline_deadline');
   expect(content.references).toContain('option:env.after_up.*.command');
@@ -19,19 +58,34 @@ it('covers every currently declared setting, nested option, state and API error 
   expect(checkReferenceCoverage(content.guide, content.userArticles, content.references)).toEqual([]);
 });
 
+it('gives each public state a labelled destination in the same reading order in both languages', () => {
+  const article = content.guide.articles.find((one) => one.id === 'state-reference');
+  const anchors = (body: string) => [...body.matchAll(/^\| \[([^\]]+)\]\(#(state:[\w.]+)\)/gm)].map((match) => match[2]);
+  const english = anchors(article?.body ?? '');
+  expect(english).toEqual(anchors(article?.translations?.['zh-CN']?.body ?? ''));
+  expect(new Set(english).size).toBe(english.length);
+  expect(english).toEqual(expect.arrayContaining(content.references.filter((id) => id.startsWith('state:'))));
+  expect(article?.body).toContain('[Waiting for approval](#state:ThreadDisplayState.waiting_approval)');
+  expect(article?.body).toContain('[Offline](#state:MachineConnection.offline)');
+  expect(article?.translations?.['zh-CN']?.body).toContain('[已丢失](#state:MachineConnection.lost)');
+  expect(article?.body).toContain('Open Approvals or the thread to answer.');
+  expect(article?.translations?.['zh-CN']?.body).toContain('打开审批或会话来答复。');
+});
+
 it.each(['setting', 'option', 'state', 'error'])('refuses one removed %s entry without reducing the inventory', (kind) => {
   const id = content.references.find((id) => id.startsWith(`${kind}:`));
   if (id === undefined) throw new Error(`Missing native ${kind} inventory`);
   const guide: Guide = { articles: content.guide.articles.map((article) => ({ ...article,
-    body: article.body.split('\n').filter((line) => !line.startsWith(`| \`${id}\``)).join('\n') })) };
+    body: article.body.split('\n').filter((line) => !line.startsWith(`| \`${id}\``) && !line.includes(`](#${id})`)).join('\n') })) };
   expect(checkReferenceCoverage(guide, content.userArticles, content.references)).toContain(`reference.missing: en:${id}`);
 });
 
 it('rejects empty explanations, untranslated Chinese and rows hidden in code or comments', () => {
-  const body = '# Reference\n\n| Reference | Meaning |\n| --- | --- |\n| `state:JobState.running` | |\n';
+  const body = '# Reference\n\n| Reference | Meaning |\n| --- | --- |\n| [Running](#state:JobState.running) | |\n';
   const article = readArticle('reference', body);
   const guide: Guide = { articles: [{ ...article, translations: { 'zh-CN': { ...article, body: body.replace('| |', '| Running |') } } }] };
   const failures = checkReferenceCoverage(guide, ['reference'], ['state:JobState.running']);
+  expect(documentedReferences('| Status | Meaning |\n| --- | --- |\n| `state:JobState.running` | Running |')).toEqual([]);
   expect(failures).toContain('reference.explanation_missing: en:state:JobState.running');
   expect(failures).toContain('reference.explanation_missing: zh-CN:state:JobState.running');
   expect(documentedReferences(`\`\`\`md\n${body}\n\`\`\`\n<!--\n${body}\n-->`)).toEqual([]);
@@ -51,7 +105,7 @@ it('discovers additions and union/map fields from declarations rather than a cou
 
 
 it('does not count a comment as visible explanatory prose', () => {
-  expect(documentedReferences('| Reference | Meaning |\n| --- | --- |\n| `state:JobState.running` | <!-- 隐藏说明 --> |\n'))
+  expect(documentedReferences('| Reference | Meaning |\n| --- | --- |\n| [Running](#state:JobState.running) | <!-- 隐藏说明 --> |\n'))
     .toEqual([{ id: 'state:JobState.running', explanation: '' }]);
 });
 
@@ -75,5 +129,18 @@ it('refuses a retired setting advertised as a current control', () => {
     }) };
     expect(checkReferenceCoverage(guide, content.userArticles, content.references))
       .toContain(`reference.setting_unknown: ${language}:setting:retired.setting`);
+  }
+});
+
+
+it('documents view-opening choices and topic thread search in both shipped languages', () => {
+  const article = content.guide.articles.find((entry) => entry.id === 'option-reference');
+  if (article === undefined) throw new Error('The shipped option reference is required');
+  for (const locale of ['en', 'zh-CN'] as const) {
+    const body = locale === 'en' ? article.body : article.translations?.[locale]?.body;
+    if (body === undefined) throw new Error('The translated option reference is required');
+    expect(documentedReferences(body).map((entry) => entry.id)).toEqual(expect.arrayContaining([
+      'option:PersonalState.sidebar.open_links', 'option:TopicSearch.q',
+    ]));
   }
 });

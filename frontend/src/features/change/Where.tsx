@@ -1,5 +1,7 @@
+import { MachineCapacityLine } from '@/features/resources/machines/MachineCapacityLine';
 import { Select } from '@/ui/Select';
 import { ResourcePicker } from '@/ui/ResourcePicker';
+import { PlacePicker, type PlaceRow } from '@/features/start/PlacePicker';
 /** Where the result works: the same environment, another one the person manages or a new one at a place, with the files that go along into it.
  *
  * Where the result works, as the dialog that starts a thread asks it, in the three ways a thread can be placed: the
@@ -9,6 +11,8 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
  * environments they manage. A host that is full can still be chosen, unless it takes nothing more, and says so.
  */
 import { useQuery } from '@tanstack/react-query';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
@@ -16,17 +20,17 @@ import { placesQuery } from '@/api/forks';
 import type { Choices, WhereChoice } from '@/features/change/choices';
 import { FilesChoice } from '@/features/change/Files';
 import { ChangeDirectory } from '@/features/change/Directory';
+import { WorkspaceInstructions } from '@/features/start/WorkspaceInstructions';
 import { useFocusFirst } from '@/features/change/Sentence';
 import type { MoveMachine, Place, PlaceEnvironment, PlaceHost, Thread } from '@/generated/api-types';
+import { HostCapacityLine } from '@/features/start/PlaceCapacity';
 import { hostNotes } from '@/features/resources/hosts/words';
 import { TemporaryChoice } from '@/features/resources/environments/Temporary';
-import { HostCapacity, ResourceHint, resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
+import { resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { Checkbox } from '@/ui/Checkbox';
-import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { UserChip } from '@/ui/UserChip';
 
 const isEnvironment = (place: Place): place is PlaceEnvironment => 'environment' in place;
 const isHost = (place: Place): place is PlaceHost => 'automatic' in place;
@@ -50,7 +54,8 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
         {
           value: 'automatic',
           name: automatic === undefined ? t('changeCompact.automatic') : t('changeCompact.automaticHost', { host: automatic.host.name }),
-          ...(automatic === undefined ? { description: t('change.where.noHost') } : resourceChoice({ kind: 'host', host: automatic.host, place: automatic })),
+          ...(automatic === undefined ? { description: t('change.where.noHost') } : { ...resourceChoice({ kind: 'host', host: automatic.host, place: automatic }),
+            description: <HostCapacityLine host={automatic} /> }),
           disabled: !hosts.some((place) => place.usable),
         },
         ...hosts.map((place) => {
@@ -60,17 +65,12 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
             name: place.host.name,
             resource:{kind:'host',id:place.host.id,data:place},
             preview: resourcePreview({ kind: 'host', host: place.host, place }),
-            description: <span className="flex flex-col gap-1">
-              {place.usable ? <ResourceHint subject={{ kind: 'host', host: place.host, place }} /> : <HostCapacity place={place} />}
-              {notes.warn !== null && <span className="text-warning">{notes.warn}</span>}
-              {notes.off !== null && <span>{notes.off}</span>}
-              {!place.usable && notes.off === null && <span>{t('uniformMoves.unavailable')}</span>}
-            </span>,
+            description: <HostCapacityLine host={place} reason={notes.off ?? notes.warn ?? (place.usable ? null : t('uniformMoves.unavailable'))} />,
             disabled: !place.usable || notes.off !== null,
           };
         }),
         ...machines.map((place) => ({ value: `machine:${place.machine.id}`, name: place.machine.name, resource:{kind:'machine',id:place.machine.id,data:place},
-          description: <span>{t('uniformMoves.directory')}{!place.usable && <>{' '}{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.join(' ')}</>}</span>,
+          description: <span className="flex flex-col gap-1"><MachineCapacityLine facts={place.capacity} />{t('uniformMoves.directory')}{!place.usable && <>{' '}{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.join(' ')}</>}</span>,
           disabled: !place.usable })),
       ]}
     />
@@ -78,6 +78,8 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
 }
 
 export interface WhereProps {
+  destinationTopic?: string | undefined;
+  carryWorkspace?: boolean;
   thread: Thread;
   choices: Choices;
   onChange: (patch: Partial<Choices>) => void;
@@ -86,9 +88,10 @@ export interface WhereProps {
   focus?: boolean;
 }
 
-export function Where({ thread, choices, onChange, fork, focus = false }: WhereProps) {
+export function Where({ thread, choices, onChange, fork, destinationTopic, carryWorkspace = false, focus = false }: WhereProps) {
   const { t } = useTranslation();
-  const places = useQuery(placesQuery(thread.topic_id));
+  const places = useQuery(placesQuery(destinationTopic ?? thread.topic_id));
+  const me = useStore(client.session, (state) => state.userId);
   const where = choices.where;
   const set = (next: WhereChoice) => onChange({ where: next });
   const current = thread.environment;
@@ -102,6 +105,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
   const kind = where.kind;
   return (
     <div ref={ref} className="flex flex-col gap-3" data-change-where>
+      {where.kind === 'new' && <Input label={t('change.where.name')} optional hint={t('change.where.nameHint')} value={where.name} onChange={(event) => set({ ...where, name: event.target.value })} autoComplete="off" />}
       <Select
         label={t('change.where.label')}
         fieldClassName="w-fit max-w-full"
@@ -127,42 +131,36 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
           ) : environments.length === 0 ? (
             <InlineAlert tone="info">{t(hasSourceFiles ? 'change.where.noOther' : 'start.where.noExisting')}</InlineAlert>
           ) : (
-            <ResourcePicker pickerKey="change.Where.change.where.another"
+            <PlacePicker
               label={t('change.where.another')}
+              hideLabel={false}
               placeholder={t('changeCompact.chooseEnvironment')}
               fieldClassName="w-fit max-w-full"
-              value={where.id}
-              onValueChange={(id) => set({ ...where, id })}
-              options={environments.map((place) => ({
-                value: place.environment.id,
-                resource:{kind:'environment',id:place.environment.id,data:place},
-                preview: resourcePreview({ kind: 'environment', environment: place.environment, host: place.host }),
-                accessory: <UserChip user={place.environment.owner} />,
-                name: (
-                  <span className="inline-flex items-center gap-2">
-                    {place.environment.name}
-                    <EnvironmentDot status={place.environment.status} />
-                  </span>
-                ),
-                description: (
-                  <span className="flex flex-wrap gap-x-3 gap-y-1">
-                    <ResourceHint subject={{ kind: 'environment', environment: place.environment, host: place.host }} />
-                    {!place.usable && <span>{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.map((reason) => t(`change.where.envReason.${reason}`)).join(t('startFlow.separator'))}</span>}
-                  </span>
-                ),
-                disabled: !place.usable,
+              value={where.id === '' ? null : where.id}
+              onPick={(id) => set({ ...where, id })}
+              rows={environments.map((place): PlaceRow => ({
+                id: place.environment.id,
+                name: place.environment.name,
+                room: place.room, running: place.environment.activity?.running_threads,
+                capacity: place.capacity,
+                on: place.environment.placement === 'connected' ? place.machine?.name ?? place.host?.name ?? null : place.host?.name ?? place.machine?.name ?? null,
+                owner: place.environment.owner.id === me ? null : place.environment.owner,
+                state: place.usable && place.environment.status !== 'running' ? t(`environments.status.${place.environment.status}`) : null,
+                group: place.usable ? 'ready' : 'unavailable',
+                reason: place.usable ? null : place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.map((reason) => t(`change.where.envReason.${reason}`)).join(t('startFlow.separator')),
+                status: place.environment.status,
+                keywords: [place.environment.address, place.environment.owner.display_name],
               }))}
             />
           )}
-          {hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
+          {!carryWorkspace && hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
         </div>
       )}
 
       {where.kind === 'new' && (
         <div className="flex flex-col gap-3">
           <HostChoices hosts={hosts} value={where.hostId} onChange={(hostId) => set({ ...where, hostId })} loading={places.isPending} />
-          <Input label={t('change.where.name')} optional hint={t('change.where.nameHint')} value={where.name} onChange={(event) => set({ ...where, name: event.target.value })} autoComplete="off" />
-          {hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
+          {!carryWorkspace && hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
           {hasSourceFiles && <Checkbox label={t('fork.files.home')} checked={where.home} onCheckedChange={(home) => set({ ...where, home })} />}
           {hasSourceFiles && <Checkbox label={t('fork.files.privateViews')} checked={where.privateViews} onCheckedChange={(privateViews) => set({ ...where, privateViews })} />}
           <Checkbox label={t('change.where.onlyMe')} checked={where.onlyMe} onCheckedChange={(onlyMe) => set({ ...where, onlyMe })} />
@@ -173,6 +171,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
         door={where.kind === 'same' ? current === null ? null : { environmentId: current.id, threadId: thread.id }
           : where.kind === 'use' && where.id !== '' ? { environmentId: where.id, threadId: null } : null}
         onChange={(directory) => onChange({ directory })} />
+      {where.kind === 'same' && current !== null && <WorkspaceInstructions environmentId={current.id} directory={choices.directory ?? thread.directory} {...(thread.source?.state==='failed'&&(choices.directory??thread.directory)===thread.directory?{recovery:{thread:thread.id,state:JSON.stringify([thread.source.state,thread.source.job?.id,thread.source.job?.state])}}:{})}/>}
     </div>
   );
 }

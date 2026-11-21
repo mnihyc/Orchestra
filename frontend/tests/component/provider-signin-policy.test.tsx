@@ -12,11 +12,12 @@ import { harnessName } from '../doubles/harness-names';
 const server=vi.hoisted((): {state:'idle'|'awaiting_user'}=>({state:'idle'}));
 beforeEach(()=>{server.state='idle';vi.clearAllMocks();});
 
-vi.mock('@/api/resources',()=>({providerSetupQuery:()=>({queryKey:['signin-setup'],queryFn:()=>Promise.resolve({subscriptions:[{
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),providerSetupQuery:()=>({queryKey:['signin-setup'],queryFn:()=>Promise.resolve({subscriptions:[{
   agent:{id:'profile'},methods:[{id:'import',title:'Import this sign-in',summary:'Native import',kind:'import',yields:'token',
     fields:[],requires:null,recommended:true,lifetime_secs:null}],
 }]})})}));
-vi.mock('@/api/provider-plan',()=>({
+vi.mock('@/api/provider-plan',async (loadOriginal)=>({
+  ...await loadOriginal<object>(),
   loginStateQuery:()=>({queryKey:['signin-progress'],queryFn:()=>Promise.resolve({state:server.state,method:null,shows:[],asks:server.state==='idle'?null:[{name:'answer',label:'Vendor answer',type:'text',required:true,help:null,choices:null,default:null,max_bytes:null}],expires_at:null,error:null})}),
   answerProviderLogin:vi.fn(),cancelProviderLogin:vi.fn(()=>{server.state='idle';return Promise.resolve({state:'idle',method:null,shows:[],asks:null,expires_at:null,error:null});}),retryProvider:vi.fn(),startProviderLogin:vi.fn(),
 }));
