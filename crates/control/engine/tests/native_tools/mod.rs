@@ -81,6 +81,7 @@ pub async fn enable(world: &World) {
     world.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(
             orch_link_contract::commands::AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".into(),
                 descriptor: typed.clone(),
@@ -114,6 +115,7 @@ pub fn workspace_on(
             ));
         }
         Ok(CommandResult::FsStat(FileStat {
+            facts: None,
             entry: DirEntry {
                 name: "web".into(),
                 path: body.path.clone(),
@@ -143,6 +145,8 @@ pub fn workspace_on(
             ));
         }
         Ok(CommandResult::FsRecord(FsRecordResult {
+            indexing: None,
+
             state: RecordState::Unavailable,
             tree_ref: None,
             repository_head: None,

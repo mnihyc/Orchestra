@@ -1,0 +1,9 @@
+clippy
+test -p orch-notifier-push --lib --test push_service
+test -p orch-config --lib --test shipped
+test -p orch-worker --bin orch-worker -- composition::tests::
+test -p orch-api --bin orch-api
+test -p orch-api-core --test notifications_routes
+test -p orch-worker-core --test channel_setup
+release-checks
+web test -- tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts

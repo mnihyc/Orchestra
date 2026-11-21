@@ -73,6 +73,7 @@ it('never replays an acknowledged addition when a later real refusal leaves one 
   await user.click(within(dialog).getByRole('button', { name: GRACE.display_name }));
   await user.click(within(dialog).getByRole('button', { name: i18n.t('chat.group.addButton', { count: 2 }) }));
   await waitFor(() => expect(requests.add).toHaveBeenCalledTimes(2));
+  await within(dialog).findByRole('alert');
   expect(dialog).toBeVisible();
   expect(within(dialog).getByRole('button', { name: DORA.display_name })).toHaveAttribute('aria-pressed', 'false');
   expect(within(dialog).getByRole('button', { name: GRACE.display_name })).toHaveAttribute('aria-pressed', 'true');

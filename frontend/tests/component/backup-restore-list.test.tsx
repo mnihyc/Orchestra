@@ -31,6 +31,18 @@ it('uses the actual manifest identity and never turns an unknown count or a path
   expect(screen.getByText('2 environments need inspection')).toBeVisible();
 });
 
+it('keeps the identifiers of a kept location behind Copy ID instead of listing them', async () => {
+  const user = userEvent.setup();
+  read.mockResolvedValue(LIST);
+  draw();
+  await screen.findByText('actual-protected-copy.json');
+  expect(screen.getByText('/volumes/profiles')).toBeVisible();
+  expect(screen.queryByText('environment', { exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByText('host', { exact: true })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Copy ID' }));
+  expect(await navigator.clipboard.readText()).toBe('Object ID: environment\nHost ID: host');
+});
+
 it('hides the cached list after a failed verification and retries the authoritative read', async () => {
   read.mockResolvedValueOnce(LIST).mockRejectedValueOnce(new Error('The manifest no longer verifies.')).mockResolvedValue(null);
   draw();

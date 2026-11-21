@@ -8,6 +8,8 @@ summary: Read help in any thread and choose whether it may read with your access
 
 # Personal read tools
 
+Personal read tools let the agent of a thread read with your own access. This page shows how to turn them on and what they can reach.
+
 ## Read the help
 
 The `orch_docs` tool searches the English and Chinese user help. Its answers link to the matching
@@ -17,7 +19,7 @@ and an environment or reading mode that disables that server still applies.
 ## Let a thread read with your access
 
 In **Settings → Policies → Personal read tools**, enable the option to offer `open`, `search`,
-`find_operation` and `read`. It is off as shipped. The ordinary setting follows system, organization,
+`find_operation` and `read`. It is off by default. The ordinary setting follows system, organization,
 project and topic values; inherited locks and reset work as on other settings.
 
 These tools use the thread owner's current read access through the same readers as Ask. They cannot

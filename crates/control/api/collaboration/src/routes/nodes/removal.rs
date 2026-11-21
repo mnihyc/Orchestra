@@ -309,6 +309,13 @@ async fn render_delete_review(
     let review = &saved.review;
     let refs = view::refs(conn, principal, &[review.node.id], Policy::default()).await?;
     Ok(NodeDeletePlan {
+        retention: orch_engine::schedule::node_retention(
+            conn,
+            review.node.id,
+            principal.now().get(),
+        )
+        .await
+        .map_err(ApiError::engine)?,
         preflight_id: saved.preflight.id,
         expires_at: Time::new(saved.preflight.expires_at),
         node: refs
