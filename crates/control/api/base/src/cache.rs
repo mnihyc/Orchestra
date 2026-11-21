@@ -81,9 +81,26 @@ pub use orch_engine::manifest::ManifestError;
 /// compresses well and a bound on what it expands to is kept while it is read.
 pub const MANIFEST_MAX_STORED_BYTES: i64 = 512 * 1024 * 1024;
 
-/// How long an upload of a machine may have had no piece before it is taken for dead: a day, as
-/// long as an upload session of a person lives.
-pub const STALE_UPLOAD_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Captures the effective idle allowance once, when a machine transfer starts.
+pub(crate) async fn upload_retention(
+    conn: &mut orch_db::Conn,
+) -> Result<storage::UploadRetention, DbError> {
+    let view = orch_settings::resolve(conn, Place::System, "storage.machine_upload_idle_secs")
+        .await
+        .map_err(|error| DbError::Other(sqlx::Error::Decode(Box::new(error))))?;
+    Ok(storage::UploadRetention {
+        seconds: view
+            .value()
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                DbError::Other(sqlx::Error::Decode(
+                    "the transfer retention is not an integer".into(),
+                ))
+            })?,
+        default_source: view.resolved.source.scope
+            == orch_settings_contract::provenance::SourceScope::Default,
+    })
+}
 
 /// How many rows a run of a job looks at in one statement.
 const BATCH: i64 = 500;
@@ -177,6 +194,8 @@ impl Samples {
 }
 
 struct CacheInner {
+    opening_sessions: crate::middleware::authentication::opening_sessions::Reads,
+    archives: crate::archives::ArchiveReads,
     ports: crate::ports_runtime::PortRuntime,
     manifests: Mutex<VecDeque<(Id, Hash, Arc<Manifest>)>>,
     manifests_kept: usize,
@@ -198,6 +217,15 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
+    pub(crate) fn opening_sessions(
+        &self,
+    ) -> &crate::middleware::authentication::opening_sessions::Reads {
+        &self.inner.opening_sessions
+    }
+    /// Shared live continuations of authorized immutable archive sources.
+    pub fn archive_reads(&self) -> &crate::archives::ArchiveReads {
+        &self.inner.archives
+    }
     /// Current port measurements and ephemeral admissions, never durable caller rows.
     #[must_use]
     pub fn ports(&self) -> &crate::ports_runtime::PortRuntime {
@@ -215,6 +243,8 @@ impl Cache {
         let samples = seconds / config.engine.stats_interval_secs.max(1);
         Self {
             inner: Arc::new(CacheInner {
+                opening_sessions: Default::default(),
+                archives: crate::archives::ArchiveReads::default(),
                 ports: crate::ports_runtime::PortRuntime::default(),
                 manifests: Mutex::new(VecDeque::new()),
                 manifests_kept: usize::try_from(config.limits.manifest_trees)
@@ -313,8 +343,10 @@ impl Cache {
         {
             return;
         }
-        if let Ok(sample) = serde_json::from_value::<ResourceSample>(report.eph.body.clone()) {
-            self.inner.samples.push(environment, sample);
+        if let Ok(reported) = serde_json::from_value::<orch_link_contract::events::EnvironmentSample>(
+            report.eph.body.clone(),
+        ) {
+            self.inner.samples.push(environment, reported.sample);
         }
     }
 
@@ -415,6 +447,54 @@ pub async fn evict_caches(db: &Db, clock: &dyn Clock) -> Result<Evicted, DbError
     Ok(done)
 }
 
+/// What one run of the purge of relayed caches did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Purged {
+    /// How many environments had cached versions in a place that relays.
+    pub environments: u64,
+    /// How many cached versions of files were forgotten.
+    pub versions: u64,
+}
+
+/// Forgets the cached versions of files in each environment whose place relays file content
+/// (`storage.relay_transfers`), and removes from the store the content that nothing else holds, at once
+/// and not after the grace. The first run after a place switches to relay removes its cache, and
+/// it runs again whenever a place switches to relaying. Content that a snapshot, an attachment, a
+/// document or a move holds is only no longer a cached version. A run goes on from where the last one
+/// stopped, `BATCH` versions at a time and `MAX_BATCHES_PER_RUN` batches at most, so that it never
+/// holds the store for long.
+pub async fn purge_relayed_caches(
+    db: &Db,
+    blobs: &Blobs,
+    clock: &dyn Clock,
+) -> Result<Purged, DbError> {
+    let mut conn = db.acquire().await?;
+    let mut done = Purged::default();
+    let at = clock.now();
+    storage::release_orphaned_command_pins(&mut conn, at, at).await?;
+    let mut batches = 0;
+    for environment in storage::cached_environments(&mut conn).await? {
+        if batches >= MAX_BATCHES_PER_RUN {
+            break;
+        }
+        if !orch_engine::transfers::relay_on(&mut conn, Place::Environment(environment)).await {
+            continue;
+        }
+        done.environments += 1;
+        while batches < MAX_BATCHES_PER_RUN {
+            let at = clock.now();
+            let hashes = storage::forget_cached_batch(&mut conn, environment, at, BATCH).await?;
+            if hashes.is_empty() {
+                break;
+            }
+            batches += 1;
+            done.versions += u64::try_from(hashes.len()).unwrap_or(u64::MAX);
+            blobs.forget_after_transfer(db, &hashes, at).await;
+        }
+    }
+    Ok(done)
+}
+
 // ---------------------------------------------------------------- collection
 
 /// What one run of the collection did.
@@ -430,7 +510,7 @@ pub struct Collected {
 
 /// Removes the content nothing points at, no cached version of a file names, and nobody asked for
 /// during `[retention] blob_grace_hours`; and the uploads that were given up: the sessions of
-/// people that ran out, and the uploads of machines that no piece came to for a day.
+/// people that ran out, and machine transfers whose captured idle retention expired.
 pub async fn collect_garbage(
     db: &Db,
     blobs: &Blobs,
@@ -456,23 +536,26 @@ pub async fn collect_garbage(
         .await?;
     }
     let mut done = Collected::default();
+    let mut after = None;
     for _ in 0..MAX_BATCHES_PER_RUN {
-        let mut conn = db.acquire().await?;
-        let candidates = storage::unreferenced(&mut conn, idle_since, BATCH).await?;
-        if candidates.is_empty() {
+        let candidates = {
+            let mut conn = db.acquire().await?;
+            storage::unreferenced_page(&mut conn, idle_since, after, BATCH).await?
+        };
+        let Some(last) = candidates.last() else {
             break;
-        }
-        for (hash, size) in candidates {
-            // The conditions are looked at again where the row is deleted: a pin or a use that
-            // came meanwhile keeps the blob.
-            if storage::forget_blob(&mut conn, &hash, idle_since).await? {
-                if let Err(error) = blobs.store().delete(&hash).await {
-                    tracing::warn!(%error, %hash, "a blob that nothing wanted could not be removed");
-                }
-                done.blobs += 1;
-                done.bytes = done.bytes.saturating_add(size);
-            }
-        }
+        };
+        after = Some((last.last_access_at, last.hash));
+        let hashes: Vec<Hash> = candidates.iter().map(|row| row.hash).collect();
+        let retired = orch_engine::transfers::retire_blobs(
+            db,
+            blobs.store().as_ref(),
+            &hashes,
+            orch_engine::transfers::RetirementWhen::IdleSince(idle_since),
+        )
+        .await?;
+        done.blobs = done.blobs.saturating_add(retired.blobs);
+        done.bytes = done.bytes.saturating_add(retired.bytes);
     }
     let mut conn = db.acquire().await?;
     for session in storage::expired_sessions(&mut conn, now, BATCH).await? {
@@ -480,11 +563,28 @@ pub async fn collect_garbage(
         storage::end_session(&mut conn, session).await?;
         done.uploads += 1;
     }
-    let silent_since = now - ChronoDuration::from_std(STALE_UPLOAD_AGE).unwrap_or_default();
-    for hash in storage::stale_uploads(&mut conn, silent_since, BATCH).await? {
-        crate::blobs::discard(&blobs.part_of(&hash)).await;
-        storage::end_upload(&mut conn, &hash).await?;
-        done.uploads += 1;
+    let retention = upload_retention(&mut conn).await?;
+    let candidates = storage::stale_uploads(&mut conn, now, retention.seconds, BATCH).await?;
+    drop(conn);
+    for hash in candidates {
+        let mut tx = db.begin().await?;
+        if let Some(row) = storage::lock_upload(&mut tx, &hash).await?
+            && row.expired(now, retention.seconds)
+        {
+            // Piece writes hold this same row lock, including their disk write. A resumed
+            // transfer cannot have its new piece discarded by an older candidate list.
+            if let Err(error) = tokio::fs::remove_file(blobs.part_of(&hash)).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, %hash, "the expired transfer still owes temporary-file cleanup");
+                tx.rollback().await.map_err(DbError::from)?;
+                continue;
+            }
+            storage::expire_source_transfer(&mut tx, &row).await?;
+            storage::end_upload(&mut tx, &hash).await?;
+            done.uploads += 1;
+        }
+        tx.commit().await?;
     }
     Ok(done)
 }
@@ -558,6 +658,14 @@ pub fn start_housekeeping(
             let every = interval_of(&app.config, EVICTION_JOB, EVICTION_EVERY);
             run_every(every, &stop, || async {
                 locked(&app.db, app.clock.as_ref(), EVICTION_JOB, || async {
+                    app.blobs
+                        .reap_command_transfers(&app.db, app.clock.as_ref(), &app.link.dispatcher())
+                        .await?;
+                    let purged =
+                        purge_relayed_caches(&app.db, &app.blobs, app.clock.as_ref()).await?;
+                    if purged.versions > 0 {
+                        tracing::info!(?purged, "the caches of places that relay were emptied");
+                    }
                     let evicted = evict_caches(&app.db, app.clock.as_ref()).await?;
                     if evicted.versions > 0 {
                         tracing::info!(?evicted, "the caches of environments were trimmed");
@@ -575,6 +683,9 @@ pub fn start_housekeeping(
             let every = interval_of(&app.config, COLLECTION_JOB, COLLECTION_EVERY);
             run_every(every, &stop, || async {
                 locked(&app.db, app.clock.as_ref(), COLLECTION_JOB, || async {
+                    app.blobs
+                        .reap_command_transfers(&app.db, app.clock.as_ref(), &app.link.dispatcher())
+                        .await?;
                     let collected =
                         collect_garbage(&app.db, &app.blobs, app.clock.as_ref(), &app.config)
                             .await?;

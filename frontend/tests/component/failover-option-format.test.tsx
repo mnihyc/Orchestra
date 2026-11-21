@@ -16,7 +16,7 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(),
 vi.mock('@/features/settings/ProviderChoice', () => ({ ProviderDefaultChoice: ({ label }: ValueControlProps) => <input aria-label={label} readOnly /> }));
 vi.mock('@/features/models/RequestOptions', () => ({ ModelRequestOptions: ({ protocol }: { protocol?: string | null }) => { calls.format(protocol); return <output>{protocol ?? 'raw'}</output>; } }));
 afterEach(async () => { cleanup(); calls.format.mockClear(); await setLocale('en'); });
-const step = { type: 'failover' as const, candidate: { provider_id: 'target', model: 'model', params: {} } };
+const step = { type: 'failover' as const, candidate: { target:{type:'single' as const,resource:{kind:'model' as const,backend:{route:'generation.model',offering:{provider:'target',offering:'model'},config:{}}}},params: {} } };
 
 it.each(['en', 'zh-CN'] as const)('passes the source format even when another target endpoint comes first in %s', async (locale) => {
   await setLocale(locale); show(<CandidateEditor purpose="summary" sourceProviderId="source" step={step} onChange={() => undefined} />);

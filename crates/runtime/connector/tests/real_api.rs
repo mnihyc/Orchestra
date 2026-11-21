@@ -149,6 +149,8 @@ async fn both_formats_are_forwarded_to_a_real_service_over_tls_and_what_they_use
         .succeed(
             &p.provider_key(),
             &ProviderDiscoverModels {
+                max_report_bytes: orch_link_contract::commands::UpstreamPolicy::default()
+                    .whole_bytes,
                 provider_id: p.rig.provider,
                 models: None,
             },

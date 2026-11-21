@@ -32,7 +32,7 @@ vi.mock('@/features/resources/trail', () => ({ useResourceHeading: () => undefin
 vi.mock('@/features/resources/environments/acts', () => ({ useEnvironmentActs: () => ({ page: () => ({ primary: null, edit: null, menu: [] }), keepAwake: () => null, dialogs: null }) }));
 vi.mock('@/features/resources/environments/AgentReach', () => ({ AgentReach: () => null }));
 vi.mock('@/features/resources/agents/ProgramBuild', () => ({ EnvironmentPrograms: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(), Page: ({ children }: { children: ReactNode }) => <main>{children}</main>, PageHeader: ({ title }: { title: ReactNode }) => <header><h1>{title}</h1></header> }));
 
@@ -54,6 +54,18 @@ beforeEach(() => { vi.clearAllMocks(); calls.available.mockResolvedValue(resourc
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the confirmed program approver as an independent person card with its recorded time (${locale})`, async () => {
+    await setLocale(locale);
+    calls.read.mockResolvedValue(row(approved()));
+    const view = draw();
+    expect(await screen.findByRole('switch', { name: i18n.t('environmentTools.anyVersionBy', { name: GRACE.display_name }) })).toBeChecked();
+    const person = await screen.findByRole('button', { name: GRACE.display_name });
+    expect(person.closest('label')).toBeNull();
+    expect(person.closest('[data-choice-name]')).toBeNull();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(calls.write).not.toHaveBeenCalled();
+  });
+
   it(`mounts the current Codex row only in the actual Tools entry (${locale})`, async () => {
     await setLocale(locale); const user = userEvent.setup(); draw('overview');
     await screen.findByRole('heading', { name: detailEnvironment.name, level: 1 });
@@ -61,7 +73,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await user.click(screen.getByRole('tab', { name: i18n.t('resourceDetails.layout.tools') }));
     expect(await screen.findByRole('heading', { name: locale === 'en' ? 'Codex tools' : 'Codex 工具' })).toBeVisible();
     expect(screen.getByText(program.version)).toBeVisible(); expect(screen.getByText('…/agent bins/codex')).toBeVisible();
-    expect(screen.getByRole('switch', { name: locale === 'en' ? 'Any agent version' : '任意代理版本' })).not.toBeChecked();
+    expect(screen.getByRole('switch', { name: locale === 'en' ? 'Any agent version' : '任意智能体版本' })).not.toBeChecked();
     await waitFor(() => expect(calls.mcp).toHaveBeenCalledTimes(1)); expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.write).not.toHaveBeenCalled();
   });
 }
