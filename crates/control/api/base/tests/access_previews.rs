@@ -366,7 +366,7 @@ async fn a_preview_of_a_resource_and_of_a_document_says_who_would_gain() {
         .call(ProviderCreate, &[])
         .token(&firm.pam.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Team key".to_owned(),
             home_id: firm.desk.org,
             access: None,

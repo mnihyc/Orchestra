@@ -12,6 +12,9 @@ import { makeContainer } from '@/features/workbench/layout';
 import { i18n, setLocale } from '@/i18n';
 import { OVERFLOW_REST_MS } from '@/ui/overflowTooltips';
 import { show } from './support';
+import { client } from '@/api/client';
+import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
+import { useNarrowWorkbench } from '@/features/workbench/NarrowViews';
 
 vi.mock('@/features/navigation/area', () => ({ useAreaNavigation: () => null }));
 const names = ['conversation', 'team', 'code', 'environment', 'agent'] as const;
@@ -32,6 +35,23 @@ function PhoneControls({ selected = () => undefined }: { selected?: (name: strin
     onSelect: () => { choose(current === name ? '' : name); selected(name); } }))} />;
 }
 afterEach(async () => { cleanup(); vi.useRealTimers(); document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
+
+it('keeps an unavailable saved phone location without indexing a missing bar or rereading it for Details', async () => {
+  const before = client.session.getState(), user = 'narrow-location-reader';
+  client.session.setState({ status: 'signed_in', userId: user, readerVersion: (before.readerVersion ?? 0) + 1 });
+  writeViewChoice(user, 'global', 'mobileBar', 'unavailable-private-bar');
+  const get = localStorage.getItem.bind(localStorage), reads = vi.fn((key: string) => get(key));
+  const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(reads);
+  function NativeChoice() { const workbench = useNarrowWorkbench(); return <>{workbench.deviceFacts}</>; }
+  const view = show(<NativeChoice />);
+  try {
+    expect(screen.getByText(i18n.t('clientFacts.device.unavailableChoice'))).toBeVisible();
+    const count = reads.mock.calls.length;
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.details') }));
+    expect(document.querySelector('[data-fact-disclosure-body]')).not.toHaveTextContent('unavailable-private-bar');
+    expect(reads).toHaveBeenCalledTimes(count); expect(readViewChoice(user, 'global', 'mobileBar', '')).toBe('unavailable-private-bar');
+  } finally { view.unmount(); spy.mockRestore(); localStorage.removeItem(`orch.${user}.choices.global.mobileBar`); client.session.setState(before); }
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`shows every medium-width choice and activates it with arrows and Enter at ${locale}/${theme}`, async () => {
