@@ -18,6 +18,8 @@ import type {
   HarnessBuild,
   HarnessChannelsStatus,
   HarnessKindInfo,
+  HumanCheckState,
+  Meta,
   Host,
   GatewayCatalogue,
   GatewayCatalogueEntry,
@@ -80,7 +82,7 @@ interface Own {
 
 /** What each setting of the system is when nobody set it, for the keys the screens use. */
 const SETTING_DEFAULTS: Record<string, unknown> = {
-  ...Object.fromEntries(SETTINGS_REGISTRY.filter((def) => def.key.startsWith('search.semantic.') || def.key === 'search.word_tuning').map((def) => [def.key, def.default])),
+  ...Object.fromEntries(SETTINGS_REGISTRY.filter((def) => def.key.startsWith('search.semantic.') || def.key === 'search.word_tuning' || def.key.startsWith('human_check.')).map((def) => [def.key, def.default])),
   'registration.mode': 'invite',
   'registration.email_verification': 'off',
   'auth.local_login': true,
@@ -144,6 +146,10 @@ export class AdminWorld implements Part {
   capabilities: CapabilityDef[] = [];
   builds: HarnessBuild[] = [];
   identityProviders: IdentityProvider[] = [];
+  /** When the secret of the human check was set; none while none is kept. It is never read back. */
+  humanCheckSecretAt: string | null = null;
+  /** What the web edge's policy leaves the chosen service, as a test sets it; the policy has room until a test says it has not. */
+  humanCheckEdge: NonNullable<HumanCheckState['edge']> = { state: 'allows', via: 'stack', lacking: [] };
   /** The state of the parts of the system, as a test sets it. */
   components: SystemInfo['components'] = [];
   /** Whether the system has stored any measurement; a test empties it. */
@@ -442,7 +448,12 @@ export class AdminWorld implements Part {
     if (route === 'GET /admin/pki') return { status: 200, body: this.pki() };
     if (route === 'GET /admin/plugins') return { status: 200, body: this.plugins() };
 
-    if (route === 'GET /admin/capabilities') return { status: 200, body: this.capabilities };
+    if (route === 'GET /admin/capabilities') {
+      const words=(query.get('q')??'').toLowerCase().split(/\s+/u).filter(Boolean),aliases=new Set((query.get('aliases')??'').split(','));
+      const rows=this.capabilities.filter((def)=>aliases.has(def.key)||words.every((word)=>`${def.key} ${def.label} ${def.description}`.toLowerCase().includes(word))).sort((one,other)=>one.key.localeCompare(other.key));
+      const from=Number(query.get('cursor')??0),limit=Number(query.get('limit')??50);
+      return {status:200,body:{items:rows.slice(from,from+limit),next_cursor:from+limit<rows.length?String(from+limit):null}};
+    }
     if ((found = /^PUT \/admin\/capabilities\/([^/]+)$/.exec(route))) return { status: 200, body: this.saveCapability(person, found[1] ?? '', body) };
     if ((found = /^DELETE \/admin\/capabilities\/([^/]+)$/.exec(route))) return { status: 200, body: this.deleteCapability(person, found[1] ?? '') };
 
@@ -475,6 +486,21 @@ export class AdminWorld implements Part {
     if (route === 'GET /admin/audit') return { status: 200, body: this.auditList(query) };
     if (route === 'GET /admin/audit/export') return this.auditExport(person, query);
 
+    if (route === 'GET /admin/human-check') return { status: 200, body: this.humanCheckState() };
+    if (route === 'PUT /admin/human-check/secret') {
+      if (typeof body.secret !== 'string' || body.secret.trim() === '') invalid('secret', 'must not be empty');
+      this.humanCheckSecretAt = new Date('2026-11-13T10:00:00Z').toISOString();
+      this.audit(person, 'auth.human_check_secret_changed', `${person.me.display_name} set the secret of the human check`);
+      return { status: 200, body: this.humanCheckState() };
+    }
+    if (route === 'DELETE /admin/human-check/secret') {
+      this.humanCheckSecretAt = null;
+      this.audit(person, 'auth.human_check_secret_changed', `${person.me.display_name} took the secret of the human check away`);
+      return { status: 200, body: this.humanCheckState() };
+    }
+    if (route === 'POST /admin/human-check/test') {
+      return { status: 200, body: this.humanCheckSecretAt === null ? { ok: false, error: 'No secret is kept for the service.' } : { ok: true, error: null } };
+    }
     if (route === 'GET /admin/identity-providers') return { status: 200, body: this.identityProviders };
     if (route === 'POST /admin/identity-providers') return { status: 200, body: this.makeProvider(person, body, requestId) };
     if ((found = /^PATCH \/admin\/identity-providers\/([^/]+)$/.exec(route))) return { status: 200, body: this.changeProvider(person, found[1] ?? '', body, requestId) };
@@ -486,6 +512,19 @@ export class AdminWorld implements Part {
 
   /** `/__double/admin/state`: the state of the parts of the system and whether anything was stored, as a test sets them. */
   control(path: string, body: Record<string, unknown>): Answer | null {
+    // `/__double/admin/setting`: a setting of the system as it is put in place before a test begins, as if an administrator had written it.
+    if (path === '/setting') {
+      const key = body.key;
+      if (typeof key !== 'string' || !(key in SETTING_DEFAULTS)) return { status: 404, body: { code: 'not_found' } };
+      this.own.set(key, { value: body.value, locked: false, revision: 1 });
+      this.mirror(key);
+      return { status: 204 };
+    }
+    // `/__double/admin/edge`: what the web edge's policy leaves the chosen service of the human check.
+    if (path === '/edge') {
+      this.humanCheckEdge = body as unknown as NonNullable<HumanCheckState['edge']>;
+      return { status: 204 };
+    }
     if (path !== '/state') return null;
     const part = body.component as { name?: string; ok?: boolean; detail?: string | null; seen_at?: string | null } | undefined;
     if (part?.name !== undefined) {
@@ -863,6 +902,25 @@ export class AdminWorld implements Part {
     };
   }
 
+  private humanCheckState(): HumanCheckState {
+    const provider = this.settingValue('human_check.provider');
+    return {
+      secret_set: this.humanCheckSecretAt !== null,
+      secret_changed_at: this.humanCheckSecretAt,
+      edge: provider === 'hcaptcha' || provider === 'recaptcha' ? this.humanCheckEdge : null,
+    };
+  }
+
+  /** The server does not switch the human check on, or move it to another service, while the web edge's policy has no room for the service. */
+  private refuseWhileTheEdgeBlocks(key: string, value: unknown): void {
+    if (this.humanCheckEdge.state !== 'blocks') return;
+    const provider = this.settingValue('human_check.provider');
+    const switchedOn = key === 'human_check.provider' && (value === 'hcaptcha' || value === 'recaptcha') && value !== provider;
+    const keyed = key === 'human_check.site_key' && (provider === 'hcaptcha' || provider === 'recaptcha') && String(this.settingValue('human_check.site_key')).trim() === '' && typeof value === 'string' && value.trim() !== '';
+    if (!switchedOn && !keyed) return;
+    throw new Refusal(409, 'human_check.edge_blocked', "the web edge's content policy does not let pages reach the service", { lacking: this.humanCheckEdge.lacking, via: this.humanCheckEdge.via });
+  }
+
   private settingList(): ResolvedSetting[] {
     return Object.keys(SETTING_DEFAULTS).map((key) => this.resolved(key));
   }
@@ -881,6 +939,7 @@ export class AdminWorld implements Part {
       this.audit(by, 'setting.cleared', `${by.me.display_name} put ${key} back to what Orch ships`);
     } else {
       const value = body.value;
+      this.refuseWhileTheEdgeBlocks(key, value);
       if (key === 'hosts.full_percent' && !(typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 100)) invalid('value', 'must be a whole number from 1 to 100');
       if (key === 'hosts.when_full' && value !== 'warn' && value !== 'block') invalid('value', 'must be warn or block');
       if (key === 'registration.mode' && value !== 'closed' && value !== 'invite' && value !== 'open') invalid('value', 'must be closed, invite or open');
@@ -903,6 +962,24 @@ export class AdminWorld implements Part {
     return this.resolved(key);
   }
 
+  /** What the pages are told of the human check: nothing while none is chosen or it has no site key; reCAPTCHA runs unseen whatever the mode says. */
+  private askedHumanCheck(): Meta['human_check'] {
+    const provider = this.settingValue('human_check.provider');
+    const siteKey = this.settingValue('human_check.site_key');
+    if ((provider !== 'hcaptcha' && provider !== 'recaptcha') || typeof siteKey !== 'string' || siteKey.trim() === '') return null;
+    const recaptcha = provider === 'recaptcha';
+    const acts = this.settingValue('human_check.acts');
+    return {
+      provider,
+      site_key: siteKey.trim(),
+      mode: recaptcha || this.settingValue('human_check.mode') === 'invisible' ? 'invisible' : 'checkbox',
+      acts: (Array.isArray(acts) ? acts : []) as NonNullable<Meta['human_check']>['acts'],
+      alternate_host: recaptcha && this.settingValue('human_check.alternate_host') === true,
+      ...(recaptcha ? { verification: this.settingValue('human_check.verification') === 'assessments' ? ('assessments' as const) : ('siteverify' as const) } : {}),
+      wait_secs: Number(this.settingValue('human_check.page_wait_secs')),
+    };
+  }
+
   /** What the system says of itself to anybody follows the settings it is made from. */
   private mirror(key: string): void {
     const value = this.settingValue(key);
@@ -913,6 +990,7 @@ export class AdminWorld implements Part {
     if (key === 'registration.mode') this.world.meta = { ...this.world.meta, registration_mode: value as typeof this.world.meta.registration_mode };
     if (key === 'orgs.created_by') this.world.meta = { ...this.world.meta, org_creation: value as typeof this.world.meta.org_creation };
     if (key === 'auth.local_login') this.world.meta = { ...this.world.meta, local_login: value !== false };
+    if (key.startsWith('human_check.')) this.world.meta = { ...this.world.meta, human_check: this.askedHumanCheck() };
     if (key === 'auth.email_code') this.world.meta = { ...this.world.meta, email_code_login: Array.isArray(value) && value.includes('sign_in') };
   }
 
