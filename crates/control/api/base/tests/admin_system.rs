@@ -42,6 +42,129 @@ fn component(parts: &[SystemComponent], name: SystemComponentName) -> &SystemCom
 }
 
 #[tokio::test]
+async fn running_configuration_reports_captured_origins_and_not_a_later_file_or_environment() {
+    let world = World::for_requests().await;
+    let c = cast(&world).await;
+    let config: ServerConfig = orch_config::load_text(
+        "[system]\npublic_url='https://orch.test'\n[database]\nacquire_timeout_ms=10000\n",
+        "orch.toml",
+        |name| (name == "ORCH_DATABASE_REQUEST_STATEMENT_TIMEOUT_MS").then(|| "15000".into()),
+    )
+    .unwrap();
+    let mut registry = orch_api_core::registry::Registry::new();
+    orch_api_core::routes::mount(&mut registry);
+    let app = orch_api_core::testing::TestApp::with_config(
+        world.app.app.db.clone(),
+        world.app.clock.clone(),
+        registry,
+        config,
+    );
+    let info = serde_json::to_value(
+        app.call(AdminSystemGet, &[])
+            .token(&c.root.token)
+            .send()
+            .await
+            .ok(),
+    )
+    .unwrap();
+    let facts = &info["effective_configuration"]["values"]["items"];
+    assert_eq!(facts.as_array().unwrap().len(), 3);
+    let row = |key| {
+        facts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["public_key"] == key)
+            .unwrap()
+    };
+    assert_eq!(row("database.acquire_timeout_ms")["origin"], json!("file"));
+    assert_eq!(
+        row("database.request_statement_timeout_ms")["origin"],
+        json!("environment")
+    );
+    assert_eq!(
+        row("database.idle_transaction_timeout_ms")["origin"],
+        json!("compiled")
+    );
+    assert_eq!(
+        row("database.acquire_timeout_ms")["typed_value"],
+        json!({"kind":"finite","milliseconds":"10000"})
+    );
+    assert!(row("database.acquire_timeout_ms")["application"] == "restart");
+    assert_eq!(
+        app.call(AdminSystemGet, &[])
+            .token(&c.boss.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+    places::admin_mode(&world, &c.root, false).await;
+    assert_eq!(
+        app.call(AdminSystemGet, &[])
+            .token(&c.root.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+}
+
+#[tokio::test]
+async fn an_unreported_process_configuration_is_not_presented_as_compiled_defaults() {
+    let world = World::new().await;
+    let c = cast(&world).await;
+    let info = serde_json::to_value(
+        world
+            .app
+            .call(AdminSystemGet, &[])
+            .token(&c.root.token)
+            .send()
+            .await
+            .ok(),
+    )
+    .unwrap();
+    assert!(info["effective_configuration"].is_null());
+}
+
+#[tokio::test]
+async fn the_api_keeps_serving_and_names_its_metrics_listener_when_the_bind_is_unavailable() {
+    let world = World::new().await;
+    let c = cast(&world).await;
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    assert!(world.app.app.bind_metrics(&address).await.is_err());
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    let api = component(&info.components, SystemComponentName::Api);
+    assert!(api.ok, "the optional listener does not stop the API");
+    assert_eq!(
+        serde_json::to_value(api.issue).unwrap(),
+        json!("metrics_listener_unavailable")
+    );
+    drop(held);
+    let listening = world.app.app.bind_metrics(&address).await.unwrap();
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        component(&info.components, SystemComponentName::Api)
+            .issue
+            .is_none()
+    );
+    drop(listening);
+}
+
+#[tokio::test]
 async fn the_state_of_the_system_says_how_its_parts_fare_and_what_waits_in_its_queues() {
     let world = World::new().await;
     let c = cast(&world).await;

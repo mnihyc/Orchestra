@@ -154,11 +154,12 @@ pub async fn run(
     tracing::info!(%bind, "serving measurements");
     let serving = tokio::spawn(serve_measurements(listener, readings.clone(), stop.clone()));
 
-    let db = Db::connect_with_slow_thresholds(
+    let db = Db::connect_with_limits(
         &config.database.url,
         config.worker.db_pool,
         std::time::Duration::from_millis(config.database.slow_statement_ms),
         std::time::Duration::from_millis(config.database.slow_acquire_ms),
+        orch_db::pool::Limits::background(&config.database),
     )
     .await
     .context("connecting to the database")?;

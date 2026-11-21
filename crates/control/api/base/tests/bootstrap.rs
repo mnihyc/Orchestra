@@ -24,6 +24,134 @@ use orch_api_contract::personal::{
 use serde_json::json;
 
 #[tokio::test]
+async fn an_early_write_has_no_effect_and_the_same_act_succeeds_after_the_handshake() {
+    let room = Room::new().await;
+    let app = &room.world.app;
+    let before = app
+        .call(MeStateGet, &[])
+        .token(&room.ada.token)
+        .send()
+        .await
+        .ok();
+    let reply = app
+        .call(MeStateSet, &[&"sidebar"])
+        .token(&room.ada.token)
+        .header("early-data", "1")
+        .body(&json!({"open":false}))
+        .send_bytes()
+        .await;
+    assert_eq!(reply.status, http::StatusCode::TOO_EARLY);
+    let problem: serde_json::Value = serde_json::from_slice(&reply.raw).unwrap();
+    assert_eq!(problem["code"], "request.too_early");
+    let state = app
+        .call(MeStateGet, &[])
+        .token(&room.ada.token)
+        .header("early-data", "1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(state, before);
+    app.call(MeStateSet, &[&"sidebar"])
+        .token(&room.ada.token)
+        .body(&json!({"open":false}))
+        .send()
+        .await
+        .ok();
+    let state = app
+        .call(MeStateGet, &[])
+        .token(&room.ada.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(state["sidebar"], json!({"open":false}));
+}
+
+#[tokio::test]
+async fn a_forwarded_early_write_is_refused_before_a_missing_session_or_a_body_can_be_used() {
+    let world = support::World::new().await;
+    for surface in [
+        orch_api_contract::surface::HttpSurface::Browser,
+        orch_api_contract::surface::HttpSurface::Key,
+    ] {
+        for early in ["1", "0, 1"] {
+            let reply = world
+                .app
+                .call(MeStateSet, &[&"sidebar"])
+                .surface(surface)
+                .header("early-data", early)
+                .body(&json!({"open":false}))
+                .send_bytes()
+                .await;
+            assert_eq!(reply.status, http::StatusCode::TOO_EARLY);
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_early_sign_in_redirect_waits_for_the_handshake_even_though_its_method_is_get() {
+    let world = support::World::new().await;
+    let start = world
+        .app
+        .call(orch_api_contract::auth::AuthOidcStart, &[&"missing"])
+        .header("early-data", "1")
+        .send_bytes()
+        .await;
+    assert_eq!(start.status, http::StatusCode::TOO_EARLY);
+    let callback = world
+        .app
+        .call(orch_api_contract::auth::AuthOidcCallback, &[&"missing"])
+        .header("early-data", "1")
+        .raw_query("error=access_denied")
+        .send_bytes()
+        .await;
+    assert_eq!(callback.status, http::StatusCode::TOO_EARLY);
+}
+
+#[tokio::test]
+async fn an_unchanged_shell_keeps_its_live_cut_and_a_personal_change_advances_only_its_own_cut() {
+    let room = Room::new().await;
+    let app = &room.world.app;
+    let read = || async {
+        serde_json::to_value(
+            app.call(MeBootstrapGet, &[])
+                .token(&room.ada.token)
+                .send()
+                .await
+                .ok(),
+        )
+        .unwrap()
+    };
+    let before = read().await;
+    assert!(before["personal_revision"].is_object());
+    assert_eq!(
+        before["meta"]["interface_defaults"]["connection_quality"],
+        json!({
+            "recent_samples":3, "usual_samples":20, "slow_increase_percent":100, "slow_extra_ms":200
+        })
+    );
+    assert_eq!(
+        before["personal_revision"],
+        read().await["personal_revision"]
+    );
+    app.call(MeStateSet, &[&"sidebar"])
+        .token(&room.ada.token)
+        .body(&json!({"open":false}))
+        .send()
+        .await
+        .ok();
+    let after = read().await;
+    assert!(
+        after["personal_revision"]["personal"].as_i64().unwrap()
+            > before["personal_revision"]["personal"].as_i64().unwrap()
+    );
+    assert_eq!(
+        after["personal_revision"]["meta"],
+        before["personal_revision"]["meta"]
+    );
+    assert_eq!(after["state"]["sidebar"], json!({"open":false}));
+}
+
+#[tokio::test]
 async fn one_shell_answer_contains_the_same_personal_projections_as_their_reads() {
     let room = Room::new().await;
     let app = &room.world.app;
