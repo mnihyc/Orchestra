@@ -106,7 +106,9 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
             site.machine,
             &orch_link_contract::commands::SerialKey::Environment(site.environment),
             &orch_link_contract::commands::FsSnapshot {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: Some(orch_link_contract::commands::WorkReport {
+                    timeout_policy: None,
                     job_id: id,
                     phase: "measure".into(),
                     timeout_secs: 86400,
@@ -560,7 +562,10 @@ async fn a_selection_must_name_a_path_inside_the_workspace() {
     .await
     .problem();
     assert_eq!(empty.code, ErrorCode::RequestInvalid);
-    for outside in ["../x", "/etc"] {
+    for (outside, code) in [
+        ("../x", ErrorCode::NotFound),
+        ("/etc", ErrorCode::RequestInvalid),
+    ] {
         let refused = create(
             &site,
             &site.ada,
@@ -574,7 +579,7 @@ async fn a_selection_must_name_a_path_inside_the_workspace() {
         )
         .await
         .problem();
-        assert_eq!(refused.code, ErrorCode::NotFound, "{outside}");
+        assert_eq!(refused.code, code, "{outside}");
     }
     let malformed = create(
         &site,
@@ -1654,4 +1659,57 @@ async fn a_snapshot_whose_machine_is_gone_when_the_job_runs_fails_with_why() {
         snapshot(&site, &site.ada, begun.snapshot).await.ok().state,
         SnapshotState::Failed
     );
+}
+
+#[tokio::test]
+async fn an_instruction_preview_distinguishes_a_missing_source_file_from_refused_reads_and_an_empty_version()
+ {
+    let site = Site::new().await;
+    let empty = snapshot_scopes::copied(
+        &site,
+        Some(site.thread),
+        vec![("AGENTS.md".into(), Vec::new())],
+    )
+    .await;
+    let read = site
+        .app()
+        .call(SnapshotFileContentGet, &[&empty])
+        .token(&site.ada.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .header("Range", "bytes=0-1023")
+        .send_bytes()
+        .await;
+    assert_eq!(read.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(read.headers["content-range"], "bytes */0");
+    assert_eq!(
+        read.headers["etag"].to_str().unwrap(),
+        format!("\"{}\"", Hash::of(b""))
+    );
+    let absent = snapshot_scopes::copied(&site, Some(site.thread), Vec::new()).await;
+    let missing = site
+        .app()
+        .call(SnapshotFileContentGet, &[&absent])
+        .token(&site.ada.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    let problem: serde_json::Value = serde_json::from_slice(&missing.raw).unwrap();
+    assert_eq!(problem["reason"], "not_found");
+    let refused = site
+        .app()
+        .call(SnapshotFileContentGet, &[&absent])
+        .token(&site.eve.token)
+        .query(&SnapshotPathQuery {
+            path: "AGENTS.md".into(),
+        })
+        .send_bytes()
+        .await;
+    assert!(!refused.status.is_success());
+    let problem: serde_json::Value = serde_json::from_slice(&refused.raw).unwrap();
+    assert_ne!(problem["reason"], "not_found");
 }

@@ -57,7 +57,7 @@ async fn changing_a_providers_host_plans_a_move_that_carries_its_sign_ins_and_sa
     assert_eq!(same.recipe.host, None);
 
     sqlx::query(
-        "UPDATE providers SET runtime_config = runtime_config || jsonb_build_object('runtime.host_id', $2::text) WHERE id = $1",
+        "UPDATE providers SET runtime_config = runtime_config || jsonb_build_object('runtime.host_id', jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id = $1",
     )
     .bind(provider)
     .bind(elsewhere.id.to_string())
@@ -105,7 +105,7 @@ async fn changing_a_providers_host_plans_a_move_that_carries_its_sign_ins_and_sa
 
     // A host that is gone blocks the move before anything is done.
     sqlx::query(
-        "UPDATE providers SET runtime_config = runtime_config || jsonb_build_object('runtime.host_id', $2::text) WHERE id = $1",
+        "UPDATE providers SET runtime_config = runtime_config || jsonb_build_object('runtime.host_id', jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id = $1",
     )
     .bind(provider)
     .bind(orch_types::new_id().to_string())

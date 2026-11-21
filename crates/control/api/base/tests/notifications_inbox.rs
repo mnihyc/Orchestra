@@ -18,10 +18,10 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::notifications::{
     MeNotificationPrefsGet, MeNotificationPrefsSet, MeNotificationPrefsSetBody,
     MePushSubscriptionCreate, MePushSubscriptionCreateBody, MePushSubscriptionDelete,
-    MePushSubscriptionDeleteBody, MePushSubscriptionList, MePushSubscriptionRemove, Notification,
+    MePushSubscriptionDeleteBody, MePushSubscriptionList, MePushSubscriptionRemove,
     NotificationGrouping, NotificationKind, NotificationList, NotificationListQuery,
-    NotificationRead, NotificationReadBody, NotificationSummaryGet, PushSubscriptionKeys,
-    QuietHours,
+    NotificationPage, NotificationRead, NotificationReadBody, NotificationSummaryGet,
+    PushSubscriptionKeys, QuietHours,
 };
 use orch_db::queries::notifications::people::{NewNotification, announce};
 use orch_types::{Id, Time};
@@ -61,11 +61,7 @@ async fn tell(
     .id
 }
 
-async fn list(
-    world: &World,
-    by: &Who,
-    query: &NotificationListQuery,
-) -> orch_api_contract::common::Page<Notification> {
+async fn list(world: &World, by: &Who, query: &NotificationListQuery) -> NotificationPage {
     world
         .app
         .call(NotificationList, &[])
@@ -76,7 +72,7 @@ async fn list(
         .ok()
 }
 
-fn titles(page: &orch_api_contract::common::Page<Notification>) -> Vec<&str> {
+fn titles(page: &NotificationPage) -> Vec<&str> {
     page.items.iter().map(|each| each.title.as_str()).collect()
 }
 

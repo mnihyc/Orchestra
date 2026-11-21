@@ -8,6 +8,8 @@ summary: Import, review and publish skills, then choose which versions agents ma
 
 # Give agents versioned skills
 
+A skill is a set of instructions and files that agents can use, kept in versions. This page shows how to import, review and publish a skill, and how to choose which versions agents may use.
+
 ## Import a skill
 
 Open Resources → Skills → Add skill. Choose an archive, a Git repository,
