@@ -64,6 +64,7 @@ async fn copy_scene(w: &Forks, plan: &ForkPlan) -> Proof<Arc<std::sync::atomic::
             .blobs
             .put_bytes(bytes::Bytes::from(manifest.bytes))
             .await?;
+    let archive_hash = archive.hash;
     for blob in [content, archive] {
         orch_db::queries::storage::register_blob(
             &mut *w.s.rig.world.conn().await,
@@ -78,7 +79,7 @@ async fn copy_scene(w: &Forks, plan: &ForkPlan) -> Proof<Arc<std::sync::atomic::
         .handler
         .on(CommandKind::FsSnapshot, move |_| {
             Ok(CommandResult::FsSnapshot(FsSnapshotResult {
-                manifest_blob: archive.hash,
+                manifest_blob: archive_hash,
                 file_count: 1,
                 total_bytes: 9,
                 uploaded_bytes: 9,
