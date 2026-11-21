@@ -74,6 +74,7 @@ struct StoreInner {
     commands: HashMap<Id, Cmd>,
     handles: HashMap<Id, CommandHandle>,
     reports: Vec<String>,
+    report_bodies: HashMap<String, Vec<Json>>,
     online: Vec<Id>,
 }
 
@@ -199,6 +200,16 @@ impl ScriptedController {
     #[must_use]
     pub fn reports(&self) -> Vec<String> {
         lock(&self.store.inner).reports.clone()
+    }
+
+    /// Original typed measurement bodies received through the real session.
+    #[must_use]
+    pub fn report_bodies(&self, kind: &str) -> Vec<Json> {
+        lock(&self.store.inner)
+            .report_bodies
+            .get(kind)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Waits until `count` events of a stream are applied.
@@ -435,8 +446,14 @@ async fn apply(
                 }
                 store.changed.notify_waiters();
             }
-            Notice::Report(eph) => {
-                lock(&store.inner).reports.push(eph.kind);
+            Notice::Report { eph, .. } => {
+                let mut inner = lock(&store.inner);
+                inner.reports.push(eph.kind.clone());
+                inner
+                    .report_bodies
+                    .entry(eph.kind)
+                    .or_default()
+                    .push(eph.body);
                 store.changed.notify_waiters();
             }
             Notice::Online { session_id } => {

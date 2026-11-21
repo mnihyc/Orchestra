@@ -8,14 +8,19 @@ import { placeLabels } from '@/lib/placeLabel';
 afterEach(() => setLocale('en'));
 
 describe('a settings section in navigation and the title bar', () => {
-  it('uses the same names for defaults, roles and outward channels in both languages', async () => {
+  it('keeps email channels named consistently while destinations retain their own section name in both languages', async () => {
     for (const language of ['en', 'zh-CN'] as const) {
       await setLocale(language);
       const t = i18n.getFixedT(language);
       expect(sectionLabel('defaults', t)).toBe(t('day100.names.defaults'));
       expect(sectionLabel('roles', t)).toBe(t('day100.names.roles'));
-      expect(sectionLabel('channels', t)).toBe(t('day100.names.outside'));
-      expect(sectionLabel('destinations', t)).toBe(sectionLabel('channels', t));
+      const channels = sectionLabel('channels', t);
+      expect(channels).toBe(language === 'en' ? 'Email and channels' : '邮件与渠道');
+      expect(channels).toBe(t('admin.sections.email.title'));
+      expect(channels).toBe(t('choiceCatalog.adminSection.email.name'));
+      expect(settingsScreenTitle(channels, null)).toBe(channels);
+      expect(sectionLabel('destinations', t)).toBe(t('day100.names.outside'));
+      expect(sectionLabel('destinations', t)).not.toBe(channels);
       expect(sectionLabel('general', t)).toBe(t('settings.org.sectionNames.general'));
     }
   });
