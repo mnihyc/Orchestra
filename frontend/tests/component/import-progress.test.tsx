@@ -15,7 +15,7 @@ vi.mock('@/api/exports', async (original) => ({ ...await original<object>(),
   jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => calls.read(id) as Promise<unknown>, retry: false }), cancelJob: calls.cancel,
 }));
 vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), importForJob: calls.lookup }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const job: Job = { id: 'job', kind: 'import', state: 'running', result: null,
   progress: { phase: 'create', percent: 42, bytes_done: 100, bytes_total: 200, files_done: 1, files_total: 2, eta_seconds: null, rate_bps: null, message: null, phases: [] },

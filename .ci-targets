@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-engine --test turns --test failures
+test -p orch-engine --test background_stop --test background_wake
+test -p orch-engine --test source --test paste_delivery
+test -p orch-api-core --test threads_drive --test thread_continuation_queues

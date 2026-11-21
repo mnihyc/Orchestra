@@ -4,7 +4,7 @@ import type { AgentDescriptor, HarnessKindName } from '../../src/generated/api-t
 const DECLARED: Record<string, { name: string; names: Record<string, string> }> = {
   codex: { name: 'Codex', names: { 'zh-CN': 'Codex' } },
   'claude-code': { name: 'Claude Code', names: { 'zh-CN': 'Claude Code' } },
-  fake: { name: 'Example agent', names: { 'zh-CN': '示例代理' } },
+  fake: { name: 'Example agent', names: { 'zh-CN': '示例智能体' } },
   'acme-agent': { name: 'Acme agent', names: {} },
 };
 
