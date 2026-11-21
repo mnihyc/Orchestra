@@ -90,6 +90,7 @@ async fn name_target(
                 "mcp_server" => ObjectKind::McpServer,
                 "mount" => ObjectKind::Mount,
                 "skill" => ObjectKind::Skill,
+                "pool" => ObjectKind::Pool,
                 _ => {
                     return Err(ApiError::internal(
                         "the native name kind has no target identity",
@@ -327,11 +328,12 @@ async fn select_names_in(
     let mut admin_places = std::collections::HashMap::new();
     let mut participation = std::collections::HashSet::new();
     let mut partial = false;
+    let identifiers = query.id.map(|id| [id]);
     for _ in 0..NAME_BATCHES_MAX {
         let candidates = rows::names(
             conn,
             &Names {
-                identifiers: None,
+                identifiers: identifiers.as_ref().map(|ids| &ids[..]),
                 starred: query.starred.unwrap_or(false),
                 at: ctx.now,
                 user: principal.user(),

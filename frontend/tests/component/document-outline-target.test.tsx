@@ -9,7 +9,7 @@ import { bindEditorMarks, DocumentMarksProvider, retireDocumentMarks, useDocumen
 import { DocumentOutline } from '@/features/people/DocumentOutline';
 import { bindContentNavigation } from '@/features/workbench/contentNavigation';
 import { contentAddress, contentTarget, parsePageAddress } from '@/features/workbench/contentAddress';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import { allTabs, findTab, makeContainer, makeGroup, makeTab, newId, type Tab } from '@/features/workbench/layout';
 import { useWorkbench } from '@/features/workbench/store';
 import { documentWriter } from '@/realtime/stores/document';
@@ -60,9 +60,9 @@ function Inspector() {
   if (target?.kind !== 'document') return null;
   const owner = fixed ? tab.id : active;
   if (owner === null) return null;
-  return <ViewInstanceContext.Provider value={{ id: tab.id, root: createRef(), target, headingOwner: owner, content: false, focusedContent: false }}>
+  return <ViewInstanceProvider value={{ id: tab.id, root: createRef(), target, headingOwner: owner, content: false, focusedContent: false }}>
     <DocumentMarksProvider owner={owner} documentId={target.id}><DocumentOutline documentId={target.id} /></DocumentMarksProvider>
-  </ViewInstanceContext.Provider>;
+  </ViewInstanceProvider>;
 }
 function Frame({ missingSecond = false }: { missingSecond?: boolean }) { return <><Pane tab={one} /><Pane tab={two} includeHeading={!missingSecond} /><Inspector /></>; }
 const button = () => screen.getByRole('button', { name: /Rollout plan/ });

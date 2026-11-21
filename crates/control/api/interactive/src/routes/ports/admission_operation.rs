@@ -101,7 +101,13 @@ async fn require(
                 "this installation has no ports domain: use the helper, or Here",
             ));
         }
-    } else {
+    } else if value.opening.is_some()
+        || value.transport != PortTransport::Tcp
+        || !core::named_listeners(conn, principal, &value.environment)
+            .await
+            .map_err(ApiError::internal)?
+            .contains(&value.port)
+    {
         listening(ctx, &value.environment, value.port, value.transport)?;
     }
     Ok(())
