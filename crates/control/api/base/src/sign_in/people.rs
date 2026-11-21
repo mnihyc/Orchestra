@@ -42,13 +42,9 @@ use orch_db::queries::identity;
 
 use orch_db::queries::identity::UserRow;
 
-use orch_settings::Place;
+use orch_settings::merge::{Link, Rows, Stack, resolve_key};
 
-use orch_settings::Snapshot;
-
-use orch_settings::Wanted;
-
-use orch_settings_contract::registry;
+use orch_settings_contract::registry::{self, Scope};
 
 use orch_settings_contract::registry::keys;
 
@@ -108,32 +104,35 @@ pub async fn email_code_uses(
     });
     let def = registry::get(keys::AUTH_EMAIL_CODE)
         .ok_or_else(|| ApiError::internal("the setting auth.email_code is not in the registry"))?;
-    let orgs: Vec<Id> = access::memberships(conn, id)
-        .await?
-        .into_iter()
-        .map(|membership| membership.org_id)
-        .filter(|org| Some(*org) != personal)
-        .collect();
-    let places: Vec<Place> = if orgs.is_empty() {
-        vec![Place::System]
-    } else {
-        orgs.into_iter().map(Place::Node).collect()
-    };
+    // The sign-in proof and the returned account both evaluate this policy.
+    let (roots, rows) = Box::pin(access::email_code_policy(conn, id, personal)).await?;
+    let rows = Rows::new(rows);
     let mut allowed = vec![EmailCodeUse::SignIn, EmailCodeUse::SecondStep];
-    for place in places {
-        // The general settings loader also contains unrelated supplied-default futures.
-        let snapshot = match Box::pin(Snapshot::load(conn, place, Wanted::Keys(&[def]))).await {
-            Ok(snapshot) => snapshot,
-            // An org that was deleted holds nobody to it.
-            Err(orch_settings::Error::NotFound) => continue,
-            Err(error) => return Err(ApiError::internal(error)),
-        };
-        let uses: Vec<EmailCodeUse> = snapshot
-            .resolve(def)
+    let mut intersect = |chain: &[Link]| {
+        let policy = resolve_key(
+            def,
+            &Stack {
+                rows: &rows,
+                chain,
+                own: None,
+            },
+            None,
+        );
+        let uses: Vec<EmailCodeUse> = policy
             .value
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
         allowed.retain(|each| uses.contains(each));
+    };
+    if roots.is_empty() {
+        intersect(&[]);
+    } else {
+        for root in roots {
+            intersect(&[Link {
+                id: root,
+                scope: Scope::Org,
+            }]);
+        }
     }
     Ok(if confirmed { allowed } else { Vec::new() })
 }
