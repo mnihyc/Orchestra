@@ -11,7 +11,7 @@ import { World } from '../doubles/world';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ reload: vi.fn() }));
-vi.mock('@/realtime/live', () => ({ reloadThread: calls.reload }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), reloadThread: calls.reload }));
 vi.mock('@/features/access/AccessRequest', () => ({
   AccessRequest: ({ onChanged }: { onChanged: () => void }) => <button onClick={onChanged}>Access was granted</button>,
 }));

@@ -35,8 +35,6 @@ use crate::error::EngineError;
 const COMMAND_WAIT: Duration = Duration::from_secs(70);
 /// A caller joining a reservation waits in small polls, without holding a database connection.
 const JOIN_POLL: Duration = Duration::from_millis(100);
-/// Closed browsers remain in the current list for one day.
-pub const CLOSED_LIST_KEPT: Span = Span::days(1);
 /// Four independent profiles fit the default environment's memory budget.
 const DEFAULT_MAX: i64 = 4;
 /// A new browser's laptop-sized shared window.
@@ -332,6 +330,9 @@ impl Browsers {
         {
             return Ok(Some(BrowsersOff::MachinePolicy));
         }
+        if site.stopping {
+            return Ok(Some(BrowsersOff::EnvironmentStopping));
+        }
         if site.status != "running"
             || site.machine_id.is_none()
             || site.machine_online != Some(true)
@@ -419,6 +420,9 @@ impl Browsers {
         let site = rows::site(&mut conn, environment)
             .await?
             .ok_or(BrowserFailure::NotFound)?;
+        if site.stopping {
+            return Err(BrowserFailure::Off(BrowsersOff::EnvironmentStopping));
+        }
         if site.machine_online != Some(true) || site.status != "running" {
             return Err(BrowserFailure::Off(BrowsersOff::EnvironmentOffline));
         }
@@ -1350,6 +1354,23 @@ impl Browsers {
         Ok(())
     }
 
+    /// The keeper's actual idle eligibility; announced or watched work has no such timer.
+    pub fn idle_close_eligible_at(
+        row: &rows::BrowserRow,
+        watching: i64,
+        minutes: i64,
+    ) -> orch_api_contract::workspace::JobWaitTime {
+        use orch_api_contract::workspace::JobWaitTime;
+        if row.origin != "started" || row.state == "closed" || watching > 0 || minutes <= 0 {
+            return JobWaitTime::NotApplicable;
+        }
+        Span::try_minutes(minutes)
+            .and_then(|age| row.last_used_at.checked_add_signed(age))
+            .map_or(JobWaitTime::Unreported, |at| JobWaitTime::At {
+                at: Time::new(at),
+            })
+    }
+
     /// Closes browsers whose environment ended, whose gates closed, or whose configured idle time elapsed.
     pub async fn sweep(&self) -> Result<(), EngineError> {
         let mut conn = self.engine.inner.db.acquire().await?;
@@ -1361,7 +1382,8 @@ impl Browsers {
             let reason = match site.as_ref() {
                 None => Some("environment_stopped"),
                 Some(site)
-                    if site.generation != row.env_generation
+                    if site.stopping
+                        || site.generation != row.env_generation
                         || !matches!(site.status.as_str(), "running" | "offline") =>
                 {
                     Some("environment_stopped")
@@ -1382,11 +1404,8 @@ impl Browsers {
                                 > Span::from_std(COMMAND_WAIT).unwrap_or_default()
                         {
                             Some("link_lost")
-                        } else if row.origin == "started"
-                            && idle > 0
-                            && self.memory().watching(row.id) == 0
-                            && self.engine.inner.clock.now() - row.last_used_at
-                                >= Span::try_minutes(idle).unwrap_or(Span::MAX)
+                        } else if matches!(Self::idle_close_eligible_at(&row, self.memory().watching(row.id), idle),
+                            orch_api_contract::workspace::JobWaitTime::At { at } if self.engine.inner.clock.now() >= at.get())
                         {
                             Some("idle")
                         } else {
@@ -1415,12 +1434,7 @@ impl Browsers {
         let looked = self.look(environment).await?;
         let known: BTreeSet<_> = looked.browsers.iter().map(|b| b.browser_id).collect();
         let mut conn = self.engine.inner.db.acquire().await?;
-        let live = rows::list(
-            &mut conn,
-            environment,
-            self.engine.inner.clock.now() - CLOSED_LIST_KEPT,
-        )
-        .await?;
+        let live = rows::list(&mut conn, environment).await?;
         drop(conn);
         for row in live
             .into_iter()
@@ -1606,5 +1620,60 @@ mod memory_tests {
             "another environment keeps its own"
         );
         assert_eq!(memory.tabs(elsewhere), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod idle_eligibility_tests {
+    use super::*;
+    use orch_api_contract::workspace::JobWaitTime;
+    #[test]
+    fn the_keeper_only_times_owned_unwatched_browsers_and_uses_their_actual_last_activity() {
+        let at = DateTime::<Utc>::UNIX_EPOCH;
+        let mut row = BrowserRow {
+            id: Id::from_u128(1),
+            environment_id: Id::from_u128(2),
+            env_generation: 1,
+            profile: None,
+            origin: "started".into(),
+            opened_by: None,
+            thread_id: None,
+            preset: None,
+            display_id: None,
+            endpoint: String::new(),
+            program: None,
+            note: None,
+            state: "open".into(),
+            close_reason: None,
+            opened_at: at,
+            last_used_at: at,
+            closed_at: None,
+        };
+        assert_eq!(
+            Browsers::idle_close_eligible_at(&row, 0, 3),
+            JobWaitTime::At {
+                at: Time::new(at + Span::minutes(3))
+            }
+        );
+        assert_eq!(
+            Browsers::idle_close_eligible_at(&row, 1, 3),
+            JobWaitTime::NotApplicable
+        );
+        assert_eq!(
+            Browsers::idle_close_eligible_at(&row, 0, 0),
+            JobWaitTime::NotApplicable
+        );
+        row.last_used_at = at + Span::minutes(2);
+        assert_eq!(
+            Browsers::idle_close_eligible_at(&row, 0, 3),
+            JobWaitTime::At {
+                at: Time::new(at + Span::minutes(5))
+            }
+        );
+        row.origin = "announced".into();
+        assert_eq!(
+            Browsers::idle_close_eligible_at(&row, 0, 3),
+            JobWaitTime::NotApplicable
+        );
     }
 }
