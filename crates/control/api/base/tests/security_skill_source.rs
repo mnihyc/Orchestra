@@ -49,6 +49,7 @@ async fn upload(world: &World, by: &Who, bytes: &[u8]) -> Hash {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: "source.tar.gz".into(),
             media_type: None,
@@ -72,6 +73,8 @@ async fn upload(world: &World, by: &Who, bytes: &[u8]) -> Hash {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 

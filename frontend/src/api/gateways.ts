@@ -1,7 +1,7 @@
 /** Gateway metadata and source-bound reports use their existing native read authorities. */
 import { queryOptions } from '@tanstack/react-query';
-import { api, ok } from '@/api/client';
-import type { ConnectorGatewayStatus, GatewayCatalogue, GatewayCatalogueUpdateBody, GatewayCatalogueUpdated, ThreadTunnelGatewayStatus } from '@/generated/api-types';
+import { accepted, api, ok } from '@/api/client';
+import type { ConnectorGatewayStatus, GatewayCatalogue, GatewayCatalogueUpdateBody, GatewayCatalogueUpdated, ThreadTunnelGatewayStatus, MachineGatewaySetBody, MachineGatewaySetReceipt } from '@/generated/api-types';
 
 export const gatewayCatalogueKey = ['gateway-catalogue'] as const;
 export const gatewayCatalogueQuery = queryOptions({
@@ -12,6 +12,9 @@ export function updateGatewayCatalogue(body: GatewayCatalogueUpdateBody): Promis
   return ok(api.PUT('/gateways', { body }));
 }
 export const machineGatewayKey = (id: string) => ['machine-gateway', id] as const;
+export function updateMachineGateway(machineId:string,body:MachineGatewaySetBody):Promise<MachineGatewaySetReceipt> {
+  return accepted(api.PUT('/machines/{machine_id}/gateway',{params:{path:{machine_id:machineId}},body}));
+}
 export function machineGatewayQuery(machineId: string, online?: boolean) {
   return queryOptions({
     queryKey: [...machineGatewayKey(machineId), online],

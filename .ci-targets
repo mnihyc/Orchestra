@@ -1,0 +1,13 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test lifecycle --test provider_runtime --test provider_updates --test updates
+test -p orch-link-contract --lib
+test -p orch-node-core --test runtimes
+test -p orch-db --lib --test commands_in_line
+test -p orch-connector-core --lib
+test -p orch-notifier-push --lib --test push_service
+test -p orch-worker --bin orch-worker -- composition::tests::
+test -p orch-api --bin orch-api
+test -p orch-config --lib --test shipped
+web typecheck
+web lint
+web test

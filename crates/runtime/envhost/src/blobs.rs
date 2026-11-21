@@ -83,6 +83,20 @@ pub trait BlobSource: Send + Sync {
     async fn get(&self, hash: Hash, target: &mut dyn BlobWriter) -> Result<i64, BlobError>;
 }
 
+/// Receives transit content directly into the destination's resumable temporary file.
+#[async_trait]
+pub trait RelaySource: Send + Sync {
+    /// Continues at the writer's actual offset and acknowledges each written prefix.
+    async fn receive(&self, size: i64, target: &mut dyn BlobWriter) -> Result<(), BlobError>;
+}
+
+/// Sends transit content directly from the source file, with browser backpressure.
+#[async_trait]
+pub trait RelaySink: Send + Sync {
+    /// Sends exactly this ranged response, without publishing any blob in a store.
+    async fn send(&self, size: i64, source: &mut dyn BlobReader) -> Result<(), BlobError>;
+}
+
 /// Reads an open file by position; the file is opened and checked by whoever hands it over.
 #[derive(Debug, Clone)]
 pub struct FileReader {
@@ -192,10 +206,33 @@ impl BlobWriter for FileWriter {
     }
 
     async fn write(&mut self, offset: i64, bytes: Bytes) -> io::Result<()> {
+        self.write_held(offset, bytes, None).await
+    }
+
+    async fn hash(&mut self) -> io::Result<Hash> {
+        let file = Arc::clone(&self.file);
+        crate::error::blocking_io(move || hash_file(&file)).await
+    }
+
+    async fn discard(&mut self) -> io::Result<()> {
+        let file = Arc::clone(&self.file);
+        crate::error::blocking_io(move || file.set_len(0)).await
+    }
+}
+
+impl FileWriter {
+    /// Keeps a native operation's ownership through the bounded filesystem write even if its caller is dropped.
+    pub(crate) async fn write_held(
+        &mut self,
+        offset: i64,
+        bytes: Bytes,
+        held: Option<Arc<dyn Send + Sync>>,
+    ) -> io::Result<()> {
         let end = offset.saturating_add(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
         let file = Arc::clone(&self.file);
         let offset = u64::try_from(offset).map_err(|_| io::ErrorKind::InvalidInput)?;
         crate::error::blocking_io(move || {
+            let _held = held;
             let mut written = 0usize;
             while written < bytes.len() {
                 crate::error::check_cancelled().map_err(io::Error::other)?;
@@ -212,16 +249,6 @@ impl BlobWriter for FileWriter {
             transfer.advance(end);
         }
         Ok(())
-    }
-
-    async fn hash(&mut self) -> io::Result<Hash> {
-        let file = Arc::clone(&self.file);
-        crate::error::blocking_io(move || hash_file(&file)).await
-    }
-
-    async fn discard(&mut self) -> io::Result<()> {
-        let file = Arc::clone(&self.file);
-        crate::error::blocking_io(move || file.set_len(0)).await
     }
 }
 

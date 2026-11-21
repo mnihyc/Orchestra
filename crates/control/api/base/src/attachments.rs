@@ -63,7 +63,7 @@ use orch_types::Hash;
 const MEDIA_TYPE_MAX_CHARS: usize = 127;
 
 /// A file the store holds because a request brought it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Taken {
     /// The content and its size.
     pub meta: BlobMeta,
@@ -71,7 +71,29 @@ pub struct Taken {
     pub name: String,
     /// Whether the request supplied bytes rather than naming a saved reference.
     pub supplied_bytes: bool,
+    // Byte staging is not custody; keep its physical publication until the existing writer adopts it.
+    _publication: Option<orch_blob_contract::store::Stored>,
 }
+impl Taken {
+    /// Describes bytes protected by the caller's request or an independently retained source.
+    pub fn protected(meta: BlobMeta, name: String, supplied_bytes: bool) -> Self {
+        Self {
+            meta,
+            name,
+            supplied_bytes,
+            _publication: None,
+        }
+    }
+}
+
+impl PartialEq for Taken {
+    fn eq(&self, other: &Self) -> bool {
+        self.meta == other.meta
+            && self.name == other.name
+            && self.supplied_bytes == other.supplied_bytes
+    }
+}
+impl Eq for Taken {}
 
 /// Why a file was not taken.
 #[derive(Debug)]
@@ -135,18 +157,18 @@ impl Staged {
     /// Inspect a native reference only after its ordinary/key source boundary admitted it.
     /// This performs no custody, registration or pin write and must not run in retryable preparation.
     pub async fn measure(&self, ctx: &Ctx, place_limit: i64) -> Result<Taken, Refused> {
-        let meta = match &self.input {
-            StagedInput::Supplied(taken) => taken.meta,
+        let (meta, publication) = match &self.input {
+            StagedInput::Supplied(taken) => (taken.meta, taken._publication.clone()),
             StagedInput::Reference { hash, .. } => {
-                let size = ctx
+                let existing = ctx
                     .app
                     .blobs
                     .store()
-                    .size(hash)
+                    .existing(hash)
                     .await
                     .map_err(ApiError::internal)?
                     .ok_or_else(ApiError::not_found)?;
-                BlobMeta { hash: *hash, size }
+                (existing.meta, Some(existing))
             }
         };
         if meta.size > place_limit {
@@ -156,6 +178,7 @@ impl Staged {
             });
         }
         Ok(Taken {
+            _publication: publication,
             meta,
             name: self.name().to_owned(),
             supplied_bytes: self.supplied_bytes(),
@@ -212,7 +235,8 @@ pub async fn stage(
         {
             Ok(meta) => Ok(Staged {
                 input: StagedInput::Supplied(Taken {
-                    meta,
+                    meta: meta.meta,
+                    _publication: Some(meta),
                     name,
                     supplied_bytes: true,
                 }),
@@ -377,7 +401,7 @@ async fn finish_retention(
 ) -> ApiResult<()> {
     ctx.app
         .blobs
-        .register(conn, taken.meta, principal.now().get())
+        .register(conn, &taken.meta, principal.now().get())
         .await?;
     references::remember(
         conn,

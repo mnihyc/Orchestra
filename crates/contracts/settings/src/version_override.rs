@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use orch_types::{Id, Time};
+use orch_agent_programs::confirmation::Confirmation;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -14,10 +14,9 @@ pub struct VersionOverride {
     pub path: String,
     /// The program version the machine reported, or `unknown`.
     pub version: String,
-    /// The manager who allowed it.
-    pub by: Id,
-    /// When the manager allowed it.
-    pub at: Time,
+    /// The manager and moment of this exact path/version decision.
+    #[serde(flatten)]
+    pub confirmation: Confirmation,
 }
 
 /// The environment's per-harness decisions.
@@ -59,8 +58,10 @@ mod tests {
         VersionOverride {
             path: path.into(),
             version: version.into(),
-            by: Id::nil(),
-            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+            confirmation: Confirmation {
+                by: orch_types::Id::nil(),
+                at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+            },
         }
     }
 
