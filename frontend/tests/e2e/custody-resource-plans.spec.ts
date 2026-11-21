@@ -9,7 +9,7 @@ import {replySent,scenario,signIn} from './support';
 function impact(source:Fixture):ResourceImpact {
   const visible=[{object:{kind:'thread' as const,id:'019a0000-0000-7000-8000-000000000042'},name:'Repair redirects',relation:'binding' as const,until:null}];
   const empty={count:0,threads:0,visible:[],hidden:0,since:null};
-  return {target:source.target,name:source.name,stopping:false,
+  return {target:source.target,name:source.name,stopping:false,applications:[],application_complete:true,
     facts:{subject:{kind:'resource',object:source.target.object},as_of:'2026-10-28T00:00:00Z',dependents:[{relation:'binding',count:5,visible,hidden:4,until:null}],dependents_complete:true,uses:null},
     activity:{running:{count:2,threads:2,visible,hidden:1,since:null},waiting:empty,stopped:empty}};
 }
