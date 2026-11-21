@@ -39,13 +39,44 @@ struct Fixture {
     workspace: FsSnapshotResult,
     home: FsSnapshotResult,
     recorded: FsSnapshotResult,
+    /// What the scripted machine uploaded when it answered a snapshot: every file and every list, with its bytes.
+    uploaded: Vec<(Hash, Vec<u8>)>,
     _directory: tempfile::TempDir,
     _store: Arc<LocalBlobStore>,
+}
+
+impl Fixture {
+    /// The scripted machine uploads again what the server no longer holds, as a machine does when it is asked
+    /// for a list or a snapshot once more: a move that ended let go of its content and the store removed it.
+    async fn upload_again(&self) {
+        let mut conn = self.world.pool.acquire().await.unwrap();
+        for (hash, bytes) in &self.uploaded {
+            if !self._store.exists(hash).await.unwrap() {
+                self._store
+                    .put(
+                        hash,
+                        Some(i64::try_from(bytes.len()).unwrap()),
+                        stream_of(vec![bytes::Bytes::copy_from_slice(bytes)]),
+                    )
+                    .await
+                    .unwrap();
+            }
+            storage::register_blob(
+                &mut conn,
+                hash,
+                i64::try_from(bytes.len()).unwrap(),
+                self.world.clock.now(),
+            )
+            .await
+            .unwrap();
+        }
+    }
 }
 
 async fn snapshot(
     world: &World,
     store: &LocalBlobStore,
+    uploaded: &mut Vec<(Hash, Vec<u8>)>,
     path: &str,
     bytes: &[u8],
 ) -> FsSnapshotResult {
@@ -86,6 +117,8 @@ async fn snapshot(
     )
     .await
     .unwrap();
+    uploaded.push((hash, bytes.to_vec()));
+    uploaded.push((written.hash, written.bytes.clone()));
     let kept = world
         .engine()
         .put_manifest(&mut conn, written.bytes)
@@ -157,9 +190,24 @@ async fn fixture(borrowed: bool) -> Fixture {
             .unwrap(),
     );
     world.engine().attach_blobs(store.clone());
-    let workspace = snapshot(&world, &store, "src/kept.bin", b"workspace\0\xff").await;
-    let home = snapshot(&world, &store, "config/kept", b"home bytes").await;
-    let recorded = snapshot(&world, &store, "git/objects/ab/kept", b"recorded\0\xff").await;
+    let mut uploaded = Vec::new();
+    let workspace = snapshot(
+        &world,
+        &store,
+        &mut uploaded,
+        "src/kept.bin",
+        b"workspace\0\xff",
+    )
+    .await;
+    let home = snapshot(&world, &store, &mut uploaded, "config/kept", b"home bytes").await;
+    let recorded = snapshot(
+        &world,
+        &store,
+        &mut uploaded,
+        "git/objects/ab/kept",
+        b"recorded\0\xff",
+    )
+    .await;
     world.machine.handler.on(CommandKind::FsManifest, move |_| {
         Ok(CommandResult::FsManifest(FsManifestResult {
             manifest_blob: workspace.manifest_blob,
@@ -285,6 +333,7 @@ async fn fixture(borrowed: bool) -> Fixture {
         workspace,
         home,
         recorded,
+        uploaded,
         _directory: directory,
         _store: store,
     }
@@ -414,6 +463,69 @@ async fn owned_directory_move(root_alias: bool) {
             .count(),
         2
     );
+    // What the move carried through the server was the move's own: held while it ran, never a cached
+    // version of a file, and removed with the move, not left to the grace of ordinary content.
+    let carried = [
+        b"workspace\0\xff".as_slice(),
+        b"home bytes".as_slice(),
+        b"recorded\0\xff".as_slice(),
+    ];
+    common::eventually(
+        "the content of the move is released and removed from the server",
+        || async {
+            let mut conn = f.world.pool.acquire().await.unwrap();
+            for bytes in carried {
+                let hash = Hash::of(bytes);
+                if storage::blob(&mut conn, &hash).await.unwrap().is_some()
+                    || f._store.exists(&hash).await.unwrap()
+                {
+                    return false;
+                }
+            }
+            true
+        },
+    )
+    .await;
+    let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM file_cache WHERE environment_id=$1")
+        .bind(f.world.environment)
+        .fetch_one(f.world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(cached, 0, "a move records no cached version of a file");
+    f.world.engine().stop();
+}
+
+#[tokio::test]
+async fn a_move_in_a_place_that_chose_to_cache_leaves_its_content_to_the_grace() {
+    let f = fixture(false).await;
+    f.world
+        .set_system("storage.relay_transfers", json!(false))
+        .await;
+    let job = queue(&f).await;
+    assert_job_state(&f.world, job.id, "succeeded").await;
+    common::eventually("the move's pins are released", || async {
+        let mut conn = f.world.pool.acquire().await.unwrap();
+        orch_db::queries::jobs::job(&mut conn, job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .plan["move_pins_released"]
+            == true
+    })
+    .await;
+    let mut conn = f.world.pool.acquire().await.unwrap();
+    for bytes in [b"workspace\0\xff".as_slice(), b"home bytes".as_slice()] {
+        let hash = Hash::of(bytes);
+        assert_eq!(
+            storage::blob(&mut conn, &hash)
+                .await
+                .unwrap()
+                .expect("a place that caches keeps what the move brought for its grace")
+                .pin_count,
+            0
+        );
+        assert!(f._store.exists(&hash).await.unwrap());
+    }
     f.world.engine().stop();
 }
 
@@ -641,6 +753,9 @@ async fn a_destination_policy_changed_during_copy_rolls_back_without_publishing_
         .unwrap();
     sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy,environment.remote_write}','true') WHERE id=$1")
         .bind(f.target.id).execute(f.world.pool.pool()).await.unwrap();
+    // The first move let go of what it carried and the store removed it; the machine, asked for its list again,
+    // uploads it again.
+    f.upload_again().await;
     let next = hosting::ready_machine_move(
         &f.world,
         &principal(&f.world).await,
@@ -1108,4 +1223,85 @@ async fn directory_move_choices_carry_the_actual_native_machine_availability_wit
         choice.grouping.availability[0].reason,
         Some(choice.reasons.join(" · "))
     );
+}
+
+#[tokio::test]
+async fn the_end_of_a_job_lets_go_of_what_its_commands_held_and_removes_what_nothing_else_holds() {
+    let world = World::new().await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        LocalBlobStore::open(directory.path().join("blobs"))
+            .await
+            .unwrap(),
+    );
+    world.engine().attach_blobs(store.clone());
+    let (alone, shared) = (
+        Hash::of(b"what only the transfer holds"),
+        Hash::of(b"what a snapshot holds as well"),
+    );
+    let mut conn = world.pool.acquire().await.unwrap();
+    for (hash, bytes) in [
+        (alone, b"what only the transfer holds".as_slice()),
+        (shared, b"what a snapshot holds as well".as_slice()),
+    ] {
+        store
+            .put(
+                &hash,
+                Some(i64::try_from(bytes.len()).unwrap()),
+                stream_of(vec![bytes::Bytes::copy_from_slice(bytes)]),
+            )
+            .await
+            .unwrap();
+        storage::register_blob(
+            &mut conn,
+            &hash,
+            i64::try_from(bytes.len()).unwrap(),
+            world.clock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    // A snapshot holds one of them for its own reasons.
+    storage::pin_blobs(&mut conn, &[shared]).await.unwrap();
+    let (job, command) = (orch_types::new_id(), orch_types::new_id());
+    storage::pin_for_command(
+        &mut conn,
+        command,
+        Some(job),
+        &[alone, shared],
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+
+    world.engine().release_command_pins(job).await.unwrap();
+
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        storage::blob(&mut conn, &alone).await.unwrap().is_none(),
+        "what nothing else holds goes with the job"
+    );
+    assert!(!store.exists(&alone).await.unwrap());
+    assert_eq!(
+        storage::blob(&mut conn, &shared)
+            .await
+            .unwrap()
+            .unwrap()
+            .pin_count,
+        1,
+        "what a snapshot holds stays, with the snapshot's pin alone"
+    );
+    assert!(store.exists(&shared).await.unwrap());
+    world.engine().release_command_pins(job).await.unwrap();
+    assert_eq!(
+        storage::blob(&mut conn, &shared)
+            .await
+            .unwrap()
+            .unwrap()
+            .pin_count,
+        1,
+        "a second end takes nothing more"
+    );
+    world.engine().stop();
 }

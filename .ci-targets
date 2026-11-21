@@ -1,0 +1,7 @@
+test -p orch-api-core --test harness_checks --test connected_program_versions --test threads_settings
+test -p orch-engine --test approval_review
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+web typecheck
+web lint
+web test
