@@ -544,6 +544,9 @@ pub struct PageCovers {
 /// the caller may change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PermissionPage {
+    /// Current caller file reach and its native machine bound, on an environment only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_reach: Option<orch_access_contract::permissions::FileReachFacts>,
     /// What the page is of.
     pub object: ObjectRef,
     /// Whether it is a thing's page or a defaults page.
@@ -747,9 +750,20 @@ pub struct OwnerReadDisclosure {
     pub confirmation: String,
 }
 
+/// Informed Host Use on the host originally installed with the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServerHostUseDisclosure {
+    /// Protected server hosts gaining or changing a native grant; no identities or names are included.
+    pub hosts: i64,
+    /// Acknowledgement of this exact intent and current native grant set; not an access grant.
+    pub confirmation: String,
+}
+
 /// The effect a change would have, worked out before it is made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PagePreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_host_use: Option<ServerHostUseDisclosure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_reads: Option<OwnerReadDisclosure>,
     /// How many pages it reaches; one for a live page.
@@ -1216,6 +1230,9 @@ pub struct ResourceAccess {
 /// The least of a provider's models and efforts that would do, and where the work was to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AccessOptions {
+    /// The work this request needs the provider for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<orch_access_contract::permissions::ProviderUsePurpose>>,
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,

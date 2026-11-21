@@ -487,6 +487,7 @@ async fn prepare_seeds(
                     | "mcp_server"
                     | "mount"
                     | "skill"
+                    | "pool"
             )
         })
         .map(|seed| seed.id)

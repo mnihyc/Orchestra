@@ -373,7 +373,7 @@ mod tests {
         let request = json!({
             "token": token, "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----…",
             "name": "alice-laptop", "platform": { "os": "linux", "arch": "x86_64" },
-            "connector_version": "0.1.0", "protocol_versions": [1], "roles": ["agent", "environment"]
+            "connector_version": "0.1.0", "protocol_versions": [crate::version::PROTOCOL_VERSION], "roles": ["agent", "environment"]
         });
         let read: EnrollRequest = serde_json::from_value(request.clone()).unwrap();
         assert_eq!(serde_json::to_value(&read).unwrap(), request);
@@ -383,7 +383,7 @@ mod tests {
             "endpoints": [ { "url": "wss://gw.orch.internal:9443", "trust": "pinned" },
                            { "url": "wss://orch.example.com/link", "trust": "public" } ],
             "system": { "name": "Orch", "public_url": "https://orch.example.com" },
-            "protocol_version": 1
+            "protocol_version": crate::version::PROTOCOL_VERSION
         });
         let read: EnrollReply = serde_json::from_value(reply.clone()).unwrap();
         assert_eq!(read.endpoints, endpoints());
