@@ -29,10 +29,10 @@ import type {
 export const environmentsKey = ['environments'] as const;
 export const environmentKey = (id: string) => ['environment', id] as const;
 export const environmentSettingsKey = (id: string) => ['environment-settings', id] as const;
-export const environmentMcpKey = (id: string) => ['environment-mcp', id] as const;
+export const environmentMcpKey = (id: string, threadId?: string) => threadId === undefined ? ['environment-mcp', id] as const : ['environment-mcp', id, threadId] as const;
 
 /** Current hosted server states and masked failures. */
-export const environmentMcpQuery = (id: string) => queryOptions({ queryKey: environmentMcpKey(id), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
+export const environmentMcpQuery = (id: string, threadId?: string) => queryOptions({ queryKey: environmentMcpKey(id, threadId), queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id }, query: threadId === undefined ? {} : { thread_id: threadId } }, signal })) });
 
 /** Import and optional enablement are one producer, including an accepted restricted receipt. */
 export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImportCreateBody, key: string) {
@@ -45,6 +45,10 @@ export async function importEnvironmentMcp(id: string, body: EnvironmentMcpImpor
 export function restartEnvironmentMcpServer(id: string, name: string): Promise<Job> {
   return ok(api.POST('/environments/{id}/mcp/servers/{name}/restart', { params: { path: { id, name } } }));
 }
+
+/** The facts of an environment's MCP reply, such as when a change reaches a thread at work: one read,
+ * whatever the size of its catalogue. An MCP change refreshes it with the environment's other MCP reads. */
+export const environmentMcpFactsQuery = (id: string) => queryOptions({ queryKey: [...environmentMcpKey(id), 'facts'], queryFn: ({ signal }): Promise<EnvironmentMcp> => ok(api.GET('/environments/{id}/mcp', { params: { path: { id } }, signal })) });
 
 /** The environments the caller may use or manage; for an org, those whose home lies in it. */
 export const environmentsQuery = (orgId: string | null) =>

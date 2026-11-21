@@ -1,0 +1,5 @@
+test -p orch-config --lib --test shipped
+web typecheck
+web lint
+web test
+web-e2e --project=chromium --workers=1 --retries=0 tests/e2e/everything.spec.ts tests/e2e/summary-options.spec.ts tests/e2e/navigation-review.spec.ts

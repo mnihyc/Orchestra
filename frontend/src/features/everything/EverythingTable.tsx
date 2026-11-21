@@ -1,8 +1,9 @@
 /** A lazily read tree grid: safe paths, aligned optional columns, a sticky header and the tree's keyboard. */
+import { PathLink } from '@/shell/TrailLink';
 import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
 import { useInfiniteQuery } from '@tanstack/react-query';
-import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
+import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, Layers3, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
 import { createContext, Fragment, type CSSProperties, type KeyboardEvent, memo, type ReactNode, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,7 +19,6 @@ import { useListingRetired, useRecentUpdates } from '@/features/navigation/useRe
 import { useViewShown } from '@/features/workbench/viewOpening';
 import type { EverythingRow, UserRef } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
-import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
 import { ByteSize } from '@/ui/ByteSize';
 import { ContextMenu } from '@/ui/ContextMenu';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -35,7 +35,7 @@ import { copyText } from '@/ui/clipboard';
 import './everything-rows.css';
 
 /** Desktop cells share the row-height token; narrow rows grow to show their labelled details. */
-const CELL = 'min-w-0 px-3 py-2 text-start align-middle text-sm wrap-anywhere text-text-muted sm:h-(--table-row-height) sm:border-b sm:border-border sm:py-1 sm:wrap-normal sm:whitespace-nowrap';
+const CELL = 'min-w-0 px-3 py-2 text-start align-middle text-sm wrap-anywhere text-text-muted group-data-[wide]/inventory:h-(--table-row-height) group-data-[wide]/inventory:border-b group-data-[wide]/inventory:border-border group-data-[wide]/inventory:py-1 group-data-[wide]/inventory:wrap-normal group-data-[wide]/inventory:whitespace-nowrap';
 const ICON_CLASS = 'size-4 shrink-0 text-text-subtle';
 // Keep the existing minimum scrolling width; actual Name sizing follows its content.
 const MIN_NAME_SHARE = 0.23;
@@ -44,7 +44,7 @@ const PLACE_MIN_REM = 5;
 const ACTION_REM = 2.5;
 const CHOICE_REM = 2;
 const COLUMN_REM: Record<Exclude<Column, 'name' | 'where'>, number> = {
-  admin_access: 5, kind: 7, owner: 10, created: 7.5, created_by: 10, last_activity: 7.5,
+  kind: 7, owner: 10, created: 7.5, created_by: 10, last_activity: 7.5,
   state: 5, size: 7, my_access: 8, tags: 12, opened: 7.5, activity_by: 7.5,
 };
 const RESOURCE_ICONS = new Map<string, ReactNode>(Object.entries({
@@ -56,6 +56,7 @@ const RESOURCE_ICONS = new Map<string, ReactNode>(Object.entries({
   machine: <Server className={ICON_CLASS} aria-hidden />,
   mount: <HardDrive className={ICON_CLASS} aria-hidden />,
   template: <LayoutTemplate className={ICON_CLASS} aria-hidden />,
+  pool: <Layers3 className={ICON_CLASS} aria-hidden />,
   skill: <GraduationCap className={ICON_CLASS} aria-hidden />,
   chat: <MessageSquare className={ICON_CLASS} aria-hidden />,
   group: <FolderTree className={ICON_CLASS} aria-hidden />,
@@ -112,7 +113,6 @@ function Cell({ column, row, onOwner }: { column: Column; row: EverythingRow; on
   if (row.kind === 'group' || (row.my_access === 'path_only' && column !== 'kind' && column !== 'my_access')) return null;
   switch (column) {
     case 'name': return null;
-    case 'admin_access': return <AsAdminMark of={adminAccessOf(row)?.place} responsive />;
     case 'kind': return t(`everything.kinds.${row.kind}`, { defaultValue: t('everything.unknownKind') });
     case 'owner': return row.owner === null ? '—' : <span className="inline-flex items-center gap-1"><UserChip user={row.owner} thing={{ kind: row.kind, id: row.id }} />{onOwner !== undefined && <IconButton size="sm" label={t('everything.onlyOwner', { name: row.owner.display_name })} icon={<Filter aria-hidden />} onClick={() => row.owner !== null && onOwner(row.owner)} />}</span>;
     case 'created_by': return row.created_by === null ? '—' : <UserChip user={row.created_by} thing={{ kind: row.kind, id: row.id }} />;
@@ -199,34 +199,33 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
     <ContextMenu label={t('everything.actions', { name })} entries={actions}><tr ref={(element) => { rowRef.current = element; tree.rememberRow(key, element === null ? null : row); }} role="row" data-everything-row={key} data-parent-key={parentKey ?? ''} aria-level={depth + 1} aria-expanded={expandable ? open : undefined}
       aria-selected={tree.selection === undefined ? undefined : tree.selection.selected.has(key)}
       tabIndex={tree.active === key || (tree.active === null && first) ? 0 : -1} onFocus={() => tree.focus(key)} onKeyDown={press}
-      className={`focus-inset ${flat ? 'everything-flat-row' : 'grid grid-cols-2 border-b border-border py-2'} hover:bg-bg-muted sm:table-row sm:border-0 sm:py-0 ${stale ? 'opacity-60' : ''}`} data-selecting={tree.selection !== undefined || undefined}>
-      {tree.selection !== undefined && <td role="gridcell" className={`${CELL} ${flat ? 'flat-choice' : 'col-start-1 row-start-1 z-(--layer-sticky) w-fit justify-self-start sm:w-auto'}`}>
+      className={`focus-inset ${flat ? 'everything-flat-row' : 'everything-tree-row grid grid-cols-2 border-b border-border py-2'} hover:bg-bg-muted group-data-[wide]/inventory:table-row group-data-[wide]/inventory:border-0 group-data-[wide]/inventory:py-0 ${stale ? 'opacity-60' : ''}`} data-selecting={tree.selection !== undefined || undefined}>
+      {tree.selection !== undefined && <td role="gridcell" className={`${CELL} ${flat ? 'flat-choice' : 'col-start-1 row-start-1 z-(--layer-sticky) w-fit justify-self-start group-data-[wide]/inventory:w-auto'}`}>
         {shareableRow(row) && <Checkbox presentation="compact" label={<span className="sr-only">{t('everything.selectNamed', { name: label })}</span>} checked={tree.selection.selected.has(key)} onCheckedChange={(selected) => tree.selection?.toggle(row, selected)} />}
       </td>}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
-        <span className={`flex min-w-0 items-start gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
+      <td role="gridcell" data-inventory-name className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] group-data-[wide]/inventory:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: `min(25%, calc(var(--spacing-4) * ${depth} + var(--spacing-2)))` }}>
+        <span className={`flex min-w-0 items-start gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 group-data-[wide]/inventory:pl-0' : ''}`}>
           {!flat && (expandable ? <IconButton size="sm" label={t(open ? 'everything.collapse' : 'everything.expand', { name: label })} icon={open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />} aria-expanded={open} onClick={() => tree.toggle(key, !open)} /> : <span className="size-(--control-sm) shrink-0" aria-hidden />)}
           <span className="flex h-(--control-sm) shrink-0 items-center"><KindIcon row={row} activity={!flat || !tree.columns.includes('state')} /></span>
-          <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere sm:min-w-[12ch] sm:wrap-normal'}`}>
-            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
+          <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere group-data-[wide]/inventory:min-w-[12ch] group-data-[wide]/inventory:wrap-normal'}`}>
+            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <PathLink data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</PathLink>}
             {row.place_label !== null && !tree.columns.includes('where') && <RowPlace value={place} />}
           </span>
           {!pathOnly && (row.kind === 'org' || row.kind === 'project' || row.kind === 'topic') && <ContainedThreadStateIcon id={row.id} />}
-          {!tree.columns.includes('admin_access') && <AsAdminMark of={adminAccessOf(row)?.place} responsive />}
           {pathOnly && !tree.columns.includes('my_access') && <span className="flex shrink-0 items-center gap-1 text-xs text-text-subtle"><LockKeyhole className="size-4" aria-hidden />{t('everything.access.path_only')}</span>}
         </span>
       </td>
       {flat && recent === 'opened' && actor !== null && <td role="gridcell" className={`${CELL} flat-by flat-phone-by`}><span className="text-xs text-text-subtle">{t('everything.columns.activity_by')}</span><UserChip className="max-w-full" user={actor} {...(row.kind === 'group' || pathOnly ? {} : { thing: { kind: row.kind, id: row.id } })} /></td>}
-      {tree.columns.filter((column) => column !== 'name').map((column) => <td role="gridcell" key={column} data-column={column} className={`${CELL} ${flat ? column === 'where' ? 'flat-place' : column === timeColumn ? 'flat-time' : column === 'activity_by' ? 'flat-by' : column === 'state' ? 'flat-state' : tree.extraColumns.includes(column) ? 'flat-extra' : 'flat-secondary' : row.kind === 'group' || pathOnly && column !== 'kind' && column !== 'my_access' ? 'hidden sm:table-cell' : 'block sm:table-cell'}`} data-empty={(column === 'activity_by' && actor === null) || (column === 'state' && state === null) || undefined}>
+      {tree.columns.filter((column) => column !== 'name').map((column) => <td role="gridcell" key={column} data-column={column} className={`${CELL} ${flat ? column === 'where' ? 'flat-place' : column === timeColumn ? 'flat-time' : column === 'activity_by' ? 'flat-by' : column === 'state' ? 'flat-state' : tree.extraColumns.includes(column) ? 'flat-extra' : 'flat-secondary' : row.kind === 'group' || pathOnly && column !== 'kind' && column !== 'my_access' ? 'hidden group-data-[wide]/inventory:table-cell' : 'block group-data-[wide]/inventory:table-cell'}`} data-empty={(column === 'activity_by' && actor === null) || (column === 'state' && state === null) || undefined}>
         {row.kind !== 'group' && (!pathOnly || column === 'kind' || column === 'my_access') && <>
-          <span className={`${flat ? 'flat-field-label' : 'mb-1 block'} text-xs text-text-subtle sm:hidden`}>{t(`everything.columns.${column}`)}</span>
+          <span className={`${flat ? 'flat-field-label' : 'mb-1 block'} text-xs text-text-subtle group-data-[wide]/inventory:hidden`}>{t(`everything.columns.${column}`)}</span>
           {flat && column === 'where' ? <><span data-mobile-place><RowPlace value={place} /></span><span data-desktop-place className="min-w-0"><Cell column={column} row={row} onOwner={tree.onOwner} /></span></>
             : flat && (column === 'opened' || column === 'last_activity' || column === 'created') ? <RecordedTime column={column} row={row} />
-              : flat && column === 'state' ? state ?? <span className="hidden sm:inline">—</span>
+              : flat && column === 'state' ? state ?? <span className="hidden group-data-[wide]/inventory:inline">—</span>
                 : <Cell column={column} row={row} onOwner={tree.onOwner} />}
         </>}
       </td>)}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 self-start justify-self-end sm:table-cell'}`} style={flat ? undefined : { verticalAlign: 'top' }}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 self-start justify-self-end group-data-[wide]/inventory:table-cell'}`} style={flat ? undefined : { verticalAlign: 'top' }}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
     </tr></ContextMenu>
     {open && <Level parent={row.id} parentKey={key} depth={depth + 1} />}
   </>;
@@ -254,7 +253,7 @@ function Level({ parent, parentKey, depth }: { parent: string | null; parentKey:
   }, [shown, tree.all, hasNextPage, isFetching, isError, fetchNextPage]);
   const span = tree.columns.length + 1 + (tree.selection === undefined ? 0 : 1);
   if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows read={level} rows={3} /></td></tr>;
-  const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
+  const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><PathLink href="/everything">{t('everything.openMine')}</PathLink></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
   if (level.isError && (rows.length === 0 || retired)) return failure;
   if (rows.length === 0) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t(tree.filter.q !== '' ? 'everything.noMatches' : filtering ? 'everything.noResults' : 'everything.empty')}</td></tr>;
   return <>
@@ -306,20 +305,36 @@ export function EverythingTable({ reader, filter, columns, extraColumns = [], pa
     ...columns.map((column) => column === 'name' ? 'minmax(0, max-content)' : column === 'where' ? `minmax(${PLACE_MIN_REM}rem, 1fr)` : `${COLUMN_REM[column]}rem`),
     `${ACTION_REM}rem`,
   ].join(' ');
-  const size = { '--recent-min-width': `${(fixedRem + PLACE_MIN_REM) / (1 - MIN_NAME_SHARE)}rem`, '--recent-columns': tracks } as CSSProperties;
+  const table = useRef<HTMLTableElement>(null);
+  const requiredRem = recent ? (fixedRem + PLACE_MIN_REM) / (1 - MIN_NAME_SHARE) : fixedRem + 16;
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const viewport = table.current?.closest<HTMLElement>('[data-scroll-allow="table"]');
+    if (!viewport) return;
+    const fit = (width: number) => {
+      const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      setWide(width >= requiredRem * rem);
+    };
+    fit(viewport.clientWidth);
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => { if (entry) fit(entry.contentRect.width); });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [requiredRem]);
+  const size = { '--recent-columns': tracks } as CSSProperties;
   return <Tree.Provider value={{ reader, filter, columns, extraColumns, all: expansion === 'all', opened, closed, toggle, active, focus, onOwner, selection: selecting, rememberRow }}>
-    <table role="treegrid" aria-label={t('everything.tree')} className={`block w-full border-separate border-spacing-0 sm:table ${recent ? 'everything-recent-table' : ''}`} style={recent ? size : undefined}>
-      {selecting !== undefined && <caption className="block px-3 py-2 text-left sm:hidden"><Button size="sm" variant="ghost" onClick={() => selecting.all([...displayed.current.values()].filter(shareableRow))}>{t('everything.selectAll')}</Button></caption>}
-      <thead className="sticky top-0 z-(--layer-sticky) hidden bg-surface sm:table-header-group"><tr role="row">
+    <table ref={table} data-wide={wide || undefined} data-table-layout={wide ? 'wide' : 'compact'} role="treegrid" aria-label={t('everything.tree')} className={`everything-table group/inventory w-full max-w-full border-separate border-spacing-0 ${wide ? 'table table-fixed' : 'block'} ${recent ? 'everything-recent-table' : ''}`} style={recent ? size : undefined}>
+      {selecting !== undefined && <caption className="block px-3 py-2 text-left group-data-[wide]/inventory:hidden"><Button size="sm" variant="ghost" onClick={() => selecting.all([...displayed.current.values()].filter(shareableRow))}>{t('everything.selectAll')}</Button></caption>}
+      <thead className="sticky top-0 z-(--layer-sticky) hidden bg-surface group-data-[wide]/inventory:table-header-group"><tr role="row">
         {selecting !== undefined && <th role="columnheader" scope="col" className={CELL}><Button size="sm" variant="ghost" onClick={() => selecting.all([...displayed.current.values()].filter(shareableRow))}>{t('navigation.recentAll')}</Button></th>}
-        {columns.map((column) => <th role="columnheader" key={column} scope="col" className={CELL} aria-sort={column !== 'admin_access' && filter.sort === COLUMN_SORT[column] ? (filter.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
-          {column === 'admin_access' ? <span>{t('adminReach.mode.name')}</span> : <button type="button" title={column === 'size' ? t('everything.sizeHint') : undefined} onClick={() => onSort(column)} className="flex items-center gap-2 rounded-md font-medium text-text whitespace-nowrap">
+        {columns.map((column) => <th role="columnheader" key={column} scope="col" className={CELL} aria-sort={filter.sort === COLUMN_SORT[column] ? (filter.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+          <button type="button" title={column === 'size' ? t('everything.sizeHint') : undefined} onClick={() => onSort(column)} className="flex items-center gap-2 rounded-md font-medium text-text whitespace-nowrap">
             {t(filter.recent === 'active' && column === 'last_activity' ? 'navigation.recentOrder.active' : `everything.columns.${column}`)}{filter.sort === COLUMN_SORT[column] && (filter.direction === 'asc' ? <ArrowUp className="size-4" aria-hidden /> : <ArrowDown className="size-4" aria-hidden />)}
-          </button>}
+          </button>
         </th>)}
         <th role="columnheader" scope="col" className={CELL}><span className="sr-only">{t('everything.rowActions')}</span></th>
       </tr></thead>
-      <tbody className="block sm:table-row-group"><Level parent={parent} parentKey={null} depth={0} /></tbody>
+      <tbody className="block group-data-[wide]/inventory:table-row-group"><Level parent={parent} parentKey={null} depth={0} /></tbody>
     </table>
   </Tree.Provider>;
 }

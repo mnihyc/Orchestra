@@ -58,6 +58,7 @@ use orch_api_contract::admin::StorageEnvironment;
 use orch_api_contract::admin::StorageStats;
 
 use orch_api_contract::admin::SystemComponent;
+use orch_api_contract::admin::SystemComponentIssue;
 
 use orch_api_contract::admin::SystemComponentName;
 
@@ -141,6 +142,15 @@ pub fn mount(registry: &mut Registry) {
     let _ = MOUNTED.set(Instant::now());
     registry
         .on(AdminSystemGet, system)
+        .on(
+            orch_api_contract::admin::AdminBundledNodeEnrollmentGet,
+            bundled_enrollment,
+        )
+        .on_with_operation(
+            orch_api_contract::admin::AdminBundledNodeEnrollmentRetry,
+            crate::key_operations::direct::declared,
+            retry_bundled_enrollment,
+        )
         .on(orch_api_contract::admin::AdminReleaseCheck, check_release)
         .on(
             orch_api_contract::admin::AdminInstallationRecordsGet,
@@ -154,6 +164,26 @@ pub fn mount(registry: &mut Registry) {
         .on(AdminPkiGet, pki)
         .on_raw(PkiCaGet, authority)
         .on_raw(OpenapiGet, openapi);
+}
+
+async fn bundled_enrollment(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<Option<orch_api_contract::admin::BundledNodeEnrollment>> {
+    let (tx, guard) = super::action(&ctx).await?;
+    let status = ctx.app.link.certificates().bundled_node_enrollment();
+    guard.check_deadline(&ctx)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(status)
+}
+
+async fn retry_bundled_enrollment(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let (tx, guard) = super::action(&ctx).await?;
+    guard.check_deadline(&ctx)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    ctx.app.link.certificates().retry_bundled_enrollment();
+    Ok(())
 }
 
 /// How one part fares, from the row it reports and what its kind of part can say for itself.
@@ -175,6 +205,7 @@ fn component(
     };
     SystemComponent {
         name,
+        issue: None,
         ok,
         detail,
         seen_at: reported.map(|beat| Time::new(beat.seen_at)),
@@ -190,6 +221,12 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
     // The API answers, so it is well, and so is the database it has just read.
     let answering = |name| SystemComponent {
         name,
+        issue: (name == SystemComponentName::Api
+            && ctx
+                .app
+                .metrics_listener_failed
+                .load(std::sync::atomic::Ordering::Relaxed))
+        .then_some(SystemComponentIssue::MetricsListenerUnavailable),
         ok: true,
         detail: None,
         seen_at: Some(Time::new(ctx.now)),
@@ -223,6 +260,65 @@ async fn system(ctx: Ctx, (): (), (): ()) -> ApiResult<SystemInfo> {
             commands_open: link::count_open_commands(&mut conn).await?,
             jobs_running: jobs::running_jobs(&mut conn).await?,
         },
+        effective_configuration: running_configuration(&ctx),
+    })
+}
+
+fn running_configuration(ctx: &Ctx) -> Option<orch_api_contract::admin::EffectiveConfiguration> {
+    use orch_api_contract::admin::{
+        ConfigurationApplication, ConfigurationKey, ConfigurationValue, EffectiveConfiguration,
+        EffectiveConfigurationValue,
+    };
+    use orch_api_contract::common::{ConfigurationOrigin, Page};
+    let captured = ctx.app.config.startup_facts.as_ref()?;
+    let applied = ctx.app.db.configured_limits()?;
+    let wanted = [
+        (
+            ConfigurationKey::DatabaseAcquireTimeout,
+            "database.acquire_timeout_ms",
+            applied.acquire_timeout,
+        ),
+        (
+            ConfigurationKey::DatabaseRequestStatementTimeout,
+            "database.request_statement_timeout_ms",
+            applied.statement.unwrap_or_default(),
+        ),
+        (
+            ConfigurationKey::DatabaseIdleTransactionTimeout,
+            "database.idle_transaction_timeout_ms",
+            applied.idle_in_transaction,
+        ),
+    ];
+    let values = wanted
+        .into_iter()
+        .map(|(public_key, key, applied)| {
+            let fact = captured.values.iter().find(|fact| fact.key == key)?;
+            if u128::from(fact.milliseconds) != applied.as_millis() {
+                return None;
+            }
+            Some(EffectiveConfigurationValue {
+                public_key,
+                typed_value: if fact.milliseconds == 0 {
+                    ConfigurationValue::Indefinite
+                } else {
+                    ConfigurationValue::Finite {
+                        milliseconds: fact.milliseconds.to_string(),
+                    }
+                },
+                origin: fact.origin.map(|origin| match origin {
+                    orch_config::observed::Origin::Compiled => ConfigurationOrigin::Compiled,
+                    orch_config::observed::Origin::File => ConfigurationOrigin::File,
+                    orch_config::observed::Origin::Environment => ConfigurationOrigin::Environment,
+                }),
+                application: ConfigurationApplication::Restart,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(EffectiveConfiguration {
+        service: SystemComponentName::Api,
+        process_revision: captured.revision.clone(),
+        measured_at: Time::new(chrono::DateTime::<chrono::Utc>::from(captured.observed_at)),
+        values: Page::last(values),
     })
 }
 
