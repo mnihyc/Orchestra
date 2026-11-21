@@ -27,7 +27,12 @@ fn existing_roots_refuse_an_outside_path_a_link_out_and_a_file() {
     let selected = inspect_environment_directory(&policy, &allowed.join("project")).unwrap();
     let original = std::fs::metadata(allowed.join("project")).unwrap();
     assert_eq!(selected.device, Some(original.dev()));
-    assert_eq!(selected.inode, Some(original.ino()));
+    assert_eq!(
+        selected.inode,
+        Some(orch_driver_contract::runtime::FileNumber::from_u64(
+            original.ino()
+        ))
+    );
     for path in [outside, allowed.join("escape"), allowed.join("file")] {
         let refused = inspect_environment_directory(&policy, &path).unwrap_err();
         assert!(refused.detail.contains("environment.roots"));
@@ -50,8 +55,14 @@ fn a_directory_not_writable_by_the_unit_names_its_owners_and_uid_without_changin
             rustix::process::getegid().as_raw(),
         )
     };
-    let expected =
-        serde_json::json!({"path":path,"device":metadata.dev(),"inode":metadata.ino()}).to_string();
+    let expected = serde_json::to_string(&orch_driver_contract::runtime::DirectoryBinding {
+        path: path.to_str().unwrap().into(),
+        device: Some(metadata.dev()),
+        inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+            metadata.ino(),
+        )),
+    })
+    .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_orch-node"))
         .args([
             "__runtime-helper",

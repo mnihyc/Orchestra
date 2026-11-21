@@ -10,7 +10,7 @@ import { commentDraftGuard, commentSlotKey, forgetCommentDraftDeviceData, getCom
 import { DocumentMarksProvider, retireDocumentMarks } from '@/features/documents/marks';
 import '@/features/documents/register';
 import { DocumentOutline } from '@/features/people/DocumentOutline';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import { findTab, makeGroup } from '@/features/workbench/layout';
 import { panelTarget, setPanelScope } from '@/features/workbench/panelScope';
 import { useWorkbench } from '@/features/workbench/store';
@@ -56,12 +56,12 @@ function Frame({ duplicateOwner = false }: { duplicateOwner?: boolean }) {
   const id = target?.kind === 'document' ? target.id : null;
   // Content and inspector views share the same native follower for their addressed document.
   return <><NativeOwner id={id} />{duplicateOwner && <NativeOwner id={id} />}
-    <ViewInstanceContext.Provider value={{ id: tab.id, root, target, headingOwner: tab.scope?.mode === 'fixed' ? tab.id : active, content: false, focusedContent: false }}>
+    <ViewInstanceProvider value={{ id: tab.id, root, target, headingOwner: tab.scope?.mode === 'fixed' ? tab.id : active, content: false, focusedContent: false }}>
       <DocumentMarksProvider owner={tab.id} documentId={id ?? ''}>
         <section data-testid="comments"><Body tab={tab} area="right" /></section>
         <section data-testid="outline">{id !== null && <DocumentOutline documentId={id} />}</section>
       </DocumentMarksProvider>
-    </ViewInstanceContext.Provider></>;
+    </ViewInstanceProvider></>;
 }
 const panel = (name: 'comments' | 'outline') => within(screen.getByTestId(name));
 const noWrites = () => { expect(calls.start).not.toHaveBeenCalled(); expect(calls.reply).not.toHaveBeenCalled(); expect(calls.edit).not.toHaveBeenCalled(); };

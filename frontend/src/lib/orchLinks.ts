@@ -46,9 +46,8 @@ export function readOrchLink(href: string, options: OrchLinkOptions = {}): URL |
   try {
     const url = new URL(clean, current);
     if (!/^(https?:)$/.test(url.protocol) || url.username !== '' || url.password !== '') return null;
-    const accepted = declaredOrigins(options.addresses ?? source() ?? {});
-    accepted.add(current.origin);
-    if (!accepted.has(url.origin)) return null;
+    if (url.origin === current.origin) return url;
+    if (!declaredOrigins(options.addresses ?? source() ?? {}).has(url.origin)) return null;
     return new URL(`${url.pathname}${url.search}${url.hash}`, current.origin);
   } catch { return null; }
 }

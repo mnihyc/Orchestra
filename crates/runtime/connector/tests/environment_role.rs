@@ -87,6 +87,7 @@ async fn a_restart_reconstructs_attachment_and_executor_without_new_start_comman
     assert_eq!(role.host().running_executors().await.len(), 1);
     let fetched = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "kept.txt".to_owned(),
@@ -158,6 +159,8 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     // A directory is listed with what is in it.
     let listing = rig
         .succeed(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: String::new(),
@@ -183,6 +186,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     let blob = rig.stored(content);
     let written = rig
         .succeed(&FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "src/new.txt".to_owned(),
@@ -200,6 +204,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     // And a file is read back: its content goes up to the system, which holds it afterwards.
     let fetched = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "hello.txt".to_owned(),
@@ -211,6 +216,7 @@ async fn a_directory_is_listed_and_a_file_is_written_through_a_content_transfer_
     assert_eq!(rig.blobs.content(&hash).unwrap().as_ref(), b"hello");
     let again = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "src/new.txt".to_owned(),
@@ -301,6 +307,8 @@ async fn a_directory_reports_its_actual_controllers_and_applies_the_declared_mem
 
 fn attach_body(environment_id: orch_types::Id, root: &std::path::Path) -> EnvAttach {
     EnvAttach {
+        workspace: Default::default(),
+
         resources: None,
         data_generation: None,
         storage: None,
@@ -331,24 +339,26 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
     let environment_id = rig.environment;
     let blob = rig.stored(b"content");
 
-    for path in [
-        "../outside/secret.txt",
-        "src/../../outside/secret.txt",
-        "/etc/hostname",
+    for (path, refusal) in [
+        ("../outside/secret.txt", "not_found"),
+        ("src/../../outside/secret.txt", "not_found"),
+        ("/etc/hostname", "files.reach_denied"),
     ] {
         let named = path.to_owned();
         assert_eq!(
             rig.fail(&FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named.clone()
             })
             .await,
-            "not_found",
+            refusal,
             "{path}"
         );
         assert_eq!(
             rig.fail(&FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named.clone(),
@@ -356,11 +366,12 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
                 max_bytes: None,
             })
             .await,
-            "not_found",
+            refusal,
             "{path}"
         );
         assert_eq!(
             rig.fail(&FsWrite {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id,
                 path: named.clone(),
@@ -369,20 +380,23 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
                 expected_hash: None
             })
             .await,
-            "not_found",
+            refusal,
             "{path}"
         );
         assert_eq!(
             rig.fail(&FsMkdir {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 path: named.clone()
             })
             .await,
-            "not_found",
+            refusal,
             "{path}"
         );
         assert_eq!(
             rig.fail(&FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id,
                 mount: None,
                 path: named,
@@ -391,13 +405,14 @@ async fn a_path_outside_the_workspace_is_refused_whatever_the_command() {
                 page: None,
             })
             .await,
-            "not_found",
+            refusal,
             "{path}"
         );
     }
     // A link inside the workspace that points out of it leads nowhere either.
     assert_eq!(
         rig.fail(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             mount: None,
             path: "leak".to_owned(),
@@ -429,6 +444,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     let blob = rig.stored(b"what somebody sent");
 
     let write = FsWrite {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id,
         path: "keep.txt".to_owned(),
@@ -439,6 +455,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     assert_eq!(rig.fail(&write).await, "policy.remote_write_disabled");
     assert_eq!(
         rig.fail(&FsMkdir {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             path: "made".to_owned()
         })
@@ -447,6 +464,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsRename {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             from: "keep.txt".to_owned(),
             to: "kept.txt".to_owned()
@@ -456,6 +474,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsCopy {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             from: "keep.txt".to_owned(),
             to: "copy.txt".to_owned()
@@ -465,6 +484,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     assert_eq!(
         rig.fail(&FsRemove {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id,
             path: "keep.txt".to_owned(),
             recursive: false
@@ -474,6 +494,7 @@ async fn a_write_the_machines_owner_forbids_is_refused_with_the_policys_code_and
     );
     // Files that arrive with a message have a switch of their own, and a move is a write.
     let delivery = FsMaterialize {
+        access: orch_link_contract::commands::FsAccess::roots(),
         work: None,
         environment_id,
         job_id: None,
@@ -543,6 +564,7 @@ async fn an_environment_outside_what_the_owner_offers_is_refused_and_so_is_what_
     );
     assert_eq!(
         rig.fail(&McpImport {
+            profile: None,
             expected_fingerprint: None,
             stored: None,
             transfer: None,
@@ -582,6 +604,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     let job = new_id();
     let snapshot = rig
         .succeed(&FsSnapshot {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             job_id: job,
@@ -612,6 +635,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     // And is written in the other environment, which then has the same files.
     let moved = rig
         .succeed(&FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: second,
             job_id: Some(new_id()),
@@ -636,6 +660,7 @@ async fn a_tree_is_snapshotted_and_materialized_in_another_environment_with_its_
     // Written again, nothing is written twice.
     let again = rig
         .succeed(&FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: second,
             job_id: None,
@@ -668,6 +693,7 @@ async fn what_the_environment_says_on_its_own_account_goes_on_its_stream() {
     // The whole tree's list is uploaded and announced when it is asked for.
     let manifest = rig
         .succeed(&orch_link_contract::commands::FsManifest {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             selection: Selection {
                 include: vec![String::new()],
@@ -795,5 +821,266 @@ async fn an_executor_that_runs_a_harnesss_build_is_not_available_in_a_runtime_th
         rig.connector.as_ref().unwrap().facts().harnesses.is_empty(),
         "it has no harness to report"
     );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_fresh_connector_attaches_its_own_workspace_and_home_without_sharing_existing_directories()
+ {
+    let mut rig = EnvRig::new();
+    rig.config.environment.roots.clear();
+    rig.config.storage.clear();
+    rig.start().await;
+    let mut attach = attach_body(rig.environment, rig.data.path());
+    attach.data_sources = Some(Default::default());
+    attach.workspace_root = None;
+    attach.data_generation = Some(1);
+    let attached = rig.succeed(&attach).await;
+    let workspace = std::path::Path::new(attached["workspace_root"].as_str().unwrap());
+    let home = std::path::Path::new(attached["home"].as_str().unwrap());
+    assert!(workspace.starts_with(rig.data.path().join("environment-data")));
+    assert!(home.starts_with(rig.data.path().join("environment-data")));
+    assert_ne!(workspace, home);
+    std::fs::write(workspace.join("kept-note"), "keep").unwrap();
+    let listed = rig
+        .succeed(&FsList {
+            access: orch_link_contract::commands::FsAccess::roots(),
+            prefix: None,
+            environment_id: rig.environment,
+            mount: None,
+            path: String::new(),
+            watch_id: None,
+            watch_instance: None,
+            page: None,
+        })
+        .await;
+    assert!(
+        listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "kept-note")
+    );
+    let other = attach_body(new_id(), workspace);
+    assert_eq!(
+        rig.fail(&other).await,
+        "policy.root_not_allowed",
+        "private storage cannot be claimed by another registration as a borrowed path"
+    );
+    assert_eq!(std::fs::read(workspace.join("kept-note")).unwrap(), b"keep");
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+fn persist_directory_policy(rig: &EnvRig) {
+    let text = orch_connector_core::policy::sparse_config(
+        &rig.config,
+        rig.config.policy.local_keys.as_deref().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(rig.data.path().join("config.toml"), text).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_machine_browses_only_current_allowed_directories_before_any_environment_is_attached() {
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    let root = rig.home.path().to_path_buf();
+    let orch = rig.directory("orch");
+    rig.directory("organ");
+    std::fs::create_dir(orch.join("module")).unwrap();
+    std::fs::write(root.join("or-file.txt"), b"not a directory").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("private-child")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.join("or-escape")).unwrap();
+    std::os::unix::fs::symlink(&orch, root.join("or-alias")).unwrap();
+    let mut request = MachineDirectoryList {
+        read_kind: orch_api_contract::resources::MachineDirectoryRead::Choices,
+        root: root.to_string_lossy().into_owned(),
+        path: String::new(),
+        prefix: "or".into(),
+        recent: vec!["organ".into()],
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    persist_directory_policy(&rig);
+    let first = rig.succeed(&request).await;
+    assert_eq!(
+        first["entries"],
+        json!(["organ"]),
+        "recent actual children come first"
+    );
+    let mut names = vec!["organ".to_owned()];
+    let mut cursor = first["next_cursor"].as_str().map(str::to_owned);
+    while let Some(next) = cursor {
+        request.cursor = Some(next);
+        let page = rig.succeed(&request).await;
+        names.extend(
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned()),
+        );
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+    }
+    assert_eq!(names, ["organ", "or-alias", "orch"]);
+    request.cursor = None;
+    request.path = "or-alias".into();
+    request.prefix.clear();
+    request.recent.clear();
+    assert_eq!(rig.succeed(&request).await["entries"], json!(["module"]));
+    request.path = "or-escape".into();
+    let (code, message) = rig.failure(&request).await;
+    assert_eq!(code, "policy.root_not_allowed");
+    assert!(message.contains("environment.roots"));
+    request.path = outside.path().to_string_lossy().into_owned();
+    assert_eq!(rig.fail(&request).await, "policy.root_not_allowed");
+    rig.config.environment.roots = vec![outside.path().to_string_lossy().into_owned()];
+    persist_directory_policy(&rig);
+    request.path.clear();
+    request.cursor = first["next_cursor"].as_str().map(str::to_owned);
+    assert_eq!(
+        rig.fail(&request).await,
+        "policy.root_not_allowed",
+        "the owner's file change is enforced before the next read"
+    );
+    rig.stop().await;
+    rig.start().await;
+    assert_eq!(
+        rig.fail(&request).await,
+        "policy.root_not_allowed",
+        "a previous page never lends its old policy"
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_continuation_refuses_changed_membership_or_a_different_filter() {
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    rig.directory("alpha");
+    rig.directory("beta");
+    let mut request = MachineDirectoryList {
+        read_kind: orch_api_contract::resources::MachineDirectoryRead::Choices,
+        root: rig.home.path().to_string_lossy().into_owned(),
+        path: String::new(),
+        prefix: String::new(),
+        recent: Vec::new(),
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    persist_directory_policy(&rig);
+    let first = rig.succeed(&request).await;
+    request.cursor = first["next_cursor"].as_str().map(str::to_owned);
+    assert!(request.cursor.is_some());
+    request.prefix = "b".into();
+    assert_eq!(rig.fail(&request).await, "conflict");
+    request.prefix.clear();
+    rig.directory("gamma");
+    assert_eq!(
+        rig.fail(&request).await,
+        "conflict",
+        "native membership changes invalidate the captured page"
+    );
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_check_confirms_the_exact_native_path_without_claiming_its_children_are_empty()
+{
+    use orch_api_contract::resources::MachineDirectoryRead;
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    let selected = rig.directory("selected");
+    std::fs::create_dir(selected.join("real-child")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), rig.home.path().join("escape-check")).unwrap();
+    let mut request = MachineDirectoryList {
+        read_kind: MachineDirectoryRead::Inspect,
+        root: rig.home.path().to_string_lossy().into_owned(),
+        path: "selected".into(),
+        prefix: String::new(),
+        recent: Vec::new(),
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    persist_directory_policy(&rig);
+    let checked = rig.succeed(&request).await;
+    assert_eq!(checked["read_kind"], json!("inspect"));
+    assert_eq!(checked["entries"], json!([]));
+    request.read_kind = MachineDirectoryRead::Choices;
+    let listed = rig.succeed(&request).await;
+    assert_eq!(listed["read_kind"], json!("choices"));
+    assert_eq!(
+        listed["entries"],
+        json!(["real-child"]),
+        "a path check never stands in for a complete empty directory"
+    );
+    request.read_kind = MachineDirectoryRead::Inspect;
+    request.path = "escape-check".into();
+    assert_eq!(rig.fail(&request).await, "policy.root_not_allowed");
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_read_does_not_disclose_the_unreadable_policy_file() {
+    use orch_link_contract::commands::MachineDirectoryList;
+    let mut rig = EnvRig::new();
+    rig.directory("visible");
+    let request = MachineDirectoryList {
+        read_kind: orch_api_contract::resources::MachineDirectoryRead::Choices,
+        root: rig.home.path().to_string_lossy().into_owned(),
+        path: String::new(),
+        prefix: String::new(),
+        recent: Vec::new(),
+        cursor: None,
+        limit: 1,
+        page_bytes: 4096,
+    };
+    rig.start().await;
+    persist_directory_policy(&rig);
+    assert_eq!(rig.succeed(&request).await["entries"], json!(["visible"]));
+    std::fs::write(
+        rig.data.path().join("config.toml"),
+        "[environment]\nroots = \"PRIVATE-POLICY-FIXTURE\"\n",
+    )
+    .unwrap();
+    let (code, message) = rig.failure(&request).await;
+    assert_eq!(code, "internal");
+    assert_eq!(message, "Reading the machine's directory policy failed");
+    assert!(!message.contains("PRIVATE-POLICY-FIXTURE"));
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_directory_machine_reports_available_room_without_attaching_a_workspace() {
+    let mut rig = EnvRig::new();
+    rig.start().await;
+    // Processor use is the delta of two native counter readings.
+    tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
+    let facts = rig
+        .succeed(&orch_link_contract::commands::MachineProbe {})
+        .await;
+    let room = &facts["room"];
+    assert!(room["cpu_free_millis"].as_u64().is_some());
+    assert!(
+        room["memory_free_bytes"]
+            .as_u64()
+            .is_some_and(|free| free <= facts["memory_bytes"].as_u64().unwrap())
+    );
+    assert!(room["observed_at"].is_string());
     rig.stop().await;
 }

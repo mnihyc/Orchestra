@@ -35,3 +35,6 @@ UNION
 SELECT 'skill', id FROM skills WHERE $1::uuid IS NULL AND deleted_at IS NULL
 UNION
 SELECT 'chat', c.id FROM chats c JOIN nodes home ON home.id=COALESCE(c.home_id,c.org_id) WHERE c.node_id IS NULL AND ($1::uuid IS NULL OR home.path @> ARRAY[$1::uuid])
+
+UNION
+SELECT 'pool', id FROM pools WHERE $1::uuid IS NULL AND deleted_at IS NULL
