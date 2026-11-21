@@ -1,0 +1,7 @@
+fmt
+contracts
+clippy
+test -p orch-engine --test orch_capabilities --test call_recovery --test orch_tools --test subagent_limits --test people_posting --test shared_write --test sharing --test shared_search --test kguard_rest --test document_folders
+test -p orch-engine --test turns --test skills --test provider_runtime
+test -p orch-api-core --test call_recovery --test setting_reach --test thread_read_tools --test document_history --test exports --test imports --test kadmin_tokens --test people_notify --test semantic_index --test search_meaning --test users --test document_ops
+test -p orch-worker-core --test document_maintenance

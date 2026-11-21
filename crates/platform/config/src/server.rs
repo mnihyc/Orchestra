@@ -15,6 +15,15 @@ const MIB: usize = 1024 * 1024;
 /// Default stack reservation for a service runtime thread; deployments may raise or lower it.
 pub const WORKER_STACK_BYTES: usize = 64 * MIB;
 
+/// Compiled database defaults, also used by library callers without a service configuration.
+pub const DATABASE_ACQUIRE_TIMEOUT_MS: u64 = 10_000;
+/// Request statements normally finish well inside this default.
+pub const DATABASE_REQUEST_STATEMENT_TIMEOUT_MS: u64 = 15_000;
+/// Background statements may run without a deadline unless configured otherwise.
+pub const DATABASE_BACKGROUND_STATEMENT_TIMEOUT_MS: u64 = 0;
+/// An idle transaction normally releases its connection and locks after this default.
+pub const DATABASE_IDLE_TRANSACTION_TIMEOUT_MS: u64 = 10_000;
+
 /// The service whose runtime is about to start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeComponent {
@@ -56,6 +65,9 @@ macro_rules! section {
 section! {
     /// The whole of `orch.toml`.
     ServerConfig {
+        /// Frozen public startup facts; callers that did not use the reader have none.
+        #[serde(skip)]
+        startup_facts: Option<crate::observed::StartupConfiguration> = None,
         /// The version of this file's format.
         version: u32 = 1,
         /// The system's name and address.
@@ -80,9 +92,6 @@ section! {
         pki: Pki = Pki::default(),
         /// The bundled environment host.
         node: Node = Node::default(),
-        /// A host node's own ceiling for host ports, which comes before every declaration of the
-        /// host's page.
-        ports: Ports = Ports::default(),
         /// External implementations of extension points.
         plugin: Vec<Plugin> = Vec::new(),
         /// The thread engine.
@@ -116,6 +125,8 @@ section! {
         name: String = s("Orch"),
         /// The origin a browser opens; used in links and mail.
         public_url: String = s("https://orch.example.com"),
+        /// Public HTTPS or mailto contact sent to push services. Empty uses the installation's HTTPS origin if available.
+        web_push_contact: String = String::new(),
         /// Other browser origins of this installation, including literal IPs only when declared.
         alternate_urls: Vec<String> = Vec::new(),
     }
@@ -365,6 +376,9 @@ section! {
         dead_after_secs: u64 = 60,
         /// The largest frame.
         max_frame_bytes: u64 = 262_144,
+        /// The byte allowance of an ordinary message. A message over a frame travels in parts;
+        /// catalogue kinds with growing lists or model content span this allowance through pages.
+        max_message_bytes: u64 = 16_777_216,
         /// How much of a tunnel may be on its way unacknowledged.
         tunnel_window_bytes: u64 = 1_048_576,
         /// How long a tunnel whose session dropped may be taken up again.
@@ -423,6 +437,14 @@ section! {
         slow_statement_ms: u64 = 1_000,
         /// Log a successful pooled connection acquisition taking more than this many milliseconds.
         slow_acquire_ms: u64 = 1_000,
+        /// How long pool acquisition may take, in milliseconds; must be positive.
+        acquire_timeout_ms: u64 = DATABASE_ACQUIRE_TIMEOUT_MS,
+        /// API statement deadline in milliseconds; zero disables it.
+        request_statement_timeout_ms: u64 = DATABASE_REQUEST_STATEMENT_TIMEOUT_MS,
+        /// Worker and maintenance statement deadline in milliseconds; zero disables it.
+        background_statement_timeout_ms: u64 = DATABASE_BACKGROUND_STATEMENT_TIMEOUT_MS,
+        /// Idle transaction deadline in milliseconds; zero disables it.
+        idle_transaction_timeout_ms: u64 = DATABASE_IDLE_TRANSACTION_TIMEOUT_MS,
     }
 }
 
@@ -513,18 +535,6 @@ section! {
 section! {
     /// `[node.docker]`
     NodeDocker {
-        /// Exact image references admitted by the machine policy; * permits any.
-        allowed_images:Vec<String> = list(&["*"]),
-        /// Registry authorities admitted by the machine policy.
-        allowed_registries:Vec<String> = list(&["*"]),
-        /// Native and Linux capability keys admitted by the machine policy.
-        allowed_capabilities:Vec<String> = list(&["*"]),
-        /// Permitted runtime classes, within those the daemon reports.
-        runtime_classes:Vec<String> = list(&["*"]),
-        /// Privileged containers require an explicit operator setting, including in Full Access.
-        allow_privileged:bool = false,
-        /// Whether image archives may be loaded; narrowed image/registry rules refuse unverified archives.
-        allow_archives:bool = true,
         /// Trusted image for restricted proxy sidecars and host-address observation; unset refuses restriction.
         restricted_proxy_image: Option<String> = None,
         /// Trusted preloaded image for the node's one-shot live mount/device helper.
@@ -537,8 +547,6 @@ section! {
         socket: String = s("/var/run/docker.sock"),
         /// What `gateway.orch.internal` resolves to inside its containers.
         gateway_host: String = s("host-gateway"),
-        /// Whether this host builds images from Dockerfiles.
-        builds: bool = true,
         /// Nonsecret defaults for Dockerfile proxy and repository arguments; template arguments take precedence.
         build_args: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new(),
         /// Carried-in image references mapped to verified local content IDs; no registry lookup for these images.
@@ -609,9 +617,6 @@ section! {
 /// One named machine storage, shared with the enforcing machine policy.
 pub type NodeStorage = orch_link_contract::policy::MachineStorage;
 
-/// Previous-release `[node.hooks]`, imported once into the machine's local hooks policy.
-pub type NodeHooks = orch_link_contract::policy::MachineHooks;
-
 section! {
     /// `[node]`: the environment host.
     Node {
@@ -637,22 +642,13 @@ section! {
         docker: NodeDocker = NodeDocker::default(),
         /// Host-driver records and default volumes; choose a traversable base when using another account.
         host: NodeHost = NodeHost::default(),
-        /// Named places for volumes; none means one, where the driver keeps its own.
-        storage: Vec<NodeStorage> = Vec::new(),
-        /// Legacy local lifecycle programs; accepted on upgrade and imported into `policy.hooks`.
-        hooks: NodeHooks = NodeHooks::default(),
+
     }
 }
 
 section! {
     /// `[node.host]`: process-driver files, separate from the node's private link identity.
     NodeHost {
-        /// Template identifiers this process driver may run.
-        allowed_templates:Vec<String> = list(&["*"]),
-        /// Existing local accounts permitted by the machine policy.
-        allowed_accounts:Vec<String> = list(&["*"]),
-        /// Absolute template launch programs, or *; agent execution remains bounded by its account/sandbox.
-        allowed_programs:Vec<String> = list(&["*"]),
         /// Absolute base for records and default volumes; absent uses data_dir/host for the node's own account.
         base: Option<PathBuf> = None,
         /// Probe native systemd scopes, otherwise report resource use without enforcement.
@@ -715,8 +711,8 @@ section! {
         login_pending_secs: u64 = 4_500,
         /// The shortest time between two checks of a running turn against its caps.
         cap_check_secs: u64 = 5,
-        /// How long the text an item gains while it grows is held before it is written to the item; every piece
-        /// reaches live readers at once, and anything else the session says writes it first. 0 writes each piece.
+        /// How long durable streamed pieces wait before being coalesced into their item row.
+        /// Live readers see each piece immediately; 0 writes the full item for each piece.
         stream_flush_ms: u64 = 1_000,
         /// A provider page reads at most once per minute by default.
         provider_facts_page_secs: u64 = 60,
@@ -764,8 +760,6 @@ section! {
     Limits {
         /// Recent visits kept for each person.
         recents_per_user: u32 = 50,
-        /// Text indexed for search, per item and per chat message.
-        search_text_chars: u32 = 20_000,
         /// The largest text shown inline in the file viewer.
         preview_bytes: u64 = 2_097_152,
         /// Workspace listings kept in memory for machines that are offline.
@@ -797,7 +791,8 @@ section! {
 section! {
     /// `[realtime]`
     Realtime {
-        /// How much may wait for one browser before the server stops counting on it.
+        /// Bytes queued per browser in each direction. Incoming controls apply backpressure;
+        /// outgoing updates use the backlog lifetime below before closing a slow connection.
         buffer_max_bytes: u64 = 4_194_304,
         /// For how long that much has to have waited before the connection is closed.
         buffer_max_secs: u64 = 30,
@@ -843,12 +838,110 @@ impl ServerConfig {
     }
 }
 
+/// Canonical worker and API job names accepted by deployment schedule overrides.
+pub const SCHEDULE_JOB_NAMES: &[&str] = &[
+    "purge_expired",
+    "outbox",
+    "routes",
+    "bot_links",
+    "soft_delete_purge",
+    "raw_events",
+    "metrics_sample",
+    "metrics_retention",
+    "cert_reminders",
+    "recents_trim",
+    "heartbeat",
+    "rate_catalogue",
+    "release_check",
+    "metrics_rollup",
+    "side_threads",
+    "provider_renew",
+    "export_purge",
+    "document_versions",
+    "document_purge",
+    "command_purge",
+    "approval_expiry",
+    "idle_stop",
+    "machine_liveness",
+    "quota_release",
+    "retention",
+    "shell_detached",
+    "summaries",
+    "cache_eviction",
+    "blob_gc",
+    "provider_expiry",
+];
+
 impl Validate for ServerConfig {
+    fn capture_origins(&mut self, origins: crate::observed::Origins) {
+        self.startup_facts = Some(crate::observed::StartupConfiguration::new(
+            [
+                (
+                    "database.acquire_timeout_ms",
+                    self.database.acquire_timeout_ms,
+                ),
+                (
+                    "database.request_statement_timeout_ms",
+                    self.database.request_statement_timeout_ms,
+                ),
+                (
+                    "database.background_statement_timeout_ms",
+                    self.database.background_statement_timeout_ms,
+                ),
+                (
+                    "database.idle_transaction_timeout_ms",
+                    self.database.idle_transaction_timeout_ms,
+                ),
+            ]
+            .into_iter()
+            .map(|(key, milliseconds)| crate::observed::StartupValue {
+                key,
+                milliseconds,
+                origin: origins.get(key).copied(),
+            })
+            .collect(),
+        ));
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |key: &str, message: &str| ConfigError::Invalid {
             key: key.to_owned(),
             message: message.to_owned(),
         };
+        if self.database.acquire_timeout_ms == 0 {
+            return Err(invalid("database.acquire_timeout_ms", "must be positive"));
+        }
+        // PostgreSQL stores these timeout settings in signed 32-bit milliseconds.
+        for (key, value) in [
+            (
+                "database.request_statement_timeout_ms",
+                self.database.request_statement_timeout_ms,
+            ),
+            (
+                "database.background_statement_timeout_ms",
+                self.database.background_statement_timeout_ms,
+            ),
+            (
+                "database.idle_transaction_timeout_ms",
+                self.database.idle_transaction_timeout_ms,
+            ),
+        ] {
+            if i32::try_from(value).is_err() {
+                return Err(invalid(
+                    key,
+                    "exceeds PostgreSQL's signed 32-bit millisecond representation",
+                ));
+            }
+        }
+        for (job, seconds) in &self.schedule {
+            let key = format!("schedule.{job}");
+            if !SCHEDULE_JOB_NAMES.contains(&job.as_str()) {
+                return Err(invalid(&key, "does not name a scheduled job"));
+            }
+            if *seconds == 0 {
+                return Err(invalid(&key, "must be a positive interval in seconds"));
+            }
+        }
         if self.version != 1 {
             return Err(invalid("version", "this build reads version 1"));
         }
@@ -936,24 +1029,6 @@ impl Validate for ServerConfig {
                 ));
             }
         }
-        if let Some(listen) = &self.ports.listen
-            && listen != "all"
-            && listen.parse::<std::net::IpAddr>().is_err()
-        {
-            return Err(invalid("ports.listen", "is all, or one literal IP address"));
-        }
-        if self
-            .ports
-            .ranges
-            .iter()
-            .flatten()
-            .any(|range| range.from == 0 || range.from > range.to)
-        {
-            return Err(invalid(
-                "ports.ranges",
-                "each range runs from a number of 1 or more to one no smaller",
-            ));
-        }
         for cidr in &self.api.trusted_proxy_cidrs {
             if cidr.parse::<ipnet::IpNet>().is_err() {
                 return Err(invalid(
@@ -983,6 +1058,15 @@ impl Validate for ServerConfig {
                 "link.dead_after_secs",
                 "must be longer than link.heartbeat_secs",
             ));
+        }
+        if self.link.max_message_bytes < self.link.max_frame_bytes {
+            return Err(invalid(
+                "link.max_message_bytes",
+                "must be at least link.max_frame_bytes",
+            ));
+        }
+        if u32::try_from(self.link.max_message_bytes).is_err() {
+            return Err(invalid("link.max_message_bytes", "must be less than 4 GiB"));
         }
 
         if !matches!(self.log.format.as_str(), "text" | "json") {
@@ -1067,6 +1151,26 @@ impl Plugin {
 
 #[cfg(test)]
 mod provider_read_tests {
+    #[test]
+    fn scheduled_jobs_reject_unknown_names_and_zero_intervals_before_starting() {
+        use super::ServerConfig;
+        use crate::loader::{Validate, load_text};
+        for text in [
+            "[schedule]\nrouts=30\n",
+            "[schedule]\noutbox=0\n",
+            "[schedule]\nblob_gc=0\n",
+        ] {
+            assert!(
+                load_text::<ServerConfig>(text, "orch.toml", |_| None).is_err(),
+                "{text}"
+            );
+        }
+        let mut config = ServerConfig::default();
+        config.schedule.insert("routes".to_owned(), 300);
+        config.schedule.insert("blob_gc".to_owned(), 7200);
+        assert!(config.validate().is_ok());
+    }
+
     use super::ServerConfig;
 
     #[test]

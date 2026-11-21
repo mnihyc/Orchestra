@@ -2,8 +2,10 @@
 import type { QueryClient, QueryKey } from '@tanstack/react-query';
 import { matches as matchesName } from '@/features/finder/ranking';
 import { ApiError } from '@/api/client';
-import type { Agent, Environment, Host, Machine, MachineProgram, MachineProgramCapability, MachinePrograms, McpServer, Mount, Provider, Skill, Template, Thread } from '@/generated/api-types';
+import type { MachineProgram, MachineProgramCapability, MachinePrograms, Thread } from '@/generated/api-types';
 import { isThreadForScreen } from '@/features/thread/cached';
+import { record, wholeRow } from '@/api/resourceRowIndex';
+export { cachedRow, record } from '@/api/resourceRowIndex';
 
 /** Cursors obtained with authoritative HTTP snapshots, cleared with the human session. */
 export const feedSequences = new Map<string, number>();
@@ -59,7 +61,6 @@ export function applyCollection(cache: QueryClient, change: CollectionChange['co
   });
 }
 
-export const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const array = (value: unknown): value is unknown[] => Array.isArray(value);
 
 const textOrNull = (value: unknown): value is string | null => value === null || typeof value === 'string';
@@ -85,23 +86,10 @@ export function machineProgramsProjection(facts: unknown, access: unknown): Mach
     can_manage: access.permissions.some((permission) => permission === 'machine.manage' || permission === 'host.manage') };
 }
 
-/** Only these native DTOs can seed their corresponding resource detail readers. */
-interface CachedResources {
-  agent: Agent;
-  environment: Environment;
-  host: Host;
-  machine: Machine;
-  mcp_server: McpServer;
-  mount: Mount;
-  provider: Provider;
-  skill: Skill;
-  template: Template;
-}
-
 const LISTS: Readonly<Record<string, readonly string[]>> = {
   node: ['children', 'topics', 'orgs', 'shared-with-me'],
   provider: ['providers'], agent: ['agents'], host: ['hosts'], environment: ['environments'],
-  machine: ['machines'], template: ['templates'], mcp_server: ['mcp-servers'], mount: ['mounts'], skill: ['skills'],
+  machine: ['machines'], template: ['templates'], mcp_server: ['mcp-servers'], mount: ['mounts'], skill: ['skills'], pool: ['pools'],
   document: ['documents'], tag: ['tags'], group: ['groups', 'org-groups'],
   approval: ['approvals', 'port-requests'], notification_channel: ['notification-channels'],
   export: ['exports'], job: [], thread: ['thread-sides', 'provider-threads'],
@@ -119,7 +107,77 @@ function overlay(before: Record<string, unknown>, row: Record<string, unknown>):
     const old = before[key]; const value = row[key];
     next[key] = key !== 'access' && record(old) && record(value) ? overlay(old, value) : value;
   }
+  if (before.list_row === true) {
+    if ('enabled_models_count' in before && Array.isArray(row.models)) next.enabled_models_count = row.models.filter((model: unknown) => record(model) && model.enabled === true).length;
+    if ('upstreams_count' in before && Array.isArray(row.upstreams)) {
+      next.upstreams_count = row.upstreams.length;
+      next.no_key_needed = row.upstreams.length > 0 && row.upstreams.every((entry: unknown) => record(entry) && record(entry.options) && entry.options.auth === 'none');
+    }
+    if ('threads_count' in before && Array.isArray(row.threads)) {
+      next.threads_count = row.threads.length;
+      next.topics_count = new Set(row.threads.flatMap((entry: unknown) => record(entry) && record(entry.topic) && typeof entry.topic.id === 'string' ? [entry.topic.id] : [])).size;
+    }
+    if ('start_allowed' in before && record(row.network)) next.start_allowed = !(row.network.required_mode === 'restricted' && row.network.mode === 'open');
+    if ('profile' in before && record(row.profile)) next.profile = { harness_version: row.profile.harness_version ?? null };
+    if ('spec' in before && record(row.spec)) {
+      const spec = row.spec;
+      next.spec = 'driver' in before ? {
+        image: spec.image ?? null, runtime: spec.runtime ?? null,
+        network: { mode: record(spec.network) ? spec.network.mode ?? null : null },
+        security: { read_only_rootfs: record(spec.security) && spec.security.read_only_rootfs === true, no_new_privileges: record(spec.security) && spec.security.no_new_privileges === true },
+        ...(record(spec.build) ? { build: {} } : {}), ...(record(spec.archive) ? { archive: {} } : {}),
+      } : { transport: spec.transport ?? spec.type ?? null };
+    }
+    if ('plan_label' in before && record(row.facts)) {
+      const source = record(row.sources) && record(row.sources.facts) && record(row.sources.facts.descriptor) ? row.sources.facts.descriptor : null;
+      const plans = source !== null && record(source.facts) && record(source.facts.plans) ? source.facts.plans : {};
+      const plan = row.facts.plan;
+      next.plan_label = typeof plan === 'string' ? plans[plan] ?? plan : null;
+    }
+    if ('source_consent' in before && record(row.sources)) next.source_consent = ['facts', 'models', 'presenter'].some((key) => { const source = record(row.sources) ? row.sources[key] : null; return record(source) && source.address !== null && source.address !== undefined; });
+  }
+  // The provider embedded by a thread is another explicit compact form. Native page events
+  // can update its drawn members but cannot turn it into a page or restore deferred report arrays.
+  if (typeof before.models_count === 'number' && !Array.isArray(before.models)) {
+    if (record(next.facts)) next.facts = { ...next.facts, spend: [], available_resets: null, extra_usage: null };
+    if (record(next.choice_usage)) next.choice_usage = { ...next.choice_usage, performance: [] };
+  }
   return next;
+}
+
+/** registered_root identifies the thread form: its workspace_root is the current native spelling,
+ * while the environment page's member is the registration. Same-typed members are not interchangeable. */
+function threadEnvironment(before: Record<string, unknown>, row: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (typeof before.registered_root !== 'string' || typeof before.workspace_root !== 'string' || typeof before.generation !== 'number') return undefined;
+  if (typeof row.workspace_root !== 'string' || typeof row.generation !== 'number' || row.generation < before.generation) return before;
+  const reported = record(row.facts) && row.facts.generation === row.generation && typeof row.facts.workspace_root === 'string'
+    ? row.facts.workspace_root.replaceAll('\\', '/') : null;
+  const absolute = reported !== null && (reported.startsWith('/') || /^[a-zA-Z]:\//.test(reported));
+  return { ...overlay(before, row), registered_root: row.workspace_root, generation: row.generation,
+    workspace_root: absolute ? reported : row.workspace_root };
+}
+
+/** The JSON type of a member: what tells one answer's shape from another's. */
+function memberType(value: unknown): string {
+  return value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+}
+
+/** Whether an object that carries a row's identifier is a view of that row, so that the row may be written over it.
+ *
+ * A row is found in the loaded data by its identifier alone, and other answers name the same thing in a shape of
+ * their own: a listing of what an agent reaches gives a thread a `path` of text, where the thread's own row has a
+ * `path` of references. Such an object belongs to its own answer and stays as the server gave it. A view of the row
+ * agrees with it on the type of every member both of them have, through the objects inside; a member that either
+ * side leaves empty decides nothing. A semantic form such as registered_root still needs its native
+ * member projection; structural agreement alone cannot establish what a same-typed member means. */
+function viewOf(before: Record<string, unknown>, row: Record<string, unknown>): boolean {
+  return Object.keys(before).every((key) => {
+    if (!(key in row)) return true;
+    const old = before[key]; const value = row[key];
+    if (old === null || old === undefined || value === null || value === undefined) return true;
+    if (memberType(old) !== memberType(value)) return false;
+    return key === 'access' || !record(old) || !record(value) || viewOf(old, value);
+  });
 }
 
 /** References and node summaries may rename a thread, never overwrite its capabilities or binding. */
@@ -134,6 +192,7 @@ function threadMetadata(before: Record<string, unknown>, row: Record<string, unk
 
 /** Inventory state follows the list projection; registration status alone does not say a machine is online. */
 function inventoryState(kind: string, row: Record<string, unknown>): unknown {
+  if (kind === 'pool') return row.enabled === true ? 'enabled' : 'disabled';
   if (kind === 'machine') {
     if (row.status === 'revoked') return 'revoked';
     return typeof row.online === 'boolean' ? (row.online ? 'online' : 'offline') : undefined;
@@ -159,7 +218,7 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
     // A separately authorized thread can still name its bound provider. Revoking the rich
     // provider view removes that view, not a required name/reference inside another DTO.
     if (change.value === null) return 'access' in before || 'resource' in before ? null : before;
-    const complete=change.partial!==true && before.content_hidden!==true && record(before.access) && Array.isArray(before.access.permissions) && !record(before.resource);
+    const complete=change.partial!==true && wholeRow(change.kind, before) && before.content_hidden!==true && record(before.access) && Array.isArray(before.access.permissions) && !record(before.resource);
     const nameOnly = INVENTORY_KINDS.has(change.kind) && 'my_access' in before && 'path' in before && !record(before.resource);
     if (nameOnly) {
       // Preserve the inventory's withheld metadata and native policy/path, even when the detail knows more.
@@ -167,11 +226,18 @@ function replace(before: unknown, change: RowChange['row'], thread?: Thread): un
       if (typeof before.name === 'string' && typeof change.value.name === 'string') next.name = change.value.name;
       const state = inventoryState(change.kind, change.value);
       if (typeof before.state === 'string' && typeof state === 'string') next.state = state;
-    } else next = before.kind === 'thread' && record(before.access)
+    } else next = (change.kind === 'environment' && change.partial !== true ? threadEnvironment(before, change.value) : undefined) ?? (before.kind === 'thread' && record(before.access)
       ? thread === undefined ? threadMetadata(before, change.value) : { ...thread }
-      : complete ? {...change.value} : overlay(before, change.value);
+      : complete ? {...change.value} : viewOf(before, change.value) ? overlay(before, change.value) : before);
+    // A thread's provider form does not report the page's spending, resets or performance.
+    // Its empty wire members must not withdraw those independently read facts.
+    if (next !== before && change.kind === 'provider' && change.partial === true && Array.isArray(before.models)) {
+      if (record(before.facts) && record(next.facts)) next.facts = { ...next.facts,
+        spend: before.facts.spend, available_resets: before.facts.available_resets, extra_usage: before.facts.extra_usage };
+      if (record(before.choice_usage) && record(next.choice_usage)) next.choice_usage = { ...next.choice_usage, performance: before.choice_usage.performance };
+    }
     // References and inventory rows name the object kind; a rich provider/template DTO names its subtype.
-    if (typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
+    if (next !== before && typeof before.kind === 'string' && ((before.kind === change.kind && !complete) || ('my_access' in before && 'path' in before))) next.kind = before.kind;
     // Everything wraps the native DTO in a tagged resource, with its own name/state columns.
     if (record(before.resource) && before.resource.kind === change.kind && change.partial !== true) {
       next = { ...next, resource: { ...before.resource, value: change.value } };
@@ -206,6 +272,8 @@ function matches(key: QueryKey, kind: string, row: Record<string, unknown>, know
   if (key[0] === 'shared-with-me' && !known) return false;
   if (key[0] === 'documents') {
     if (!record(row.node) || typeof row.node.id !== 'string' || typeof row.deleted !== 'boolean') return known;
+    if (key[5] === 'references' && typeof key[6] === 'string' && typeof row.title === 'string'
+      && !row.title.toLowerCase().includes(key[6].toLowerCase())) return false;
     if (row.deleted !== (key[3] === true)) return false;
     const here = row.node.id === key[1];
     if (!here && key[2] !== true) return false;
@@ -251,7 +319,7 @@ function matches(key: QueryKey, kind: string, row: Record<string, unknown>, know
   return known || key[2] === 'resources' || !('scope' in filter);
 }
 
-const INVENTORY_KINDS=new Set(['provider','agent','environment','host','machine','template','mcp_server','mount','skill']);
+const INVENTORY_KINDS=new Set(['provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool']);
 
 function inventory(key:QueryKey,kind:string):boolean {
   return INVENTORY_KINDS.has(kind) && key[2]==='resources' && record(key[3]) && Array.isArray(key[3].kinds) && (key[3].kinds.length===0 || key[3].kinds.includes(kind));
@@ -273,13 +341,14 @@ export function missingInventoryProjection(cache:QueryClient,change:RowChange['r
     }
     return undefined;
   };
-  const detailed=(key:QueryKey)=>record(key[3]) && record(key[3].resource) && key[3].resource.details===true;
+  const detailed=(key:QueryKey)=>record(key[3]) && record(key[3].resource) && (key[3].resource.details===true || key[3].resource.rows===true);
   const queries=[...cache.getQueryCache().getAll()].sort((one,other)=>Number(detailed(other.queryKey))-Number(detailed(one.queryKey)));
   let visible:QueryKey|null=null;
   for(const query of queries) {
     if(!inventory(query.queryKey,change.kind))continue;
     const row=find(query.state.data);
-    const value=row!==undefined && record(row.resource) && record(row.resource.value) ? row.resource.value : undefined;
+    const nested = row?.resource_row ?? row?.resource;
+    const value = record(nested) && record(nested.value) ? nested.value : undefined;
     // A known ordinary name row retains its native path/policy during state/name updates.
     // Private/path-only rows, new membership and changed authority still need the exact inventory cut.
     const knownName = row !== undefined && typeof row.name === 'string' && typeof row.my_access === 'string'
@@ -378,7 +447,7 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
         if (thread !== undefined) cache.setQueryData(key, thread);
         else if (record(query.state.data)) cache.setQueryData(key, threadMetadata(query.state.data, change.value));
       } else if(change.partial===true) {
-        if(record(query.state.data)) cache.setQueryData(key,overlay(query.state.data,change.value));
+        if(record(query.state.data)) cache.setQueryData(key,replace(query.state.data,change,thread));
       } else cache.setQueryData(key,change.value);
     } else if (query.state.data !== undefined) {
       const relatedList = typeof key[0] === 'string' && (LISTS[change.kind] ?? []).includes(key[0]) || key[2] === 'resources';
@@ -389,23 +458,4 @@ function writeRow(cache: QueryClient, change: RowChange['row'], thread?: Thread)
   }
   if (thread !== undefined) cache.setQueryData(['node', thread.id], thread);
   else if (!threadView && change.value !== null && change.partial !== true) cache.setQueryData([detail, change.id], change.value);
-}
-
-/** Use a list's already-authorized native row before asking the API for the same detail. */
-export function cachedRow<Kind extends keyof CachedResources>(cache: QueryClient, kind: Kind, id: string): CachedResources[Kind] | undefined {
-  const find = (value: unknown): Record<string, unknown> | undefined => {
-    if (Array.isArray(value)) {
-      for (const one of value as unknown[]) { const found = find(one); if (found !== undefined) return found; }
-    } else if (record(value)) {
-      if (value.id === id && value.content_hidden !== true && record(value.resource) && value.resource.kind === kind && record(value.resource.value)) return value.resource.value;
-      if (value.id === id && value.content_hidden !== true && record(value.access) && !('resource' in value)) return value;
-      for (const one of Object.values(value)) if (Array.isArray(one) || record(one)) { const found = find(one); if (found !== undefined) return found; }
-    }
-    return undefined;
-  };
-  for (const query of cache.getQueryCache().getAll()) {
-    const found = find(query.state.data);
-    if (found !== undefined) return found as unknown as CachedResources[Kind];
-  }
-  return undefined;
 }

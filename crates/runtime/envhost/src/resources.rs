@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use orch_api_contract::processes::ResourceSample;
-use orch_types::Clock;
+use orch_link_contract::events::EnvironmentSample;
+use orch_types::{Clock, Time};
 use sysinfo::Networks;
 
 use crate::processes::{Processes, ScopeKind};
@@ -78,7 +79,9 @@ impl CgroupReading {
 
 #[derive(Debug, Clone, Copy)]
 struct Previous {
+    generation: Option<i64>,
     at: Instant,
+    observed_at: Time,
     cpu_usec: Option<u64>,
     received: u64,
     sent: u64,
@@ -144,7 +147,23 @@ impl Sampler {
     /// Takes a sample. It reads files and the process table, so it is for a blocking thread.
     #[must_use]
     pub fn sample(&self) -> ResourceSample {
+        self.read(None).0
+    }
+
+    /// Collects the counters for the attachment that requested the report.
+    pub(crate) fn sample_for_attachment(&self, generation: i64) -> EnvironmentSample {
+        let (sample, cpu_interval_started_at) = self.read(Some(generation));
+        EnvironmentSample {
+            generation,
+            cpu_interval_started_at,
+            sample,
+        }
+    }
+
+    fn read(&self, generation: Option<i64>) -> (ResourceSample, Option<Time>) {
+        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
+        let observed_at = self.clock.time();
         let reading = self
             .cgroup
             .as_deref()
@@ -152,7 +171,6 @@ impl Sampler {
             .filter(CgroupReading::reports_use);
         let (count, process_cpu, process_memory) = self.processes.totals();
 
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let (networks, previous) = &mut *guard;
         networks.refresh(true);
         let (received, sent) = networks
@@ -169,17 +187,20 @@ impl Sampler {
         let seconds = previous
             .map(|p| now.duration_since(p.at).as_secs_f64())
             .filter(|s| *s > 0.0);
-        let cpu_percent = match (
+        let (cpu_percent, cpu_interval_started_at) = match (
             reading,
-            previous.and_then(|p| p.cpu_usec),
+            previous
+                .filter(|p| p.generation == generation)
+                .and_then(|p| p.cpu_usec),
             cpu_usec,
             seconds,
         ) {
-            (Some(_), Some(before), Some(after), Some(seconds)) => {
-                (after.saturating_sub(before) as f64) / (seconds * 1_000_000.0) * 100.0
-            }
-            (Some(_), ..) => 0.0,
-            (None, ..) => process_cpu,
+            (Some(_), Some(before), Some(after), Some(seconds)) if after >= before => (
+                ((after - before) as f64) / (seconds * 1_000_000.0) * 100.0,
+                previous.map(|p| p.observed_at),
+            ),
+            (Some(_), ..) => (0.0, None),
+            (None, ..) => (process_cpu, None),
         };
         let rate = |now_total: u64, before: Option<u64>| match (before, seconds) {
             (Some(before), Some(seconds)) => {
@@ -190,7 +211,9 @@ impl Sampler {
         let net_rx_bps = rate(received, previous.map(|p| p.received));
         let net_tx_bps = rate(sent, previous.map(|p| p.sent));
         *previous = Some(Previous {
+            generation,
             at: now,
+            observed_at,
             cpu_usec,
             received,
             sent,
@@ -199,8 +222,8 @@ impl Sampler {
 
         let (disk_used_bytes, _) = disk_use(&self.workspace);
         let to_i64 = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
-        ResourceSample {
-            at: self.clock.time(),
+        let sample = ResourceSample {
+            at: observed_at,
             cpu_percent,
             cpu_limit_millis: reading.and_then(|r| r.cpu_limit_millis),
             memory_bytes: reading
@@ -212,7 +235,8 @@ impl Sampler {
             net_rx_bps,
             net_tx_bps,
             pids: reading.and_then(|r| r.pids_current).map_or(count, to_i64),
-        }
+        };
+        (sample, cpu_interval_started_at)
     }
 }
 
@@ -300,7 +324,9 @@ mod tests {
             Some(group.path().to_path_buf()),
         );
         let started = std::time::Instant::now();
-        let first = sampler.sample();
+        let baseline = sampler.sample_for_attachment(1);
+        assert_eq!(baseline.cpu_interval_started_at, None);
+        let first = baseline.sample;
         assert_eq!(
             (first.memory_bytes, first.memory_limit_bytes),
             (1_000_000, Some(2_000_000))
@@ -321,7 +347,9 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         write("cpu.stat", "usage_usec 1250000\n");
-        let second = sampler.sample();
+        let interval = sampler.sample_for_attachment(1);
+        assert_eq!(interval.cpu_interval_started_at, Some(first.at));
+        let second = interval.sample;
         let longest = started.elapsed();
         // A quarter of a second of CPU time over the time between the two samples, which is no
         // shorter than the wait and no longer than the whole test took on a busy machine: one CPU
@@ -333,6 +361,18 @@ mod tests {
             second.cpu_percent
         );
         assert!(second.net_rx_bps >= 0 && second.net_tx_bps >= 0);
+        let idle = sampler.sample_for_attachment(1);
+        assert_eq!(idle.cpu_interval_started_at, Some(second.at));
+        assert!(idle.sample.cpu_percent.abs() < f64::EPSILON);
+        write("cpu.stat", "usage_usec 1\n");
+        assert_eq!(
+            sampler.sample_for_attachment(1).cpu_interval_started_at,
+            None
+        );
+        assert_eq!(
+            sampler.sample_for_attachment(2).cpu_interval_started_at,
+            None
+        );
     }
 
     #[test]
