@@ -61,10 +61,11 @@ export function NotifierDialog({ title, lead, notifiers, existing, submitLabel, 
   const { t } = useTranslation();
   const [kind, setKind] = useState(existing?.kind ?? notifiers[0]?.name ?? '');
   const notifier = notifiers.find((entry) => entry.name === kind);
-  const fields = useMemo(
-    () => (notifier === undefined ? [] : existing === undefined ? notifier.fields : fieldsForEdit(notifier.fields, existing.secretsSet, t('settings.channels.keepSecret'))),
-    [notifier, existing, t],
-  );
+  const fields = useMemo(() => {
+    const declared = notifier?.fields.map((field) => notifier.name === 'email' && field.name === 'hello_name'
+      ? { ...field, label: t('settings.channels.ehloName'), help: t('settings.channels.ehloHelp') } : field) ?? [];
+    return existing === undefined ? declared : fieldsForEdit(declared, existing.secretsSet, t('settings.channels.keepSecret'));
+  }, [notifier, existing, t]);
   const [values, setValues] = useState<FormValues>(() => startingValues(notifier?.fields ?? [], existing?.config));
   const [name, setName] = useState(existing?.name ?? '');
   const [sent, setSent] = useState(false);
@@ -130,7 +131,7 @@ export function NotifierDialog({ title, lead, notifiers, existing, submitLabel, 
           autoComplete="off"
         />
         {notifier !== undefined && (
-          <FieldForm fields={fields} values={values} errors={errors} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
+          <FieldForm fields={fields} values={values} errors={errors} secretsSet={existing?.secretsSet} onChange={(field: string, value: FormValue) => setValues((before) => ({ ...before, [field]: value }))} />
         )}
         {extra}
         {sent && hold !== null && <InlineAlert tone="danger">{hold}</InlineAlert>}

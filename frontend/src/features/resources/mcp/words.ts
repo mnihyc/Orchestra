@@ -2,6 +2,9 @@
 import type { TFunction } from 'i18next';
 import type { McpState } from '@/generated/api-types';
 import type { TranslationKey } from '@/i18n';
+import type { DotTone } from '@/ui/StatusDot';
+
+export const mcpStateTone: Record<McpState, DotTone> = { starting: 'info', running: 'success', stopped: 'off', failed: 'danger', unavailable: 'warning' };
 
 export function mcpProgram(source: string): string {
   return source === 'codex' ? 'Codex' : source === 'claude' || source === 'claude_code' || source === 'claude-code' ? 'Claude Code' : source;

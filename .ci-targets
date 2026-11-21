@@ -1,0 +1,3 @@
+test -p orch-api-core --test accounts
+test -p orch-db --test approval_settlement
+test -p orch-api-core --test personal -- --test-threads=1

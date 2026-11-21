@@ -344,6 +344,7 @@ impl Fixture {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: true,
                     harness_version: "1.0.0".into(),
                     descriptor: serde_json::from_value(described.clone()).map_err(|error| {
@@ -410,6 +411,7 @@ impl Fixture {
                 Ok(CommandResult::SessionPrefixOpen(NativePrefixOpened {
                     prefix: body.prefix.clone(),
                     session: orch_agent_contract::session::SessionOpened {
+                        mcp: None,
                         native_session_ref: native,
                         resumed: false,
                         import_report: None,
@@ -450,6 +452,7 @@ impl Fixture {
                 });
                 Ok(CommandResult::SessionContinuationResume(
                     SessionOpenResult {
+                        mcp: None,
                         native_session_ref: body.source.native_session_ref.clone(),
                         resumed: true,
                         import_report: None,
@@ -489,9 +492,27 @@ impl Fixture {
                 .await?
                 .ok_or("latest turn absent")?
         };
-        engine
-            .interrupt(&Caller::session(world.ada), thread, latest.id)
+        let stopped = engine
+            .stop_thread(&Caller::session(world.ada), thread, Some(latest.id))
             .await?;
+        assert!(
+            stopped.turn.is_none(),
+            "the queued input has no native turn"
+        );
+        common::eventually(
+            "Stop holds the input and gives up its preparation",
+            || async {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM thread_inputs WHERE id=$1 AND state='pending'
+                 AND queue_held AND state_detail IS NULL AND turn_id IS NULL)",
+                )
+                .bind(submitted.input.id)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap_or(false)
+            },
+        )
+        .await;
         let pending = {
             let mut conn = world.pool.acquire().await?;
             threads::input(&mut conn, submitted.input.id)
