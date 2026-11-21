@@ -31,11 +31,12 @@ const PARENT = snapshot().thread.id;
 const SIDE = '01950000-0000-7000-8000-000000000020';
 const PANEL = 'side-version-panel';
 const GROUP = '01950000-0000-7000-8000-000000000030';
+const INITIAL_EXECUTION = 4;
 const IA = '01950000-0000-7000-8000-000000000031', IB = '01950000-0000-7000-8000-000000000032', IC = '01950000-0000-7000-8000-000000000033';
 const DA = '01950000-0000-7000-8000-000000000041', DB = '01950000-0000-7000-8000-000000000042', DC = '01950000-0000-7000-8000-000000000043';
 const owner = snapshot().thread.owner;
 const panelRead = resultThreadRead(SIDE, PANEL), sideDefault = defaultThreadRead(SIDE);
-const parentContext: TimelineContext = { threadId: PARENT, threadName: 'Parent stays selected', detail: 'steps', recent: new Set(),
+const parentContext: TimelineContext = { threadId: PARENT, threadName: 'Parent stays selected', detail: 'normal',
   layout: 'one', setLayout: () => undefined, meId: owner.id, canInteract: true, canManage: false, live: true, lit: null, selection: NOT_PICKING };
 const reference = { id: SIDE, kind: 'thread' as const, name: 'Versioned aside', redacted: false };
 let previousWorkbench = useWorkbench.getState();
@@ -77,7 +78,7 @@ function transport() {
   const visible = new Set([A, B]);
   const state: { count: number; active: string; execution: number;
     around: ((request: Request) => Promise<Response>) | null; older: ((request: Request) => Promise<Response>) | null }
-    = { count: 3, active: A, execution: 4, around: null, older: null };
+    = { count: 3, active: A, execution: INITIAL_EXECUTION, around: null, older: null };
   const current = (id: string) => {
     const found = versions.get(id); if (found === undefined) throw new Error('Unknown synthetic continuation'); return found;
   };
@@ -92,7 +93,7 @@ function transport() {
     if (match?.[1] !== SIDE || match[2] === undefined) return Promise.reject(new Error('A side read must keep its actual native thread ID'));
     const selected = url.searchParams.get('continuation_id'), id = selected ?? state.active, suffix = match[2];
     if (suffix === '/opening' || suffix === '/sync') {
-      expect(url.searchParams.get('limit')).toBe('200');
+      expect(url.searchParams.get('limit')).toBe(suffix === '/opening' ? null : '200');
       const cut = sideCut(scope(id, selected === null), current(id), state.count, visible.has(id));
       return Promise.resolve(Response.json(suffix === '/opening' ? opening(cut) : cut));
     }
@@ -148,7 +149,7 @@ beforeEach(() => {
   client.session.setState({ userId: owner.id }); useWorkbench.setState({ userId: null });
   composerWriter.setText(PARENT, 'Unsent parent words');
   threadWriter.reset(PARENT, snapshot(), false, captureThreadRead(PARENT));
-  const cut = sideCut(projection(A, A, 1, true), version(A), 3, true);
+  const cut = sideCut({ ...projection(A, A, 1, true), execution_revision: INITIAL_EXECUTION }, version(A), 3, true);
   threadWriter.reset(sideDefault, cut, false, captureThreadRead(sideDefault));
 });
 afterEach(() => {

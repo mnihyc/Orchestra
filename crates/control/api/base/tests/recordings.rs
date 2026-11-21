@@ -29,10 +29,10 @@ struct Place {
 }
 
 impl Place {
-    fn of(site: &Site, master: Option<MasterKey>) -> Self {
+    fn of(_site: &Site, master: Option<MasterKey>) -> Self {
         let store = Blobs::in_memory().store();
         Self {
-            kept: KeptOutput::new(Arc::clone(&store), site.world.app.app.db.clone(), master),
+            kept: KeptOutput::new(Arc::clone(&store), master),
             store,
         }
     }
@@ -95,7 +95,13 @@ async fn a_recording_is_put_away_with_the_values_of_the_environments_secrets_tak
 
     let kept = place
         .kept
-        .keep(site.environment, uploaded, true)
+        .keep(
+            &mut *site.world.conn().await,
+            site.environment,
+            uploaded,
+            true,
+            site.world.now(),
+        )
         .await
         .unwrap();
 
@@ -127,7 +133,13 @@ async fn a_recording_with_no_secret_in_it_is_kept_as_the_machine_uploaded_it() {
 
     let kept = place
         .kept
-        .keep(site.environment, uploaded, true)
+        .keep(
+            &mut *site.world.conn().await,
+            site.environment,
+            uploaded,
+            true,
+            site.world.now(),
+        )
         .await
         .unwrap();
 
@@ -145,7 +157,13 @@ async fn a_recording_of_an_environment_without_secrets_is_kept_as_it_was_uploade
 
     let kept = place
         .kept
-        .keep(site.environment, uploaded, true)
+        .keep(
+            &mut *site.world.conn().await,
+            site.environment,
+            uploaded,
+            true,
+            site.world.now(),
+        )
         .await
         .unwrap();
 
@@ -164,7 +182,13 @@ async fn a_recording_is_kept_as_it_is_where_the_place_of_the_shell_does_not_mask
 
     let kept = place
         .kept
-        .keep(site.environment, uploaded, false)
+        .keep(
+            &mut *site.world.conn().await,
+            site.environment,
+            uploaded,
+            false,
+            site.world.now(),
+        )
         .await
         .unwrap();
 
@@ -178,7 +202,16 @@ async fn a_recording_whose_environment_has_secrets_that_cannot_be_opened_is_not_
     let place = Place::of(&site, None);
     let uploaded = place.uploaded(b"$ echo tok-4f9c1a77\ntok-4f9c1a77\n").await;
 
-    let refused = place.kept.keep(site.environment, uploaded, true).await;
+    let refused = place
+        .kept
+        .keep(
+            &mut *site.world.conn().await,
+            site.environment,
+            uploaded,
+            true,
+            site.world.now(),
+        )
+        .await;
 
     assert!(
         refused.is_err(),
@@ -199,7 +232,13 @@ async fn a_recording_longer_than_may_be_put_away_is_refused() {
     assert!(
         place
             .kept
-            .keep(site.environment, too_long, true)
+            .keep(
+                &mut *site.world.conn().await,
+                site.environment,
+                too_long,
+                true,
+                site.world.now()
+            )
             .await
             .is_err()
     );

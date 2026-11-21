@@ -7,6 +7,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { HardDrive } from 'lucide-react';
+import { type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { storageQuery } from '@/api/admin';
@@ -25,13 +26,11 @@ import { UserChip } from '@/ui/UserChip';
 
 type Consumer = StorageStats['top_environments'][number];
 
-export function Storage() {
-  const { t } = useTranslation();
-  const locale = useAppearance((state) => state.locale);
-  const storage = useQuery(storageQuery);
-
-  if (storage.isPending) {
-    return (
+export function Storage({ confirmSession, frame }: { confirmSession: boolean; frame: (body: ReactNode) => ReactNode }) {
+  // The native Storage read checks this session's current admin mode before returning totals.
+  const storage = useQuery({ ...storageQuery, ...(confirmSession && { refetchOnMount: 'always' as const }) });
+  if (storage.isPending || (confirmSession && !storage.isFetchedAfterMount)) {
+    return frame(
       <div className="@container"><SkeletonGroup read={storage} className={FIGURE_GRID}>
         {[0, 1, 2, 3, 4].map((at) => (
           <Skeleton key={at} className="h-16 w-full" />
@@ -39,9 +38,14 @@ export function Storage() {
       </SkeletonGroup></div>
     );
   }
-  if (storage.isError) return <ErrorState error={storage.error} retrying={storage.isRefetching} onRetry={() => void storage.refetch()} />;
+  if (storage.isError) return frame(<ErrorState error={storage.error} retrying={storage.isRefetching} onRetry={() => void storage.refetch()} />);
 
-  const stats = storage.data;
+  return frame(<StorageFigures stats={storage.data} />);
+}
+
+function StorageFigures({ stats }: { stats: StorageStats }) {
+  const { t } = useTranslation();
+  const locale = useAppearance((state) => state.locale);
   const bytes = (value: number) => formatBytes(value, locale);
   // How much of the room that blobs and free space share the blobs take.
   const room = stats.blob_bytes + stats.disk_free_bytes;

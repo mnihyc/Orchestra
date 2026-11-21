@@ -9,8 +9,8 @@ import { chat } from '../doubles/chat-rows';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Node>>(), export: vi.fn<(target: ExportTarget) => void>(), request: vi.fn<(target: ExportTarget) => void>() }));
-vi.mock('@/api/nodes', () => ({ nodeQuery: (id: string) => ({ queryKey: ['menu-node', id], queryFn: calls.read }) }));
-vi.mock('@/features/export/ExportHost', () => ({ openExport: calls.export, requestExportAccess: calls.request }));
+vi.mock('@/api/nodes', async (loadOriginal) => ({ ...await loadOriginal<object>(), nodeQuery: (id: string) => ({ queryKey: ['menu-node', id], queryFn: calls.read }) }));
+vi.mock('@/features/export/ExportHost', async (loadOriginal) => ({ ...await loadOriginal<object>(), openExport: calls.export, requestExportAccess: calls.request }));
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('the native chat export menu', () => {
