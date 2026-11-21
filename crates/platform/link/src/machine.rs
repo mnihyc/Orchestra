@@ -22,7 +22,7 @@
 //! dealt with.
 
 use crate::commands::{CommandHandler, CommandServer, ServerOptions};
-use crate::framing::Measurements;
+use crate::framing::{Measurements, Refused};
 use crate::gateways::PrimaryGateway;
 use crate::journal::Journal;
 use crate::reconnect::{Backoff, DialError, Dialer, Endpoints};
@@ -38,9 +38,10 @@ use orch_link_contract::events::{Event, Report};
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::{HEARTBEAT_SECS, MachineFactsRates, Platform, Ready, Role};
 use orch_link_contract::streams::{Eph, Stream};
-use orch_link_contract::version::RejectCode;
+use orch_link_contract::version::{Limits, RejectCode};
 use orch_pki::certificates::{Certificate, LeafKey};
 use orch_types::{Clock, Id};
+mod publication;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -298,6 +299,7 @@ struct SessionStart {
 
 #[derive(Debug)]
 struct Shared {
+    spool_status: watch::Sender<orch_api_contract::resources::SpoolStatus>,
     auxiliary: Arc<auxiliary::Pool>,
     incoming: Mutex<Option<IncomingTunnels>>,
     primary_attaching: Mutex<Option<String>>,
@@ -367,6 +369,24 @@ pub enum MachineRequestError {
     /// The system may have committed before the reply was lost; never claim it certainly failed.
     #[error("the local request was not confirmed; inspect the machine's Tools before trying again")]
     Unconfirmed,
+    /// The request is larger than a message on this link may be.
+    #[error(
+        "the request is {bytes} bytes, and a message on this link may have {limit} at most (`max_message_bytes` in the `[link]` section of the settings)"
+    )]
+    TooLarge {
+        /// Its size.
+        bytes: usize,
+        /// The most a message may have.
+        limit: usize,
+    },
+}
+
+/// Why the session did not take a request: it is over, or the request is larger than it carries.
+fn refusal_of(refused: Refused) -> MachineRequestError {
+    match refused {
+        Refused::TooLarge { bytes, limit } => MachineRequestError::TooLarge { bytes, limit },
+        Refused::SessionOver | Refused::Unwritable => MachineRequestError::Offline,
+    }
 }
 
 struct PendingImport {
@@ -531,6 +551,11 @@ impl MachineLink {
         #[cfg(feature = "test-observers")]
         let observed_inputs = crate::test_observers::QueueGauge::new("machine.inputs");
         let (status_tx, status_rx) = watch::channel(LinkStatus::Starting);
+        let (spool_status, _) = watch::channel(orch_api_contract::resources::SpoolStatus {
+            problem: (!recovery.damaged.is_empty())
+                .then_some(orch_api_contract::resources::SpoolProblem::Damaged),
+            waiting_events: 0,
+        });
         let budget = Arc::new(tokio::sync::Semaphore::new(
             orch_link_contract::version::MAX_CHANNELS as usize,
         ));
@@ -560,6 +585,7 @@ impl MachineLink {
         let endpoints_now = Arc::new(Mutex::new(config.endpoints.clone()));
         let active_endpoint = Arc::new(Mutex::new(None));
         let shared = Arc::new_cyclic(|parent| Shared {
+            spool_status,
             auxiliary: auxiliary::Pool::new(
                 parent.clone(),
                 auxiliary::PoolConfig {
@@ -779,6 +805,12 @@ impl MachineLink {
         self.shared.status.clone()
     }
 
+    /// Output storage health remains observable while authoritative publication is held.
+    #[must_use]
+    pub fn spool_status(&self) -> watch::Receiver<orch_api_contract::resources::SpoolStatus> {
+        self.shared.spool_status.subscribe()
+    }
+
     /// The latest authenticated gateway's minimum and recommended connector builds, retained while offline.
     #[must_use]
     pub fn versions(&self) -> Option<orch_link_contract::version::ConnectorVersions> {
@@ -823,7 +855,7 @@ impl MachineLink {
         };
         sender
             .send(Frame::McpImportAsk(request))
-            .map_err(|_| MachineRequestError::Offline)?;
+            .map_err(refusal_of)?;
         tokio::time::timeout(
             Duration::from_secs(orch_link_contract::mcp_import::ANSWER_WITHIN_SECS),
             told,
@@ -871,7 +903,7 @@ impl MachineLink {
         };
         sender
             .send(Frame::PortLocalAsk(request))
-            .map_err(|_| MachineRequestError::Offline)?;
+            .map_err(refusal_of)?;
         tokio::time::timeout(
             Duration::from_secs(orch_link_contract::local_ports::ANSWER_WITHIN_SECS),
             receive,
@@ -922,6 +954,21 @@ impl MachineLink {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(SessionSender::data_frame_bytes)
+    }
+
+    /// The most bytes of a message the session in hand carries: what a gateway stated, or the shipped
+    /// limit while no session stands. What cannot be sent whole may be cut by whoever knows how, up to this.
+    #[must_use]
+    pub fn message_bytes(&self) -> usize {
+        self.shared
+            .session
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map_or(
+                Limits::default().message_bytes(),
+                SessionSender::max_message_bytes,
+            )
     }
 
     /// The figures of the link as a machine reports them in its facts.
@@ -1458,16 +1505,16 @@ async fn run_session(
 }
 
 /// Forces the files of the spool to disk, where blocking is fine.
-async fn sync_files(files: Vec<std::fs::File>) {
+async fn sync_files(files: crate::spool::SyncBatch) -> std::io::Result<crate::spool::SyncBatch> {
     if files.is_empty() {
-        return;
+        return Ok(files);
     }
-    let _ = tokio::task::spawn_blocking(move || {
-        for file in files {
-            let _ = file.sync_data();
-        }
+    tokio::task::spawn_blocking(move || {
+        files.force()?;
+        Ok(files)
     })
-    .await;
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 async fn core(
@@ -1486,14 +1533,19 @@ async fn core(
     let mut ticks: u32 = 0;
     let mut stall_after = Duration::from_secs(u64::from(HEARTBEAT_SECS));
     let mut shutdown: Option<oneshot::Sender<()>> = None;
+    let mut publications = publication::Publications::new(shared.spool_status.borrow().problem);
+    let mut last_problem = None;
+    let mut health_at = Instant::now();
 
     'running: loop {
+        let mut ticked = false;
         let first = tokio::select! {
             input = inputs.recv() => match input {
                 Some(input) => Some(input),
                 None => break 'running,
             },
-            _ = ticker.tick() => None,
+            _ = ticker.tick() => {ticked=true;None},
+            completed = publications.completed() => { publications.finish(completed,&mut streams);None },
         };
         let mut batch: Vec<Input> = first.into_iter().collect();
         #[cfg(feature = "test-observers")]
@@ -1507,7 +1559,7 @@ async fn core(
             batch.push(more);
         }
         let now = Instant::now();
-        if batch.is_empty() {
+        if ticked {
             ticks = ticks.wrapping_add(1);
             streams.on_stall(stall_after, now);
             if ticks.is_multiple_of(HOUSEKEEPING_EVERY) {
@@ -1533,29 +1585,16 @@ async fn core(
                     event,
                     reply,
                 } => {
-                    let outcome = match (event.body(), event.kind().as_str()) {
-                        (Ok(body), kind) => streams.publish(&stream, clock.time(), kind, body, now),
-                        (Err(error), _) => Err(PublishError::Spool(crate::spool::SpoolError::Io {
-                            path: "event".to_owned(),
-                            source: std::io::Error::other(error),
-                        })),
-                    };
-                    match outcome {
-                        Ok(frames) => {
-                            let _ = reply.send(Ok(()));
-                            send_all(session.as_ref(), frames);
-                        }
-                        Err(error) => {
-                            let _ = reply.send(Err(error));
-                        }
-                    }
+                    publications.push(stream, &event, clock.time(), reply);
                 }
                 Input::Report { eph } => {
                     if let Some(open) = session.as_ref() {
-                        let _ = open.send_events(Frame::Eph(eph));
+                        noted(open.send_events(Frame::Eph(eph)), "a report");
                     }
                 }
                 Input::Ready(start) => {
+                    publications.session_changed();
+                    health_at = now;
                     let SessionStart {
                         retained_supported,
                         gateway_id,
@@ -1577,7 +1616,7 @@ async fn core(
                     session_gateway = Some(gateway_id.clone());
                     tunnels.session_up_at(sender.clone(), &gateway_id, retained_supported);
                     shared.auxiliary.primary_ready();
-                    match streams.on_ready(&ready.cursors, sender.max_frame_bytes(), now) {
+                    match streams.on_ready(&ready.cursors, sender.limits(), now) {
                         Ok(frames) => send_all(Some(&sender), frames),
                         Err(error) => {
                             tracing::error!(%error, "the streams could not be brought up to date")
@@ -1627,13 +1666,16 @@ async fn core(
                                 true,
                                 clock.time(),
                             );
-                            let _ = sender.send(Frame::PortConnectionsReply(
-                                orch_link_contract::ports::PortConnectionsReply {
-                                    request_ref: query.request_ref,
-                                    environment_id: query.environment_id,
-                                    connections,
-                                },
-                            ));
+                            noted(
+                                sender.send(Frame::PortConnectionsReply(
+                                    orch_link_contract::ports::PortConnectionsReply {
+                                        request_ref: query.request_ref,
+                                        environment_id: query.environment_id,
+                                        connections,
+                                    },
+                                )),
+                                "a report of port connections",
+                            );
                         }
                         #[cfg(feature = "test-observers")]
                         if let Some(flight) = flight {
@@ -1687,6 +1729,7 @@ async fn core(
                 Input::Data(data) => tunnels.on_data(data),
                 Input::Datagram(packet) => tunnels.on_datagram(packet),
                 Input::Ended => {
+                    publications.session_changed();
                     if let Some(ended) = session.take() {
                         *shared.meter.lock().unwrap_or_else(PoisonError::into_inner) =
                             Some(ended.meter().measurements());
@@ -1704,11 +1747,6 @@ async fn core(
                 }
                 Input::Shutdown(done) => {
                     shutdown = Some(done);
-                    #[cfg(feature = "test-observers")]
-                    if let Some(flight) = flight {
-                        flight.processed();
-                    }
-                    break;
                 }
             }
             #[cfg(feature = "test-observers")]
@@ -1716,57 +1754,82 @@ async fn core(
                 flight.processed();
             }
         }
-        if shutdown.is_some() {
-            break 'running;
+        publications.drive(&mut streams, now);
+        publications.force(&mut streams, session.as_ref(), now);
+        let storage = publications.status();
+        let previous = shared.spool_status.borrow().problem;
+        let changed = *shared.spool_status.borrow() != storage;
+        if changed {
+            shared.spool_status.send_replace(storage.clone());
         }
-        if let Some(open) = session.as_ref() {
-            pump(&mut streams, open, now).await;
+        if storage.problem != previous {
+            if let Some(reason) = storage.reason() {
+                tracing::warn!(
+                    reason,
+                    waiting = storage.waiting_events,
+                    "output publication needs attention"
+                );
+            } else {
+                tracing::info!("authoritative output publication resumed");
+            }
         }
-        // Whatever was spooled is forced to disk within a tick, sent or not.
-        if streams.is_dirty()
-            && let Ok(files) = streams.sync_handles()
+        if let Some(open) = session.as_ref()
+            && (last_problem != Some(storage.problem) || now >= health_at)
         {
-            sync_files(files).await;
+            match Eph::of(
+                &Stream::Machine,
+                clock.time(),
+                &Report::SpoolStatus(storage.clone()),
+            ) {
+                Ok(eph) => {
+                    noted(open.send_events(Frame::Eph(eph)), "output storage health");
+                }
+                Err(_) => tracing::error!("output storage health could not be encoded"),
+            }
+            last_problem = Some(storage.problem);
+            health_at = now + stall_after;
+        }
+        if shutdown.is_some() && publications.is_empty() && !streams.is_dirty() {
+            break 'running;
         }
     }
     if let Some(open) = session.as_ref() {
         open.end();
     }
     if let Ok(files) = streams.sync_handles() {
-        sync_files(files).await;
+        match sync_files(files).await {
+            Ok(batch) => streams.complete_sync(&batch),
+            Err(error) => {
+                tracing::error!(kind=?error.kind(), "the spool still owes durability at shutdown")
+            }
+        }
     }
     if let Some(done) = shutdown {
         let _ = done.send(());
     }
 }
 
-fn send_all(session: Option<&SessionSender>, frames: Vec<Frame>) {
-    if let Some(session) = session {
-        for frame in frames {
-            let _ = session.send_events(frame);
+/// Notes a frame that the session did not take. One that is too large for what the session carries is
+/// said, with its size and the limit, and counted: it is never lost in silence. The session being over
+/// is no news. Returns whether the session is there to take the next frame.
+fn noted(sent: Result<(), Refused>, what: &str) -> bool {
+    match sent {
+        Ok(()) => true,
+        Err(Refused::SessionOver) => false,
+        Err(refused) => {
+            tracing::error!(%refused, what, "a frame was not sent");
+            metrics::counter!("orch_link_frames_refused_total").increment(1);
+            true
         }
     }
 }
 
-/// Frames what may go on the wire and sends it, the files forced to disk
-/// first: nothing is on the wire that is not on disk.
-async fn pump(streams: &mut StreamSender, session: &SessionSender, now: Instant) {
-    let frames = match streams.pump(session.event_frame_bytes(), now) {
-        Ok(frames) => frames,
-        Err(error) => {
-            tracing::error!(%error, "the spool failed");
-            return;
-        }
-    };
-    if frames.is_empty() {
-        return;
-    }
-    if let Ok(files) = streams.sync_handles() {
-        sync_files(files).await;
-    }
-    for frame in frames {
-        if session.send_events(frame).is_err() {
-            return;
+fn send_all(session: Option<&SessionSender>, frames: Vec<Frame>) {
+    if let Some(session) = session {
+        for frame in frames {
+            if !noted(session.send_events(frame), "a frame of events") {
+                return;
+            }
         }
     }
 }

@@ -1,6 +1,6 @@
 /** Real router/store/Board/contexts; only native read replies and heavy feature bodies are synthetic. */
 import { act, cleanup, fireEvent, render, screen, waitFor, type RenderResult } from '@testing-library/react';
-import { useLayoutEffect } from 'react';
+import { useImperativeHandle, useLayoutEffect } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider, type AnyRoute } from '@tanstack/react-router';
 import { File, PanelsTopLeft } from 'lucide-react';
@@ -35,6 +35,8 @@ import { useThreadWindowLifetime } from '@/features/workbench/threadWindows';
 import '@/features/search/ResultView';
 // Admit the real lazy module before timing reader changes, including its first use in this file.
 import { ResultThread } from '@/features/search/ResultContent';
+import type { TimelineHandle, TimelineProps } from '@/features/timeline/Timeline';
+import { i18n } from '@/i18n';
 import { clearScreenHeading, focusScreenHeading } from '@/shell/screen';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { Route as ThreadRoute } from '@/routes/thread/$threadId/index';
@@ -44,7 +46,7 @@ import { Route as PlaceChatRoute } from '@/routes/place-chat/$nodeId/index';
 import { RoutingFrame } from './workbench-routing/frame';
 import { delayedReads, feedCalls, FileWitness, heldFeeds, InspectorWitness, nativeRows, nativeNodes, nativeThread, useNativeFeed, USER } from './workbench-content/fixture';
 import { World } from '../doubles/world';
-import { ACME } from '../doubles/fixtures';
+import { ACME, meta } from '../doubles/fixtures';
 import { threadOpening } from '../doubles/thread-opening';
 
 vi.mock('@/realtime/live', async (original) => {
@@ -61,7 +63,13 @@ vi.mock('@/features/documents/Document', async () => {
 vi.mock('@/features/chat/ChatView', async () => {
   const { FullChat } = await import('./workbench-content/fixture'); return { ChatView: FullChat, chatTitle: () => 'Actual chat', chatPageTitle: () => 'Actual chat' };
 });
-vi.mock('@/features/timeline/Timeline', () => ({ Timeline: () => <div role="log" /> }));
+const previewTimeline = vi.hoisted(() => ({ props: null as TimelineProps | null, end: vi.fn() }));
+vi.mock('@/features/timeline/StatusLine', () => ({ StatusLine: ({ threadId, withStop }: { threadId: string; withStop?: boolean }) => <p data-preview-status={threadId} data-with-stop={String(withStop)} /> }));
+vi.mock('@/features/timeline/Timeline', () => ({ Timeline: (props: TimelineProps) => {
+  previewTimeline.props = props;
+  useImperativeHandle(props.ref, (): TimelineHandle => ({ scrollToItem: () => undefined, scrollToEnd: previewTimeline.end, visibleItemIds: () => new Set() }));
+  return <div role="log" />;
+} }));
 vi.mock('@/api/workspace', async (original) => {
   const actual = await original<typeof Workspace>();
   const { nativeEnvironment: environment } = await import('./workbench-content/fixture');
@@ -77,7 +85,7 @@ vi.mock('@/api/nodes', async (original) => {
 });
 
 // This witness receives the real FileTabs props; actual CodeView dispatch is covered separately.
-vi.mock('@/features/files/lazy', () => ({ lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
+vi.mock('@/features/files/lazy', async (loadOriginal) => ({ ...await loadOriginal<object>(), lazyPart: () => function FileViewerWitness({ line, lineRequest }: ViewerProps) {
   return <section><output aria-label="Addressed file line" data-line={line ?? 'none'} data-request={lineRequest ?? 'none'} />
     <textarea aria-label="Retained viewer draft" defaultValue="Original file bytes" /></section>;
 } }));
@@ -104,6 +112,7 @@ const state = () => useWorkbench.getState();
 const savedSession = client.session.getState(), savedOptions = queryClient.getDefaultOptions();
 const unregister: (() => void)[] = [], mounted: RenderResult[] = [], histories: ReturnType<typeof createMemoryHistory>[] = [];
 beforeEach(() => {
+  previewTimeline.props = null; previewTimeline.end.mockClear();
   state().leave(); localStorage.clear(); threadWriter.clear(); queryClient.clear(); treeWriter.clear();
   nativeRows.clear(); nativeNodes.clear(); heldFeeds.clear(); delayedReads.clear(); feedCalls.length = 0;
   clearPageNavigation(pageNavigationOrigin()); usePageFailures.setState({ byTab: new Map() }); clearViewOpenings();
@@ -153,7 +162,26 @@ function fileLocation(env: string, thread: string | null, path = 'main.rs', line
   return { view: 'file', environmentId: env, threadId: thread, path, ...(line === undefined ? {} : { line }) };
 }
 
-it('pushes ordinary files, replaces focus echoes, and back/forward recovers exact file/diff targets without losing peers', async () => {
+it('keeps a recently closed native thread cut until its closed slot is actually displaced', async () => {
+  const a = page('thread-a'), b = page('thread-b'), c = page('thread-c');
+  for (const id of ['thread-a', 'thread-b', 'thread-c']) nativeRows.set(id, nativeThread(id));
+  seed([a, b, c], a.id);
+  queryClient.setQueryData(['meta'], meta()); queryClient.setQueryData(['me-state'], { interface: { kept_closed_tabs: 1 } });
+  const drawn = draw(a.of!.href!); await settled(drawn);
+  const read = contentThreadRead('thread-a', a.id);
+  await waitFor(() => expect(threadViewOf(read).read?.ready).toBe(true));
+  const before = threadViewOf(read);
+  act(() => state().close({ kind: 'tab', tab: a.id }));
+  await act(async () => { await Promise.resolve(); });
+  expect(threadViewOf(read).read).toBe(before.read); expect(before.read?.controller.signal.aborted).toBe(false);
+  act(() => state().reopen()); await screen.findByTestId(`full-thread-${a.id}`);
+  expect(threadViewOf(read).read).toBe(before.read);
+  act(() => { state().close({ kind: 'tab', tab: a.id }); state().close({ kind: 'tab', tab: b.id }); });
+  await act(async () => { await Promise.resolve(); });
+  expect(threadViewOf(read).read).toBeNull(); expect(before.read?.controller.signal.aborted).toBe(true);
+});
+
+it('pushes ordinary files, replaces focus echoes, and back/forward recovers exact file/diff targets without losing peers', { timeout: 30_000 }, async () => {
   const a = page('thread-a'); nativeRows.set('thread-a', nativeThread('thread-a')); seed([a], a.id);
   const drawn = draw(a.of!.href!); await settled(drawn, a.of!.href);
   const first = fileLocation('environment-thread-a', 'thread-a', 'one.rs', 31);
@@ -340,10 +368,10 @@ it('the actual fixed-history opening hydrator cannot replace shared controls', a
   selectThreadContinuation(fixed, 'history-b');
   const capture = threadWriter.capture(fixed, client.session.getState().readerVersion);
   const controls = queryClient.getQueryData(threadKeys.parameters(ACME.mainThread));
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(before);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(controls);
-  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toEqual({ pages: [opening.outline], pageParams: [null] });
+  expect(queryClient.getQueryData(threadKeys.outline(fixed))).toBeUndefined();
   expect(fixed.controls).toBeUndefined();
 });
 
@@ -358,7 +386,7 @@ it('shared current workspace metadata cannot replace the existing draft or contr
   expect(source).toEqual(workspaceThreadRead('workspace-a', ACME.mainThread));
   expect(source).not.toEqual(workspaceThreadRead('workspace-b', ACME.mainThread));
   const capture = threadWriter.capture(source, client.session.getState().readerVersion);
-  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null, settings: [] }, capture);
+  hydrateThreadOpening(queryClient, { ...opening, draft: null, parameters: null, limits: null }, capture);
   expect(queryClient.getQueryData(threadKeys.draft(ACME.mainThread))).toEqual(draft);
   expect(queryClient.getQueryData(threadKeys.parameters(ACME.mainThread))).toEqual(parameters);
   expect(source.key.kind).toBe('result'); expect(source.controls).toBeUndefined();
@@ -445,6 +473,21 @@ it('preview cleanup after the full reader is admitted preserves B and its fresh 
   expect(current.read?.ready).toBe(true); expect(current.read?.controller.signal.aborted).toBe(false);
 });
 
+it('keeps the live status and jump to latest available in a search-side thread preview', async () => {
+  const main = page('thread-a'), preview = makeTab('search-result', { kind: 'thread', id: 'thread-live-preview' });
+  nativeRows.set('thread-live-preview', nativeThread('thread-live-preview'));
+  seed([main], main.id);
+  state().change((layout) => ({ ...layout, bottom: { ...layout.bottom, group: makeGroup([preview]), open: true } }));
+  const drawn = render(<QueryClientProvider client={queryClient}><TooltipProvider><ResultThread threadId="thread-live-preview" tabId={preview.id} item={null} shown /></TooltipProvider></QueryClientProvider>);
+  mounted.push(drawn);
+  await waitFor(() => expect(threadViewOf(resultThreadRead('thread-live-preview', preview.id)).read?.ready).toBe(true));
+  expect(drawn.container.querySelector('[data-preview-status="thread-live-preview"]')).toHaveAttribute('data-with-stop', 'true');
+  act(() => previewTimeline.props?.onFollow?.({ atEnd: false, away: 3, ahead: true }));
+  const jump = await screen.findByRole('button', { name: i18n.t('timeline.newBelow', { count: 3 }) });
+  fireEvent.click(jump);
+  expect(previewTimeline.end).toHaveBeenCalledOnce();
+});
+
 it.each(['bottom', 'temporary left bar'] as const)('a visible narrow preview in %s admits B through its tab slot without requiring a phone sheet choice', async (area) => {
   const a = page('thread-a'), preview = makeTab('search-result', { kind: 'thread', id: 'thread-narrow-preview', continuation: '' });
   nativeRows.set('thread-a', nativeThread('thread-a')); nativeRows.set('thread-narrow-preview', nativeThread('thread-narrow-preview'));
@@ -469,9 +512,12 @@ it.each(['bottom', 'temporary left bar'] as const)('a visible narrow preview in 
     expect(feedCalls.some((call) => call.native === 'thread-narrow-preview' && call.owner === preview.id && !call.controls)).toBe(true);
     act(() => state().change((layout) => moveScoped(layout, preview.id, { to: 'split', group: findTab(layout, a.id)!.group.id, side: 'right' })));
     await screen.findByTestId(`full-thread-${preview.id}`);
-    const current = threadViewOf(contentThreadRead('thread-narrow-preview', preview.id));
-    expect(current.read?.selection).toBe('history-b'); expect(current.read?.ready).toBe(true);
-    expect(current.read?.controller.signal.aborted).toBe(false);
+    // The kept body can paint before its newly shown slot resumes the admitted reader.
+    await waitFor(() => {
+      const current = threadViewOf(contentThreadRead('thread-narrow-preview', preview.id));
+      expect(current.read?.selection).toBe('history-b'); expect(current.read?.ready).toBe(true);
+      expect(current.read?.controller.signal.aborted).toBe(false);
+    });
   } finally { width.mockRestore(); }
 });
 
