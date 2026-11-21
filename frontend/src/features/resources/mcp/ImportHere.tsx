@@ -2,7 +2,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { environmentKey, environmentMcpKey, importEnvironmentMcp } from '@/api/environments';
+import { importEnvironmentMcp } from '@/api/environments';
 import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import type { EnvironmentMcp, EnvironmentRef, MachineRef, McpFound } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
@@ -20,7 +20,7 @@ type EnvironmentAt = Pick<EnvironmentRef, 'id' | 'name'>;
 type MachineAt = Pick<MachineRef, 'id' | 'name' | 'online'>;
 interface Asked { environment: EnvironmentAt; machine: MachineAt; rows: readonly McpFound[]; reader: ReturnType<typeof libraryReader> }
 
-function ProgramImport({ environment, machine, source, rows, right }: { environment: EnvironmentAt; machine: MachineAt; source: string; rows: readonly McpFound[]; right: EnvironmentMcp['import'] }) {
+function ProgramImport({ environment, machine, source, rows, right, threadId }: { environment: EnvironmentAt; machine: MachineAt; source: string; rows: readonly McpFound[]; right: EnvironmentMcp['import']; threadId?: string | undefined }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const cache = useQueryClient();
@@ -35,15 +35,13 @@ function ProgramImport({ environment, machine, source, rows, right }: { environm
         const identity = JSON.stringify([asked.reader, asked.environment.id, asked.machine.id, discoveryKey(row)]);
         let key = keys.current.get(identity);
         if (key === undefined) { key = newActKey(); keys.current.set(identity, key); }
-        const made = await importEnvironmentMcp(asked.environment.id, { name: row.name, source: row.source, scope: row.scope, directory: row.directory, enable: true }, key);
+        const made = await importEnvironmentMcp(asked.environment.id, { ...(row.origin === undefined || row.origin === null ? {} : { origin: row.origin }), name: row.name, source: row.source, scope: row.scope, directory: row.directory, enable: true }, key);
         if (!sameLibraryReader(asked.reader)) return;
         state.acknowledge(row, made.id); keys.current.delete(identity);
       }
     },
     onSettled: (_value, _error, asked) => {
       if (!sameLibraryReader(asked.reader)) return;
-      void cache.invalidateQueries({ queryKey: environmentMcpKey(asked.environment.id) });
-      void cache.invalidateQueries({ queryKey: environmentKey(asked.environment.id), exact: true });
       void cache.invalidateQueries({ queryKey: ['mcp-servers'] });
     },
   });
@@ -59,12 +57,12 @@ function ProgramImport({ environment, machine, source, rows, right }: { environm
     </div>
     {create.error !== null && <ErrorAlert error={create.error} />}
     {review && <Dialog open title={t('mcpImport.title')} onOpenChange={(open) => { if (!open) setReview(false); }} size="lg" footer={<Button onClick={() => setReview(false)}>{t('common.close')}</Button>}>
-      <FoundMcp environment={environment} machineId={machine.id} />
+      <FoundMcp threadId={threadId} environment={environment} machineId={machine.id} />
     </Dialog>}
   </div>;
 }
 
-export function ImportHere({ environment, machine, value }: { environment: EnvironmentAt; machine: MachineAt; value: EnvironmentMcp }) {
+export function ImportHere({ environment, machine, value, threadId }: { environment: EnvironmentAt; machine: MachineAt; value: EnvironmentMcp; threadId?: string | undefined }) {
   const state = useImportState(environment.id, machine.id);
   const groups = new Map<string, McpFound[]>();
   const seen = new Set<string>();
@@ -75,6 +73,6 @@ export function ImportHere({ environment, machine, value }: { environment: Envir
     seen.add(key); groups.set(found.source, [...(groups.get(found.source) ?? []), found]);
   }
   return groups.size === 0 ? null : <div className="flex min-w-0 flex-col gap-2" data-mcp-import-here="">
-    {[...groups].map(([source, rows]) => <ProgramImport key={`${environment.id}:${machine.id}:${source}`} environment={environment} machine={machine} source={source} rows={rows} right={value.import} />)}
+    {[...groups].map(([source, rows]) => <ProgramImport threadId={threadId} key={`${environment.id}:${machine.id}:${source}`} environment={environment} machine={machine} source={source} rows={rows} right={value.import} />)}
   </div>;
 }

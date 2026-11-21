@@ -7,6 +7,7 @@ import { HINT_IDS, articleOf, hintOf } from '@/features/help/hints';
 import { ARTICLE_GROUPS, articleAvailable, articleFirstLine, articleInLanguage, belongsTo, makeGuide, readArticle, slugOf, splitFrontMatter } from '@/help/guide';
 import { guide } from '@/help/library';
 import { proseLinks, resolveArticleLink } from '@/help/links';
+import { documentedReferences } from '@/help/referenceCoverage';
 import { i18n, loadSearchCatalogues } from '@/i18n';
 import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
@@ -139,15 +140,24 @@ describe('the guide that ships with the build', () => {
     }
   });
 
-  it('links to no article and no heading that is not there', () => {
+  it('links to existing articles, headings and status rows', () => {
+    const destinations = new Map(guide.articles.map((article) => {
+      const anchors = new Set(article.headings.map((heading) => heading.id));
+      if (article.id === 'state-reference') {
+        for (const row of documentedReferences(article.body)) {
+          if (row.id.startsWith('state:')) anchors.add(row.id);
+        }
+      }
+      return [article.id, anchors] as const;
+    }));
     for (const article of guide.articles) {
       for (const href of proseLinks(article.body)) {
         if (article.files?.[href] !== undefined) continue;
         const link = resolveArticleLink(href, article.linkPrefix);
         if (link === null) continue;
-        const target = guide.articles.find((candidate) => candidate.id === link.article);
-        expect(target, `${article.id} → ${link.article}`).toBeDefined();
-        if (link.heading !== null) expect(target?.headings.map((heading) => heading.id), `${article.id} → ${link.article}#${link.heading}`).toContain(link.heading);
+        const anchors = destinations.get(link.article);
+        expect(anchors, `${article.id} → ${link.article}`).toBeDefined();
+        if (link.heading !== null) expect(anchors, `${article.id} → ${link.article}#${link.heading}`).toContain(link.heading);
       }
     }
   });
