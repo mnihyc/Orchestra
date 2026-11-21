@@ -29,6 +29,9 @@ pub struct Authenticated {
 /// A verified local target; DNS and nonloopback IP addresses are never used.
 #[derive(Clone)]
 pub enum Endpoint {
+    /// The held local desktop selected by its manager.
+    #[cfg(target_os = "linux")]
+    Desktop(super::desktop::Desktop),
     /// An IPv4 loopback port.
     Port(u16),
     /// A local Unix socket path.
@@ -72,6 +75,8 @@ impl Endpoint {
     /// Opens only the validated local transport.
     pub async fn connect(&self) -> Result<Box<dyn Stream>, DisplayError> {
         match self {
+            #[cfg(target_os = "linux")]
+            Self::Desktop(desktop) => desktop.connection().await,
             Self::Port(port) => Ok(Box::new(TcpStream::connect(("127.0.0.1", *port)).await?)),
             #[cfg(unix)]
             Self::Socket(path) => Ok(Box::new(tokio::net::UnixStream::connect(path).await?)),
@@ -223,5 +228,26 @@ mod tests {
         assert_eq!(error.code(), "bad_password");
         assert!(!error.to_string().contains("password-private"));
         server.await.unwrap();
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod desktop_tests {
+    #[test]
+    fn only_a_local_x_display_can_be_shared_as_the_machine_desktop() {
+        for (display, socket) in [
+            (":0", Some("X0")),
+            (":10.2", Some("X10")),
+            ("host:0", None),
+            ("localhost:10.0", None),
+            (":../1", None),
+            (":2.3.4", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                super::super::desktop::socket_name(display).as_deref(),
+                socket
+            );
+        }
     }
 }

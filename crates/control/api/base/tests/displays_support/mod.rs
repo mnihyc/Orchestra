@@ -77,6 +77,9 @@ pub async fn window(floor: &Floor) -> Browser {
 }
 /// Dispatches the actual display tool, rather than calling its lifecycle helper directly.
 pub async fn call(floor: &Floor, thread: Id, arguments: orch_types::Json) -> OrchToolResult {
+    let turn = super::browsers_support::fake::active_tool_turn(&floor.scene, thread)
+        .await
+        .expect("the display request has an admitted native turn");
     let call_ref = orch_types::new_id().to_string();
     floor
         .app
@@ -84,7 +87,7 @@ pub async fn call(floor: &Floor, thread: Id, arguments: orch_types::Json) -> Orc
         .answer_tool_call(&orch_engine::tools::CallContext {
             machine: floor.scene.rig.machine_id,
             thread,
-            turn: orch_types::new_id(),
+            turn,
             call_ref: call_ref.clone(),
             attempt: None,
             tool: orch_agent_contract::events::OrchTool::UseDisplay,
