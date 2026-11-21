@@ -73,8 +73,8 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>
 vi.mock('@/api/access', async (original) => ({ ...await original<typeof AccessApi>(),
   holderSearchQuery: (...args: unknown[]) => { calls.holders(...args); return { queryKey: ['reader-holders', ...args], queryFn: () => Promise.resolve(holderRows()) }; },
 }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
-vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: vi.fn() }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: vi.fn() }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModule>(), boxClasses: '', Page: ({ children }: { children: ReactNode }) => <main>{children}</main>,
   PageHeader: ({ title, lead, actions }: { title: string; lead?: ReactNode; actions?: ReactNode }) => <header><h1>{title}</h1>{lead}{actions}</header>,
@@ -82,10 +82,10 @@ vi.mock('@/shell/Page', async (original) => ({ ...await original<typeof PageModu
   Section: ({ title, lead, children }: { title: string; lead?: ReactNode; children: ReactNode }) => <section><h2>{title}</h2>{lead}{children}</section>,
 }));
 vi.mock('@/ui/Table', () => ({ Table: <Row extends { id: string },>({ rows, columns }: { rows: Row[]; columns: Column<Row>[] }) => <ul>{rows.map((row) => <li key={row.id}>{columns.map((column) => <div key={column.id}>{column.cell(row, new Set(columns.map((one) => one.id)))}</div>)}</li>)}</ul> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map(), useNameTrees: () => new Map() }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: vi.fn() }));
-vi.mock('@/features/workbench/Narrow', () => ({ useShape: () => 'wide' }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (node: { name?: string | null } | null | undefined) => node?.name ?? null, useKnownPlaces: () => new Map(), useNameTrees: () => new Map() }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: vi.fn() }));
+vi.mock('@/features/workbench/Narrow', async (loadOriginal) => ({ ...await loadOriginal<object>(), useShape: () => 'wide' }));
 
 const appearance = useAppearance.getState();
 const finderBefore = useFinder.getState();

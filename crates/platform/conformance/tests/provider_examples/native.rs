@@ -107,7 +107,7 @@ async fn endpoint_matches_the_plain_protocol(
     assert_eq!(headers["authorization"], "Bearer disposable-native-access");
     assert_eq!(
         description["presents"]["header"],
-        options.key_header(protocol.default_auth()).unwrap()
+        protocol.key_header(&options).unwrap()
     );
     assert_eq!(description["presents"]["scheme"], "Bearer");
     assert_eq!(

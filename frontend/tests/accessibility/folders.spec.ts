@@ -14,7 +14,7 @@ async function open(page: Page, path: string, person: { login: string; password:
   await page.goto(path);
 }
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 
 test('a project that holds folders as a list, as a board and as Activity, and a folder of its own', async ({ page }) => {
   // A project with folders and no topic of its own: the cards stand above what says that it has no topics.
