@@ -29,13 +29,13 @@ const chipKind = (target: LinkedThing) => target.kind === 'document' ? 'doc' as 
 
 const pathOf = (target: LinkedThing): string => target.kind === 'document' ? `/doc/${target.id}` : target.kind === 'chat' ? `/chat/${target.id}` : target.kind === 'thread' ? `/thread/${target.id}` : `/node/${target.id}`;
 
-export function References({ list }: { list: ListState }) {
+export function References({ list, filtered = false }: { list: ListState; filtered?: boolean }) {
   const { t } = useTranslation();
   const rows = list.rows;
   const labels = usePlaceLabels(rows.filter((row) => row.readable && row.name !== null).map((row) => ({ id: row.id, name: row.name ?? '', above: row.context })));
   if (list.pending) return <SkeletonRows read={list.read} rows={LOADING_ROWS} />;
   if (list.failed) return <ErrorAlert error={list.error} action={<Button size="sm" onClick={list.retry}>{t('common.tryAgain')}</Button>} />;
-  if (rows.length === 0 && !list.hasMore) return <StateLine title={t('links.references.empty')} compact />;
+  if (rows.length === 0 && !list.hasMore) return <StateLine title={t(filtered ? 'ui.combobox.empty' : 'links.references.empty')} compact />;
   return <div className="flex min-w-0 flex-col" data-links-list="references">
     {rows.length > 0 && <ul className="flex min-w-0 flex-col gap-1" aria-label={t('links.tabs.references')}>
       {rows.map((target) => <li key={`${target.kind}:${target.id}:${target.path ?? ''}`} className="flex min-h-(--row-height) min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-2 py-1 hover:bg-bg-subtle">

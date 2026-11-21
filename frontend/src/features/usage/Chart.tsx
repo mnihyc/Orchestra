@@ -11,7 +11,7 @@ import type uPlot from 'uplot';
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { formatMeasure, formatScale } from '@/features/usage/figures';
+import { formatMeasure, scaleLabels } from '@/features/usage/figures';
 import { assignSlots, type Bars, REST_SLOT, SLOTS } from '@/features/usage/series';
 import type { Measure } from '@/features/usage/search';
 import { useAppearance } from '@/lib/appearance';
@@ -287,7 +287,7 @@ export function UsageChart({ label, bars, measure, onSelect, stale = false, heig
             grid: { stroke: colors.grid, width: 1 },
             ticks: { show: false },
             border: { show: false },
-            values: (_chart, splits) => splits.map((value) => formatScale(value, measure, locale)),
+            values: (_chart, splits) => scaleLabels(splits, measure, locale),
             size: (self, values, _axisIndex, cycle) => {
               if (cycle > 1) return widestSeen;
               widestSeen = labelRoom(self, values, 'right') + AXIS_PADDING;

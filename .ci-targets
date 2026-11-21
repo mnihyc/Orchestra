@@ -1,0 +1,5 @@
+test -p orch-api-core --test me --test members --test model_entries --test moves_tags --test notifications_channels --test notifications_destinations --test notifications_inbox --test notifications_routes --test org_contents
+test -p orch-api-core --test page_people_chips --test people_reactions --test people_scale --test permission_reader_scopes --test personal_native_scopes --test personal_notification_scope --test personal_state_scope --test program_admin
+test -p orch-api-core --test provider_aux_reader_scopes --test provider_harness --test provider_model_operation_scopes --test provider_models --test reaches --test schedule_operation_scopes --test search_names --test search_native_scopes --test semantic_admin
+test -p orch-api-core --test service_accounts --test session_others --test thread_history_pages --test threads_adopt --test threads_raw --test token_sign_in_acts --test topic_native_scopes --test typed_path_operations --test typed_resource_operations
+test -p orch-api-core --test upload_inventory --test users --test workspace_files --test workspace_snapshots --test workspace_source

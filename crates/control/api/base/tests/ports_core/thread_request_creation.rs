@@ -13,6 +13,7 @@ async fn header(kind: PortOpeningKind, automatic: bool) -> Proof {
     port_policy(&world, capability, if automatic { "allow" } else { "ask" }).await;
     if kind == PortOpeningKind::Host {
         let ports = orch_link_contract::policy::MachinePorts {
+            loopback_tcp: Default::default(),
             allowed: vec![PortOpeningKind::Host],
             publish: Some(HostPorts {
                 incoming_address: "dedicated-vm.example.test".into(),

@@ -8,12 +8,15 @@
  * nothing of its own, each changed where it is shown. A host's own page, where it is managed, is one
  * click from its name.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { hostsQuery } from '@/api/admin';
+import { hostsPageQuery } from '@/api/admin';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { fullEffect, FULL_PERCENT_SHIPPED, declaredShare, megabytes } from '@/features/admin/hosts';
 import { ChoiceSetting, NumberSetting, useSystemSettings } from '@/features/admin/SettingRows';
@@ -62,7 +65,9 @@ function Memory({ host, percent, inherited }: { host: Host; percent: number; inh
 export function Hosts() {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const hosts = useQuery(hostsQuery);
+  const search = useCollectionSearch("admin-hosts");
+  const hosts = useInfiniteQuery(hostsPageQuery(search.q));
+  const rows = hosts.data?.pages.flatMap((page) => page.items) ?? [];
   const { find } = useSystemSettings();
   const percentSetting = find('hosts.full_percent')?.value;
   const percent = typeof percentSetting === 'number' ? percentSetting : FULL_PERCENT_SHIPPED;
@@ -135,18 +140,20 @@ export function Hosts() {
           </Link>
         }
       >
+        <CollectionSearch name={t("admin.sections.hosts.title")} {...search} />
         {hosts.isPending ? (
           <SkeletonRows read={hosts} rows={3} />
-        ) : hosts.isError ? (
+        ) : hosts.isError && rows.length === 0 ? (
           <ErrorState error={hosts.error} retrying={hosts.isRefetching} onRetry={() => void hosts.refetch()} />
-        ) : hosts.data.length === 0 ? (
+        ) : rows.length === 0 ? (
           <EmptyState compact icon={<Server aria-hidden />} title={t('admin.hosts.none')} description={t('admin.hosts.noneHint')} />
         ) : (
           <>
-            <Table label={t('admin.sections.hosts.title')} columns={columns} rows={hosts.data} rowKey={(host) => host.id} />
+            <Table label={t('admin.sections.hosts.title')} columns={columns} rows={rows} virtual rowKey={(host) => host.id} />
             <p className="text-sm text-text-muted">{t('admin.hosts.note')}</p>
           </>
         )}
+        <Pagination hasMore={hosts.hasNextPage} loading={hosts.isFetchingNextPage} error={hosts.isFetchNextPageError ? hosts.error : undefined} onMore={() => void hosts.fetchNextPage()} />
       </Section>
     </div>
   );

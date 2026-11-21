@@ -4,7 +4,7 @@ use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::admin::{
     AdminSemanticSearchKeep, AdminSemanticSearchRebuild, SemanticSearchKeepBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_db::queries::semantic as rows;
 
@@ -15,11 +15,12 @@ async fn administrative_key(s: &Scene, operation: &str) -> String {
         "resources":["org"],"allow":[{"operation":operation,"actions":["manage"]}]
     }]}))
     .unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut s.rig.db.acquire().await.unwrap(),
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.ada.id(),
             name: "Native index work",
             token_hash: &token_hash(&secret),
@@ -259,6 +260,7 @@ async fn administrative_embedding_queue_insert_rechecks_after_its_actual_native_
             .unwrap();
         let dispatcher = s.rig.world.app.app.link.dispatcher();
         let command = orch_api_core::dispatch::StoredCommand {
+            content_transit: false,
             id: Some(call),
             machine: frame.machine,
             kind: frame.kind.as_str().to_owned(),
