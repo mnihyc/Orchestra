@@ -509,7 +509,7 @@ async fn check_level(level: Level) {
         .query(&NameSearchListQuery {
             q: Some("Admin proof".to_owned()),
             // A page of names holds at most this many; the proof's few things fit in one.
-            limit: Some(orch_api_contract::search::NAME_SEARCH_LIMIT_MAX),
+            limit: Some(orch_api_contract::search::NAME_SEARCH_OVERVIEW_COUNT),
             ..Default::default()
         })
         .send()
@@ -894,7 +894,7 @@ async fn a_setting_that_closes_chat_to_everybody_also_closes_it_to_enabled_nativ
 #[tokio::test]
 async fn another_browser_session_and_an_all_scopes_token_keep_their_ordinary_access() {
     use orch_api_core::middleware::authentication::{
-        ACCESS_TOKEN_PREFIX, API_TOKEN_PREFIX, new_token, token_hash,
+        ACCESS_TOKEN_PREFIX, new_api_token, new_token, token_hash,
     };
     let scene = Scene::new().await;
     let world = &scene.rig.world;
@@ -909,7 +909,7 @@ async fn another_browser_session_and_an_all_scopes_token_keep_their_ordinary_acc
     )
     .await;
     let other_token = new_token(ACCESS_TOKEN_PREFIX);
-    let api_token = new_token(API_TOKEN_PREFIX);
+    let api_token = new_api_token(orch_types::new_id());
     {
         let mut conn = world.conn().await;
         orch_db::queries::identity::testing::insert_session(
@@ -922,7 +922,7 @@ async fn another_browser_session_and_an_all_scopes_token_keep_their_ordinary_acc
         .await
         .unwrap();
         sqlx::query("INSERT INTO api_tokens(id,user_id,name,token_hash,scopes) VALUES($1,$2,'ordinary automation',$3,ARRAY['*'])")
-            .bind(new_id()).bind(by.id()).bind(token_hash(&api_token)).execute(&mut *conn).await.unwrap();
+            .bind(orch_api_contract::api_keys::key_id(&api_token).unwrap()).bind(by.id()).bind(token_hash(&api_token)).execute(&mut *conn).await.unwrap();
     }
     let other = Who {
         person: by.person.clone(),

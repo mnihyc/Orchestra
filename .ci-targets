@@ -1,0 +1,2 @@
+test -p orch-api-core --test personal -- --show-output person_lock
+test -p orch-api-core --test personal -- --show-output person_lock
