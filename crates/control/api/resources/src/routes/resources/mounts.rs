@@ -108,6 +108,103 @@ pub use orch_api_base::routes::resources::mounts::PreparedInventory;
 pub use orch_api_base::routes::resources::mounts::PreparedMount;
 
 pub use orch_api_base::routes::resources::mounts::NativeLocation;
+async fn machine_list(
+    ctx: Ctx,
+    query: api::MachineMountListQuery,
+    (): (),
+) -> ApiResult<api::MachineMounts> {
+    let source = format!("machine-mounts:{}:{}", ctx.user()?.id(), ctx.id("id")?);
+    let mut reply = crate::key_operations::native::selected_read::<machine_read::Mounts>(
+        ctx,
+        query.clone(),
+        (),
+    )
+    .await?;
+    let chosen = query.collection();
+    let first = orch_api_contract::common::CollectionQuery {
+        limit: query.limit,
+        ..Default::default()
+    };
+    let collection = query
+        .collection
+        .unwrap_or(api::MachineMountCollection::Locations);
+    if collection == api::MachineMountCollection::Environments {
+        let mount = query.mount_id.ok_or_else(|| {
+            ApiError::invalid("mount_id", "is required for attached environments")
+        })?;
+        let mut row = reply
+            .locations
+            .into_iter()
+            .find(|row| row.mount.id == mount)
+            .ok_or_else(ApiError::not_found)?;
+        let page = crate::collection::snapshot(
+            &chosen,
+            &format!("{source}:environments:{mount}"),
+            row.environments,
+            |row| (row.name.clone(), row.id),
+            |row| row.name.clone(),
+            false,
+        )?;
+        row.environments = page.items;
+        row.environments_next_cursor.clone_from(&page.next_cursor);
+        reply.locations = vec![row];
+        reply.available.clear();
+        reply.next_cursor = page.next_cursor;
+        return Ok(reply);
+    }
+    let available = crate::collection::snapshot(
+        if collection == api::MachineMountCollection::Available {
+            &chosen
+        } else {
+            &first
+        },
+        &format!("{source}:available"),
+        reply.available,
+        |row| (row.mount.name.clone(), row.mount.id),
+        |row| row.mount.name.clone(),
+        false,
+    )?;
+    let locations = crate::collection::snapshot(
+        if collection == api::MachineMountCollection::Locations {
+            &chosen
+        } else {
+            &first
+        },
+        &format!("{source}:locations"),
+        reply.locations,
+        |row| (row.mount.name.clone(), row.mount.id),
+        |row| {
+            format!(
+                "{} {} {}",
+                row.mount.name,
+                row.target,
+                row.source.as_deref().unwrap_or("")
+            )
+        },
+        false,
+    )?;
+    reply.next_cursor = if collection == api::MachineMountCollection::Available {
+        available.next_cursor
+    } else {
+        locations.next_cursor
+    };
+    reply.available = available.items;
+    reply.locations = locations.items;
+    for row in &mut reply.locations {
+        let page = crate::collection::snapshot(
+            &first,
+            &format!("{source}:environments:{}", row.mount.id),
+            std::mem::take(&mut row.environments),
+            |row| (row.name.clone(), row.id),
+            |row| row.name.clone(),
+            false,
+        )?;
+        row.environments = page.items;
+        row.environments_next_cursor = page.next_cursor;
+    }
+    Ok(reply)
+}
+
 /// Names fit the database's agent-facing path component: two through thirty-two characters.
 const NAME_MIN: usize = 2;
 
@@ -120,7 +217,7 @@ pub fn mount(registry: &mut Registry) {
         .on_snapshot_read_with_optional_operation(
             api::MachineMountList,
             crate::key_operations::native::selected::<machine_read::Mounts>,
-            crate::key_operations::native::selected_read::<machine_read::Mounts>,
+            machine_list,
         )
         .on_snapshot_read_with_optional_operation(
             api::MachineEnvironmentDataGet,
@@ -488,6 +585,7 @@ async fn show_inventory_one(
     let lost_locations = prepared.lost_locations.clone();
     let attached_environments = prepared.attached_environments;
     Ok(Mount {
+        next_cursor: None,
         provenance: Default::default(),
         lost_locations,
         attached_environments: Some(attached_environments),
@@ -526,7 +624,12 @@ async fn seen(
     else {
         return Ok(None);
     };
-    let object = match machine.host_id {
+    // A host's node and a unit that a host runs are named by that host; a person's own machine has a page.
+    let named_by = match machine.host_id {
+        Some(host) => Some(host),
+        None => orch_db::queries::resources::hosting::host_running(conn, machine_id).await?,
+    };
+    let object = match named_by {
         Some(host) => ObjectRef {
             kind: ResourceKind::Host.into(),
             id: host,
@@ -799,7 +902,11 @@ async fn remove_location(
     .await
 }
 
-async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+async fn delete(
+    ctx: Ctx,
+    query: orch_api_contract::resource_facts::ResourceNotificationQuery,
+    (): (),
+) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     require(
@@ -813,7 +920,30 @@ async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let row = rows::lock(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    delete_native(&ctx, &mut tx, &principal, &row).await?;
+    let operation = super::lifecycle_notifications::accept(
+        &ctx,
+        &mut tx,
+        &principal,
+        orch_access_contract::decisions::ObjectRef {
+            kind: ResourceKind::Mount.into(),
+            id,
+        },
+        &row.name,
+        "mount_delete",
+        &query,
+    )
+    .await?;
+    orch_engine::notifications::operation_scope(
+        Some(operation.id),
+        delete_native(&ctx, &mut tx, &principal, &row),
+    )
+    .await?;
+    orch_engine::notifications::attach_operation(&mut tx, &[], &operation, ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
+    orch_engine::notifications::notify_operation(&mut tx, &operation, "done", ctx.now)
+        .await
+        .map_err(ApiError::engine)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }

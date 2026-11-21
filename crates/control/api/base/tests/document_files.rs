@@ -367,6 +367,7 @@ async fn upload_in_pieces(desk: &Desk, by: &Who, name: &str, bytes: &[u8]) -> Ha
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: name.to_owned(),
             media_type: None,
@@ -392,6 +393,8 @@ async fn upload_in_pieces(desk: &Desk, by: &Who, name: &str, bytes: &[u8]) -> Ha
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 
@@ -1078,6 +1081,7 @@ async fn upload_in_pieces_large(desk: &Desk, by: &Who, name: &str, bytes: &[u8])
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: name.to_owned(),
             media_type: None,
@@ -1103,6 +1107,8 @@ async fn upload_in_pieces_large(desk: &Desk, by: &Who, name: &str, bytes: &[u8])
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 

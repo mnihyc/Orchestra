@@ -62,5 +62,5 @@ cargo test -p orch-adapter-acp --lib
 cargo test -p orch-adapter-acp --test turns --test process --test generic_suite
 ```
 
-The live `dsh_real`, `dsh_plugin` and `dsh_mcp` suites still require the integrator's
+The live `dsh_real`, `dsh_plugin` and `dsh_mcp` suites still require an
 explicit native harness fixture; offline schema evidence does not replace them.

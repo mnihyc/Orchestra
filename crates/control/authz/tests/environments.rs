@@ -127,6 +127,80 @@ async fn grouped_reach_counts_keep_nested_members_owners_and_each_objects_suspen
 }
 
 #[tokio::test]
+async fn forwarding_a_machine_listener_requires_an_explicit_port_entry_on_this_credential() {
+    let s = setting().await;
+    let reader = s.w.member("port-reader").await;
+    let principal = s.w.principal(Caller::session(reader)).await;
+    let holder = Holder::User { id: reader };
+    s.w.put(
+        "environment",
+        s.env,
+        P::FilesView,
+        holder,
+        json!({"reach":"machine"}),
+    )
+    .await;
+    let entry = s.w.grant("environment", s.env, P::PortsView, holder).await;
+    let mut conn = s.w.conn().await;
+    assert!(
+        !orch_authz::file_reach::port_machine(&mut conn, &principal, s.env)
+            .await
+            .unwrap()
+    );
+    for (reach, expected) in [("machine", true), ("roots", false)] {
+        assert!(
+            orch_db::queries::access::rewrite_entry(
+                &mut conn,
+                entry,
+                &json!({"reach":reach}),
+                None,
+                "",
+                None
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            orch_authz::file_reach::port_machine(&mut conn, &principal, s.env)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_machine_file_view_never_widens_a_roots_only_write_entry() {
+    use orch_access_contract::permissions::FileReach;
+    let s = setting().await;
+    let reader = s.w.member("file-reader").await;
+    s.w.put(
+        "environment",
+        s.env,
+        P::FilesView,
+        Holder::User { id: reader },
+        json!({"reach":"machine"}),
+    )
+    .await;
+    s.w.put(
+        "environment",
+        s.env,
+        P::FilesManage,
+        Holder::User { id: reader },
+        json!({}),
+    )
+    .await;
+    let principal = s.w.principal(Caller::session(reader)).await;
+    let reach =
+        orch_authz::file_reach::held(&mut *s.w.conn().await, &principal, s.env, Policy::default())
+            .await
+            .unwrap();
+    assert_eq!(reach.view, Some(FileReach::Machine));
+    assert_eq!(reach.manage, Some(FileReach::Roots));
+    assert!(!reach.terminal);
+}
+
+#[tokio::test]
 async fn whoever_manages_an_environment_decides_where_threads_run_in_it_and_nobody_else_does() {
     let s = setting().await;
     let into = |thread: Option<Id>, from: Option<Id>, to: Option<Id>| Moving {
@@ -268,6 +342,190 @@ async fn creating(m: &Making, who: Id, place: Place, mounts: Vec<Id>) -> Creatin
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn a_lent_host_keeps_the_pool_and_member_limits_without_granting_direct_host_use() {
+    use orch_access_contract::pools::PathMember;
+    use orch_db::queries::pools::Leaf;
+    let m = making().await;
+    let pool = m.w.thing("pool", m.hal, m.w.root, "Build hosts").await;
+    let member = orch_types::new_id();
+    let consent = orch_types::new_id();
+    let pool_entry =
+        m.w.put(
+            "pool",
+            pool,
+            P::PoolUse,
+            Holder::User { id: m.cal },
+            json!({"host":{"max_environments":1,"resources_max":{"memory_mb":1024}}}),
+        )
+        .await;
+    m.w.grant(
+        "template",
+        m.template,
+        P::TemplateUse,
+        Holder::User { id: m.cal },
+    )
+    .await;
+    let mut conn = m.w.conn().await;
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1")
+        .bind(pool)
+        .bind(json!({"kind":"host","enabled":true,"policy":{"type":"ordered"},"lend_members":true,"members":[],"config":{}}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(member)
+    .bind(json!({"type":"single","resource":{"kind":"host","id":m.host}}))
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO pool_lending(id,resource_kind,resource_id,giver_id,matcher,options) VALUES($1,'host',$2,$3,$4,$5)")
+        .bind(consent).bind(m.host).bind(m.hal).bind(json!({"kind":"pool","pool_id":pool}))
+        .bind(json!({"max_environments":1,"resources_max":{"memory_mb":512}}))
+        .execute(&mut *conn).await.unwrap();
+    let principal = m.w.principal(Caller::session(m.cal)).await;
+    let leaf = Leaf::Host { id: m.host };
+    let path = [PathMember {
+        pool_id: pool,
+        revision: 1,
+        member_id: member,
+    }];
+    let selection = orch_authz::pools::Selection {
+        leaf: &leaf,
+        path: &path,
+    };
+    let mut ask = NewEnvironment {
+        home: m.w.topic,
+        place: on_host(
+            &m,
+            Wants {
+                resources: ResourceLimits {
+                    memory_mb: Some(512),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        mounts: vec![],
+    };
+    let Creating::Allowed(created) = environments::check_creation_at_pool(
+        &mut conn,
+        &principal,
+        &ask,
+        &Policies::default(),
+        selection,
+    )
+    .await
+    .unwrap() else {
+        panic!("both current consents admit this exact bounded creation")
+    };
+    assert_eq!(created.ceiling.memory_mb, Some(512));
+    assert!(created.pool_entries.contains(&pool_entry));
+    assert!(created.pool_entries.contains(&consent));
+    assert!(!m.w.can_on(m.cal, "host", m.host, P::HostUse).await);
+    if let Place::Host { wants, .. } = &mut ask.place {
+        wants.resources.memory_mb = Some(513);
+    }
+    assert!(!matches!(
+        environments::check_creation_at_pool(
+            &mut conn,
+            &principal,
+            &ask,
+            &Policies::default(),
+            selection
+        )
+        .await
+        .unwrap(),
+        Creating::Allowed(_)
+    ));
+    if let Place::Host { wants, .. } = &mut ask.place {
+        wants.resources.memory_mb = Some(512);
+    }
+    let existing =
+        m.w.thing("environment", m.cal, m.w.topic, "Already made")
+            .await;
+    orch_db::queries::environments::record_creation_entries(
+        &mut conn,
+        existing,
+        &created.pool_entries,
+    )
+    .await
+    .unwrap();
+    let Creating::Exceeds(limits) = environments::check_creation_at_pool(
+        &mut conn,
+        &principal,
+        &ask,
+        &Policies::default(),
+        selection,
+    )
+    .await
+    .unwrap() else {
+        panic!("another physical host cannot evade the same pool audience's last slot")
+    };
+    assert!(limits.iter().any(|limit| matches!(
+        limit,
+        Limit::TooManyEnvironments {
+            allowed: 1,
+            made: 1
+        }
+    )));
+    sqlx::query("UPDATE environments SET deleted_at=$2 WHERE id=$1")
+        .bind(existing)
+        .bind(m.w.now.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let provider =
+        m.w.provider(m.cal, m.w.root, "A provider in the same host pool")
+            .await;
+    orch_db::queries::environments::record_provider_creation_entries(
+        &mut conn,
+        provider,
+        &created.pool_entries,
+    )
+    .await
+    .unwrap();
+    let Creating::Exceeds(limits) = environments::check_creation_at_pool(
+        &mut conn,
+        &principal,
+        &ask,
+        &Policies::default(),
+        selection,
+    )
+    .await
+    .unwrap() else {
+        panic!("a provider registration holds the same pool audience's slot")
+    };
+    assert!(limits.iter().any(|limit| matches!(
+        limit,
+        Limit::TooManyEnvironments {
+            allowed: 1,
+            made: 1
+        }
+    )));
+    sqlx::query("UPDATE pool_lending SET removed_at=$2 WHERE id=$1")
+        .bind(consent)
+        .bind(m.w.now.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(!matches!(
+        environments::check_creation_at_pool(
+            &mut conn,
+            &principal,
+            &ask,
+            &Policies::default(),
+            selection
+        )
+        .await
+        .unwrap(),
+        Creating::Allowed(_)
+    ));
 }
 
 fn on_host(m: &Making, wants: Wants) -> Place {
@@ -1007,4 +1265,48 @@ async fn a_registered_environments_creator_can_transfer_ownership_without_transf
     );
     let machine_page = m.w.read_thing(m.hal, "machine", machine).await;
     assert_eq!(machine_page.first_owner, Some(m.hal));
+}
+
+#[test]
+fn usable_terminal_reach_widens_existing_file_doors_without_inventing_a_missing_act() {
+    use orch_access_contract::permissions::FileReach;
+    use orch_authz::file_reach::Held;
+    let held = Held {
+        view: Some(FileReach::Roots),
+        manage: None,
+        terminal: true,
+    };
+    let usable = held.resolved(true, FileReach::Machine);
+    assert_eq!(usable.view, Some(FileReach::Machine));
+    assert_eq!(usable.manage, None);
+    assert!(usable.view_from_terminal);
+    let unavailable = held.resolved(false, FileReach::Machine);
+    assert_eq!(unavailable.view, Some(FileReach::Roots));
+    assert!(!unavailable.view_from_terminal);
+    let bounded = held.resolved(true, FileReach::Roots);
+    assert_eq!(bounded.view, Some(FileReach::Roots));
+    assert!(!bounded.view_from_terminal);
+}
+
+#[tokio::test]
+async fn full_environment_control_keeps_its_native_file_authority_when_the_shell_is_off() {
+    use orch_access_contract::permissions::FileReach;
+    let w = World::new().await;
+    let owner = w.member("file-owner").await;
+    let manager = w.member("file-manager").await;
+    let environment = w.thing("environment", owner, w.topic, "Files").await;
+    w.grant(
+        "environment",
+        environment,
+        P::EnvironmentManage,
+        Holder::User { id: manager },
+    )
+    .await;
+    let principal = w.principal(Caller::session(manager)).await;
+    let mut conn = w.conn().await;
+    let held = orch_authz::file_reach::held(&mut conn, &principal, environment, Policy::default())
+        .await
+        .unwrap();
+    assert_eq!(held.view, Some(FileReach::Machine));
+    assert_eq!(held.manage, Some(FileReach::Machine));
 }

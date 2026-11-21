@@ -234,6 +234,7 @@ impl Engine {
         );
         let key = command.key.wire();
         let proposed = link::NewCommand {
+            content_transit: false,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),
@@ -269,13 +270,21 @@ impl Engine {
                 )
                 .await?
             } else {
+                let pool = paid.pool_selection(&mut conn, &caller).await?;
                 service_use(
                     &mut conn,
                     &caller,
-                    paid.origin.place()?,
-                    provider,
-                    &paid.offering,
-                    &paid.groups,
+                    &ServiceUse {
+                        purpose: orch_access_contract::permissions::UsagePurpose::for_capability(
+                            &paid.capability,
+                        ),
+                        place: paid.origin.place()?,
+                        provider,
+                        offering: &paid.offering,
+                        groups: &paid.groups,
+                        pool: pool.as_ref(),
+                        in_thread: paid.origin.tool().is_some(),
+                    },
                     self.inner.clock.as_ref(),
                 )
                 .await?
@@ -316,6 +325,7 @@ impl Engine {
             let mut tx = self.db().begin().await?;
             let key = command.key.wire();
             let proposed = link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

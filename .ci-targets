@@ -1,0 +1,8 @@
+clippy
+contracts
+test -p orch-api-core --test provider_harness --test threads_adopt --test service_accounts --test provider_models --test model_entries
+test -p orch-api-core --lib
+test -p orch-db --lib --test released_migrations
+web typecheck
+web lint
+web test

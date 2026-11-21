@@ -71,22 +71,64 @@ pub async fn accepts_command(
 
 /// Existing accepted calls and completion commands share one live reader, without a new use producer.
 pub async fn requests(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Id>, EngineError> {
+    requests_at(conn, target, None).await
+}
+
+/// A live observer can supply its actual application clock; no database wall clock replaces it.
+pub async fn requests_at(
+    conn: &mut Conn,
+    target: &FactTarget,
+    now: Option<Time>,
+) -> Result<Vec<Id>, EngineError> {
     Ok(sqlx::query_scalar(include_str!("requests.sql"))
         .bind(target.object.kind.as_str())
         .bind(target.object.id)
         .bind(target.model_id)
+        .bind(now.map(Time::get))
+        .fetch_all(conn)
+        .await
+        .map_err(DbError::from)?)
+}
+
+/// Native pending placement identities, not all jobs that happen to use the same host.
+pub async fn pool_placements(conn: &mut Conn, pool: Id) -> Result<Vec<Id>, EngineError> {
+    pool_placements_among(conn, pool, None).await
+}
+
+/// A retained negative stop rechecks only its captured jobs against their actual current association.
+pub(crate) async fn pool_placements_among(
+    conn: &mut Conn,
+    pool: Id,
+    jobs: Option<&[Id]>,
+) -> Result<Vec<Id>, EngineError> {
+    Ok(sqlx::query_scalar(include_str!("pool_placements.sql"))
+        .bind(pool)
+        .bind(jobs)
         .fetch_all(conn)
         .await
         .map_err(DbError::from)?)
 }
 
 /// The resource transaction freezes the first stop reason before any native cancellation is sent.
-pub async fn stop_requests(conn: &mut Conn, ids: &[Id], reason: &str) -> Result<(), EngineError> {
+pub async fn stop_requests(
+    conn: &mut Conn,
+    ids: &[Id],
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<(), EngineError> {
     sqlx::query(
         "UPDATE summary_calls SET cancel_reason=COALESCE(cancel_reason,$2) WHERE id=ANY($1)",
     )
     .bind(ids)
     .bind(reason)
+    .execute(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+    sqlx::query(
+        "UPDATE provider_relay_calls SET finished_at=COALESCE(finished_at,$2) WHERE id=ANY($1)",
+    )
+    .bind(ids)
+    .bind(now)
     .execute(conn)
     .await
     .map_err(DbError::from)?;
@@ -144,6 +186,13 @@ pub struct Work {
 
 /// One resource's exact work at the caller's observation instant.
 pub async fn read(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Work>, EngineError> {
+    if target.object.kind == ObjectKind::Pool && target.model_id.is_none() {
+        return Ok(sqlx::query_as(include_str!("pool_activity.sql"))
+            .bind(target.object.id)
+            .fetch_all(conn)
+            .await
+            .map_err(DbError::from)?);
+    }
     let kind = match target.object.kind {
         ObjectKind::Provider => "provider",
         ObjectKind::Agent => "agent",

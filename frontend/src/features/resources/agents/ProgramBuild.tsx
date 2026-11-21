@@ -2,6 +2,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { environmentProgramsQuery } from '@/api/harnesses';
+import { AutoApprovalCheckAction } from '@/features/composer/AutoApprovalCheck';
+import { IdentifyProgram } from './IdentifyProgram';
 import { BuildStatus } from '@/features/resources/agents/BuildStatus';
 import { programNameIn } from '@/features/resources/programNames';
 import type { HarnessBuild, RunningHarnessBuild } from '@/generated/api-types';
@@ -18,24 +20,28 @@ export function DisabledBuildFeatures({ build, name }: { build: HarnessBuild; na
   </div>)}</>;
 }
 
-export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; name?: string | undefined }) {
+export function ProgramBuild({ program, name, source, machineId }: { machineId?: string | undefined; program: RunningHarnessBuild; name?: string | undefined; source?: readonly unknown[] }) {
   const { t, i18n } = useTranslation();
   const title = name ?? programNameIn(program, i18n.resolvedLanguage ?? i18n.language) ?? programNameIn(program.build, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
   return <div className="flex min-w-0 flex-col gap-1" data-program={program.kind}>
     <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm"><span className="min-w-0 wrap-anywhere">{title} {program.version}</span>
-      {program.build === null ? <span className="text-text-muted">{t('programVersions.unknownCheck')}</span> : <BuildStatus build={program.build} name={title} />}
+      {program.build === null ? <span className="text-text-muted"><span>{t('programVersions.unknownCheck')}</span>{' · '}<span>{t(machineId && source ? 'programVersions.unmatchedBuild' : 'programVersions.unknownCheckWhy')}</span></span> : <BuildStatus build={program.build} name={title} showOutcome />}
+      {program.build === null && machineId && source && <IdentifyProgram key={machineId} machineId={machineId} program={program} source={source} />}
+      {source && program.check_machine_id && program.build && program.build.status !== 'checking' && (program.build.status !== 'checked' || !program.build.check) &&
+        <AutoApprovalCheckAction installed target={{ kind: program.kind, version: program.version, machine_id: program.check_machine_id, sha256: program.build.sha256 }} source={source} refresh={[source]} />}
     </div>
     {program.build !== null && <DisabledBuildFeatures build={program.build} name={title} />}
   </div>;
 }
 
-export function EnvironmentPrograms({ id, generation, compact = false }: { id: string; generation?: number; compact?: boolean }) {
+export function EnvironmentPrograms({ id, generation, machineId, compact = false }: { id: string; machineId?: string | undefined; generation?: number; compact?: boolean }) {
   const { t } = useTranslation();
-  const programs = useQuery(environmentProgramsQuery(id, generation));
+  const query = environmentProgramsQuery(id, generation);
+  const programs = useQuery(query);
   if (programs.isPending) return <SkeletonRows read={programs} rows={2} />;
   if (programs.isError) return <ErrorState compact error={programs.error} onRetry={() => void programs.refetch()} />;
   return <section className="flex min-w-0 flex-col gap-2" aria-label={t('programVersions.running')}>
     {!compact && <h3 className="text-sm font-medium text-text-muted">{t('programVersions.running')}</h3>}
-    {programs.data.length === 0 ? <StateLine compact message={t('programVersions.noneObserved')} /> : programs.data.map((program) => <ProgramBuild key={`${program.kind}:${program.version}`} program={program} />)}
+    {programs.data.length === 0 ? <StateLine compact message={t('programVersions.noneObserved')} /> : programs.data.map((program) => <ProgramBuild key={`${program.kind}:${program.version}`} program={program} source={query.queryKey} machineId={machineId} />)}
   </section>;
 }

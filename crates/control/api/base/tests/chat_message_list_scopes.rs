@@ -33,13 +33,13 @@ struct Key {
 }
 async fn key(world: &support::World, user: Id, rules: Vec<Value>) -> Key {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

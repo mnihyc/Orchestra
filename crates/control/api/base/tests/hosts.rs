@@ -234,6 +234,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
     assert_eq!(initial.value, Some(json!(7)));
     assert!(!initial.writable);
     let value = NodeSettingSetBody {
+        model_choice: None,
         value: json!(0),
         locked: None,
         expected_revision: Some(0),
@@ -268,6 +269,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     let bad = NodeSettingSetBody {
+        model_choice: None,
         value: json!(-1),
         locked: None,
         expected_revision: Some(revision),
@@ -941,7 +943,7 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
             .token(&who.token)
             .query(&HostRuntimeListQuery::default());
         let before = Statements::now();
-        let rows = call.send().await.ok();
+        let rows = call.send().await.ok().items;
         (Statements::now() - before, rows)
     }
     let (few, current) = count(&world, &c.boss, host).await;
@@ -988,10 +990,12 @@ async fn host_fleet_environment_and_preflight_agree_on_updates_and_lists_read_to
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
@@ -1078,7 +1082,8 @@ async fn environment_and_host_runtime_pages_read_stored_state_without_inspection
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(runtimes.iter().any(|row| row.id == runtime));
     assert_eq!(
         reads.load(Ordering::SeqCst),
@@ -1204,7 +1209,8 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&HostRuntimeListQuery::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     let fleet = world
         .app
         .call(AdminRuntimeList, &[])
@@ -1212,10 +1218,12 @@ async fn the_provider_page_and_host_and_fleet_count_the_same_runtime_changes() {
         .query(&AdminRuntimeListQuery {
             host_id: Some(host),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         host_rows
             .iter()
@@ -1406,6 +1414,7 @@ async fn a_host_manager_removes_another_owners_provider_unit_with_the_requested_
         let query = HostRuntimeDeleteQuery {
             confirm: unit_name.clone(),
             volumes,
+            force: None,
         };
         let denied = world
             .app
@@ -1424,6 +1433,7 @@ async fn a_host_manager_removes_another_owners_provider_unit_with_the_requested_
             .query(&HostRuntimeDeleteQuery {
                 confirm: "Private provider".to_owned(),
                 volumes,
+                force: None,
             })
             .send()
             .await
@@ -1564,6 +1574,21 @@ async fn a_change_against_an_old_revision_is_refused_and_a_change_that_asks_for_
     let c = company(&world).await;
     let id = a_host(&world, &c.boss, Some(c.acme), "Build box").await;
     let first = read(&world, &c.boss, id).await;
+    orch_db::queries::resources::hosting::record_node_load(
+        &mut *world.conn().await,
+        id,
+        &json!({"cpus":1,"memory_mb":100}),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hosts SET capacity=jsonb_set(capacity,'{cpus}','16',true),storages='[]' WHERE id=$1")
+        .bind(id).execute(&world.db.pool).await.unwrap();
+    assert_eq!(
+        read(&world, &c.boss, id).await.revision,
+        first.revision,
+        "capacity, storage and load reports leave the pending host edit current"
+    );
     let renamed = world
         .app
         .call(HostUpdate, &[&id])
@@ -1890,7 +1915,7 @@ fn host_enrollment_request(
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Node],
     }
 }
@@ -2676,3 +2701,48 @@ mod storage_scopes;
 
 #[path = "hosts/enrollment_scopes.rs"]
 mod enrollment_scopes;
+
+#[tokio::test]
+async fn kept_layer_pages_keep_the_latest_marker_beyond_a_searched_first_page() {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let host = a_host(&world, &c.boss, Some(c.acme), "Layer catalogue").await;
+    let environment = orch_types::new_id();
+    let images: Vec<_> = (0..13).map(|generation| json!({"system":"test","environment":environment,"generation":generation,"capture":orch_types::new_id(),"reference":format!("kept-{generation}"),"bytes":4096,"total_bytes":8192,"layers":2})).collect();
+    sqlx::query("UPDATE hosts SET kept_images=$2 WHERE id=$1")
+        .bind(host)
+        .bind(json!({"epoch":7,"images":images}))
+        .execute(&mut *world.conn().await)
+        .await
+        .unwrap();
+    let page = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.kept_layers.len(), 1);
+    assert_eq!(page.kept_layers[0].generation, 12);
+    assert!(page.kept_layers[0].latest);
+    let next = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","limit":1,"cursor":page.next_cursor.unwrap()}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(next.kept_layers[0].generation, 11);
+    assert!(!next.kept_layers[0].latest);
+    let empty = world
+        .app
+        .call(HostGet, &[&host])
+        .token(&c.boss.token)
+        .query(&json!({"collection":"kept_layers","q":"undisclosed-name","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert!(empty.kept_layers.is_empty());
+}

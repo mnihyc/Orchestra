@@ -2,7 +2,7 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { expect, it, vi } from 'vitest';
 import { applyChanges, findAct } from '@/api/acts';
-import type { Node, Tag } from '@/generated/api-types';
+import type { Node, TagPage } from '@/generated/api-types';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
@@ -11,7 +11,7 @@ for (const [kind, id] of [['org', ACME.org], ['project', ACME.web], ['topic', AC
     const world = new World();
     const person = world.people.get('ada')!;
     const before = world.places.node(person, id);
-    const catalogue = world.places.handle(person, 'GET', `/nodes/${id}/tags`, new URLSearchParams(), {})?.body as Tag[];
+    const catalogue = (world.places.handle(person, 'GET', `/nodes/${id}/tags`, new URLSearchParams(), {})?.body as TagPage).items;
     const urgent = catalogue.find((tag) => tag.name === 'urgent');
     if (urgent === undefined) throw new Error('Missing tag fixture');
     const input = { tag_ids: [...new Set([...before.tags.map((tag) => tag.id), urgent.id])], expected_revision: before.revision };
