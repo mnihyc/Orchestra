@@ -808,6 +808,14 @@ pub(crate) async fn prepare_reached_for_thread(
     thread: Id,
     input: Option<&threads::InputRow>,
 ) -> ApiResult<PreparedReached> {
+    if !rows::may_cover_thread(conn, thread).await? {
+        return Ok(PreparedReached {
+            computed: Vec::new(),
+            names: NameSources::default(),
+            providers: Vec::new(),
+            at: ctx.now,
+        });
+    }
     let author = input.map_or(Some(principal.user()), |input| input.author_id);
     let shown = match engine::ask_for_thread(conn, thread, author)
         .await

@@ -13,14 +13,14 @@ use orch_types::{Clock, Id, Json, new_id};
 macro_rules! cache_columns {
     () => {
         "id,kind,node_id,document_id,chat_id,viewer_id,own_options,options_revision,options_updated_by,\
-         text,producer,source_snapshot,source_refs,completed_request_id,completed_at,revision,\
+         text,producer,result_facts,source_snapshot,source_refs,completed_request_id,completed_at,revision,\
          dirty_revision,completed_dirty_revision,created_at,updated_at"
     };
 }
 
 macro_rules! request_columns {
     () => {
-        "id,summary_id,origin,requested_by,paying_user,client_id,accepted_operation,arguments,accepted_source,prepared,accepted_revision,\
+        "id,call_id,read_attempt,model_admitted_at,summary_id,origin,requested_by,paying_user,client_id,accepted_operation,arguments,accepted_source,prepared,attempt_facts,accepted_revision,\
          options_revision,dirty_revision,state,lease_token,lease_until,problem,created_at,due_at,finished_at"
     };
 }
@@ -51,6 +51,8 @@ pub struct Cache {
     pub text: Option<String>,
     /// Private producer metadata, projected through current visibility later.
     pub producer: Option<Json>,
+    /// Captured output transformations/usage; read under the paragraph's current source governors.
+    pub result_facts: Option<Json>,
     /// Actual material/cursor/settings fingerprint at completion.
     pub source_snapshot: Option<Json>,
     /// Every governing source that must still be readable before exposing the paragraph.
@@ -76,6 +78,12 @@ pub struct Cache {
 pub struct Request {
     /// Stable identity retained across worker leases/restarts.
     pub id: Id,
+    /// The immutable command/call-rule root for the current unpaid preparation.
+    pub call_id: Id,
+    /// Unpaid prompt rebuilds, retained across worker claims.
+    pub read_attempt: i64,
+    /// A wire admission may have started model IO; it is never inferred back to no effect.
+    pub model_admitted_at: Option<DateTime<Utc>>,
     /// Its cache.
     pub summary_id: Id,
     /// Automatic or explicitly person-issued.
@@ -96,6 +104,8 @@ pub struct Request {
     pub accepted_source: Json,
     /// Trusted producer's prepared source and route state; no credentials.
     pub prepared: Option<Json>,
+    /// Small actual attempt observations; their own prepared sources govern any public projection.
+    pub attempt_facts: Option<Json>,
     /// Monotonic acceptance order in this cache, independent of equal/wall-clock timestamps.
     pub accepted_revision: i64,
     /// Own-options version admitted for this work.
@@ -198,6 +208,16 @@ pub async fn ensure(
     .fetch_optional(conn).await?)
 }
 
+/// Keep the governing places stable through the source check. A child may still
+/// reference its parent by foreign key while the document tree scope is held.
+pub async fn lock_places(conn: &mut Conn, places: &[Id]) -> Result<(), DbError> {
+    sqlx::query("SELECT id FROM nodes WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE")
+        .bind(places)
+        .fetch_all(conn)
+        .await?;
+    Ok(())
+}
+
 /// Individual options follow the existing document-tree scope prefix, then the ordinary
 /// thread/node/settings serialization footprint, before the document/cache writer. Call on
 /// the native writer's short action transaction; no lock is retained across model IO.
@@ -216,16 +236,12 @@ pub async fn lock_document_options(
     {
         threads::tools::lock_threads(conn, &[original.node_id]).await?;
     }
-    let mut nodes = hierarchy::with_ancestors(conn, &[original.node_id])
+    let nodes = hierarchy::with_ancestors(conn, &[original.node_id])
         .await?
         .into_iter()
         .map(|row| row.id)
         .collect::<Vec<_>>();
-    nodes.sort_unstable();
-    nodes.dedup();
-    for node in &nodes {
-        hierarchy::lock(conn, *node).await?;
-    }
+    lock_places(conn, &nodes).await?;
     sqlx::query("SELECT node_id,key FROM settings WHERE key=$1 AND (node_id=ANY($2) OR node_id IS NULL) ORDER BY node_id NULLS FIRST FOR UPDATE")
         .bind(orch_settings_contract::registry::keys::SUMMARY_TARGETS).bind(&nodes).fetch_all(&mut *conn).await?;
     let current = documents::lock(conn, document).await?;
@@ -367,9 +383,9 @@ pub async fn enqueue(
         return Ok(Enqueued::Busy);
     }
     let request = sqlx::query_as(concat!(
-        "INSERT INTO resource_summary_requests(id,summary_id,origin,requested_by,paying_user,client_id,",
+        "INSERT INTO resource_summary_requests(id,call_id,summary_id,origin,requested_by,paying_user,client_id,",
         "accepted_operation,arguments,options_revision,dirty_revision,created_at,accepted_revision,accepted_source,due_at) ",
-        "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING ",request_columns!()
+        "VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING ",request_columns!()
     ))
     .bind(new_id()).bind(summary).bind(kind).bind(issuer).bind(payer).bind(client)
     .bind(accepted).bind(arguments).bind(cache.options_revision).bind(cache.dirty_revision).bind(at)
@@ -397,6 +413,139 @@ pub async fn request(conn: &mut Conn, id: Id) -> Result<Option<Request>, DbError
     .await?)
 }
 
+/// The short source-fenced admission immediately before a model command may leave the server.
+pub async fn model_admitted(
+    conn: &mut Conn,
+    request: Id,
+    call: Id,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE resource_summary_requests SET model_admitted_at=COALESCE(model_admitted_at,$3) WHERE id=$1 AND call_id=$2 AND state='running' AND prepared IS NOT NULL AND lease_until>$3")
+        .bind(request).bind(call).bind(at).execute(conn).await?.rows_affected()==1)
+}
+
+/// A new prompt identity is allowed only when the original model effect has never been admitted.
+pub enum Rebuild {
+    Ready {
+        request: Box<Request>,
+        cancelled: Vec<Id>,
+    },
+    Exhausted,
+    Admitted,
+    Lost,
+}
+
+/// Cache/request locks serialize an unpaid rebuild against first-wire admission. Call after the
+/// new source was read without source row locks, under the original caller and policy ceiling.
+pub async fn rebuild(
+    tx: &mut Tx,
+    original: &Request,
+    token: Id,
+    source: &Json,
+    limit: i64,
+    at: DateTime<Utc>,
+) -> Result<Rebuild, DbError> {
+    let cache: Option<Cache> = sqlx::query_as(concat!(
+        "SELECT ",
+        cache_columns!(),
+        " FROM resource_summaries WHERE id=$1 FOR UPDATE"
+    ))
+    .bind(original.summary_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let current: Option<Request> = sqlx::query_as(concat!(
+        "SELECT ",
+        request_columns!(),
+        " FROM resource_summary_requests WHERE id=$1 FOR UPDATE"
+    ))
+    .bind(original.id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (Some(cache), Some(current)) = (cache, current) else {
+        return Ok(Rebuild::Lost);
+    };
+    if current.state != "running"
+        || current.lease_token != Some(token)
+        || current.call_id != original.call_id
+        || current.lease_until.is_none_or(|until| until <= at)
+    {
+        return Ok(Rebuild::Lost);
+    }
+    if current.model_admitted_at.is_some() {
+        return Ok(Rebuild::Admitted);
+    }
+    if current.read_attempt >= limit {
+        return Ok(Rebuild::Exhausted);
+    }
+    let mut calls:Vec<Id>=sqlx::query_scalar("SELECT id FROM summary_calls WHERE resource_request_id=$1 AND resource_call_id=$2 ORDER BY id")
+        .bind(current.id).bind(current.call_id).fetch_all(&mut **tx).await?;
+    calls.push(current.call_id);
+    calls.sort_unstable();
+    calls.dedup();
+    let commands: Vec<(Id, String, i32)> = sqlx::query_as(
+        "SELECT id,state,attempts FROM commands WHERE id=ANY($1) ORDER BY id FOR UPDATE",
+    )
+    .bind(&calls)
+    .fetch_all(&mut **tx)
+    .await?;
+    if commands.iter().any(|(_, state, attempts)| {
+        *attempts > 0 || !matches!(state.as_str(), "queued" | "failed" | "cancelled")
+    }) {
+        return Ok(Rebuild::Admitted);
+    }
+    // Keep the withdrawn receipt as a durable cleanup instruction. Its model-input state is
+    // settled through the ordinary node sequence writer after this short fence commits.
+    sqlx::query("UPDATE summary_calls SET cancel_reason='source_changed' WHERE resource_request_id=$1 AND resource_call_id=$2")
+        .bind(current.id)
+        .bind(current.call_id)
+        .execute(&mut **tx)
+        .await?;
+    let request:Request=sqlx::query_as(concat!("UPDATE resource_summary_requests SET call_id=$3,read_attempt=read_attempt+1,accepted_source=$4,prepared=NULL,attempt_facts=NULL,dirty_revision=$5,problem=NULL WHERE id=$1 AND lease_token=$2 RETURNING ",request_columns!()))
+        .bind(current.id).bind(token).bind(new_id()).bind(source).bind(cache.dirty_revision).fetch_one(&mut **tx).await?;
+    sqlx::query("UPDATE resource_summaries SET revision=revision+1,updated_at=$2 WHERE id=$1")
+        .bind(cache.id)
+        .bind(at)
+        .execute(&mut **tx)
+        .await?;
+    let cancelled = commands
+        .into_iter()
+        .filter_map(|(id, state, _)| (state == "queued").then_some(id))
+        .collect();
+    Ok(Rebuild::Ready {
+        request: Box::new(request),
+        cancelled,
+    })
+}
+
+/// Unsent receipts withdrawn by a committed prompt rebuild. Keeping them makes cancellation
+/// and native model-input settlement recoverable if the worker stopped just after that commit.
+#[derive(sqlx::FromRow)]
+pub struct Withdrawn {
+    pub id: Id,
+    pub node: Id,
+    pub input: Option<Id>,
+    pub input_state: Option<String>,
+    pub command_state: Option<String>,
+}
+
+/// Only this request's proven unpaid withdrawals; ordinary paid receipts never enter this set.
+pub async fn withdrawn(conn: &mut Conn, request: Id) -> Result<Vec<Withdrawn>, DbError> {
+    Ok(sqlx::query_as("SELECT s.id,s.node_id AS node,m.id AS input,m.state AS input_state,c.state AS command_state FROM summary_calls s LEFT JOIN model_inputs m ON m.node_id=s.node_id AND m.purpose='summary' AND m.reference=s.id::text AND EXISTS(SELECT 1 FROM resource_summary_model_inputs g WHERE g.model_input_id=m.id AND g.request_id=$1) LEFT JOIN commands c ON c.id=s.id WHERE s.resource_request_id=$1 AND s.cancel_reason='source_changed' ORDER BY s.id")
+        .bind(request).fetch_all(conn).await?)
+}
+
+/// A complete native source proof can acknowledge an unrelated invalidation (for example,
+/// a chat message outside the original pinned range) before the final paragraph CAS.
+pub async fn acknowledge_source(
+    conn: &mut Conn,
+    id: Id,
+    token: Id,
+    call: Id,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE resource_summary_requests r SET dirty_revision=s.dirty_revision FROM resource_summaries s WHERE r.id=$1 AND r.lease_token=$2 AND r.call_id=$3 AND r.state='running' AND s.id=r.summary_id AND s.options_revision=r.options_revision")
+        .bind(id).bind(token).bind(call).execute(conn).await?.rows_affected()==1)
+}
+
 /// Active or most recent completed work for a cache, for a properly admitted read projection.
 pub async fn latest(conn: &mut Conn, summary: Id) -> Result<Option<Request>, DbError> {
     Ok(sqlx::query_as(concat!(
@@ -407,7 +556,7 @@ pub async fn latest(conn: &mut Conn, summary: Id) -> Result<Option<Request>, DbE
 macro_rules! recoverable_sources {
     () => {
         " FROM model_call_recovery c \
-         JOIN resource_summary_requests r ON r.id=c.call_key \
+         JOIN resource_summary_requests r ON r.call_id=c.call_key \
          JOIN resource_summaries s ON s.id=r.summary_id \
          WHERE c.purpose='summary' AND c.context->>'task'='resource_summary' \
          AND c.state IN ('scheduled','running') AND (c.due_at IS NULL OR c.due_at<=$1) \
@@ -465,8 +614,8 @@ pub async fn claim(
         "(state='queued' OR (state='running' AND lease_until<=$1)) ORDER BY due_at,created_at,id ",
         "FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE resource_summary_requests r SET state='running',",
         "lease_token=$3,lease_until=$2 FROM next WHERE r.id=next.id RETURNING ",
-        "r.id,r.summary_id,r.origin,r.requested_by,r.paying_user,r.client_id,r.accepted_operation,",
-        "r.arguments,r.accepted_source,r.prepared,r.accepted_revision,r.options_revision,r.dirty_revision,r.state,r.lease_token,r.lease_until,",
+        "r.id,r.call_id,r.read_attempt,r.model_admitted_at,r.summary_id,r.origin,r.requested_by,r.paying_user,r.client_id,r.accepted_operation,",
+        "r.arguments,r.accepted_source,r.prepared,r.attempt_facts,r.accepted_revision,r.options_revision,r.dirty_revision,r.state,r.lease_token,r.lease_until,",
         "r.problem,r.created_at,r.due_at,r.finished_at"
     )).bind(at).bind(until).bind(new_id()).fetch_optional(conn).await?)
 }
@@ -495,6 +644,19 @@ pub async fn prepare(
         == 1)
 }
 
+/// Retain a paid observation before its short publication check, under the original claim and call.
+/// A discarded answer keeps this receipt; recording it neither publishes text nor schedules work.
+pub async fn observe_attempt(
+    conn: &mut Conn,
+    request: Id,
+    token: Id,
+    call: Id,
+    facts: &Json,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE resource_summary_requests SET attempt_facts=$4 WHERE id=$1 AND lease_token=$2 AND call_id=$3 AND state='running' AND prepared IS NOT NULL")
+        .bind(request).bind(token).bind(call).bind(facts).execute(conn).await?.rows_affected()==1)
+}
+
 /// A successful, already conformed producer output. Caller must retain every actual source
 /// reference, including restricted documents/chats, for current-read checks on later views.
 pub struct Paragraph<'a> {
@@ -502,6 +664,8 @@ pub struct Paragraph<'a> {
     pub text: &'a str,
     /// Private producer snapshot.
     pub producer: &'a Json,
+    /// Actual conformance/usage observations; None means no capture.
+    pub result_facts: Option<&'a Json>,
     /// Source/range/settings fingerprint.
     pub source_snapshot: &'a Json,
     /// Array of actual governing source references.
@@ -514,6 +678,8 @@ pub enum Outcome<'a> {
     Paragraph(Paragraph<'a>),
     /// Safe failure; retain the previous paragraph.
     Failed(&'a Json),
+    /// A factual source change; retain the previous paragraph and offer a new explicit act.
+    Changed(&'a Json),
     /// Source/configuration/authority changed; retain previous text and do not start a new paid act.
     Discarded,
 }
@@ -563,13 +729,14 @@ pub async fn finish(
         && cache.dirty_revision == work.dirty_revision;
     let (state, problem) = match outcome {
         Outcome::Paragraph(paragraph) if current && work.prepared.is_some() => {
-            sqlx::query("UPDATE resource_summaries SET text=$2,producer=$3,source_snapshot=$4,source_refs=$5,\
+            sqlx::query("UPDATE resource_summaries SET text=$2,producer=$3,source_snapshot=$4,source_refs=$5,result_facts=$8,\
                 completed_request_id=$6,completed_at=$7,completed_dirty_revision=dirty_revision WHERE id=$1")
                 .bind(summary).bind(paragraph.text).bind(paragraph.producer).bind(paragraph.source_snapshot)
-                .bind(paragraph.source_refs).bind(id).bind(at).execute(&mut **tx).await?;
+                .bind(paragraph.source_refs).bind(id).bind(at).bind(paragraph.result_facts).execute(&mut **tx).await?;
             ("done", None)
         }
         Outcome::Failed(problem) => ("failed", Some(problem)),
+        Outcome::Changed(problem) => ("discarded", Some(problem)),
         Outcome::Paragraph(_) | Outcome::Discarded => ("discarded", None),
     };
     sqlx::query("UPDATE resource_summary_requests SET state=$2,problem=$3,finished_at=$4,lease_token=NULL,lease_until=NULL WHERE id=$1")
@@ -606,7 +773,7 @@ pub async fn topic_threads(
 ) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT t.node_id FROM threads t JOIN nodes n ON n.id=t.node_id \
-         WHERE $1=ANY(n.path) AND t.side_of IS NULL AND ($2::uuid IS NULL OR t.node_id>$2) \
+         WHERE $1=ANY(n.path) AND t.side_of IS NULL AND NOT delegated_execution_only(t.node_id) AND ($2::uuid IS NULL OR t.node_id>$2) \
          AND NOT EXISTS(SELECT 1 FROM nodes a WHERE a.id=ANY(n.path) AND (a.deleted_at IS NOT NULL OR a.archived_at IS NOT NULL)) \
          ORDER BY t.node_id LIMIT $3"
     ).bind(topic).bind(after).bind(limit).fetch_all(conn).await?)

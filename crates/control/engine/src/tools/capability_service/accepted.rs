@@ -214,6 +214,38 @@ pub(super) fn capture_native(
         .map_err(|_| EngineError::StaleToolSource)?
 }
 
+/// A native reader supplies only a source-checked, already-generated receipt and its frozen material.
+pub(super) async fn reconcile_native_result(
+    engine: &Engine,
+    call: &CallContext,
+    capability: &str,
+    input: Json,
+    images: Vec<orch_model_contract::generation::GenerationPart>,
+    publish: impl std::future::Future<Output = Result<(), EngineError>>,
+) -> Result<AcceptedCapabilityResult, EngineError> {
+    let sink = Arc::new(Mutex::new(None));
+    PREPARED
+        .scope(
+            Prepared {
+                owner: source::Source::captured()?,
+                capability: capability.into(),
+                input,
+                images,
+                accepted: sink.clone(),
+            },
+            publish,
+        )
+        .await?;
+    let result = sink
+        .lock()
+        .map_err(|_| EngineError::unreadable("The native result is unavailable"))?
+        .take()
+        .ok_or(EngineError::StaleToolSource)?;
+    engine
+        .read_accepted_capability_result(call, &result.receipt)
+        .await
+}
+
 impl Engine {
     pub(super) async fn retain_native_capability_result(
         &self,
@@ -231,6 +263,33 @@ impl Engine {
             i64::try_from(serde_json::to_vec(&value)?.len()).map_err(EngineError::unreadable)?;
         let mut tx = self.db().begin().await?;
         source::check_call(&mut tx, call).await?;
+        source::original_callers(
+            &mut tx,
+            call,
+            self.inner.clock.as_ref(),
+            self.inner.access.as_ref(),
+        )
+        .await?;
+        if let Some(helper) = &accepted.receipt.helper
+            && !helper.current_placement(&mut tx).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
+        // The permanent receipt and temporary pins are created in one transaction under
+        // the call's lock. Once its consumer releases the pins, replay must not recreate them.
+        let prior: Option<Json> =
+            sqlx::query_scalar("SELECT plan->$2 FROM thread_tool_calls WHERE answer_id=$1")
+                .bind(accepted.receipt.owner.answer())
+                .bind(SLOT)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        if let Some(prior) = prior {
+            if serde_json::from_value::<CapabilityResultReceipt>(prior)? != accepted.receipt {
+                return Err(EngineError::ToolCallIdentity);
+            }
+            return Ok(());
+        }
         let mut hashes: Vec<Hash> = accepted
             .native_images
             .iter()
@@ -341,7 +400,7 @@ impl Engine {
         let store = self
             .blobs()
             .ok_or_else(|| EngineError::unreadable("the accepted result store is unavailable"))?;
-        store
+        let _publication = store
             .put(
                 &hash,
                 Some(size),
@@ -399,7 +458,7 @@ impl Engine {
             )
             .await?;
             sqlx::query_as("SELECT result_blob,result_size,inline_native FROM thread_tool_service_results WHERE answer_id=$1 AND command_id=$2 AND capability=$3 AND input_hash=$4")
-                .bind(receipt.owner.answer()).bind(receipt.command).bind(&receipt.capability).bind(receipt.input_hash.as_bytes().as_slice()).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?.ok_or_else(||EngineError::unreadable("the accepted result is no longer retained; it was not generated again"))?
+                .bind(receipt.owner.answer()).bind(receipt.command).bind(&receipt.capability).bind(receipt.input_hash.as_bytes().as_slice()).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?.ok_or_else(||EngineError::CapabilityPacketUnavailable(Box::new(receipt.clone())))?
         };
         let accepted = if let Some(inline) = inline {
             if raw.is_some()
@@ -456,6 +515,12 @@ impl Engine {
             self.inner.access.as_ref(),
         )
         .await?;
+        if current.answer() == receipt.owner.answer()
+            && let Some(helper) = &receipt.helper
+            && !helper.current_placement(&mut conn).await?
+        {
+            return Err(EngineError::StaleToolSource);
+        }
         Ok(accepted)
     }
 

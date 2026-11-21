@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use orch_types::{Hash, Id, Seq};
 
 pub mod reading;
+pub mod retained;
 
 pub const JOB_KIND: &str = "thread_continuation";
 
@@ -28,10 +29,15 @@ pub struct ContinuationRow {
     pub queue_held_at: Option<DateTime<Utc>>,
     pub queue_revision: i64,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_source: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_prefix: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub open_result: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_creation: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_creation_result: Option<orch_types::Json>,
     pub failure: Option<orch_types::Json>,
 }
@@ -58,6 +64,20 @@ impl Projection {
 }
 
 pub async fn projection(
+    conn: &mut Conn,
+    thread: Id,
+    viewed: Option<Id>,
+) -> Result<Option<Projection>, DbError> {
+    super::snapshot::by_id(
+        conn,
+        (thread, viewed),
+        |rows| &mut rows.projections,
+        |conn, (thread, viewed)| Box::pin(load_projection(conn, thread, viewed)),
+    )
+    .await
+}
+
+async fn load_projection(
     conn: &mut Conn,
     thread: Id,
     viewed: Option<Id>,
@@ -173,6 +193,7 @@ pub struct VersionRow {
     pub created_at: DateTime<Utc>,
     pub status: String,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub job_snapshot: Option<orch_types::Json>,
 }
 
@@ -325,9 +346,11 @@ pub async fn freeze_prefix(
 pub struct OperationRow {
     pub id: Id,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub job_snapshot: orch_types::Json,
     pub thread_id: Id,
     pub actor_id: Id,
+    #[sqlx(try_from = "crate::storage::Text")]
     pub client_id: String,
     pub body_hash: Vec<u8>,
     pub kind: String,
@@ -356,7 +379,7 @@ pub async fn replay(
     client: &str,
 ) -> Result<Option<OperationRow>, DbError> {
     Ok(sqlx::query_as("SELECT * FROM thread_continuation_operations WHERE thread_id=$1 AND actor_id=$2 AND client_id=$3")
-        .bind(thread).bind(actor).bind(client).fetch_optional(conn).await?)
+        .bind(thread).bind(actor).bind(orch_types::storable::encode_key(client)).fetch_optional(conn).await?)
 }
 
 pub async fn operation(conn: &mut Conn, id: Id) -> Result<Option<OperationRow>, DbError> {
@@ -373,10 +396,10 @@ pub async fn create_operation(conn: &mut Conn, row: &OperationRow) -> Result<(),
         source_continuation_id,target_continuation_id,input_id,segment_id,expected_active_continuation_id,
         expected_execution_revision,expected_queue_revision,status,created_at,job_id,job_snapshot)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'preparing',$14,$15,$16)")
-        .bind(row.id).bind(row.thread_id).bind(row.actor_id).bind(&row.client_id).bind(&row.body_hash).bind(&row.kind)
+        .bind(row.id).bind(row.thread_id).bind(row.actor_id).bind(orch_types::storable::encode_key(&row.client_id)).bind(&row.body_hash).bind(&row.kind)
         .bind(row.source_continuation_id).bind(row.target_continuation_id).bind(row.input_id).bind(row.segment_id)
         .bind(row.expected_active_continuation_id).bind(row.expected_execution_revision).bind(row.expected_queue_revision)
-        .bind(row.created_at).bind(row.job_id).bind(&row.job_snapshot).execute(&mut *conn).await?;
+        .bind(row.created_at).bind(row.job_id).bind(orch_types::storable::encode_exact(&row.job_snapshot)).execute(&mut *conn).await?;
     sqlx::query("UPDATE thread_continuations SET job_id=$2 WHERE id=$1 AND thread_id=$3")
         .bind(row.target_continuation_id)
         .bind(row.id)

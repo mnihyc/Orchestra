@@ -111,6 +111,37 @@ fn expected(f: &Fixture, parent: Id) -> BTreeSet<(String, Id)> {
 }
 
 #[tokio::test]
+async fn a_tree_clock_and_document_edit_do_not_wait_for_unrelated_assignment_upkeep() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    let mut held = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT object_id FROM participation_object_facts ORDER BY object_kind,object_id FOR UPDATE")
+        .fetch_all(&mut *held).await.unwrap();
+    // The other transaction deliberately retains every projection row until this check ends.
+    // A lock timeout detects a dependency, independently of the runner's query execution speed.
+    sqlx::query("SET lock_timeout='1s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET tree_seq=tree_seq+1 WHERE id=$1")
+        .bind(f.deep)
+        .execute(&mut *conn)
+        .await
+        .expect("a tree clock changes no assignment or path");
+    sqlx::query("UPDATE documents SET doc_seq=doc_seq+1,title='An edited document' WHERE id=$1")
+        .bind(f.document)
+        .execute(&mut *conn)
+        .await
+        .expect("document content changes no assignment or home");
+    held.rollback().await.unwrap();
+    let facts: (Id, Id, bool) = sqlx::query_as(
+        "SELECT home_id,org_id,live FROM participation_object_facts WHERE object_kind='document' AND object_id=$1",
+    ).bind(f.document).fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(facts, (f.deep, f.root, true));
+}
+
+#[tokio::test]
 async fn descendant_assignments_keep_membership_group_time_closed_and_move_semantics() {
     let db = TestDb::fresh().await;
     let mut conn = db.pool.acquire().await.unwrap();
@@ -139,6 +170,17 @@ async fn descendant_assignments_keep_membership_group_time_closed_and_move_seman
         ..Focus::default()
     };
     assert_eq!(marks(&mut conn, &f, &grouped).await, expected(&f, f.branch));
+    let outside_this_tree = Focus {
+        groups: grouped.groups.clone(),
+        members: grouped.members.clone(),
+        closed: vec![new_id()],
+        ..Focus::default()
+    };
+    assert_eq!(
+        marks(&mut conn, &f, &grouped).await,
+        marks(&mut conn, &f, &outside_this_tree).await,
+        "closing an unrelated branch leaves the same assignment marks"
+    );
     assert!(
         marks(
             &mut conn,
@@ -248,6 +290,76 @@ async fn descendant_assignments_keep_membership_group_time_closed_and_move_seman
         .await
         .unwrap();
     assert!(marks(&mut conn, &f, &Focus::default()).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_follow_marks_its_live_path_without_reading_each_ancestor_again() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    orch_db::queries::hierarchy::put_subscription(
+        &mut conn,
+        f.person,
+        f.deep,
+        "important",
+        "manual",
+        f.at.get(),
+    )
+    .await
+    .unwrap();
+    let visible = [f.root, f.branch, f.deep]
+        .map(|id| ("node".to_owned(), id))
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(marks(&mut conn, &f, &Focus::default()).await, visible);
+
+    let plan = access::participation::explain_marks(
+        &mut conn,
+        f.person,
+        &[],
+        &[f.root],
+        f.at,
+        &[f.root],
+        &[PageKey::new("node", f.root, "live")],
+        &[f.root],
+        &[],
+        None,
+        &[f.root],
+        false,
+    )
+    .await
+    .unwrap();
+    fn path_reads(plan: &serde_json::Value) -> u64 {
+        let own = if plan["Relation Name"] == "nodes" {
+            plan["Actual Loops"].as_u64().unwrap()
+        } else {
+            0
+        };
+        own + plan["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(path_reads)
+            .sum::<u64>()
+    }
+    assert!(
+        path_reads(&plan[0]["Plan"]) <= 1,
+        "only the chat subscription checks the node kind; ancestors use the maintained path"
+    );
+
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(f.branch)
+        .bind(f.at.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(marks(&mut conn, &f, &Focus::default()).await.is_empty());
+    sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+        .bind(f.branch)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(marks(&mut conn, &f, &Focus::default()).await, visible);
 }
 
 #[tokio::test]

@@ -15,9 +15,9 @@ args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=True)
 source = (args.tree / 'crates/control/db/src/queries/source.rs').read_text()
 function = source.split('pub async fn thread_display_facts(', 1)[1].split('/// Contained threads', 1)[0]
-query = re.search(r'"(WITH pending AS MATERIALIZED .*?WHERE th.node_id=ANY\(\$1\))"', function, re.S)[1]
-jobs = (args.tree / 'crates/control/db/src/queries/jobs.rs').read_text().split('fn thread_hold_predicate(', 1)[1]
-hold = re.search(r'"(\(j.state IN .*?)"\s*\.replace', jobs, re.S)[1].replace('__THREAD__', 'th.node_id')
+query = re.search(r'"(SELECT th.node_id id, .*?WHERE th.node_id=ANY\(\$1\))"', function, re.S)[1]
+jobs = (args.tree / 'crates/control/db/src/queries/jobs.rs').read_text()
+hold = re.search(r'const THREAD_HOLD: &str = "(.*?)";', jobs, re.S)[1]
 query = query.replace('__RECOVERY_HOLD__', hold)
 pages = source.split('pub async fn topic_threads_page(', 1)[1].split('/// SQL totals', 1)[0]
 page_queries = re.findall(r'"(SELECT th.topic_id.*?LIMIT \$[24])"', pages, re.S)
@@ -104,7 +104,9 @@ PREPARE attention_counts(uuid[]) AS {count_query};
 sql += explain('baseline-idle', one)
 sql += "UPDATE threads SET state='blocked',blocked_reason='error',blocked_detail='call_recovery' WHERE node_id="+thread+";\n"
 sql += explain('baseline-recovery', one)
-sql += (args.tree / 'migrations/0042_thread_display_indexes.sql').read_text() + '\n'
+for migration in sorted((args.tree / 'migrations').glob('*.sql')):
+    indexes = re.findall(r'^CREATE INDEX thread_display_[^;]+;', migration.read_text(), re.M)
+    sql += '\n'.join(indexes) + '\n'
 sql += 'ANALYZE nodes; ANALYZE threads; ANALYZE turns; ANALYZE thread_inputs; ANALYZE approvals; ANALYZE input_schedules; ANALYZE jobs; ANALYZE thread_reads; ANALYZE model_call_recovery; ANALYZE items;\n'
 sql += explain('indexed-recovery', one)
 sql += explain('indexed-thousand', many)
