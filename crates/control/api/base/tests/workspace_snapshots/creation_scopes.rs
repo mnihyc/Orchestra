@@ -494,7 +494,8 @@ async fn queued_snapshot_work_keeps_its_original_operation_and_current_key_befor
                 assert_eq!(row.state, "complete");
                 assert_eq!(site.sent(CommandKind::FsSnapshot), 1);
             } else {
-                assert_eq!(job.state, "failed");
+                assert_eq!(job.state, "failed", "export={export}, change={change}");
+                assert_eq!(job.error.as_ref().unwrap()["code"], "access.denied");
                 assert_eq!(row.state, "failed");
                 assert_eq!(site.sent(CommandKind::FsSnapshot), 0);
             }
@@ -565,7 +566,9 @@ async fn a_changed_runtime_snapshot_pointer_never_redirects_the_original_job_or_
     .await
     .unwrap();
     site.app().app.engine.start();
-    assert_eq!(ended(&site, first).await.state, "failed");
+    let failed = ended(&site, first).await;
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.error.as_ref().unwrap()["code"], "access.denied");
     assert_eq!(ended(&site, second).await.state, "succeeded");
     assert_eq!(
         storage::snapshot(&mut *site.world.conn().await, first_snapshot)

@@ -9,6 +9,7 @@
 //! Nothing here decides anything. A row that is not stored is not returned,
 //! and a removed entry is returned by nothing but what asks for the record.
 
+use super::read_facts::with_snapshot;
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Json};
@@ -97,7 +98,11 @@ pub struct HolderPlaceRow {
 }
 
 /// Places whose current names may match a locator; permissions are cut before anything is returned.
-pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbError> {
+/// People-only fields need organization addresses, without traversing the project/topic inventory.
+pub async fn holder_places(
+    conn: &mut Conn,
+    orgs_only: bool,
+) -> Result<Vec<HolderPlaceRow>, DbError> {
     Ok(sqlx::query_as(
         "SELECT n.id, n.org_id AS root, n.kind, n.path, n.name AS leaf_name,
                 string_agg(p.name, ' > ' ORDER BY a.position) AS name,
@@ -105,9 +110,9 @@ pub async fn holder_places(conn: &mut Conn) -> Result<Vec<HolderPlaceRow>, DbErr
                 (array_agg(p.id ORDER BY a.position DESC) FILTER (WHERE p.kind = 'org'))[1] AS org
            FROM nodes n CROSS JOIN LATERAL unnest(n.path) WITH ORDINALITY a(id, position)
            JOIN nodes p ON p.id = a.id LEFT JOIN orgs o ON o.node_id = p.id
-          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL
+          WHERE n.kind IN ('org','project','topic') AND n.deleted_at IS NULL AND (NOT $1::boolean OR n.kind='org')
           GROUP BY n.id ORDER BY n.org_id, n.id")
-        .fetch_all(conn).await?)
+        .bind(orgs_only).fetch_all(conn).await?)
 }
 
 /// Current person addresses with their domains; the API cuts domains before exposing their names.
@@ -124,7 +129,7 @@ pub async fn holder_user_addresses(
 }
 
 /// A person's membership of one tree of orgs.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, sqlx::FromRow)]
 pub struct MembershipRow {
     /// The root org of the tree.
     pub org_id: Id,
@@ -135,17 +140,80 @@ pub struct MembershipRow {
     pub domain_path: Vec<Id>,
 }
 
-/// Every tree of orgs `user` is a member of.
-pub async fn memberships(conn: &mut Conn, user: Id) -> Result<Vec<MembershipRow>, DbError> {
-    Ok(sqlx::query_as(
+// Both membership readers exclude a removed domain and every domain below a removed ancestor.
+macro_rules! membership_rows {
+    () => {
         "SELECT m.org_id, m.domain_id, d.path AS domain_path
            FROM org_members m JOIN nodes d ON d.id = m.domain_id
           WHERE m.user_id = $1 AND d.deleted_at IS NULL
-            AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(d.path) AND gone.deleted_at IS NOT NULL)
-          ORDER BY m.org_id",
+            AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(d.path) AND gone.deleted_at IS NOT NULL)"
+    };
+}
+
+/// Every tree of orgs `user` is a member of.
+pub async fn memberships(conn: &mut Conn, user: Id) -> Result<Vec<MembershipRow>, DbError> {
+    Ok(
+        sqlx::query_as(concat!(membership_rows!(), " ORDER BY m.org_id"))
+            .bind(user)
+            .fetch_all(conn)
+            .await?,
     )
+}
+
+/// The live team roots that govern mailed codes and the setting rows at those roots and the system.
+/// Membership, locks and values are observed in the same statement, including roots without a setting.
+pub async fn email_code_policy(
+    conn: &mut Conn,
+    user: Id,
+    personal: Option<Id>,
+) -> Result<(Vec<Id>, Vec<super::settings::SettingRow>), DbError> {
+    let (roots, sqlx::types::Json(rows)): (Vec<Id>, sqlx::types::Json<Vec<super::settings::SettingRow>>) =
+        sqlx::query_as(concat!(
+            "WITH memberships AS (", membership_rows!(), "),
+             roots AS (SELECT ARRAY(SELECT org_id FROM memberships WHERE org_id IS DISTINCT FROM $2::uuid) AS ids),
+             watched AS MATERIALIZED (
+                SELECT orch_authz_saw(orch_authz_epochs(ids)) FROM roots
+                 WHERE cardinality(ids)>0 AND COALESCE(current_setting('orch.authz_seen',true),'')<>''
+             )
+             SELECT roots.ids, (SELECT COALESCE(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+               FROM settings s WHERE s.key='auth.email_code' AND (s.node_id IS NULL OR s.node_id=ANY(roots.ids)))
+               FROM roots, (SELECT count(*) FROM watched) w"
+        ))
+        .bind(user)
+        .bind(personal)
+        .fetch_one(conn)
+        .await?;
+    Ok((roots, rows))
+}
+
+/// The stored account facts used alongside the current effective holder set.
+#[derive(Debug, sqlx::FromRow)]
+pub struct AccountMembershipsRow {
+    /// The account's status across the system.
+    pub status: String,
+    /// Whether the account holds Admin at the system.
+    pub is_system_admin: bool,
+    /// Every org in which the account is suspended.
+    pub suspended_in: Vec<Id>,
+    /// The live domain in each tree, ordered by root.
+    pub memberships: sqlx::types::Json<Vec<MembershipRow>>,
+}
+
+/// Read a person's status, suspensions and live domains together, including a person with no domain.
+pub async fn account_memberships(
+    conn: &mut Conn,
+    user: Id,
+) -> Result<Option<AccountMembershipsRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT u.status, u.is_system_admin,
+                ARRAY(SELECT s.org_id FROM org_suspensions s WHERE s.user_id = u.id) AS suspended_in,
+                COALESCE((SELECT json_agg(domain ORDER BY domain.org_id) FROM (",
+        membership_rows!(),
+        ") domain), '[]'::json) AS memberships
+           FROM users u WHERE u.id = $1"
+    ))
     .bind(user)
-    .fetch_all(conn)
+    .fetch_optional(conn)
     .await?)
 }
 
@@ -252,17 +320,55 @@ pub async fn roles_in_places(
     places: &[Id],
     now: DateTime<Utc>,
 ) -> Result<Vec<RoleRow>, DbError> {
-    Ok(sqlx::query_as(concat!(
+    let mut places = places.to_vec();
+    places.sort_unstable();
+    places.dedup();
+    let mut result = Vec::new();
+    let missing = with_snapshot(conn, |facts| {
+        let mut missing = Vec::new();
+        for id in &places {
+            match facts.roles.get(&(now, *id)) {
+                Some(rows) => result.extend_from_slice(rows),
+                None => missing.push(*id),
+            }
+        }
+        missing
+    });
+    let selected = missing.as_deref().unwrap_or(&places);
+    if selected.is_empty() {
+        return Ok(result);
+    }
+    let rows: Vec<RoleRow> = sqlx::query_as(concat!(
         "SELECT ",
         role_columns!(),
         " FROM node_roles
           WHERE node_id = ANY($1) AND removed_at IS NULL AND (expires_at IS NULL OR expires_at > $2)
           ORDER BY node_id, created_at, id"
     ))
-    .bind(places)
+    .bind(selected)
     .bind(now)
-    .fetch_all(conn)
-    .await?)
+    .fetch_all(&mut *conn)
+    .await?;
+    if let Some(missing) = missing {
+        let _ = with_snapshot(conn, |facts| {
+            for id in missing {
+                facts.roles.entry((now, id)).or_default();
+            }
+            for row in &rows {
+                facts
+                    .roles
+                    .entry((now, row.node_id))
+                    .or_default()
+                    .push(row.clone());
+            }
+        });
+        if !result.is_empty() {
+            result.extend(rows);
+            result.sort_by_key(|row| (row.node_id, row.created_at, row.id));
+            return Ok(result);
+        }
+    }
+    Ok(rows)
 }
 
 /// One entry of a row, as it is stored.
@@ -361,8 +467,31 @@ fn split(pages: &[PageKey]) -> (Vec<String>, Vec<Id>, Vec<String>) {
 /// `object_id`) that were not removed: people and groups, in the order they
 /// were named.
 pub async fn owner_entries(conn: &mut Conn, objects: &[PageKey]) -> Result<Vec<EntryRow>, DbError> {
-    let (kinds, ids, _) = split(objects);
-    Ok(sqlx::query_as(concat!(
+    let keys: Vec<_> = objects
+        .iter()
+        .map(|page| (page.object_kind.clone(), page.object_id))
+        .collect();
+    let mut result = Vec::new();
+    let missing = with_snapshot(conn, |facts| {
+        let mut missing = Vec::new();
+        for key in &keys {
+            match facts.owners.get(key) {
+                Some(rows) => result.extend_from_slice(rows),
+                None => missing.push(key.clone()),
+            }
+        }
+        missing
+    });
+    let selected = missing.as_deref().unwrap_or(&keys);
+    if selected.is_empty() {
+        result.sort_by_key(|row| (row.created_at, row.id));
+        return Ok(result);
+    }
+    let (kinds, ids): (Vec<_>, Vec<_>) = selected
+        .iter()
+        .map(|(kind, id)| (kind.as_str(), *id))
+        .unzip();
+    let rows: Vec<EntryRow> = sqlx::query_as(concat!(
         "SELECT ",
         entry_columns!(),
         " FROM permission_entries e
@@ -373,8 +502,32 @@ pub async fn owner_entries(conn: &mut Conn, objects: &[PageKey]) -> Result<Vec<E
     ))
     .bind(kinds)
     .bind(ids)
-    .fetch_all(conn)
-    .await?)
+    .fetch_all(&mut *conn)
+    .await?;
+    if let Some(missing) = missing {
+        let _ = with_snapshot(conn, |facts| {
+            for key in missing {
+                facts.owners.entry(key).or_default();
+            }
+            // A repeated object in the join yields adjacent copies of an entry. Store it once
+            // so any later selection can ask for its own number of occurrences.
+            for row in &rows {
+                let owners = facts
+                    .owners
+                    .entry((row.object_kind.clone(), row.object_id))
+                    .or_default();
+                if owners.last().is_none_or(|last| last.id != row.id) {
+                    owners.push(row.clone());
+                }
+            }
+        });
+        if !result.is_empty() {
+            result.extend(rows);
+            result.sort_by_key(|row| (row.created_at, row.id));
+            return Ok(result);
+        }
+    }
+    Ok(rows)
 }
 
 /// The entries that were not removed in the rows of `permissions` on the
@@ -448,6 +601,53 @@ pub async fn stored_rows(
     .bind(permissions)
     .fetch_all(conn)
     .await?)
+}
+
+/// Reads each page's overrides and live entries together, including entries on a following row.
+pub async fn page_rows_and_entries(
+    conn: &mut Conn,
+    pages: &[PageKey],
+    permissions: &[String],
+) -> Result<(Vec<StoredRow>, Vec<EntryRow>), DbError> {
+    use sqlx::{FromRow, Row};
+
+    let (kinds, ids, which) = split(pages);
+    let records = sqlx::query(
+        "WITH wanted AS MATERIALIZED (
+             SELECT * FROM unnest($1::text[], $2::uuid[], $3::text[]) w(object_kind,object_id,page)
+         ), facts AS (
+             SELECT r.object_kind,r.object_id,r.page,r.profile,r.permission,r.revision,
+                    r.inherit,r.locked,r.updated_by,r.updated_at,NULL::permission_entries AS entry
+               FROM wanted JOIN permission_rows r USING (object_kind,object_id,page)
+              WHERE r.permission=ANY($4)
+             UNION ALL
+             SELECT e.object_kind,e.object_id,e.page,e.profile,e.permission,e.revision,
+                    NULL,NULL,NULL,NULL,e
+               FROM wanted JOIN permission_entries e USING (object_kind,object_id,page)
+              WHERE e.removed_at IS NULL AND e.permission=ANY($4)
+         )
+         SELECT object_kind,object_id,page,profile,permission,revision,inherit,locked,updated_by,updated_at,
+                (entry).id,(entry).holder_kind,(entry).holder_id,(entry).holder_role,(entry).options,
+                (entry).expires_at,(entry).note,(entry).source,(entry).created_by,(entry).created_at,
+                (entry).renewed_at,(entry).removed_at,(entry).removed_by
+           FROM facts ORDER BY (entry).created_at,(entry).id",
+    )
+    .bind(kinds)
+    .bind(ids)
+    .bind(which)
+    .bind(permissions)
+    .fetch_all(conn)
+    .await?;
+    let mut settings = Vec::new();
+    let mut grants = Vec::new();
+    for record in records {
+        if record.try_get::<Option<Id>, _>("id")?.is_some() {
+            grants.push(EntryRow::from_row(&record)?);
+        } else {
+            settings.push(StoredRow::from_row(&record)?);
+        }
+    }
+    Ok((settings, grants))
 }
 
 /// The stored rows of the permission `permission` on the pages, own and
@@ -2800,6 +3000,7 @@ pub type Trial<'c> = sqlx::Transaction<'c, sqlx::Postgres>;
 /// and asking, without leaving it made.
 pub async fn begin_trial(conn: &mut Conn) -> Result<Trial<'_>, DbError> {
     use sqlx::Connection;
+    crate::pool::discard_read_facts();
     Ok(conn.begin().await?)
 }
 
@@ -4485,6 +4686,36 @@ mod tests {
                 domain_path: vec![w.root, w.department],
             }]
         );
+        let account = account_memberships(&mut conn, w.bo).await.unwrap().unwrap();
+        assert_eq!(account.memberships.0, found);
+        assert_eq!(account.status, "active");
+        assert!(!account.is_system_admin && account.suspended_in.is_empty());
+        assert!(
+            account_memberships(&mut conn, new_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            account_memberships(&mut conn, w.ada)
+                .await
+                .unwrap()
+                .unwrap()
+                .memberships
+                .0
+                .is_empty()
+        );
+        suspend_in(&mut conn, w.department, w.bo, w.ada)
+            .await
+            .unwrap();
+        assert_eq!(
+            account_memberships(&mut conn, w.bo)
+                .await
+                .unwrap()
+                .unwrap()
+                .suspended_in,
+            vec![w.department]
+        );
         assert!(memberships(&mut conn, w.ada).await.unwrap().is_empty());
         assert_eq!(
             members_among(&mut conn, w.root, &[w.bo, w.ada])
@@ -4670,6 +4901,19 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].locked && !rows[0].inherit && rows[0].page == "defaults");
+        let pages = [page.clone(), defaults.clone(), page.clone(), system.clone()];
+        let (settings, grants) = page_rows_and_entries(&mut conn, &pages, &wanted)
+            .await
+            .unwrap();
+        assert_eq!(settings, rows);
+        assert_eq!(grants, entries(&mut conn, &pages, &wanted).await.unwrap());
+        let (settings, grants) =
+            page_rows_and_entries(&mut conn, &[page.clone()], &["chat.view".into()])
+                .await
+                .unwrap();
+        assert_eq!(settings, stored_rows_of(&mut conn, &page).await.unwrap());
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].permission, "chat.view");
         assert_eq!(stored_rows_of(&mut conn, &page).await.unwrap().len(), 1);
         assert_eq!(entries_of(&mut conn, &page).await.unwrap().len(), 2);
     }
@@ -5220,6 +5464,364 @@ mod tests {
             .await
             .unwrap();
         assert!(roots.iter().all(|(_, root)| *root == w.root));
+    }
+
+    #[tokio::test]
+    async fn a_member_keeps_the_strongest_inherited_role_until_it_expires_or_the_place_closes() {
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        let end = at + Duration::minutes(1);
+        make_system_admin(&mut conn, w.ada).await.unwrap();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        give_role(
+            &mut conn,
+            w.root,
+            "members",
+            w.root,
+            "interactor",
+            w.ada,
+            None,
+        )
+        .await
+        .unwrap();
+        give_role(
+            &mut conn,
+            w.department,
+            "user",
+            w.bo,
+            "developer",
+            w.ada,
+            Some(end),
+        )
+        .await
+        .unwrap();
+        add_entry(
+            &mut conn,
+            &PageKey::new("system", SYSTEM_ID, "defaults"),
+            "any",
+            "project.view",
+            ("role", None, Some("developer")),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        for (time, expected) in [(at, "developer"), (end, "interactor")] {
+            let project_role: String = sqlx::query_scalar(
+                "SELECT h.role FROM access_holders($1,$2,false) h WHERE h.kind='role' AND h.id=$3",
+            )
+            .bind(w.bo)
+            .bind(time)
+            .bind(w.project)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            assert_eq!(project_role, expected);
+            holder_graph_matches_initial_function(&mut conn, time).await;
+        }
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.department)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let still_held: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h WHERE h.id=$3)",
+        )
+        .bind(w.bo)
+        .bind(at)
+        .bind(w.project)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert!(!still_held);
+        holder_graph_matches_initial_function(&mut conn, at).await;
+    }
+
+    #[tokio::test]
+    async fn implicit_role_views_follow_local_inheritance_locks_and_expiry() {
+        async fn check(conn: &mut Conn, w: &World, at: DateTime<Utc>, visible: bool) {
+            let identities: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM access_holders($1,$2,false) WHERE id=$3 ORDER BY kind",
+            )
+            .bind(w.bo)
+            .bind(at)
+            .bind(w.project)
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+            if visible {
+                assert_eq!(identities, ["reachable", "role", "visible"]);
+            } else {
+                assert_eq!(identities, ["role"]);
+            }
+            holder_graph_matches_initial_function(conn, at).await;
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        give_role(
+            &mut conn,
+            w.project,
+            "user",
+            w.bo,
+            "interactor",
+            w.ada,
+            None,
+        )
+        .await
+        .unwrap();
+        let system = PageKey::new("system", SYSTEM_ID, "defaults");
+        let parent = PageKey::new("node", w.department, "defaults");
+        let leaf = live(w.project);
+        add_entry(
+            &mut conn,
+            &system,
+            "any",
+            "project.view",
+            ("role", None, Some("viewer")),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        add_entry(
+            &mut conn,
+            &system,
+            "any",
+            "doc.edit",
+            ("role", None, Some("developer")),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+
+        check(&mut conn, &w, at, true).await;
+        // A page-only viewer can acquire a separate group through this place.
+        let group = insert_group(&mut conn, w.root, "Project viewers", w.ada)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO group_members(group_id,member_node_id,member_role) VALUES($1,$2,'viewer')",
+        )
+        .bind(group)
+        .bind(w.project)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        let groups: Vec<Id> =
+            sqlx::query_scalar("SELECT id FROM access_holders($1,$2,false) WHERE kind='group'")
+                .bind(w.bo)
+                .bind(at)
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        assert!(groups.contains(&group));
+        check(&mut conn, &w, at, true).await;
+        set_row(&mut conn, &parent, "any", "project.view", false, false)
+            .await
+            .unwrap();
+        check(&mut conn, &w, at, false).await;
+        let end = at + Duration::minutes(1);
+        add_entry(
+            &mut conn,
+            &leaf,
+            "any",
+            "project.view",
+            ("role", None, Some("interactor")),
+            Some(end),
+            at,
+        )
+        .await
+        .unwrap();
+        check(&mut conn, &w, at, true).await;
+        check(&mut conn, &w, end, false).await;
+        set_row(&mut conn, &system, "any", "project.view", true, true)
+            .await
+            .unwrap();
+        check(&mut conn, &w, end, true).await;
+    }
+
+    #[tokio::test]
+    async fn named_and_creation_grants_follow_changes_and_ancestor_restoration_on_one_connection() {
+        async fn visible(conn: &mut Conn, person: Id, place: Id, at: DateTime<Utc>) -> bool {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h WHERE h.kind='visible' AND h.id=$3)",
+            )
+            .bind(person)
+            .bind(at)
+            .bind(place)
+            .fetch_one(conn)
+            .await
+            .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        let direct = add_entry(
+            &mut conn,
+            &live(w.project),
+            "any",
+            "project.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        assert!(remove_entry(&mut conn, direct, w.ada, at).await.unwrap());
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        add_entry(
+            &mut conn,
+            &live(w.department),
+            "any",
+            "org.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        let created = add_entry(
+            &mut conn,
+            &live(w.project),
+            "any",
+            "project.view",
+            ("user", Some(w.bo), None),
+            None,
+            at,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE permission_entries SET source='creation' WHERE id=$1")
+            .bind(created)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.root)
+            .bind(at)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+        sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+            .bind(w.root)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(visible(&mut conn, w.bo, w.project, at).await);
+        assert!(remove_entry(&mut conn, created, w.ada, at).await.unwrap());
+        assert!(!visible(&mut conn, w.bo, w.project, at).await);
+    }
+
+    #[tokio::test]
+    async fn path_state_reads_current_deleted_and_archived_ancestors_without_needing_every_node() {
+        async fn state(conn: &mut Conn, path: &[Id]) -> (bool, bool) {
+            sqlx::query_as("SELECT live,archived FROM orch_path_state($1)")
+                .bind(path)
+                .fetch_one(conn)
+                .await
+                .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let path = [w.root, w.department, w.project];
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        sqlx::query("UPDATE nodes SET archived_at=$2 WHERE id=$1")
+            .bind(w.department)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, true));
+        sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+            .bind(w.root)
+            .bind(clock::start())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (false, true));
+        sqlx::query("UPDATE nodes SET deleted_at=NULL,archived_at=NULL WHERE id=ANY($1)")
+            .bind(path.as_slice())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(state(&mut conn, &path).await, (true, false));
+        assert_eq!(state(&mut conn, &[]).await, (true, false));
+        assert_eq!(state(&mut conn, &[new_id()]).await, (true, false));
+    }
+
+    #[tokio::test]
+    async fn repeated_navigation_reads_keep_current_grants_people_suspensions_and_expiry() {
+        async fn can_develop(conn: &mut Conn, person: Id, place: Id, at: DateTime<Utc>) -> bool {
+            sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM access_holders($1,$2,false) h
+                  WHERE h.kind='role' AND h.id=$3 AND h.role IN ('developer','admin'))",
+            )
+            .bind(person)
+            .bind(at)
+            .bind(place)
+            .fetch_one(conn)
+            .await
+            .unwrap()
+        }
+
+        let test = TestDb::fresh().await;
+        let mut conn = test.pool.acquire().await.unwrap();
+        let w = world(&mut conn).await;
+        let at = clock::start();
+        insert_member(&mut conn, w.root, w.bo, w.department)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        give_role(
+            &mut conn,
+            w.department,
+            "user",
+            w.bo,
+            "developer",
+            w.ada,
+            Some(at + Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        let outsider = new_id();
+        insert_user(&mut conn, outsider, "outsider").await.unwrap();
+        assert!(!can_develop(&mut conn, outsider, w.project, at).await);
+        assert!(!can_develop(&mut conn, w.bo, w.project, at + Duration::seconds(2)).await);
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+
+        suspend_in(&mut conn, w.department, w.bo, w.ada)
+            .await
+            .unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
+        lift_suspension(&mut conn, w.department, w.bo)
+            .await
+            .unwrap();
+        assert!(can_develop(&mut conn, w.bo, w.project, at).await);
+        suspend(&mut conn, w.bo).await.unwrap();
+        assert!(!can_develop(&mut conn, w.bo, w.project, at).await);
     }
 
     #[tokio::test]

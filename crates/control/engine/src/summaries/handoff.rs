@@ -549,8 +549,17 @@ pub(crate) async fn handoff_budget(
     let mut conn = engine.db().acquire().await?;
     match orch_summarizer_model::descriptor::Config::read(&chosen.config) {
         Ok(config) if chosen.kind == "model" => {
-            super::budget::input_budget(&mut conn, thread, config.provider_id, &config.model_name)
-                .await
+            let offering = config.offering().map_err(EngineError::unreadable)?;
+            let reasons = super::budget::reasons(&mut conn, &config).await?;
+            let output = config.output_reserve(SummaryField::Handoff, reasons);
+            super::budget::input_budget(
+                &mut conn,
+                thread,
+                offering.provider,
+                &offering.offering,
+                output,
+            )
+            .await
         }
         _ => Ok(super::budget::budget_of(None, super::budget::DEFAULT_SHARE)),
     }
@@ -589,7 +598,7 @@ pub(crate) async fn handoff_transcript(
     drop(conn);
     // The material is the newest turns in brief and a line for each older turn, within the share: never the whole.
     let bounded = bounded_input(previous, recent.as_ref(), &budget);
-    handoff_captured(engine, thread, &bounded.text, request_id, &frozen).await
+    handoff_captured(engine, thread, &bounded.text, request_id, &frozen, None).await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -614,12 +623,57 @@ pub(crate) async fn capture_handoff_choice(
     })?)
 }
 
+/// The native cut owning this receipt; callers have already checked its source governors.
+pub(crate) struct HandoffObservation {
+    input_call: Id,
+    attempt: Option<Id>,
+    pub result: orch_api_contract::summary_facts::HandoffResult,
+}
+
+pub(crate) struct HandoffCapture<'a> {
+    pub cut: Id,
+    pub input: &'a crate::fork_history::cut::HandoffInput,
+    pub receipt: &'a mut Option<HandoffObservation>,
+}
+
+impl HandoffCapture<'_> {
+    async fn input(
+        &self,
+        engine: &Engine,
+        call: Id,
+        material: &str,
+    ) -> Result<orch_api_contract::summary_facts::HandoffInputCoverage, EngineError> {
+        let key = format!("handoff_input:{call}");
+        let proposed = self.input.coverage_for(material);
+        let mut conn = engine.db().acquire().await?;
+        // The request digest identifies the exact paid prompt. Recovery keeps its first observation,
+        // even if the same frozen words are read again after a default or the wall clock changes.
+        thread_history_cuts::keep_artifact(
+            &mut conn,
+            self.cut,
+            &key,
+            &serde_json::to_value(&proposed)?,
+            &[],
+        )
+        .await?;
+        let cut = thread_history_cuts::cut(&mut conn, self.cut)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("the retained handoff source disappeared"))?;
+        Ok(serde_json::from_value(
+            cut.artifacts.get(&key).cloned().ok_or_else(|| {
+                EngineError::unreadable("the handoff input observation is absent")
+            })?,
+        )?)
+    }
+}
+
 pub(crate) async fn handoff_captured(
     engine: &Engine,
     thread: Id,
     previous: &str,
     request_id: Id,
     frozen: &Json,
+    mut capture: Option<HandoffCapture<'_>>,
 ) -> Result<String, EngineError> {
     let HandoffChoice { chosen, name } = serde_json::from_value(frozen.clone())?;
     let budget = handoff_budget(engine, thread, frozen).await?;
@@ -671,9 +725,53 @@ pub(crate) async fn handoff_captured(
         .ok_or_else(|| {
             EngineError::unreadable("the chosen producer cannot write a handoff summary")
         })?;
-    let result = producer.summarize(request).await;
+    if let Some(capture) = capture.as_mut() {
+        let coverage = capture.input(engine, call, &request.previous).await?;
+        if capture
+            .receipt
+            .as_ref()
+            .is_none_or(|before| before.input_call != call)
+        {
+            *capture.receipt = Some(HandoffObservation {
+                input_call: call,
+                attempt: None,
+                result: orch_api_contract::summary_facts::HandoffResult {
+                    input_coverage: Some(coverage),
+                    result_facts: None,
+                },
+            });
+        }
+    }
+    let result = producer
+        .summarize(request)
+        .await
+        .map(|answer| answer.conform(SummaryField::Handoff, &limits, &[]));
+    if let Some(capture) = capture.as_mut() {
+        let facts = super::facts::produced(
+            &mut *engine.db().acquire().await?,
+            &chosen,
+            &producer.describe(),
+            call,
+            thread,
+            result.as_ref().ok(),
+            orch_types::Time::new(engine.inner.clock.now()),
+        )
+        .await?;
+        if let Some(facts) = facts
+            && let Some(observed) = capture.receipt.as_mut()
+        {
+            // An unpaid continuation is not another answer and cannot erase a captured transformation.
+            if result.is_ok()
+                || facts.attempt != observed.attempt
+                || observed.result.result_facts.is_none()
+            {
+                observed.attempt = facts.attempt;
+                observed.result.result_facts = facts.result;
+            }
+        }
+    }
     let answer = match result {
-        Ok(answer) => answer.conform(SummaryField::Handoff, &limits, &[]),
+        Ok(answer) => answer,
         Err(error) => {
             if chosen.kind == "model" {
                 engine

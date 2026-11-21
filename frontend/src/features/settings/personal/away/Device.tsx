@@ -1,11 +1,15 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { Pagination } from '@/ui/Pagination';
 /** Current-device readiness, explicit registration/test/removal, and separately named other devices. */
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink, FlaskConical, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { metaQuery } from '@/api/auth';
-import { devicesKey, devicesQuery, outsideKey, removeDevice, routesKey, testDevice } from '@/api/away';
+import { devicesKey, devicesPageQuery, devicesQuery, outsideKey, removeDevice, routesKey, testDevice } from '@/api/away';
 import { notificationChannelsKey } from '@/api/notifications';
 import { currentSubscription, enablePush } from '@/features/settings/personal/push';
 import { Button } from '@/ui/Button';
@@ -26,7 +30,10 @@ export function DeviceReadiness({ channelId }: { channelId: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const devices = useQuery(devicesQuery);
-  const here = useQuery({ queryKey: hereKey, queryFn: inspectDevice, retry: false, staleTime: 0 });
+  const search = useCollectionSearch('push-devices');
+  const others = useInfiniteQuery(devicesPageQuery(search.q));
+  const rows = others.data?.pages.flatMap((page) => page.items) ?? [];
+  const here = useQuery({ queryKey: hereKey, queryFn: inspectDevice, retry: false });
   const key = useQuery(metaQuery).data?.push_public_key;
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -67,7 +74,12 @@ export function DeviceReadiness({ channelId }: { channelId: string }) {
       {result !== null && <InlineAlert tone={result.ok ? 'success' : 'danger'}>{result.ok ? t('away.outcome.accepted') : t('away.outcome.testFailed', { reason: result.error ?? '' })}</InlineAlert>}
       {error !== null && <ErrorAlert error={error} message={errorAct === 'test' ? t('away.outcome.notConfirmed') : undefined} />}
       {(here.error !== null || devices.error !== null) && <ErrorAlert error={here.error ?? devices.error} />}
-      {(devices.data ?? []).filter((device) => device.id !== own?.id).length > 0 && <div className="flex flex-col gap-1 border-t border-border pt-2"><h4 className="text-xs font-medium text-text-muted">{t('away.device.other')}</h4><ul className="flex flex-col gap-2">{(devices.data ?? []).filter((device) => device.id !== own?.id).map((device) => <li key={device.id} className="flex flex-wrap items-center justify-between gap-2 text-sm text-text"><span className="min-w-0 wrap-anywhere">{device.label}</span><Button size="sm" variant="ghost" icon={<Trash2 aria-hidden />} pending={busy === device.id} onClick={() => void run(device.id, () => removeDevice(device.id))}>{t('away.outcome.remove')}</Button></li>)}</ul></div>}
+      <div className="flex flex-col gap-2 border-t border-border pt-2"><h4 className="text-xs font-medium text-text-muted">{t('away.device.other')}</h4>
+        <CollectionSearch name={t('away.device.other')} {...search} />
+        <ScrollRegion kind="table" label={t('away.device.other')} className="max-h-64 overflow-y-auto"><ul className="flex flex-col gap-2">{rows.filter((device) => device.id !== own?.id).map((device) => <li key={device.id} className="flex flex-wrap items-center justify-between gap-2 text-sm text-text"><span className="min-w-0 wrap-anywhere">{device.label}</span><Button size="sm" variant="ghost" icon={<Trash2 aria-hidden />} pending={busy === device.id} onClick={() => void run(device.id, () => removeDevice(device.id))}>{t('away.outcome.remove')}</Button></li>)}</ul></ScrollRegion>
+        {others.isError && !others.isFetchNextPageError && <ErrorAlert error={others.error} action={<Button size="sm" onClick={() => void others.refetch()}>{t('away.retry')}</Button>} />}
+        <Pagination hasMore={others.hasNextPage} loading={others.isFetchingNextPage} error={others.isFetchNextPageError ? others.error : null} onMore={() => void others.fetchNextPage()} />
+      </div>
       <p className="text-xs text-text-muted">{t('away.device.proof')}</p>
     </section>
   );
