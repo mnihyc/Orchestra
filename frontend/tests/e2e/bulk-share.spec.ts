@@ -81,7 +81,7 @@ test('a lost share answer is read explicitly and the one Undo never treats that 
   const lost = dialog(page).getByRole('list',{name:'What this applies to'}).getByRole('listitem').filter({has:page.getByText('Upgrade deps',{exact:true})});
   await lost.getByRole('button',{name:'Read current state',exact:true}).click();
   await expect(lost).toContainText('This read is not a confirmation of the lost write.');
-  await dialog(page).getByRole('button',{name:'Undo successful rows',exact:true}).click();
+  await dialog(page).getByRole('button',{name:'Undo what succeeded',exact:true}).click();
   await expect(dialog(page).getByRole('heading',{name:'Undo results',exact:true})).toBeVisible();
   expect(written).toEqual([ACME.fixLogin,ACME.upgradeDeps,ACME.fixLogin]);
 });

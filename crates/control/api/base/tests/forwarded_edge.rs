@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "forwarded_edge/connections.rs"]
+mod connections;
 mod support;
 
 use orch_api_core::registry::Registry;
@@ -126,6 +128,12 @@ async fn edge(world: &World) -> Edge {
     // The shipped entrypoint creates these empty includes when HTTPS is off.
     std::fs::write(directory.join("frontend-https.conf"), "").unwrap();
     std::fs::write(directory.join("ports-https.conf"), "").unwrap();
+    // ... and the room for a human check's service, empty where none is chosen.
+    std::fs::write(
+        directory.join("frontend-csp.conf"),
+        "set $csp_script \"\";\nset $csp_style \"\";\nset $csp_connect \"\";\nset $csp_frame \"\";\n",
+    )
+    .unwrap();
     let authority =
         CertificateAuthority::create("Forwarded edge test", 3650, &world.app.clock).unwrap();
     let (key, certificate) = authority
@@ -175,11 +183,20 @@ async fn edge(world: &World) -> Edge {
         )
         .replace("https://api:8443", &format!("https://127.0.0.1:{api_port}"))
         .replace(
+            "server api:8443 resolve;",
+            &format!("server 127.0.0.1:{api_port};"),
+        )
+        .replace(
+            "server gateway:9444 resolve;",
+            &format!("server 127.0.0.1:{api_port};"),
+        )
+        .replace(
             "https://gateway:9444",
             &format!("https://127.0.0.1:{api_port}"),
         )
         .replace("/tmp/frontend-https.conf", "/fixture/frontend-https.conf")
-        .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf");
+        .replace("/tmp/ports-https.conf", "/fixture/ports-https.conf")
+        .replace("/tmp/frontend-csp*.conf", "/fixture/frontend-csp.conf");
     std::fs::write(directory.join("nginx.conf"), nginx).unwrap();
     drop(front);
     drop(body);

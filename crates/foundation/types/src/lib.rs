@@ -14,10 +14,11 @@ pub mod measurements;
 pub mod media;
 pub mod revision;
 pub mod schema;
+pub mod storable;
 pub mod time;
 
 pub use fields::{Choice, Field, FieldType};
-pub use hash::Hash;
+pub use hash::{Hash, derive_key};
 pub use id::{Id, new_id};
 pub use revision::{Revision, Seq};
 pub use time::{Clock, ManualClock, SystemClock, Time};
