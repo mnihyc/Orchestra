@@ -9,6 +9,7 @@
  * beneath. A span in which nothing was used says so and draws no chart. Credits are an estimate and
  * Orch bills nobody, which the screen says once at its foot.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { ChartColumn, X } from 'lucide-react';
@@ -160,6 +161,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
     if(patch.range!==undefined || patch.from!==undefined || patch.to!==undefined) setOpenedAt(Date.now());
     if(onSearch===undefined) setOwn((before)=>patchSearch(before,patch));else onSearch(patch);
   }, [onSearch,keepChoices,setOwn]);
+  carryDeviceChoice(change, keepChoices);
 
   // The dated report is a snapshot. A midnight clock tick must not start another API read.
   const day = today(openedAt);
@@ -247,11 +249,11 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
   const labelRecords=useInfiniteQuery({...eventsQuery(recordParams),enabled:false});
   const records=labelRecords.data?.pages.flatMap((page)=>page.items) ?? [];
   const accessAndHelp = <>{scope.kind === 'node' && <UsageVisibility nodeId={scope.id} />}<ArticleGuideLink article="speed-first-output-and-errors" title={t('usagePerf.help')} /></>;
-  const selectView = (next: 'usage' | 'performance' | 'requests') => change({view:next,show:undefined});
+  const selectView = carryDeviceChoice((next: 'usage' | 'performance' | 'requests') => change({view:next,show:undefined}), change, 'view');
   const period = <Period span={span} onSearch={change} now={now} />;
   const exportAction = <Export scope={scope} span={span} figures={params} records={recordParams} />;
   const chooseScope = (next: string) => change({ scope: next, by: undefined, more: undefined, ...Object.fromEntries(activeFilters(search).map(({ name }) => [name, undefined])) });
-  const planSection=scope.kind==='provider' && providerData!==undefined ? <Plan key={JSON.stringify([providerData.id,providerData.facts_at,span.from,span.to,search.plan_bucket])} provider={providerData} span={span} mode={search.plan ?? 'current'} metric={providerMetric} onMetric={(plan_metric)=>change({plan_metric})} bucket={search.plan_bucket} onMode={(plan)=>change({plan})} onBucket={(plan_bucket)=>change({plan_bucket})} /> : null;
+  const planSection=scope.kind==='provider' && providerData!==undefined ? <Plan key={JSON.stringify([providerData.id,providerData.facts_at,span.from,span.to,search.plan_bucket])} provider={providerData} span={span} mode={search.plan ?? 'current'} metric={providerMetric} onMetric={carryDeviceChoice((plan_metric: 'subscription' | 'credits')=>change({plan_metric}), change, 'plan_metric')} bucket={search.plan_bucket} onMode={carryDeviceChoice((plan: 'current' | 'history')=>change({plan}), change, 'plan')} onBucket={carryDeviceChoice((plan_bucket: NonNullable<UsageSearch['plan_bucket']>)=>change({plan_bucket}), change, 'plan_bucket')} /> : null;
 
   const body = (
     <div className="flex min-w-0 flex-col gap-4">
@@ -285,13 +287,13 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
 
       {view === 'requests' ? <Requests key={`${scopeText(scope)}:${search.org ?? ''}`} scope={scope} search={search} span={span} onSearch={change} orgChoices={analytics?.breakdowns.filter((table) => table.by === 'org').flatMap((table) => table.rows.flatMap((row) => row.key.org === null || row.key.org === undefined ? [] : [row.key.org])) ?? []} />
         : view === 'performance' ? figures.isPending ? <Skeletons read={figures} /> : figures.isError && analytics === undefined ? <ErrorState error={figures.error} onRetry={() => void figures.refetch()} /> : analytics === undefined || bars === null ? null : <PerformanceView
-          measure={performanceMeasure} onMeasure={(show) => change({ show })}
+          measure={performanceMeasure} onMeasure={carryDeviceChoice((show: Measure) => change({ show }), change, 'show')}
           figures={<PerformanceFigures current={analytics.totals.performance} previous={before === null ? undefined : analytics.performance_before} before={before === null ? '' : t('usage.figures.before', { count: span.days })} />}
-          controls={<><ChoiceLocator size="sm" label={t('usage.chart.splitBy')} value={split} onValueChange={(series) => change({ series })} options={[...(measure==='tokens' ? [{value:'token_kind' as const,name:t('usagePerf.choices.splits.token_kind.name'),description:t('usagePerf.choices.splits.token_kind.description')}] : []),...tabs.map((one) => ({ value: one, name: t(`usagePerf.choices.splits.${one}.name`), description: t(`usagePerf.choices.splits.${one}.description`) })), { value: 'none', name: t('usagePerf.choices.splits.none.name'), description: t('usagePerf.choices.splits.none.description') }]} /><Select size="sm" label={t('usage.chart.per')} value={chartBucket} onValueChange={(bucket) => change({bucket})} options={[{ value: 'auto' as const, name: t('usagePerf.choices.buckets.auto.name'), description: t('usagePerf.choices.buckets.auto.description') }, ...bucketsFor(span.days).map((one) => ({ value: one, name: t(`usagePerf.choices.buckets.${one}.name`), description: t(`usagePerf.choices.buckets.${one}.description`) }))]} /></>}
+          controls={<><ChoiceLocator size="sm" label={t('usage.chart.splitBy')} value={split} onValueChange={carryDeviceChoice((series: Split) => change({ series }), change, 'series')} options={[...(measure==='tokens' ? [{value:'token_kind' as const,name:t('usagePerf.choices.splits.token_kind.name'),description:t('usagePerf.choices.splits.token_kind.description')}] : []),...tabs.map((one) => ({ value: one, name: t(`usagePerf.choices.splits.${one}.name`), description: t(`usagePerf.choices.splits.${one}.description`) })), { value: 'none', name: t('usagePerf.choices.splits.none.name'), description: t('usagePerf.choices.splits.none.description') }]} /><Select size="sm" label={t('usage.chart.per')} value={chartBucket} onValueChange={carryDeviceChoice((bucket: NonNullable<UsageSearch['bucket']>) => change({bucket}), change, 'bucket')} options={[{ value: 'auto' as const, name: t('usagePerf.choices.buckets.auto.name'), description: t('usagePerf.choices.buckets.auto.description') }, ...bucketsFor(span.days).map((one) => ({ value: one, name: t(`usagePerf.choices.buckets.${one}.name`), description: t(`usagePerf.choices.buckets.${one}.description`) }))]} /></>}
           chart={<UsageChart onColors={setColors} label={t('usagePerf.chart')} bars={bars} measure={measure} onSelect={select} empty={<span>{t('usagePerf.notMeasured')}</span>} stale={stale} />}
           errors={<PerformanceErrors performance={analytics.totals.performance} onOutcome={(outcome) => change({ view: 'requests', outcome: readOutcome(outcome) })} />}
           comparison={<PerformanceComparison rows={analytics.comparison ?? []} modelNames={new Map(analytics.breakdowns.filter((table)=>table.by==='model').flatMap((table)=>table.rows.flatMap((row)=>row.key.model===undefined || row.key.model===null || row.key.model_display===undefined || row.key.model_display===null ? [] : [[row.key.model,row.key.model_display] as const])))} onFilter={change} />}
-          breakdowns={<Breakdowns colors={colors} seriesBy={split} performance tabs={tabs} tab={tab} onTab={(by) => change({ by })} tableOf={tableOf} search={search} onFilter={(name, value) => change({ [name]: search[name] === value ? undefined : value })} showingMore={search.more === true} onMore={() => change({ more: true })} />}
+          breakdowns={<Breakdowns colors={colors} seriesBy={split} performance tabs={tabs} tab={tab} onTab={carryDeviceChoice((by: UsageDimension) => change({ by }), change, 'by')} tableOf={tableOf} search={search} onFilter={(name, value) => change({ [name]: search[name] === value ? undefined : value })} showingMore={search.more === true} onMore={() => change({ more: true })} />}
         />
         : figures.isPending ? (
         <Skeletons read={figures} plan={planSection} />
@@ -308,9 +310,9 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
           <TokenLine tokens={analytics.totals.tokens} />
           {planSection}
           <Section id="usage-over-time" title={t('usage.sections.overTime')} className={`${boxClasses} min-w-0 p-4`} action={<>
-            <Select size="sm" label={t('usage.chart.show')} value={measure} onValueChange={(show)=>change({show})} options={MEASURES.filter((one)=>one==='turns' || one==='requests' || one==='tokens' || one==='credits').map((value)=>({value,name:t(`usagePerf.choices.measures.${value}.name`),description:t(`usagePerf.choices.measures.${value}.description`)}))} />
-            <ChoiceLocator size="sm" label={t('usage.chart.splitBy')} value={split} onValueChange={(series)=>change({series})} options={[...(measure==='tokens' ? [{value:'token_kind' as const,name:t('usagePerf.choices.splits.token_kind.name'),description:t('usagePerf.choices.splits.token_kind.description')}] : []),...tabs.map((value)=>({value,name:t(`usagePerf.choices.splits.${value}.name`),description:t(`usagePerf.choices.splits.${value}.description`)})),{value:'none',name:t('usagePerf.choices.splits.none.name'),description:t('usagePerf.choices.splits.none.description')}]} />
-            <Select size="sm" label={t('usage.chart.per')} value={chartBucket} onValueChange={(bucket)=>change({bucket})} options={[{value:'auto' as const,name:t('usagePerf.choices.buckets.auto.name'),description:t('usagePerf.choices.buckets.auto.description')},...bucketsFor(span.days).map((value)=>({value,name:t(`usagePerf.choices.buckets.${value}.name`),description:t(`usagePerf.choices.buckets.${value}.description`)}))]} />
+            <Select size="sm" label={t('usage.chart.show')} value={measure} onValueChange={carryDeviceChoice((show: Measure)=>change({show}), change, 'show')} options={MEASURES.filter((one)=>one==='turns' || one==='requests' || one==='tokens' || one==='credits').map((value)=>({value,name:t(`usagePerf.choices.measures.${value}.name`),description:t(`usagePerf.choices.measures.${value}.description`)}))} />
+            <ChoiceLocator size="sm" label={t('usage.chart.splitBy')} value={split} onValueChange={carryDeviceChoice((series: Split)=>change({series}), change, 'series')} options={[...(measure==='tokens' ? [{value:'token_kind' as const,name:t('usagePerf.choices.splits.token_kind.name'),description:t('usagePerf.choices.splits.token_kind.description')}] : []),...tabs.map((value)=>({value,name:t(`usagePerf.choices.splits.${value}.name`),description:t(`usagePerf.choices.splits.${value}.description`)})),{value:'none',name:t('usagePerf.choices.splits.none.name'),description:t('usagePerf.choices.splits.none.description')}]} />
+            <Select size="sm" label={t('usage.chart.per')} value={chartBucket} onValueChange={carryDeviceChoice((bucket: NonNullable<UsageSearch['bucket']>)=>change({bucket}), change, 'bucket')} options={[{value:'auto' as const,name:t('usagePerf.choices.buckets.auto.name'),description:t('usagePerf.choices.buckets.auto.description')},...bucketsFor(span.days).map((value)=>({value,name:t(`usagePerf.choices.buckets.${value}.name`),description:t(`usagePerf.choices.buckets.${value}.description`)}))]} />
           </>}>
             <UsageChart onColors={setColors} label={t('usage.chart.label')} bars={bars} measure={measure} onSelect={select} empty={<span>{chartEmptyText(analytics.totals,measure,t)}</span>} stale={stale} />
           </Section>
@@ -318,7 +320,7 @@ export function Report({ scope: givenScope, search: given, onSearch, embedded = 
               <Breakdowns colors={colors} seriesBy={split}
                 tabs={tabs}
                 tab={tab}
-                onTab={(next) => change({ by: next })}
+                onTab={carryDeviceChoice((next: UsageDimension) => change({ by: next }), change, 'by')}
                 tableOf={tableOf}
                 search={search}
                 onFilter={(name, value) => change({ [name]: search[name] === value ? undefined : value })}

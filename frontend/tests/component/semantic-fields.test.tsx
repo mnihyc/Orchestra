@@ -1,5 +1,6 @@
 /** Semantic search fields have short localized labels and keep the provider before the model and dimensions. */
 import { screen } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
 
@@ -13,11 +14,37 @@ import { formatNumber } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
 import { useAppearance } from '@/lib/appearance';
 import { SettingSummary } from '@/features/settings/SettingSummary';
+import { providerModelsQuery } from '@/api/resources';
+import type { ProviderModel } from '@/generated/api-types';
+import { MODEL_ESTIMATE } from '../doubles/fixtures';
 
 vi.mock('@/features/settings/ProviderChoice', () => ({
   ProviderDefaultChoice: ({ label }: ValueControlProps) => <select aria-label={label}><option /></select>,
   ProviderDefaultName: () => null,
 }));
+
+it.each(['en', 'zh-CN'] as const)('offers the vector model of a mixed local catalogue only in its embeddings choice in %s', async (locale) => {
+  const previous = currentLocale();
+  await setLocale(locale);
+  const def = SETTINGS_REGISTRY.find((entry) => entry.key === 'search.semantic.embeddings');
+  if (def === undefined) throw new Error('Embeddings are registered');
+  const provider = '01990000-0000-7000-8000-000000000001';
+  const models: ProviderModel[] = (['generation', 'embedding'] as const).map((purpose, at) => ({
+    ...MODEL_ESTIMATE, id: String(at), model_name: `local-${purpose}`, display_name: `Local ${purpose}`,
+    groups: [], enabled: true, source: 'manual', parameters: { ...{ purposes: [purpose] }, efforts: [] },
+  }));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryDefaults(providerModelsQuery(provider).queryKey, { staleTime: Infinity });
+  cache.setQueryData(providerModelsQuery(provider).queryKey, models);
+  const user = userEvent.setup();
+  const view = show(<EmbeddingsChoice shape={shapeOf(def.schema)} value={{ provider_id: provider, model_name: '', dimensions: 256 }}
+    label={i18n.t('settingRegistry.search.semantic.embeddings.title')} onChange={vi.fn()} />, cache);
+  try {
+    await user.click(screen.getByRole('combobox', { name: i18n.t('admin.semantic.fields.model') }));
+    expect(await screen.findByRole('option', { name: 'Local embedding' })).toBeVisible();
+    expect(screen.queryByRole('option', { name: 'Local generation' })).toBeNull();
+  } finally { view.unmount(); cache.clear(); await setLocale(previous); }
+});
 
 it.each(['en', 'zh-CN'] as const)('names the embeddings and tuning controls in %s without exposing schema member names', async (locale) => {
   const previous = currentLocale();
@@ -29,7 +56,8 @@ it.each(['en', 'zh-CN'] as const)('names the embeddings and tuning controls in %
     value={{ provider_id: '01990000-0000-7000-8000-000000000001', model_name: 'example-model', dimensions: 256, query_prefix: 'query: ', document_prefix: 'text: ' }} />);
   try {
     const provider = screen.getByRole('combobox', { name: i18n.t('admin.semantic.provider') });
-    const model = screen.getByRole('textbox', { name: i18n.t('admin.semantic.fields.model') });
+    // The model is chosen from the provider's models by name, so it is a choice, never a box to type an identifier in.
+    const model = screen.getByRole('combobox', { name: i18n.t('admin.semantic.fields.model') });
     const dimensions = screen.getByRole('spinbutton', { name: i18n.t('admin.semantic.fields.dimensions') });
     expect(provider.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(model.compareDocumentPosition(dimensions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

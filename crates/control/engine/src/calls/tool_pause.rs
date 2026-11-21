@@ -118,6 +118,9 @@ pub(super) async fn selected(
     node: Id,
     now: DateTime<Utc>,
 ) -> Result<Option<Recovery>, EngineError> {
+    if orch_db::queries::threads::no_call_recovery(conn, node) {
+        return Ok(None);
+    }
     if let Some(agent) = read(conn, node, Purpose::Agent)
         .await?
         .filter(|row| !matches!(row.state.as_str(), "completed" | "dismissed"))

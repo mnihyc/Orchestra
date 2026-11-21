@@ -27,13 +27,12 @@ use serde_json::json;
 async fn key(scene: &Scene, user: Id, rules: Vec<serde_json::Value>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = crate::middleware::authentication::new_token(
-        crate::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let issued_key_id = orch_types::new_id();
+    let token = crate::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut scene.rig.db.acquire().await.unwrap(),
         &NewApiToken {
-            id: orch_types::new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Reference card",
             token_hash: &crate::middleware::authentication::token_hash(&token),
