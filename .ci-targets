@@ -1,0 +1,11 @@
+test -p orch-api-core --lib
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-core --test admin_catalogue
+test -p orch-connector-core --test machine_program_policy_lifecycle
+test -p orch-api-core --test certificates -- bundled_node
+test -p orch-api-core --test installation_records -- only_system_administrators_can_see_and_retry_a_bundled_host_registration_failure
+test -p orch-node --test program -- a_fresh_bundled_node_enrolls_and_comes_online_after_a_database_registration_failure
+test -p orch-link-contract -p orch-api-contract --lib
+web typecheck
+web lint
+web test
