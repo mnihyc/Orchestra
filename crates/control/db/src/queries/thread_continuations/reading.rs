@@ -15,6 +15,19 @@ pub(crate) const OWNERS:&str="WITH owners AS (
     FROM thread_continuation_spans s JOIN thread_continuations c ON c.id=s.continuation_id
     WHERE c.thread_id=$1 AND c.id=$2)";
 
+/// Only the same connection's open snapshot can establish that the selected history has no prefix.
+/// Both explicit and active selections name the actual continuation that supplied the page.
+fn has_only_current_rows(conn: &Conn, thread: Id, view: Id) -> bool {
+    super::super::snapshot::with(conn, |rows| {
+        [Some(view), None].into_iter().any(|selection| {
+            rows.projections
+                .get(&(thread, selection))
+                .and_then(Option::as_ref)
+                .is_some_and(|row| row.viewed_continuation_id == view && !row.has_inherited_history)
+        })
+    }) == Some(true)
+}
+
 /// One indexed ownership batch for the selected histories of the requested threads.
 pub(crate) const SELECTED_OWNERS:&str="WITH owners AS (
     SELECT t.node_id AS thread_id,t.active_continuation_id AS owner,1 AS first_turn,
@@ -24,16 +37,19 @@ pub(crate) const SELECTED_OWNERS:&str="WITH owners AS (
       FROM threads t JOIN thread_continuation_spans s ON s.continuation_id=t.active_continuation_id
       WHERE t.node_id=ANY($1))";
 
-/// Structural identity and stream are immutable once referenced. Pin/quote metadata stays shared. The record is
-/// made once for each row: `(f(...)).*` would make it again for every column of an item, two dozen times a row.
-pub(crate) const DECODE: &str = "SELECT d.* FROM candidates c JOIN items i ON i.id=c.id
-    CROSS JOIN LATERAL jsonb_populate_record(NULL::items,
-    CASE WHEN c.frozen_at IS NULL OR i.seq_updated<=c.frozen_at THEN to_jsonb(i)
-      ELSE (SELECT r.body FROM thread_item_revisions r WHERE r.item_id=i.id
-        AND r.seq_updated<=c.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END
-    || jsonb_build_object('pinned_at',i.pinned_at,'pinned_by',i.pinned_by,'chat_refs',i.chat_refs,
-        'seq_updated',i.seq_updated,'updated_at',i.updated_at)) d
-    ORDER BY i.seq_created";
+/// Use the current item directly until its body changes past the freeze. A revised item keeps
+/// its historical body and the pin and quote metadata shared with the current item.
+pub(crate) const DECODE: &str = "SELECT visible.* FROM candidates c JOIN items i ON i.id=c.id
+    CROSS JOIN LATERAL (
+      SELECT i.* WHERE c.frozen_at IS NULL OR i.seq_updated<=c.frozen_at
+      UNION ALL
+      SELECT d.* FROM jsonb_populate_record(NULL::items,
+        (SELECT r.body FROM thread_item_revisions r WHERE r.item_id=i.id
+          AND r.seq_updated<=c.frozen_at ORDER BY r.seq_updated DESC LIMIT 1)
+        || jsonb_build_object('pinned_at',i.pinned_at,'pinned_by',i.pinned_by,'chat_refs',i.chat_refs,
+            'seq_updated',i.seq_updated,'updated_at',i.updated_at)) d
+      WHERE c.frozen_at IS NOT NULL AND i.seq_updated>c.frozen_at
+    ) visible ORDER BY i.seq_created";
 
 /// before/after use permanent sequence positions; sparse global order is not renumbered.
 ///
@@ -49,6 +65,25 @@ pub async fn items(
     stream: Option<&str>,
     limit: i64,
 ) -> Result<Vec<ItemRow>, DbError> {
+    if has_only_current_rows(conn, thread, view) {
+        let (order, comparison) = if forward { ("ASC", ">") } else { ("DESC", "<") };
+        let sql = format!(
+            "SELECT * FROM (
+            SELECT i.* FROM items i WHERE i.thread_id=$1 AND i.continuation_id=$2
+              AND i.seq_created>=0 AND ($3::bigint IS NULL OR i.seq_created {comparison} $3)
+              AND ($4::text IS NULL OR i.stream=$4)
+              AND (i.turn_id IS NULL OR (SELECT t.ordinal>=1 FROM turns t WHERE t.id=i.turn_id))
+            ORDER BY i.seq_created {order} LIMIT $5) page ORDER BY seq_created"
+        );
+        return Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(thread)
+            .bind(view)
+            .bind(boundary)
+            .bind(stream)
+            .bind(limit)
+            .fetch_all(conn)
+            .await?);
+    }
     items_with_bytes(
         conn,
         ItemPage {
@@ -384,13 +419,19 @@ pub async fn turns(
     before: Option<i32>,
     limit: i64,
 ) -> Result<Vec<TurnRow>, DbError> {
-    let sql = format!(
-        "{OWNERS}, chosen AS (SELECT p.id,p.ordinal FROM owners o JOIN LATERAL (
+    let sql = if has_only_current_rows(conn, thread, view) {
+        format!(
+            "SELECT * FROM ({TURN_SELECT} WHERE thread_id=$1 AND continuation_id=$2 AND ordinal>=1 AND ($3::int IS NULL OR ordinal<$3) ORDER BY ordinal DESC LIMIT $4) page ORDER BY ordinal"
+        )
+    } else {
+        format!(
+            "{OWNERS}, chosen AS (SELECT p.id,p.ordinal FROM owners o JOIN LATERAL (
       SELECT t.id,t.ordinal FROM turns t WHERE t.thread_id=$1 AND t.continuation_id=o.owner
         AND t.ordinal BETWEEN o.first_turn AND o.last_turn AND ($3::int IS NULL OR t.ordinal<$3)
       ORDER BY t.ordinal DESC LIMIT $4) p ON true ORDER BY p.ordinal DESC LIMIT $4)
       {TURN_SELECT} WHERE id IN(SELECT id FROM chosen) ORDER BY ordinal"
-    );
+        )
+    };
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -406,9 +447,18 @@ pub async fn turns_among(
     view: Id,
     ids: &[Id],
 ) -> Result<Vec<TurnRow>, DbError> {
-    let sql=format!("{OWNERS} {TURN_SELECT} WHERE thread_id=$1 AND id=ANY($3) AND EXISTS(
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = if has_only_current_rows(conn, thread, view) {
+        format!(
+            "{TURN_SELECT} WHERE thread_id=$1 AND continuation_id=$2 AND ordinal>=1 AND id=ANY($3) ORDER BY ordinal"
+        )
+    } else {
+        format!("{OWNERS} {TURN_SELECT} WHERE thread_id=$1 AND id=ANY($3) AND EXISTS(
       SELECT 1 FROM owners o WHERE o.owner=turns.continuation_id AND turns.ordinal BETWEEN o.first_turn AND o.last_turn)
-      ORDER BY ordinal");
+      ORDER BY ordinal")
+    };
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -443,11 +493,20 @@ pub async fn segments_among(
     view: Id,
     ids: &[Id],
 ) -> Result<Vec<HistorySegmentRow>, DbError> {
-    let sql=format!("{OWNERS} {SEGMENT_SELECT} WHERE thread_id=$1 AND id=ANY($3) AND EXISTS(
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = if has_only_current_rows(conn, thread, view) {
+        format!(
+            "{SEGMENT_SELECT} WHERE thread_id=$1 AND continuation_id=$2 AND id=ANY($3) ORDER BY ordinal"
+        )
+    } else {
+        format!("{OWNERS} {SEGMENT_SELECT} WHERE thread_id=$1 AND id=ANY($3) AND EXISTS(
       SELECT 1 FROM owners o WHERE o.owner=segments.continuation_id AND (o.frozen_at IS NULL
         OR EXISTS(SELECT 1 FROM turns t WHERE t.segment_id=segments.id AND t.ordinal BETWEEN o.first_turn AND o.last_turn)
         OR EXISTS(SELECT 1 FROM items i WHERE i.segment_id=segments.id AND i.turn_id IS NULL
-          AND i.seq_created BETWEEN o.first_seq AND o.last_seq))) ORDER BY ordinal");
+          AND i.seq_created BETWEEN o.first_seq AND o.last_seq))) ORDER BY ordinal")
+    };
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
@@ -463,14 +522,20 @@ pub async fn segments(
     before: Option<i32>,
     limit: i64,
 ) -> Result<Vec<HistorySegmentRow>, DbError> {
-    let sql=format!("{OWNERS},chosen AS(SELECT p.id,p.ordinal FROM owners o JOIN LATERAL (
+    let sql = if has_only_current_rows(conn, thread, view) {
+        format!(
+            "SELECT * FROM ({SEGMENT_SELECT} WHERE thread_id=$1 AND continuation_id=$2 AND ($3::int IS NULL OR ordinal<$3) ORDER BY ordinal DESC LIMIT $4) page ORDER BY ordinal"
+        )
+    } else {
+        format!("{OWNERS},chosen AS(SELECT p.id,p.ordinal FROM owners o JOIN LATERAL (
       SELECT s.id,s.ordinal FROM segments s WHERE s.thread_id=$1 AND s.continuation_id=o.owner
         AND ($3::int IS NULL OR s.ordinal<$3) AND (o.frozen_at IS NULL OR EXISTS(
           SELECT 1 FROM turns t WHERE t.segment_id=s.id AND t.ordinal BETWEEN o.first_turn AND o.last_turn)
           OR EXISTS(SELECT 1 FROM items i WHERE i.segment_id=s.id AND i.turn_id IS NULL
             AND i.seq_created BETWEEN o.first_seq AND o.last_seq))
       ORDER BY s.ordinal DESC LIMIT $4) p ON true ORDER BY p.ordinal DESC LIMIT $4)
-      {SEGMENT_SELECT} WHERE id IN(SELECT id FROM chosen) ORDER BY ordinal");
+      {SEGMENT_SELECT} WHERE id IN(SELECT id FROM chosen) ORDER BY ordinal")
+    };
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)

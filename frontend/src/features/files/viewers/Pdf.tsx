@@ -3,6 +3,7 @@
  * Only the chosen page has a canvas and text layer; pages and workers are
  * cleaned up on navigation/close. All PDF.js assets are hosted by Orch.
  */
+import { PreviewRefusal } from '../FileFacts';
 import { ChevronLeft, ChevronRight, Minus, Plus, Search } from 'lucide-react';
 import { getDocument, GlobalWorkerOptions, TextLayer, type PDFDocumentProxy, type PDFPageProxy, type RenderTask } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -214,7 +215,7 @@ export default function PdfViewer({ door, path, head }: ViewerProps) {
   const preview = useMediaPreview(door, path, head);
   const tooBig = head.stat.size > (preview.data?.viewer_bytes ?? MEDIA_MOST_BYTES);
   const read = useFileBytes(door, path, tooBig || preview.data === undefined ? undefined : head.brought);
-  if (tooBig) return <FileState state="too_large" />;
+  if (tooBig) return <PreviewRefusal allowance={preview.data?.viewer_allowance} />;
   if (preview.isError) return <FileState state={fileFailure(preview.error)} />;
   if (head.brought.state === 'unavailable') return <FileState state={head.brought.reason === 'not_found' ? 'gone' : 'unavailable'} />;
   if (read.error !== null) return <FileState state={fileFailure(read.error)} />;

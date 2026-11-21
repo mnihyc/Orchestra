@@ -584,6 +584,20 @@ pub async fn on_the_way_to(conn: &mut Conn, path: &[Id]) -> Result<Vec<CapRow>, 
         .await?)
 }
 
+/// Whether any enabled cap names this thread's place and provider. A positive
+/// answer still needs the turn's model, tier, charge attribution and subject rules.
+pub async fn may_cover_thread(conn: &mut Conn, thread: Id) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM threads t JOIN nodes n ON n.id=t.node_id
+           JOIN usage_caps c ON c.enabled AND (c.node_id IS NULL OR c.node_id=ANY(n.path))
+             AND (c.provider_id IS NULL OR c.provider_id=t.provider_id)
+           WHERE t.node_id=$1)",
+    )
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
 /// The service tier a question about the caps is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TierAsked<'a> {
@@ -800,6 +814,8 @@ fn push_holder_users(
 pub struct Running {
     /// The turn.
     pub turn_id: Id,
+    /// Logical running-turn reservation, shared by Ask and its owned model step.
+    pub reservation: Id,
     /// Its thread.
     pub thread_id: Id,
     /// The model it runs, by its routing name.
@@ -838,10 +854,10 @@ pub async fn running(
     at: DateTime<Utc>,
 ) -> Result<Vec<Running>, DbError> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT t.id AS turn_id, t.thread_id, t.model, s.provider_id,
+        "SELECT t.id AS turn_id, COALESCE(work.ask_turn,t.id) AS reservation,t.thread_id, t.model, s.provider_id,
                 COALESCE(work.purpose,CASE WHEN s.program='orch' THEN 'ask' ELSE 'turn' END) AS purpose,
                 s.program_protocol AS protocol,
-                i.author_id AS user_id, a.harness_kind,
+                CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE i.author_id END AS user_id, a.harness_kind,
                 t.params, a.descriptor -> 'parameters' AS declared,
                 CASE WHEN t.end_work IS NULL THEN t.usage ELSE t.end_work#>'{snapshot,usage}' END AS usage, t.limit_bypass,
                 COALESCE((SELECT sum(e.total_tokens) FROM usage_events e WHERE e.turn_id = t.id AND e.counted), 0)::bigint
@@ -862,7 +878,13 @@ pub async fn running(
     }
     query.push(")");
     push_running_scope(&mut query, cap);
-    push_subject(&mut query, cap, person, "i.author_id", at);
+    push_subject(
+        &mut query,
+        cap,
+        person,
+        "(CASE WHEN work.node_id IS NOT NULL THEN work.person_id ELSE i.author_id END)",
+        at,
+    );
     query.push(" ORDER BY t.created_at, t.id");
     Ok(query.build_query_as().fetch_all(conn).await?)
 }
@@ -1083,17 +1105,34 @@ pub async fn waiting(
     Ok(query.build_query_as().fetch_all(conn).await?)
 }
 
-/// The threads blocked for want of room in a cap, the one that has waited longest first: the order in which
-/// they are looked at again when room is made, so that a cap behaves as a queue.
-pub async fn blocked_for_room(conn: &mut Conn, limit: i64) -> Result<Vec<Id>, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
-          WHERE t.state = 'blocked' AND t.blocked_reason = 'quota_exceeded'
+/// The position of a waiting thread in the cap queue. Threads with no pending input come last.
+#[derive(Debug, sqlx::FromRow)]
+pub struct RoomWaiter {
+    /// The thread to reconsider.
+    pub thread: Id,
+    /// The oldest pending input as observed when this page was read.
+    pub oldest: Option<DateTime<Utc>>,
+}
+
+/// Reads the next page of cap waiters in admission order, even if the preceding rows have since started.
+pub async fn blocked_for_room_page(
+    conn: &mut Conn,
+    after: Option<&RoomWaiter>,
+    limit: i64,
+) -> Result<Vec<RoomWaiter>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT t.node_id AS thread, q.oldest
+           FROM threads t JOIN nodes n ON n.id=t.node_id
+           CROSS JOIN LATERAL (SELECT min(i.created_at) AS oldest FROM thread_inputs i
+                               WHERE i.thread_id=t.node_id AND i.state='pending') q
+          WHERE t.state='blocked' AND t.blocked_reason='quota_exceeded'
             AND n.deleted_at IS NULL AND n.archived_at IS NULL
-          ORDER BY (SELECT min(i.created_at) FROM thread_inputs i WHERE i.thread_id = t.node_id AND i.state = 'pending')
-                   NULLS LAST, t.node_id
-          LIMIT $1",
+            AND ($1::uuid IS NULL OR (COALESCE(q.oldest,'infinity'::timestamptz),t.node_id)
+                                     > (COALESCE($2::timestamptz,'infinity'::timestamptz),$1))
+          ORDER BY q.oldest NULLS LAST, t.node_id LIMIT $3",
     )
+    .bind(after.map(|waiter| waiter.thread))
+    .bind(after.and_then(|waiter| waiter.oldest))
     .bind(limit)
     .fetch_all(conn)
     .await?)

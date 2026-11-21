@@ -673,6 +673,64 @@ scoped_history_controls!(
 );
 
 #[tokio::test]
+async fn an_opening_with_a_substream_keeps_both_windows_in_creation_order() -> Proof {
+    let history = seed_history(1, 3).await?;
+    let last = history.anchors.last().ok_or("main item absent")?;
+    let child = new_id();
+    let mut tx = history.scene.rig.db.begin().await?;
+    let seq = orch_db::sequences::next(&mut tx, history.thread)
+        .await?
+        .ok_or("thread absent")?;
+    threads::insert_item(
+        &mut tx,
+        &NewItem {
+            id: child,
+            thread_id: history.thread,
+            segment_id: last.segment,
+            turn_id: Some(last.turn),
+            stream: "sub:helper",
+            parent_item_id: Some(last.item),
+            kind: "agent_message",
+            status: "completed",
+            author_id: None,
+            payload: &json!({"text":"reply","text_len":5}),
+            native_ref: None,
+            search_text: None,
+            at: history.scene.rig.world.now(),
+        },
+        seq,
+    )
+    .await?
+    .ok_or("substream item absent")?;
+    tx.commit().await?;
+    let opening = history
+        .scene
+        .rig
+        .world
+        .app
+        .call(ThreadOpeningGet, &[&history.thread])
+        .token(&history.scene.ada.token)
+        .query(&ThreadOpeningGetQuery {
+            limit: Some(2),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        opening
+            .sync
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        [history.anchors[1].item, last.item, child]
+    );
+    assert!(opening.sync.has_older);
+    Ok(())
+}
+
+#[tokio::test]
 async fn opening_is_a_window_and_old_item_pages_supply_their_own_historical_references() -> Proof {
     let history = seed().await?;
     let app = &history.scene.rig.world.app;
@@ -686,17 +744,27 @@ async fn opening_is_a_window_and_old_item_pages_supply_their_own_historical_refe
         .send()
         .await
         .ok();
-    assert_eq!(opening.sync.seq, opening.outline.seq);
+    assert!(serde_json::to_value(&opening)?.get("outline").is_none());
+    let outline = app
+        .call(ThreadOutlineGet, &[&history.thread])
+        .token(&history.scene.ada.token)
+        .query(&ThreadOutlineGetQuery {
+            limit: Some(5),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(outline.seq >= opening.sync.seq);
     assert!(opening.sync.items.len() <= 10); // Existing union: five overall plus five main.
     assert_eq!(
         opening.sync.turns.len(),
         usize::try_from(THREAD_SYNC_ENDED_TURNS)?
     );
     assert_eq!(opening.sync.segments.len(), opening.sync.turns.len());
-    assert!(opening.outline.next_before.is_some());
+    assert!(outline.next_before.is_some());
     assert!(
-        opening
-            .outline
+        outline
             .entries
             .iter()
             .map(|entry| entry.item_id)
