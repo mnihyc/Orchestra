@@ -9,7 +9,12 @@ set -Eeuo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-A="$(release_a)"; B="$(release_b)"
+# The earlier release holds the nginx.conf of v0.1.1, the later a newer generation of the deployment files (see the update scenario),
+# so that what a cut-off transaction does with files can be looked at.
+deploy_variant "$(release_a)" a --generation 1 --minimum 1 --strip-openapi
+A="$SMOKE_VARIANTS/a"
+deploy_variant "$(release_b)" b --generation 2 --minimum 2 --publish "$A"
+B="$SMOKE_VARIANTS/b"
 TAG_A="$(release_tag "$A")"; TAG_B="$(release_tag "$B")"
 new_stack recover 41212 "$A"
 trap 'finish' EXIT
@@ -25,14 +30,23 @@ step "release $TAG_A is running with an administrator"
 update_sh first-start --from "$A" > /dev/null || fail "first-start"
 setup_admin || fail "the first administrator was not made"
 wait_for 240 "the bundled node is online" node_online
+NGINX_A="$(sha256sum < "$STACK/nginx.conf")"
 
-step "cut off before any link moved: the update is undone"
+step "cut off as the files were to be written: nothing of them is changed, and the update is undone"
+check "the updater was stopped right after it wrote 'filing'" crash_at filing "$TAG_B" --from "$B" --yes
+if update_sh recover; then pass "recover finished"; else fail "recover finished"; fi
+expect "release $TAG_A is the one running" "${TAG_A#v}" "$(edge_version)"
+expect "nginx.conf is the earlier one" "$NGINX_A" "$(sha256sum < "$STACK/nginx.conf")"
+check "no transaction is left open" test ! -e "$STACK/runtime/update/journal"
+
+step "cut off before any link moved, with the files written: the update is undone, the files go back"
 check "the updater was stopped right after it wrote 'activating'" crash_at activating "$TAG_B" --from "$B" --yes
 refuses "another update is refused until this is dealt with" update_sh "$TAG_B" --from "$B" --yes
 check "status says that a transaction was cut off" says interrupted update_sh status
 if update_sh recover; then pass "recover finished"; else fail "recover finished"; fi
 expect "release $TAG_A is the one running" "${TAG_A#v}" "$(edge_version)"
 check "every service reports $TAG_A" ready "$TAG_A"
+expect "the files the update had written are the earlier ones again: nginx.conf" "$NGINX_A" "$(sha256sum < "$STACK/nginx.conf")"
 check "no previous release was recorded" test ! -e "$STACK/runtime/server/previous"
 check "no transaction is left open" test ! -e "$STACK/runtime/update/journal"
 check "the administrator signs in" sign_in
@@ -41,6 +55,7 @@ step "cut off with the new release started and not yet judged: the update is fin
 check "the updater was stopped right after it wrote 'verifying'" crash_at verifying "$TAG_B" --from "$B" --yes
 if update_sh recover; then pass "recover finished"; else fail "recover finished"; fi
 expect "release $TAG_B is the one running" "${TAG_B#v}" "$(edge_version)"
+check "the files of the release stay: its nginx.conf hands the key routes to the API" nginx_serves_keys
 check "every service reports $TAG_B" ready "$TAG_B"
 expect "the record names $TAG_B as installed and $TAG_A as the previous" "$TAG_B $TAG_A" \
   "$(sed -n 's/^current_tag=//p' "$STACK/runtime/update/state") $(sed -n 's/^previous_tag=//p' "$STACK/runtime/update/state")"

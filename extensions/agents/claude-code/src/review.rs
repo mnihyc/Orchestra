@@ -145,7 +145,7 @@ mod tests {
     use orch_agent_contract::events::SessionEvent;
 
     fn settings() -> SessionSettings {
-        serde_json::from_value(json!({"agent_id":orch_types::new_id(),"thread_id":orch_types::new_id(),"segment_id":orch_types::new_id(),"mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace","mounts":[],"model":"claude-opus-5","effort":null,"params":{},"approval_mode":"auto","available_models":["claude-opus-5"],"sandbox_mode":"workspace","instructions":"","memory":null,"arrangement":"together","orch_tools":[],"raw_events":false})).unwrap()
+        serde_json::from_value(json!({"agent_id":orch_types::new_id(),"thread_id":orch_types::new_id(),"segment_id":orch_types::new_id(),"mode":"new","native_session_ref":null,"upto_turn_ordinal":null,"workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace","mounts":[],"model":"claude-opus-5","effort":null,"params":{},"approval_mode":"auto","available_models":["claude-opus-5"],"sandbox_mode":"workspace","instructions":"","memory":null,"arrangement":"together","orch_tools":[],"output_capture_bytes":67108864, "web_action_wait_secs":120,"raw_events":false})).unwrap()
     }
 
     #[test]
@@ -208,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_is_not_declared_before_the_real_trial_and_ask_rules_are_still_cards() {
+    fn auto_declares_the_native_classifier_and_ask_rules_are_still_cards() {
         let descriptor = crate::descriptor::descriptor("2.1.296", false);
-        assert!(!descriptor.approval_modes.contains(&ApprovalMode::Auto));
+        assert!(descriptor.approval_modes.contains(&ApprovalMode::Auto));
         assert_eq!(
             crate::approvals::permission_mode(ApprovalMode::Auto),
             "auto"

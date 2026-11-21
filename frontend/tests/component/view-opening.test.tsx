@@ -9,7 +9,7 @@ import { beginOpening, openingId } from '@/lib/opening';
 
 interface Announcement { body: { kind: string; id: string; opening_id: string }; headers: Record<string, string> }
 const calls = vi.hoisted(() => ({ post: vi.fn<(path: string, options: Announcement) => Promise<unknown>>() }));
-vi.mock('@/api/client', () => ({ api: { POST: calls.post }, done: async (request: Promise<unknown>) => { await request; } }));
+vi.mock('@/api/client', async (loadOriginal) => ({ ...await loadOriginal<object>(), api: { POST: calls.post }, done: async (request: Promise<unknown>) => { await request; } }));
 
 const VIEW = 'kept-document-opening';
 function Slot({ route }: { route: string }) {
