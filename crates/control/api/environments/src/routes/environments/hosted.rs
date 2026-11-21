@@ -207,6 +207,7 @@ pub(crate) async fn create_with_prepared_initial(
 orch_api_base::__api_bind_25a1104266!();
 
 struct CreationInput {
+    identity: Option<Id>,
     body: NewEnvironment,
     config: serde_json::Value,
     name: Option<String>,
@@ -218,11 +219,12 @@ struct CreationInput {
 impl CreationInput {
     fn request<'a>(&'a self, principal: &Principal) -> Request<'a> {
         Request {
+            identity: self.identity,
             owner: principal.user(),
             name: self.name.as_deref(),
             home: self.home,
             template: self.body.template_id,
-            host: self.body.host_id,
+            host: self.body.host_id.clone(),
             config: &self.config,
         }
     }
@@ -235,6 +237,11 @@ async fn prepare_input(
     body: NewEnvironment,
     prepared: Option<orch_engine::initial_files::Plan>,
 ) -> ApiResult<CreationInput> {
+    if let Some(Some(target)) = &body.host_id {
+        target
+            .validate(orch_provider_contract::pools::Kind::Host)
+            .map_err(|reason| invalid("host_id", &reason))?;
+    }
     let mut config = body.config.clone().unwrap_or_else(|| json!({}));
     if let Some(sources) = &body.data_sources {
         let own = config
@@ -295,6 +302,7 @@ async fn prepare_input(
     }
     let _ = ctx;
     Ok(CreationInput {
+        identity: ctx.operation_request().map(|request| request.identity()),
         body,
         config,
         name,

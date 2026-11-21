@@ -200,3 +200,16 @@ describe('starting a side thread', () => {
     expect(calls.start).not.toHaveBeenCalled();
   });
 });
+
+it.each(['en', 'zh-CN'] as const)('opens an acting side explicitly when the program has no read-only mode in %s', async (locale) => {
+  await setLocale(locale);
+  const t = i18n.getFixedT(locale);
+  const thread = parent(null);
+  const dialog = open({ ...thread, sides: { ...thread.sides!, acting: true } });
+  const send = within(dialog).getByRole('button', { name: t('side.ask.send') });
+  expect(send).toBeDisabled();
+  await userEvent.click(within(dialog).getByRole('radio', { name: t('side.reading.acting') }));
+  calls.start.mockImplementation(() => new Promise(() => undefined));
+  await userEvent.click(send);
+  await waitFor(() => expect(calls.start).toHaveBeenCalledWith(THREAD, expect.objectContaining({ acting: true })));
+});

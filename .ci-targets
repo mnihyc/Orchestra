@@ -1,0 +1,7 @@
+fmt
+test -p orch-xtask --bin orch-xtask -- names::tests::the_tree_of_the_product_names_no_program_in_shared_code --exact
+test -p orch-engine --test volume_carry
+clippy
+web typecheck
+web lint
+web test -- tests/component/before-orch-history.test.tsx tests/component/change-preview.test.tsx tests/component/environment-restart.test.tsx tests/component/pending-schedule-opening.test.tsx tests/component/thread-first-minutes.test.tsx tests/unit/catalogue.test.ts tests/unit/help-content.test.ts tests/unit/mount-plans.test.ts tests/unit/release-guide.test.ts tests/unit/help-reference-coverage.test.ts tests/unit/catalogue-usage.test.ts tests/unit/thread-timeline.test.ts tests/component/admin-human-check.test.tsx
