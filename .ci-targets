@@ -1,0 +1,1 @@
+web-e2e --project=chromium --workers=1 --retries=0 tests/e2e/navigation-review.spec.ts --grep "whole compact row facts"
