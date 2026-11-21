@@ -60,6 +60,8 @@ pub mod stats;
 pub mod units;
 pub mod volume_moves;
 pub mod volumes;
+mod work_process;
+mod work_units;
 
 pub use archive::BlobSource;
 pub use config::DockerConfig;

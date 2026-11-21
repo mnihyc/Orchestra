@@ -134,6 +134,7 @@ impl Prepared {
         let issued = dispatcher
             .issue_stored_before(
                 StoredCommand {
+                    content_transit: false,
                     id: Some(command.id),
                     machine: command.machine,
                     kind: command.kind.as_str().into(),

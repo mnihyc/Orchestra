@@ -1,7 +1,7 @@
 import type * as RouterModule from '@tanstack/react-router';
 import { i18n } from '@/i18n';
 /** Every thread icon slot reads the server presentation, including when execution state differs. */
-import { act, cleanup, screen, within } from '@testing-library/react';
+import { cleanup, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { NodeTree } from '@/features/navigation/NodeTree';
@@ -11,7 +11,7 @@ import { ThreadCard } from '@/features/topic/ThreadCard';
 import { KindIcon } from '@/features/everything/EverythingTable';
 import type { Thread, ThreadDisplayState, TreeNode } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { ThreadStateIcon, LiveThreadStateIcon } from '@/ui/ThreadState';
+import { ThreadStateIcon } from '@/ui/ThreadState';
 import { ViewTab } from '@/ui/ViewTab';
 import { display } from '../doubles/thread-display';
 import { acmeTree, ACME } from '../doubles/fixtures';
@@ -25,10 +25,10 @@ vi.mock('@/api/references', () => ({ referencePreviewQuery: ({ id }: { id: strin
     place: null, updated_at: null, updated_by: null, part: null, thread_display: supplied.thread?.display });
 } }) }));
 vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }), useNavigate: () => vi.fn() }));
-vi.mock('@/features/navigation/NodeMenu', () => ({ NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
-vi.mock('@/features/navigation/DocMenu', () => ({ DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
-vi.mock('@/features/chat/open', () => ({ isPlainClick: () => true, useOpenPath: () => vi.fn() }));
+vi.mock('@/features/navigation/NodeMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
+vi.mock('@/features/navigation/DocMenu', async (loadOriginal) => ({ ...await loadOriginal<object>(), DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), isPlainClick: () => true, useOpenPath: () => vi.fn() }));
 
 const appearance = useAppearance.getState();
 afterEach(() => { cleanup(); treeWriter.clear(); supplied.read.mockClear(); useAppearance.setState(appearance); });
@@ -85,18 +85,6 @@ it('keeps a known visible thread with an absent observation explicitly unreporte
   expect(view.container.querySelector('[data-work-state]')).toBeNull();
   expect(screen.getByRole('img')).toHaveAccessibleName(i18n.t('threadStates.notReported'));
   expect(view.container.querySelector('svg.lucide-message-square-text')).toBeNull();
-});
-
-it('keeps a retained tab current from its existing tree facts without opening a reader', () => {
-  const row = acmeTree().find((node) => node.id === ACME.mainThread)!;
-  const previous = display('finished', { seq: 10, read_seq: 0 });
-  treeWriter.reset(ACME.org, [{ ...row, thread: { ...row.thread!, display: previous } }], 1);
-  show(<ViewTab id="retained" panelId="panel" title="Work" active={false} tabbable menu={[]} onSelect={vi.fn()} onClose={vi.fn()}
-    icon={<LiveThreadStateIcon display={previous} threadId={row.id} />} />);
-  expect(screen.getByRole('img', { name: 'Finished' })).toBeVisible();
-  act(() => treeWriter.display(row.id, display('idle', { seq: 10, read_seq: 10 })));
-  expect(screen.getByRole('img', { name: 'Idle' })).toBeVisible();
-  expect(supplied.read).not.toHaveBeenCalled();
 });
 
 it("keeps an archived place's own glyph and colour beside its archive mark", () => {

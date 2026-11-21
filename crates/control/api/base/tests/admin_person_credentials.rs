@@ -19,7 +19,7 @@ use orch_api_contract::{
     common::{ErrorCode, PageQuery},
 };
 use orch_api_core::{
-    middleware::authentication::{ACCESS_TOKEN_PREFIX, API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{ACCESS_TOKEN_PREFIX, new_api_token, new_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken, NewSession};
@@ -65,7 +65,7 @@ async fn key(world: &World, owner: Id, rules: Option<Vec<Json>>) -> (Id, String)
         serde_json::to_value(scope).unwrap()
     });
     let id = new_id();
-    let bearer = new_token(API_TOKEN_PREFIX);
+    let bearer = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {

@@ -2,7 +2,7 @@
 //!
 //! A host often has more than one kind of disk, so which disk a volume lands on is a choice and not an accident
 //! of where the driver keeps things. A **storage** is a named place on the host where volumes are made; the
-//! operator declares them in the node's configuration (`[[node.storage]]`, one of them the default), and the
+//! operator declares them in the canonical machine policy (`[[storages]]`, one of them the default), and the
 //! host reports each with its capacity, its free space and whether a private view can be made on it. A host
 //! that declares none has one, `default`, where its driver keeps its volumes anyway.
 //!
