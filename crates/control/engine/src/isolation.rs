@@ -256,6 +256,25 @@ pub fn isolation_of(
         })
         .unwrap_or_default();
     RuntimeIsolation {
+        assumptions: Some(orch_driver_contract::isolation::RuntimeAssumptions {
+            boundary_source: if class.is_some() {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::RuntimeDeclaration
+            } else if runtime.is_some() {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::UnknownRuntimeFallback
+            } else {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::DriverDeclaration
+            },
+            stop_persistence_source: if class.is_some() {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::RuntimeDeclaration
+            } else {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::NotReported
+            },
+            overhead_source: if class.is_some() {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::RuntimeDeclaration
+            } else {
+                orch_driver_contract::isolation::RuntimeAssumptionSource::UnknownRuntimeFallback
+            },
+        }),
         driver: driver.to_owned(),
         driver_title: driver_title.to_owned(),
         runtime: class
@@ -268,6 +287,66 @@ pub fn isolation_of(
         keeps_software_on_stop: class.map(|class| class.keeps_software_on_stop),
         limits,
         unavailable,
+    }
+}
+
+/// Sources from the raw report, preserving an omitted member instead of treating a typed default as a declaration.
+#[must_use]
+pub fn assumption_sources(
+    descriptor: &Json,
+    runtime: Option<&str>,
+) -> orch_driver_contract::isolation::RuntimeAssumptions {
+    use orch_driver_contract::isolation::{
+        EFFECTIVE_RUNTIME, RuntimeAssumptionSource as Source, RuntimeAssumptions, class_in,
+    };
+    let class = class_in(descriptor, runtime);
+    let raw = class.as_ref().and_then(|class| {
+        descriptor
+            .get("runtimes")
+            .and_then(Json::as_array)?
+            .iter()
+            .find(|raw| raw.get("name").and_then(Json::as_str) == Some(class.name.as_str()))
+    });
+    let requested = runtime
+        .or_else(|| descriptor.get(EFFECTIVE_RUNTIME).and_then(Json::as_str))
+        .or_else(|| descriptor.get("default_runtime").and_then(Json::as_str));
+    let boundary_source = if raw
+        .and_then(|raw| raw.get("boundary"))
+        .and_then(Json::as_str)
+        .and_then(Boundary::parse)
+        .is_some()
+    {
+        Source::RuntimeDeclaration
+    } else if class.is_some() || requested.is_some() {
+        Source::UnknownRuntimeFallback
+    } else if matches!(
+        descriptor.get("confinement").and_then(Json::as_str),
+        Some("isolated" | "none")
+    ) {
+        Source::DriverDeclaration
+    } else {
+        Source::UnknownRuntimeFallback
+    };
+    RuntimeAssumptions {
+        boundary_source,
+        stop_persistence_source: if raw
+            .and_then(|raw| raw.get("keeps_software_on_stop"))
+            .and_then(Json::as_bool)
+            .is_some()
+        {
+            Source::RuntimeDeclaration
+        } else {
+            Source::NotReported
+        },
+        overhead_source: if raw
+            .and_then(|raw| raw.get("memory_overhead_mb"))
+            .and_then(Json::as_i64)
+            .is_some()
+        {
+            Source::RuntimeDeclaration
+        } else {
+            Source::UnknownRuntimeFallback
+        },
     }
 }
 
@@ -289,7 +368,9 @@ pub fn isolation_from_descriptor(
         Some("isolated") => Boundary::SharedKernel,
         _ => Boundary::Unbounded,
     };
-    isolation_of(driver, title, class.as_ref(), None, fallback, subjects)
+    let mut isolation = isolation_of(driver, title, class.as_ref(), None, fallback, subjects);
+    isolation.assumptions = Some(assumption_sources(descriptor, None));
+    isolation
 }
 
 /// What a runtime's class says of one capability: its risk there (the definition's own where the class says nothing) and the
@@ -819,5 +900,67 @@ mod tests {
     fn mounts_are_a_subject_only_where_there_are_some() {
         assert_eq!(subjects(["ptrace", "ptrace"], true), ["mounts", "ptrace"]);
         assert_eq!(subjects(["ptrace"], false), ["ptrace"]);
+    }
+    #[test]
+    fn a_recorded_isolation_keeps_its_declared_sources_while_an_unknown_runtime_stays_a_fallback() {
+        let declaration = json!({"title":"Driver","confinement":"isolated","default_runtime":"vm","runtimes":[
+            {"name":"vm","title":"VM","boundary":"own_kernel","keeps_software_on_stop":true,"memory_overhead_mb":128}
+        ]});
+        let captured = isolation_from_descriptor("driver", &declaration, &[]);
+        let kept = serde_json::to_value(&captured).unwrap();
+        assert_eq!(
+            kept["assumptions"]["boundary_source"],
+            "runtime_declaration"
+        );
+        assert_eq!(
+            kept["assumptions"]["stop_persistence_source"],
+            "runtime_declaration"
+        );
+        let mut changed = declaration.clone();
+        changed["runtimes"][0]["boundary"] = json!("shared_kernel");
+        assert_eq!(
+            serde_json::from_value::<RuntimeIsolation>(kept.clone())
+                .unwrap()
+                .boundary,
+            Boundary::OwnKernel
+        );
+        assert_eq!(
+            isolation_from_descriptor("driver", &changed, &[]).boundary,
+            Boundary::SharedKernel
+        );
+        let mut unknown = declaration;
+        unknown["effective_runtime"] = json!("not-declared");
+        let fallback =
+            serde_json::to_value(isolation_from_descriptor("driver", &unknown, &[])).unwrap();
+        assert_eq!(
+            fallback["assumptions"]["boundary_source"],
+            "unknown_runtime_fallback"
+        );
+        assert_eq!(
+            fallback["assumptions"]["stop_persistence_source"],
+            "not_reported"
+        );
+        let partial = json!({"default_runtime":"vm","runtimes":[{"name":"vm","title":"VM"}]});
+        let partial = assumption_sources(&partial, None);
+        assert_eq!(
+            partial.boundary_source,
+            orch_driver_contract::isolation::RuntimeAssumptionSource::UnknownRuntimeFallback
+        );
+        assert_eq!(
+            partial.stop_persistence_source,
+            orch_driver_contract::isolation::RuntimeAssumptionSource::NotReported
+        );
+        assert_eq!(
+            partial.overhead_source,
+            orch_driver_contract::isolation::RuntimeAssumptionSource::UnknownRuntimeFallback
+        );
+        let mut old = kept;
+        old.as_object_mut().unwrap().remove("assumptions");
+        assert!(
+            serde_json::from_value::<RuntimeIsolation>(old)
+                .unwrap()
+                .assumptions
+                .is_none()
+        );
     }
 }

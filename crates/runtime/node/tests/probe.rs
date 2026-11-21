@@ -71,6 +71,7 @@ async fn what_the_host_uses_is_told_as_soon_as_the_node_runs() {
         "memory_used_mb",
         "disk_used_gb",
         "disk_free_gb",
+        "pids",
     ] {
         assert!(
             load.get(member).is_some_and(|value| value.is_number()),
@@ -78,6 +79,7 @@ async fn what_the_host_uses_is_told_as_soon_as_the_node_runs() {
         );
     }
     assert!(load["memory_used_mb"].as_i64().unwrap() > 0);
+    assert!(load["pids"].as_i64().unwrap() > 0);
     rig.stop().await;
 }
 

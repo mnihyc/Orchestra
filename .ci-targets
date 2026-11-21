@@ -1,0 +1,2 @@
+test -p orch-api-core --test personal -- person_lock:: --test-threads=1 --nocapture
+test -p orch-api-core --test accounts -- the_first_password_sign_in_after_setup_works_on_a_two_mib_stack --nocapture
