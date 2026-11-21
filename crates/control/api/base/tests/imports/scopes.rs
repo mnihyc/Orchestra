@@ -5,7 +5,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::imports::ImportFileList;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken};
@@ -68,7 +68,7 @@ async fn key(o: &Office, actor: &Who, rules: Vec<Value>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     let world = &o.s.rig.world;
     identity::create_api_token_scoped(
         &mut *world.conn().await,
@@ -161,7 +161,8 @@ async fn import_metadata_and_file_pages_keep_native_bodies_own_operations_and_li
     let first = page(files(&o, &reader.secret, import.id, &query).await);
     assert_eq!(first, native);
     assert_eq!(first.items, vec![import.files[0].clone()]);
-    assert_eq!(first.next_cursor.as_deref(), Some("1"));
+    // The cursor is the list's own opaque continuation; the next page is read with it.
+    assert!(first.next_cursor.is_some());
     let second = page(
         files(
             &o,
@@ -444,4 +445,21 @@ async fn import_file_publication_keeps_original_saved_names_and_live_key_after_a
             }
         );
     }
+}
+
+#[tokio::test]
+async fn import_source_name_search_finds_a_later_file_before_a_small_page() {
+    let (o, import) = scene().await;
+    let reply =
+        o.s.rig
+            .world
+            .app
+            .call(ImportFileList, &[&import.id])
+            .token(&o.s.ada.token)
+            .query(&json!({"q":"second-source","limit":1}))
+            .send_bytes()
+            .await;
+    let page = page(reply);
+    assert_eq!(page.items, vec!["second-source.md"]);
+    assert!(page.next_cursor.is_none());
 }
