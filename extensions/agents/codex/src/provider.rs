@@ -425,7 +425,7 @@ pub struct AuthSummary {
     pub account_id: Option<String>,
 }
 
-fn claims_of(token: &str) -> Option<Json> {
+pub(crate) fn claims_of(token: &str) -> Option<Json> {
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
     serde_json::from_slice(&bytes).ok()

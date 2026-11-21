@@ -10,7 +10,7 @@ export function capabilityBackendsQuery(reader: string, provider: string, place:
     queryKey: ['capability-backends', reader, provider, place, capability, q] as const,
     initialPageParam: undefined as string | undefined,
     queryFn: ({ signal, pageParam }): Promise<BackendPage> => ok(api.GET('/providers/{id}/capability-backends', {
-      params: { path: { id: provider }, query: { capability, place, q, ...(pageParam === undefined ? {} : { cursor: pageParam }) } }, signal,
+      params: { path: { id: provider }, query: { capability, ...(place === '' ? {} : { place }), q, ...(pageParam === undefined ? {} : { cursor: pageParam }) } }, signal,
     })),
     getNextPageParam: (last: BackendPage) => last.next_cursor ?? undefined,
     retry: false,
@@ -21,7 +21,7 @@ export function selectedCapabilityBackendQuery(reader: string, provider: string,
   return queryOptions({
     queryKey: ['selected-capability-backend', reader, provider, place, capability, offering] as const,
     queryFn: ({ signal }): Promise<BackendPage> => ok(api.GET('/providers/{id}/capability-backends', {
-      params: { path: { id: provider }, query: { capability, place, offering } }, signal,
+      params: { path: { id: provider }, query: { capability, ...(place === '' ? {} : { place }), offering } }, signal,
     })),
     retry: false,
   });

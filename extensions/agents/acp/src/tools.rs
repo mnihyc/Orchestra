@@ -527,11 +527,17 @@ pub fn tool_payload(view: &ToolView, place: &Place<'_>) -> ToolPayload {
     };
     let Some(family) = family else {
         return match &view.understood {
-            Understood::Orch(tool) => ToolPayload::Orch {
-                tool: *tool,
-                arguments: input.clone(),
-                result: (ended && !failed).then(|| json_or_text(&output)),
-            },
+            Understood::Orch(tool) => {
+                let result = ended.then(|| json_or_text(&output));
+                ToolPayload::Orch {
+                    tool: *tool,
+                    arguments: input.clone(),
+                    rate_limit: failed
+                        .then(|| orch_agent_contract::events::tool_rate_limit(result.as_ref()))
+                        .flatten(),
+                    result,
+                }
+            }
             Understood::Mcp { server, tool } => ToolPayload::Mcp {
                 server: server.clone(),
                 tool: tool.clone(),
@@ -748,6 +754,26 @@ mod tests {
             },
             locations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_orch_refusal_keeps_its_structured_facts_when_the_native_result_is_failed() {
+        let program = program();
+        let servers = vec!["orch".to_owned()];
+        let place = place(&program, &servers);
+        let value = json!({"error":{"code":"rate_limited","rate_limit":{"allowed_calls":2,"period_secs":60}}});
+        let view = view(
+            "mcp__orch__announce",
+            "other",
+            json!({"title":"A real refusal"}),
+            Status::Failed,
+            &value.to_string(),
+            &place,
+        );
+        let failed = tool_payload(&view, &place);
+        assert!(
+            matches!(failed, ToolPayload::Orch { result: Some(ref result), .. } if result == &value)
+        );
     }
 
     #[test]
