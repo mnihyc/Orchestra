@@ -331,6 +331,9 @@ impl Engine {
             None
         };
         let files = FilesPlan {
+            source_policy: None,
+            home_policy: None,
+            file_states_policy: None,
             kept_image_bytes: None,
             source: FilesSource::Cached,
             source_as_of,
@@ -504,6 +507,7 @@ pub(crate) async fn files(
                     machine,
                     SerialKey::Environment(recipe.environment),
                     &FsMaterialize {
+                        access: orch_link_contract::commands::FsAccess::roots(),
                         work: None,
                         environment_id: recipe.environment,
                         job_id: Some(job.id()),
@@ -604,9 +608,39 @@ pub(crate) async fn files(
     Ok(Done::Finished)
 }
 
+/// The source identity of one immutable recovery record; queue edits do not change this supplier.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct HistorySupplier {
+    thread: Id,
+    continuation: Id,
+    execution_revision: i64,
+    segment: Option<Id>,
+    environment: Option<Id>,
+    directory: String,
+    provider: Option<Id>,
+    agent: Option<Id>,
+}
+
+impl HistorySupplier {
+    fn of(row: &orch_db::queries::threads::ThreadRow) -> Self {
+        Self {
+            thread: row.node_id,
+            continuation: row.active_continuation_id,
+            execution_revision: row.execution_revision,
+            segment: row.current_segment_id,
+            environment: row.environment_id,
+            directory: row.workspace_dir.clone(),
+            provider: row.provider_id,
+            agent: row.agent_id,
+        }
+    }
+}
+
 /// One thread's immutable recorded Carry supplier, retained by the environment job.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct HistoryArtifact {
+    /// The exact supplier that the owned job froze, never a later execution selection.
+    supplier: HistorySupplier,
     /// Where the transcript is kept in the store.
     pub(crate) blob: Hash,
     /// How large it is.
@@ -633,36 +667,44 @@ pub(crate) async fn history(
     thread: Id,
 ) -> Result<HistoryArtifact, crate::jobs::runner::Stop> {
     if let Some(artifact) = histories(&job.plan().await?)?.get(&thread) {
+        if artifact.supplier.thread != thread {
+            return Err(
+                EngineError::unreadable("the recovery record belongs to another thread").into(),
+            );
+        }
         return Ok(artifact.clone());
     }
     let engine = job.engine();
     let scratch = crate::fork_history::cut::Scratch::new(engine.scratch_dir().join(format!(
-        "recovery-{}-{}.md",
+        "recovery-{}-{}-{}.md",
         job.id().simple(),
-        thread.simple()
+        thread.simple(),
+        orch_types::new_id().simple()
     )));
-    let mut tx = engine.db().begin().await?;
-    let row = orch_db::queries::threads::lock(&mut tx, thread)
+    // This first statement freezes the source and all later pages on one repeatable snapshot.
+    // No writer connection or thread row is held while the transcript and Carry text are read.
+    let mut reading = orch_db::queries::feeds::begin_reading(engine.db()).await?;
+    let row = orch_db::queries::threads::thread(&mut reading, thread)
         .await?
         .ok_or_else(|| EngineError::unreadable("the recovering thread is missing"))?;
+    let supplier = HistorySupplier::of(&row);
     let unconfirmed = orch_db::queries::thread_history_cuts::unconfirmed_inputs(
-        &mut tx,
+        &mut reading,
         thread,
         row.active_continuation_id,
         None,
     )
     .await?;
-    // The thread is locked, so nothing of it changes; one snapshot opened now sees all of it, page after page.
-    let mut reading = orch_db::queries::feeds::begin_reading(engine.db()).await?;
     let last = orch_db::queries::thread_history::last_turn(
         &mut reading,
         thread,
         row.active_continuation_id,
     )
     .await?;
-    let redactor = crate::raw_events::live_redactor(&mut tx, &row, row.environment_id)
+    let redactor = crate::raw_events::live_redactor(&mut reading, &row, row.environment_id)
         .await?
         .ok_or_else(|| EngineError::unreadable("the recorded conversation cannot be redacted"))?;
+    tracing::info!(target: "orch_engine::recovery::history_write", thread = %thread, "Writing the frozen recovery conversation");
     let (turns, mut size) = if last == 0 {
         let text = crate::written::read_conversation_view(
             &mut reading,
@@ -691,15 +733,16 @@ pub(crate) async fn history(
         .await?;
         (written.turns, written.size)
     };
-    let settings = crate::resolved::load(&mut tx, thread).await?;
+    let settings = crate::resolved::load(&mut reading, thread).await?;
     let model = match (row.provider_id, settings.model) {
         (Some(provider), Some(model)) => {
-            orch_db::queries::resources::thread_engine::model(&mut tx, provider, &model).await?
+            orch_db::queries::resources::thread_engine::model(&mut reading, provider, &model)
+                .await?
         }
         _ => None,
     };
     let budget = crate::fork_history::carry_budget(
-        &mut tx,
+        &mut reading,
         thread,
         model
             .as_ref()
@@ -754,13 +797,18 @@ pub(crate) async fn history(
         notice = format!("{warning}\n{notice}");
     }
     let notice = crate::raw_events::mask_text(&redactor, notice);
-    tx.commit().await.map_err(DbError::from)?;
     reading.commit().await.map_err(DbError::from)?;
 
     // One environment job owns several thread suppliers. Its private plan and blob pins
     // freeze them independently; a single-thread history cut keeps its original owner rule.
-    let (blob, size) = crate::fork_history::cut::put_file(engine, scratch.path()).await?;
-    let artifact = HistoryArtifact { blob, size, notice };
+    let publication = crate::fork_history::cut::put_file(engine, scratch.path()).await?;
+    let (blob, size) = (publication.hash, publication.size);
+    let artifact = HistoryArtifact {
+        supplier,
+        blob,
+        size,
+        notice,
+    };
     let mut tx = engine.db().begin().await?;
     let current = job
         .lock_owned(&mut tx)
@@ -773,6 +821,19 @@ pub(crate) async fn history(
         storage::register_blob(&mut tx, &artifact.blob, artifact.size, job.now()).await?;
         if !saved.values().any(|held| held.blob == artifact.blob) {
             storage::pin_blobs(&mut tx, &[artifact.blob]).await?;
+        }
+        // The owned runtime job holds the logical source against rebinding. Queue edits remain independent.
+        // Publishing its private artifact writes no thread row, and needs no thread row lock.
+        let current_thread = orch_db::queries::threads::thread(&mut tx, thread)
+            .await?
+            .ok_or_else(|| EngineError::unreadable("the recovering thread is missing"))?;
+        if HistorySupplier::of(&current_thread) != artifact.supplier {
+            return Err(crate::jobs::runner::Stop::Failed(
+                crate::jobs::runner::Failure::new(
+                    "conflict.stale_revision",
+                    "The recovery conversation's source changed before it could be kept",
+                ),
+            ));
         }
         saved.insert(thread, artifact.clone());
         jobs::merge_plan(
@@ -944,6 +1005,7 @@ pub(crate) async fn materialize_artifacts(
             machine,
             SerialKey::Environment(environment),
             &orch_link_contract::commands::FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: environment,
                 job_id: Some(job.id()),

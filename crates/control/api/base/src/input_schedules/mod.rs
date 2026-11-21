@@ -32,8 +32,6 @@ use orch_api_contract::input_schedules::*;
 
 use orch_api_contract::threads::ContentPart;
 
-use orch_api_contract::threads::Delivery;
-
 use orch_api_contract::users::UserRef;
 
 use orch_authz::Act;
@@ -281,6 +279,16 @@ async fn run_view(
             reason = input.state_detail;
         }
     }
+    let outcome = row
+        .outcome
+        .map(decode::<InputScheduleOccurrenceOutcome>)
+        .transpose()?
+        .map(|mut outcome| {
+            if thread.is_none() {
+                outcome.accepted_input_ref = None;
+            }
+            outcome
+        });
     Ok(InputScheduleRun {
         id: row.id,
         occurrence: row.occurrence,
@@ -290,6 +298,7 @@ async fn run_view(
         input_id: row.input_id,
         turn_id,
         reason,
+        outcome,
         created_at: Time::new(row.created_at),
         started_at: started_at.map(Time::new),
     })
@@ -338,7 +347,12 @@ async fn present_bounded(
         None => None,
     };
     Ok(InputSchedule {
+        timing_policy: Some(InputTimingPolicy::of(&decode::<InputTiming>(
+            row.timing.clone(),
+        )?)),
         id: row.id,
+        plan: row.plan,
+        delivery: decode(json!(&row.delivery))?,
         kind: agent::metadata(&row)?.map(|_| InputScheduleKind::Agent),
         agent: agent::metadata(&row)?,
         topic: refs
@@ -579,6 +593,8 @@ async fn create(
         name: name(body.name.as_deref().unwrap_or("Scheduled input"))?,
         target: encode(&body.target)?,
         content: encode(&body.content)?,
+        plan: body.plan,
+        delivery: orch_engine::inputs::delivery_word(body.delivery).into(),
         native_action: body.native_action.as_ref().map(encode).transpose()?,
         definition_authority: None,
         timing: encode(&body.timing)?,
