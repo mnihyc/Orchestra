@@ -5,6 +5,10 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "container_units/fixture.rs"]
+mod container_units;
+#[path = "summaries/fence.rs"]
+mod fence;
 mod places;
 mod rig;
 mod support;
@@ -20,15 +24,19 @@ use orch_api_contract::nodes::{
     AutoAction, AutoField, Node, NodeAuto, NodeAutoBody, NodeUpdate, NodeUpdateBody,
 };
 use orch_api_contract::settings::{NodeSettingList, NodeSettingSet, NodeSettingSetBody};
+use orch_api_contract::summaries::{
+    SummaryModelChoice, SummaryRefresh, SummaryRefreshBody, SummaryTarget,
+};
 use orch_api_contract::threads::Delivery;
 use orch_authz::Caller;
+use orch_db::queries::summaries as rows;
 use orch_engine::summaries::{handoff, indexed_transcript};
 use orch_link_contract::commands::{
     Command, CommandKind, CommandResult, ProviderComplete, ProviderCompleteResult,
 };
 use orch_link_contract::events::TurnOutcome;
 use orch_settings::Target;
-use orch_types::{Id, Json, new_id};
+use orch_types::{Id, Json, Time, new_id};
 use rig::{MODEL, Scene, eventually, turn_began, turn_ended};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -40,6 +48,7 @@ async fn configure(s: &Scene, value: Json) {
         .call(NodeSettingSet, &[&s.tree.topic.base.id, &"auto.summarizer"])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -171,7 +180,7 @@ async fn switching_off_each_source_or_deleting_its_provider_stops_an_accepted_su
         });
         configure(
             &s,
-            json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+            json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
         )
         .await;
         s.rig
@@ -430,7 +439,7 @@ async fn the_first_turn_updates_auto_fields_defined_tags_and_the_topic_and_count
     let calls = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     for (key, value) in [
@@ -593,7 +602,7 @@ async fn a_person_wins_a_race_with_a_real_summary_call_and_that_call_does_not_de
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -652,6 +661,21 @@ async fn a_person_wins_a_race_with_a_real_summary_call_and_that_call_does_not_de
         panic!("a thread");
     };
     assert_eq!(after.base.name, "The team's chosen title");
+    let captured = serde_json::to_value(&after.base).unwrap();
+    assert_eq!(
+        captured["automatic_fields"]["title"]["last_attempt"]["outcome"],
+        json!("discarded")
+    );
+    assert_eq!(
+        captured["automatic_fields"]["title"]["last_attempt"]["discard_reason"],
+        json!("changed_by_person")
+    );
+    let canonical: Option<Json> = sqlx::query_scalar("SELECT measurement_states->'reported_tokens' FROM usage_events WHERE origin='orch' AND purpose='summary' LIMIT 1")
+        .fetch_one(s.rig.db.pool()).await.unwrap();
+    assert_eq!(
+        captured["automatic_fields"]["title"]["last_attempt"]["captured_usage"],
+        canonical.unwrap_or(Json::Null)
+    );
     assert_eq!(
         after.base.title_source,
         orch_api_contract::nodes::FieldSource::User
@@ -737,7 +761,7 @@ async fn no_chosen_producer_or_a_setting_writer_without_provider_use_makes_no_ca
     let provider = api_provider(&s).await;
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     // A historical writer who has since lost Use remains the writer; authority is read at issue.
@@ -767,9 +791,17 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
     script(&s, true);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "summary.retry_ceiling_secs",
+            json!(90),
+        )
+        .await;
     s.rig
         .world
         .set_at(
@@ -788,7 +820,31 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
     assert_eq!(attempts(&s, id).await.0, 1);
     let delay: i64 = sqlx::query_scalar("SELECT EXTRACT(epoch FROM next_at-last_at)::bigint FROM node_summary_state WHERE node_id=$1")
         .bind(id).fetch_one(s.rig.db.pool()).await.unwrap();
-    assert_eq!(delay, 240);
+    assert_eq!(delay, 90);
+    let Node::Thread(captured_node) = places::read(&s.rig.world, &s.ada, id).await else {
+        panic!("a thread");
+    };
+    let captured = serde_json::to_value(captured_node.base).unwrap();
+    assert_eq!(
+        captured["automatic_fields"]["title"]["schedule"]["retry_ceiling"],
+        json!(90)
+    );
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "summary.retry_ceiling_secs",
+            json!(6000),
+        )
+        .await;
+    let Node::Thread(later_node) = places::read(&s.rig.world, &s.ada, id).await else {
+        panic!("a thread");
+    };
+    assert_eq!(
+        serde_json::to_value(later_node.base).unwrap()["automatic_fields"]["title"]["schedule"]["retry_ceiling"],
+        json!(90),
+        "a current default cannot rewrite the captured retry policy"
+    );
     assert_eq!(s.rig.commands.issued_of("provider.complete"), 1);
     let charged: (i64, i64) = sqlx::query_as("SELECT count(*),sum(total_tokens)::bigint FROM usage_events WHERE origin='orch' AND purpose='summary' AND counted")
         .fetch_one(s.rig.db.pool()).await.unwrap();
@@ -857,6 +913,26 @@ async fn malformed_text_is_charged_and_backed_off_while_a_full_shared_cap_skips_
         attempts(&s, id).await.1.as_deref(),
         Some("A usage cap has no room for summaries")
     );
+    let Node::Thread(current) = places::read(&s.rig.world, &s.ada, id).await else {
+        panic!("a thread")
+    };
+    let recorded = current
+        .base
+        .automatic_fields
+        .expect("automatic work has captured field facts");
+    let schedule = recorded
+        .title
+        .schedule
+        .expect("a skip keeps its attempt schedule");
+    assert_eq!(
+        schedule.reason,
+        Some(orch_api_contract::summary_facts::AutomaticSkipReason::CapNoRoom)
+    );
+    assert_eq!(
+        schedule.last_attempt_at,
+        Some(Time::new(s.rig.world.now())),
+        "an unpaid skip is still an actual field attempt"
+    );
 }
 
 #[tokio::test]
@@ -875,7 +951,7 @@ async fn a_handoff_uses_the_chosen_producer_and_keeps_an_indexed_full_file_and_t
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let text = handoff(&s.rig.engine, id, None, request).await.unwrap();
@@ -908,7 +984,7 @@ async fn material_sent_to_a_different_explicitly_chosen_provider_is_redacted_bef
     let seen = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -994,7 +1070,7 @@ async fn recovering_an_already_counted_completion_adds_neither_a_model_call_nor_
     script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     s.rig
@@ -1051,6 +1127,7 @@ async fn set_at_topic(s: &Scene, key: &str, value: Json) {
         .call(NodeSettingSet, &[&s.tree.topic.base.id, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -1078,7 +1155,7 @@ async fn a_long_threads_handoff_sends_the_newest_turns_in_brief_and_the_older_on
     let seen = script(&s, false);
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     // The model's entry names no window, so the one every such model has (32 000 tokens) is taken; three percent of
@@ -1171,7 +1248,7 @@ async fn the_plan_of_a_summary_shows_what_it_will_send_and_what_that_costs_befor
     let provider = api_provider(&s).await;
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let with = preflight(&s, id, &request).await;
@@ -1199,6 +1276,81 @@ async fn the_plan_of_a_summary_shows_what_it_will_send_and_what_that_costs_befor
         carried.history.summary.is_none(),
         "only a summary has something to estimate"
     );
+}
+
+#[tokio::test]
+async fn the_estimate_of_a_summary_counts_the_room_a_model_that_reasons_is_left_for_its_reasoning()
+{
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    for nth in 0..2 {
+        s.exchange(
+            id,
+            nth,
+            &format!("Question {nth}"),
+            &format!("Answer {nth}"),
+        )
+        .await;
+    }
+    let request = ForkRequest {
+        result: ForkResult::New,
+        topic_id: None,
+        name: Some("Trial".to_owned()),
+        access: None,
+        agent_access: None,
+        history: Some(ForkHistory {
+            mode: HistoryMode::Summary,
+            from_turn: None,
+            to_turn: None,
+        }),
+        to: None,
+        environment: None,
+        worktree: None,
+        files_at: None,
+        memory: None,
+        directory: None,
+        cwd: None,
+        options: None,
+        mounts: None,
+        check_fingerprints: None,
+        fingerprint_request_id: None,
+    };
+    let provider = api_provider(&s).await;
+    configure(
+        &s,
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}},"answer_max_output_tokens":300,"reasoning_tokens":700}),
+    )
+    .await;
+    sqlx::query("UPDATE provider_models SET parameters=parameters || $3::jsonb WHERE provider_id=$1 AND model_name=$2")
+        .bind(provider).bind(MODEL)
+        .bind(json!({"offered":{"report":{"capabilities":{"thinking":{"supported":false}}}}}))
+        .execute(s.rig.db.pool()).await.unwrap();
+    let plain = preflight(&s, id, &request)
+        .await
+        .history
+        .summary
+        .expect("a summary plan carries its estimate");
+    assert_eq!(
+        plain.output_tokens, 300,
+        "a model that does not reason is asked for the answer's allowance"
+    );
+    sqlx::query("UPDATE provider_models SET parameters=parameters || jsonb_build_object('efforts',$1::jsonb) WHERE provider_id=$2 AND model_name=$3")
+        .bind(json!(["low", "high"]))
+        .bind(provider)
+        .bind(MODEL)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let reasoning = preflight(&s, id, &request)
+        .await
+        .history
+        .summary
+        .expect("a summary plan carries its estimate");
+    assert_eq!(
+        reasoning.output_tokens, 1000,
+        "a model that reasons is counted with the room the request leaves it, as the request asks for it"
+    );
+    assert_eq!(reasoning.input_tokens, plain.input_tokens);
 }
 
 /// What the agent's `goal` tool leaves when it reports in the running turn.
@@ -1253,7 +1405,7 @@ async fn a_report_of_met_is_checked_by_the_helper_and_a_not_yet_starts_the_next_
         });
     configure(
         &s,
-        json!({"kind":"model","provider_id":provider,"model_name":MODEL}),
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
     )
     .await;
     let ada = Caller::session(s.ada.id());
@@ -1292,6 +1444,11 @@ async fn a_report_of_met_is_checked_by_the_helper_and_a_not_yet_starts_the_next_
     {
         let seen = asked.lock().unwrap();
         assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].max_output_tokens,
+            512 + 2_000,
+            "goal verification has its own answer allowance beyond reasoning room"
+        );
         assert!(
             seen[0]
                 .system
@@ -1337,4 +1494,178 @@ async fn a_report_of_met_is_checked_by_the_helper_and_a_not_yet_starts_the_next_
         2,
         "nothing goes on after it is met"
     );
+}
+
+/// The provider's key kept on the machine of a container that a host of Ada's runs, as the system
+/// leaves a provider once its container has enrolled. The unit's machine is online.
+async fn key_in_a_container(s: &Scene, provider: Id) -> Id {
+    let now = s.rig.world.now();
+    let unit = {
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        let (host, template) = container_units::host_and_template(
+            &mut conn,
+            s.ada.id(),
+            s.tree.org.base.id,
+            "Summary",
+            now,
+        )
+        .await;
+        container_units::provider_unit(&mut conn, host, template, provider, now).await
+    };
+    sqlx::query("UPDATE machines SET online = true WHERE id = $1")
+        .bind(unit)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    unit
+}
+
+/// The request once it is over, whichever way it ended.
+async fn ended(s: &Scene, request: Id) -> rows::Request {
+    eventually("the summary request is over", || async {
+        let row = rows::request(&mut *s.rig.world.conn().await, request)
+            .await
+            .unwrap()
+            .unwrap();
+        matches!(row.state.as_str(), "done" | "failed" | "discarded")
+    })
+    .await;
+    rows::request(&mut *s.rig.world.conn().await, request)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// The model request of a refresh went to the unit's machine and ended well, and the thread's
+/// paragraph is the text that came back.
+async fn paragraph_of_the_thread_came_from(s: &Scene, thread: Id, unit: Id, viewer: Option<Id>) {
+    let sent: Vec<(Id, String)> =
+        sqlx::query_as("SELECT machine_id,state FROM commands WHERE kind = 'provider.complete'")
+            .fetch_all(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        sent,
+        [(unit, "succeeded".to_owned())],
+        "one model request, on the machine the key is on"
+    );
+    let cache = rows::get(
+        &mut *s.rig.world.conn().await,
+        SummaryTarget::Thread { id: thread },
+        viewer,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        cache
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("redirect test now passes")),
+        "the paragraph is what the model answered: {:?}",
+        cache.text
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persons_refresh_of_a_thread_writes_its_paragraph_when_the_providers_key_is_on_a_unit_machine()
+ {
+    let s = Scene::new().await;
+    let provider = api_provider(&s).await;
+    let calls = script(&s, false);
+    let thread = s.thread().await.base.id;
+    s.exchange(thread, 0, "Fix login", "The redirect is repaired")
+        .await;
+    // The case runs the refresh itself, so no sweep of the engine competes with it.
+    s.rig.engine.stop();
+    let unit = key_in_a_container(&s, provider).await;
+    let receipt = s
+        .rig
+        .world
+        .app
+        .call(SummaryRefresh, &[&"thread", &thread])
+        .token(&s.ada.token)
+        .body(&SummaryRefreshBody {
+            client_id: new_id(),
+            model: Some(SummaryModelChoice {
+                backend: orch_provider_contract::capabilities::BackendRef {
+                    route: "summarizer-model.complete".into(),
+                    offering: Some(orch_provider_contract::capabilities::OfferingRef {
+                        provider,
+                        offering: MODEL.into(),
+                    }),
+                    ..Default::default()
+                },
+                params: None,
+            }),
+            range: None,
+        })
+        .send()
+        .await
+        .ok();
+    s.rig.engine.summarize_resources().await.unwrap();
+    let request = ended(&s, receipt.id).await;
+    assert_eq!(
+        request.state, "done",
+        "the refresh ends with its paragraph, not with {:?}",
+        request.problem
+    );
+    assert!(
+        request
+            .accepted_source
+            .get("http")
+            .is_some_and(|http| !http.is_null()),
+        "a person's refresh keeps the raw identity that asked for it"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    paragraph_of_the_thread_came_from(&s, thread, unit, Some(s.ada.id())).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automatic_refresh_of_a_thread_writes_its_paragraph_when_the_providers_key_is_on_a_unit_machine()
+ {
+    let s = Scene::new().await;
+    let provider = api_provider(&s).await;
+    let calls = script(&s, false);
+    let unit = key_in_a_container(&s, provider).await;
+    configure(
+        &s,
+        json!({"kind":"model","backend":{"route":"summarizer-model.complete","offering":{"provider":provider,"offering":MODEL}}}),
+    )
+    .await;
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "summary.targets",
+            json!({"thread":{"automatic":true}}),
+        )
+        .await;
+    let thread = s.thread().await.base.id;
+    s.exchange(thread, 0, "Fix login", "The redirect is repaired")
+        .await;
+    let target = SummaryTarget::Thread { id: thread };
+    eventually("the thread's paragraph is written", || async {
+        rows::get(&mut *s.rig.world.conn().await, target, None)
+            .await
+            .unwrap()
+            .is_some_and(|cache| cache.text.is_some())
+    })
+    .await;
+    let cache = rows::get(&mut *s.rig.world.conn().await, target, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = rows::latest(&mut *s.rig.world.conn().await, cache.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (request.origin.as_str(), request.state.as_str()),
+        ("automatic", "done"),
+        "the automatic refresh ends with its paragraph, not with {:?}",
+        request.problem
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    paragraph_of_the_thread_came_from(&s, thread, unit, None).await;
 }

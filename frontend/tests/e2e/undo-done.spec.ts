@@ -5,7 +5,7 @@ import { scenario, signIn } from './support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
-const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
+const tree = (page: Page) => page.getByRole('tree', { name: 'Organizations, projects, topics and threads' });
 const row = (page: Page, name: string): Locator => tree(page).getByRole('treeitem', { name: new RegExp(`^${name}( |$)`) });
 
 async function rowMenu(page: Page, name: string): Promise<Locator> {
