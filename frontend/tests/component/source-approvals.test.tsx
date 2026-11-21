@@ -10,7 +10,7 @@ import {harnessApproval,ALLOW_DENY} from '../doubles/thread-rows';
 import {ADA} from '../unit/general-access-fixtures';
 const decide=vi.hoisted(()=>vi.fn());
 vi.mock('@/features/approvals/Decision',()=>({useDecision:()=>({decide,pending:false,pressed:null,error:null,lost:null})}));
-vi.mock('@/realtime/stores/tree',()=>({useNodePath:()=>({path:[]})}));
+vi.mock('@/realtime/stores/tree',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNodePath:()=>({path:[]})}));
 vi.mock('@/ui/UserChip',()=>({UserChip:({user}:{user:UserRef})=><button data-person-chip={user.id}>{user.display_name}</button>}));
 const base=harnessApproval('source-request',{threadId:'thread',itemId:'source-item',title:'Work waits',requester:ADA,request:{request_kind:'command',detail:{command:'review',cwd:'/work',reason:null},options:ALLOW_DENY}});
 function source(kind:'plan'|'input'):SourceApproval {

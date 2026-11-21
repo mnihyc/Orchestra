@@ -195,14 +195,14 @@ pub fn address(typed: &Typed) -> String {
 pub fn typed(href: &str) -> Option<Typed> {
     let (head, fragment) = href.split_once('#').unwrap_or((href, ""));
     let path = head.split('?').next().unwrap_or(head).trim_end_matches('/');
-    let mut file_path = None;
+    let mut reference_path = None;
     let (kind, id) = if let Some(rest) = path.strip_prefix(ENVIRONMENTS) {
         let (id, path) = rest.split_once("/files/")?;
         let path = decode_path(path)?;
-        if !relative_path(&path) {
+        if !file_path(&path) {
             return None;
         }
-        file_path = Some(path);
+        reference_path = Some(path);
         (InlineRefKind::EnvironmentFile, id)
     } else if let Some(id) = path.strip_prefix(FILES) {
         (InlineRefKind::File, id)
@@ -232,7 +232,7 @@ pub fn typed(href: &str) -> Option<Typed> {
     Some(Typed {
         kind,
         id,
-        path: file_path,
+        path: reference_path,
         part,
     })
 }
@@ -245,6 +245,21 @@ pub fn relative_path(path: &str) -> bool {
         && !path.contains(['\\', ':'])
         && !path.chars().any(char::is_control)
         && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+/// A human environment-file reference may name a native address; its reader still needs current reach.
+#[must_use]
+pub fn file_path(path: &str) -> bool {
+    if relative_path(path) {
+        return true;
+    }
+    let native = path.starts_with('/')
+        || path.starts_with("\\\\")
+        || (path.len() >= 3
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':'
+            && matches!(path.as_bytes()[2], b'/' | b'\\'));
+    !path.is_empty() && native && !path.chars().any(char::is_control)
 }
 
 /// A path written in a stored reference's address, preserving slashes and escaping URL punctuation.
@@ -1020,6 +1035,30 @@ mod tests {
                 address(&plan),
                 address(&repro)
             )
+        );
+    }
+    #[test]
+    fn an_explicit_environment_file_link_keeps_its_native_address_without_widening_agent_paths() {
+        for path in [
+            "/var/data/report.txt",
+            "C:/data/report.txt",
+            "//server/share/report.txt",
+        ] {
+            let reference = Typed {
+                kind: InlineRefKind::EnvironmentFile,
+                id: id(7),
+                path: Some(path.to_owned()),
+                part: Some(RefPart::Line(1)),
+            };
+            assert_eq!(typed(&address(&reference)), Some(reference));
+        }
+        assert_eq!(
+            workspace_path("/outside/report.txt", "/workspace", "src"),
+            None
+        );
+        assert_eq!(
+            workspace_path("C:/outside/report.txt", "C:/workspace", "src"),
+            None
         );
     }
 }

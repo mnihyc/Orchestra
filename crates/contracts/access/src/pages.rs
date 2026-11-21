@@ -62,6 +62,8 @@ words! {
         Mount = "mount",
         /// A skill.
         Skill = "skill",
+        /// A configured group of resources.
+        Pool = "pool",
         /// A document.
         Document = "document",
         /// A document-only container's live permission page.
@@ -88,6 +90,7 @@ impl From<ObjectKind> for StoredKind {
             ObjectKind::McpServer => Self::McpServer,
             ObjectKind::Mount => Self::Mount,
             ObjectKind::Skill => Self::Skill,
+            ObjectKind::Pool => Self::Pool,
         }
     }
 }
@@ -460,6 +463,24 @@ impl<'a> Chain<'a> {
         self.lock()
             .filter(|(index, _)| *index > 0)
             .map(|(_, place)| place)
+    }
+
+    /// Active policy origins, including empty rows, under the same lock and private cut as holders.
+    /// Member-side pool consents use this instead of inventing another inheritance resolver.
+    #[must_use]
+    pub fn origins(&self) -> Vec<Origin> {
+        let mut origins = Vec::new();
+        for link in self
+            .links
+            .iter()
+            .skip(self.lock().map_or(0, |(index, _)| index))
+        {
+            origins.push(link.origin);
+            if !link.follows() {
+                break;
+            }
+        }
+        origins
     }
 
     fn gathered(&self, from: usize, now: Time) -> Vec<Named<'a>> {
@@ -2672,6 +2693,29 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Origin::Own).unwrap(),
             json!({ "page": "own" })
+        );
+    }
+}
+
+#[cfg(test)]
+mod pool_origin_tests {
+    use super::*;
+
+    #[test]
+    fn lending_follows_the_same_private_and_locked_origins_as_the_member_use_row() {
+        let root = PlaceRef::Node(orch_types::new_id());
+        let mut own = Row::following(Permission::ProviderUse, Profile::Any);
+        own.inherit = false;
+        let defaults = Row::following(Permission::ProviderUse, Profile::Any);
+        assert_eq!(
+            Chain::of(Some(&own)).under(root, Some(&defaults)).origins(),
+            vec![Origin::Own]
+        );
+        let mut locked = defaults;
+        locked.locked = true;
+        assert_eq!(
+            Chain::of(Some(&own)).under(root, Some(&locked)).origins(),
+            vec![Origin::Defaults(root)]
         );
     }
 }

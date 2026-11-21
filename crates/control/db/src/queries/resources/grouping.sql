@@ -30,3 +30,6 @@ SELECT w.kind,m.id,m.home_id,m.home_overridden_at,NULL::uuid,m.name,m.revision,N
 UNION ALL
 SELECT w.kind,s.id,s.home_id,s.home_overridden_at,NULL::uuid,s.name,s.revision,NULL::uuid,s.owner_id
   FROM wanted w JOIN skills s ON w.kind='skill' AND s.id=w.id WHERE s.deleted_at IS NULL
+UNION ALL
+SELECT w.kind,p.id,p.home_id,p.home_overridden_at,NULL::uuid,p.name,p.revision,NULL::uuid,p.owner_id
+  FROM wanted w JOIN pools p ON w.kind='pool' AND p.id=w.id WHERE p.deleted_at IS NULL

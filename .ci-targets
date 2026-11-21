@@ -1,0 +1,7 @@
+test -p orch-api-core --test document_files --test uniform_places --test thread_environment_readers --test terminals_http --test terminal_create_scopes --test summaries --test skill_duplicates --test related_scale --test ports_core --test people_storage --test people_scale --test people_creation
+test -p orch-api-core --test kvnc_core --test invitation_roles --test document_import_files --test document_file_creation_scopes --test document_convert --test chats_content --test chat_files --test browsers --test blob_housekeeping --test ask
+test -p orch-api-core --test settings --test personal --test admin_system --test skills --test threads_settings --test threads_read
+web typecheck
+web lint
+web test
+web-e2e --project=chromium --workers=1 --retries=0 tests/e2e/everything.spec.ts tests/e2e/summary-options.spec.ts tests/e2e/navigation-review.spec.ts

@@ -1,7 +1,7 @@
 //! A real held selected window cannot borrow a fresh empty window's proof.
 
 use super::Source;
-use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use crate::middleware::authentication::{new_api_token, token_hash};
 use crate::rig::{PATIENCE, Scene};
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::PageQuery;
@@ -80,7 +80,7 @@ async fn snapshot_list_held_rows_keep_their_actual_sources_when_the_current_wind
     };
     let full: KeyScope = serde_json::from_value(json!({"rules":[rule(scene.on.environment)]}))?;
     let token = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(token);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
