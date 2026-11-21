@@ -15,7 +15,8 @@ import { useTranslation } from 'react-i18next';
 
 import { threadContextQuery } from '@/api/context';
 import { programNameIn } from '@/features/resources/programNames';
-import { useProviderHealth } from '@/features/usage/PerformancePlaces';
+import { useProviderHealth } from '@/features/usage/ProviderHealth';
+import { parametersQuery } from '@/api/threads';
 import {
   countKey,
   contextModelName,
@@ -24,6 +25,7 @@ import {
   freedBy,
   ringOf,
   type Segment,
+  usedAlone,
 } from '@/features/usage/context/fill';
 import { PartsBar, Swatch } from '@/features/usage/context/PartsBar';
 import type { ContextFill, ContextPart, Thread } from '@/generated/api-types';
@@ -131,7 +133,10 @@ export function ContextPanel({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const revision = useThreadPart(thread.id, turnsRevision);
-  useProviderHealth(thread.binding?.provider.id ?? null);
+  const providerId = thread.binding?.provider.id ?? null;
+  const parameters = useQuery({ ...parametersQuery(thread.id), enabled: providerId !== null, retry: false });
+  const provider = parameters.data?.provider;
+  useProviderHealth(providerId, !parameters.isError && !parameters.isPlaceholderData && provider?.id === providerId && provider.access.permissions.includes('provider.view'));
   const kept = useQuery(threadContextQuery(thread.id, 'kept', revision));
   // A harness that counts on request is asked once a turn, when somebody opens this between turns.
   const counted = useQuery({ ...threadContextQuery(thread.id, 'count', revision), enabled: kept.data?.can_count === true });
@@ -148,6 +153,7 @@ export function ContextPanel({ thread }: { thread: Thread }) {
         {fill !== null && <span className="text-xs text-text-subtle" data-context-count={fill.count}>{t(countKey(fill.count), { harness })}</span>}
       </div>
       {contextModelName(thread)!==null && <p className="text-sm text-text-muted">{t('contextUsage.panel.model',{model:modelDisplayName(contextModelName(thread)??'',t)})}</p>}
+      {ring === null && usedAlone(thread.usage) !== null && <p className="text-sm text-text-muted tabular-nums">{t('contextUsage.ring.labelUsed', { used: formatTokens(usedAlone(thread.usage) ?? 0, locale) })}</p>}
       {ring !== null && (
         <p className="text-sm text-text-muted tabular-nums">
           {t(ring.compactPercent === null ? 'contextUsage.ring.labelBare' : 'contextUsage.ring.label', {

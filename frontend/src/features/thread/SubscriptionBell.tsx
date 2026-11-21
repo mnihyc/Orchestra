@@ -6,8 +6,10 @@
  * recomputed exceptions page; a refusal leaves the served state and newer thread facts intact.
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { FactDisclosureBody } from '@/ui/FactDisclosure';
+import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useAttentionStore } from '@/features/navigation/attention';
 import { defaultLevelName, levelOptions } from '@/features/notifications/levelWords';
 
 import { setNotificationException } from '@/api/notificationExceptions';
@@ -26,7 +28,11 @@ export function SubscriptionBell({ thread, label }: { thread: Pick<Thread, 'id' 
   const cache = useQueryClient();
   const describe = useErrorText();
   const heading = label ?? t('thread.bell.label');
+  const descriptionId = useId();
   const own = thread.access.subscription;
+  const automatic = useAttentionStore((state)=>own!==null && state.levels.get(thread.id)===own && state.sources.get(thread.id)==='auto');
+  const manual = useAttentionStore((state)=>own!==null && state.levels.get(thread.id)===own && state.sources.get(thread.id)==='manual');
+  const needsManualAll = own==='all'&&!manual;
   const effective = thread.access.effective_subscription;
   const inherited = thread.access.inherited_subscription ?? null;
   const [open, setOpen] = useState(false);
@@ -53,13 +59,13 @@ export function SubscriptionBell({ thread, label }: { thread: Pick<Thread, 'id' 
   });
   const choose = (value: string) => {
     const level = value === 'default' ? null : value as SubscriptionLevel;
-    if (change.isPending || level === own) return;
+    if (change.isPending || level === own && !(level==='all'&&needsManualAll)) return;
     setOpen(false);
     change.mutate({ level, cursor: exceptionCursor(cache) });
   };
   const entries: MenuEntry[] = [
-    { type: 'label', id: 'label', label: heading },
-    { type: 'radio', id: 'level', label: heading, value: own ?? 'default',
+    ...(!automatic ? [{ type: 'label' as const, id: 'label', label: heading }] : []),
+    { type: 'radio', id: 'level', label: heading, value: needsManualAll ? 'current' : own ?? 'default',
       onValueChange: choose,
       options: [
         { value: 'default', name: defaultLevelName(t, inherited) },
@@ -73,8 +79,8 @@ export function SubscriptionBell({ thread, label }: { thread: Pick<Thread, 'id' 
       align="end"
       open={open}
       onOpenChange={(next) => { if (!change.isPending) setOpen(next); }}
-      content={<><DropdownEntries entries={entries} /><OutsideMenu nodeId={thread.id} onClose={() => setOpen(false)} onPause={(mode, prefs) => { setOpen(false); setPause({ mode, prefs }); }} /></>}
-      trigger={<BellTrigger label={heading} scopeLabel={t('chat.segment.thread')} level={effective} inherited={own === null} showLevel pending={change.isPending} />}
+      content={<>{(automatic || own!==null&&!manual) && <FactDisclosureBody groups={[{key:'following',facts:[{key:'source',label:t('placesMail.source'),value:automatic?<span id={descriptionId}>{t('placesMail.autoFollowed')}</span>:undefined}]}]}/> }<DropdownEntries entries={entries} /><OutsideMenu nodeId={thread.id} onClose={() => setOpen(false)} onPause={(mode, prefs) => { setOpen(false); setPause({ mode, prefs }); }} /></>}
+      trigger={<BellTrigger label={heading} scopeLabel={t('chat.segment.thread')} level={effective} automatic={automatic} descriptionId={descriptionId} descriptionInPopup={automatic && open} inherited={own === null} showLevel pending={change.isPending} />}
     />
     {pause !== null && <PauseDialog open mode={pause.mode} initial={pause.prefs} onOpenChange={(on) => { if (!on) setPause(null); }} />}
   </>

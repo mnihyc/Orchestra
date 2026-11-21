@@ -70,12 +70,15 @@ impl RequestOutcome {
 pub struct UsageRequest {
     /// Exact provisional adapter observation replaced by this source failure event, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub previous_ref: Option<String>,
     /// The previous adapter request when this is its native retry, rather than a new model step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub retry_of: Option<String>,
     /// Native tool item references emitted by this request; absent means no known association.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub tool_refs: Option<Vec<String>>,
     /// Refusal or vendor-specific reason, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +91,7 @@ pub struct UsageRequest {
     pub attempt: Option<i64>,
     /// Upstream request identity, separate from an adapter's own request reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-native-reference" = true))]
     pub provider_request_id: Option<String>,
 
     /// Vendor-reported successful native searches; missing is not a measured zero.
@@ -97,6 +101,7 @@ pub struct UsageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetches: Option<i64>,
     /// Stable within the turn and reused by every observation of this request.
+    #[schemars(extend("x-native-reference" = true))]
     pub id: String,
     /// The model actually used, where reported.
     pub model: Option<String>,
@@ -320,6 +325,8 @@ impl UsageRequest {
 /// The first-class adapter event, routed identically for a built-in adapter and an external JSON line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelRequestReport {
+    /// The physical producer, absent only for unscoped history or discovery.
+    pub native_opening_id: Option<Id>,
     /// The thread.
     pub thread_id: Id,
     /// The session segment.
@@ -359,7 +366,7 @@ mod tests {
 
     #[test]
     fn an_external_adapter_and_a_builtin_report_the_same_request_with_nullable_counts() {
-        let body = json!({"thread_id":"00000000-0000-4000-8000-000000000001","segment_id":"00000000-0000-4000-8000-000000000002","turn_id":"00000000-0000-4000-8000-000000000003",
+        let body = json!({"native_opening_id":null,"thread_id":"00000000-0000-4000-8000-000000000001","segment_id":"00000000-0000-4000-8000-000000000002","turn_id":"00000000-0000-4000-8000-000000000003",
             "request":{"id":"request-1","model":"model-a","asked":"2026-10-15T00:00:00.000Z","first_output":"2026-10-15T00:00:01.000Z","end":"2026-10-15T00:00:03.000Z",
             "tokens":{"input_tokens":100,"cached_input_tokens":0,"cache_write_tokens":null,"output_tokens":64,"reasoning_tokens":null,"total_tokens":164},"reasoning_hidden":false,"output_streamed":true,"outcome":{"status":"done"}}});
         let event = AdapterEvent::from_wire(MODEL_REQUEST_EVENT, body.clone()).unwrap();

@@ -10,7 +10,7 @@
 //! orgs', the root org of the request's place, and of every node a decision reads)
 //! in the statement that locks the identity, before any permission fact; the
 //! commit checks them as its last statement and refuses, retryably
-//! (`conflict.stale_revision`), when a change of authority committed meanwhile.
+//! (`conflict.concurrent_change`), when a change of authority committed meanwhile.
 //! Roles, permission pages/defaults, memberships, groups, standing, moves and
 //! shared availability/policy move those epochs at their own commit: the request's
 //! root org for a change about one place, the system's otherwise. Ordinary content,
@@ -335,15 +335,21 @@ impl CurrentHttpIdentity {
 
 /// Read facts for a real transport origin. The id/hash must come from its actual authenticator;
 /// a native Session caller or another credential of the same account cannot substitute for it.
+/// `locked` waits for a change of the credential being made and holds its rows until the
+/// transaction ends; without it the rows are read in the statement's snapshot, which writes nothing.
 pub(crate) async fn current_read_identity(
     app: &App,
     conn: &mut Conn,
     user: orch_types::Id,
     credential: Credential<'_>,
+    locked: bool,
 ) -> ApiResult<CurrentHttpIdentity> {
-    let identity = rows::lock_identity(conn, user, credential, false)
-        .await?
-        .ok_or_else(invalid_token)?;
+    let identity = if locked {
+        rows::lock_identity(conn, user, credential, false).await?
+    } else {
+        rows::read_identity(conn, user, credential).await?
+    }
+    .ok_or_else(invalid_token)?;
     identity_facts(app, credential, identity)
 }
 
@@ -444,6 +450,12 @@ pub async fn current_http_identity(
             }
             rows::lock_identity_for_write(conn, original.id(), credential, authority_change, place)
                 .await?
+        }
+        HttpIdentityMode::Read if ctx.ordinary_browser_opening() => {
+            let Credential::Session { id, hash } = credential else {
+                return Err(invalid_token());
+            };
+            rows::opening_session(conn, original.id(), id, hash).await?
         }
         HttpIdentityMode::Read => {
             rows::lock_identity(conn, original.id(), credential, false).await?
