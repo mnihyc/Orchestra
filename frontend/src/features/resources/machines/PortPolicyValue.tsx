@@ -1,4 +1,6 @@
 /** A machine's reported port ceiling in human words; command text retains its exact original JSON. */
+import { useState } from 'react';
+import { Input } from '@/ui/Input';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { record } from '@/features/resources/UnitCommands';
@@ -26,10 +28,13 @@ function rangeWords(rows: readonly PortRange[]): string {
 
 export function PortPolicyValue({ value }: { value: unknown }) {
   const { t } = useTranslation();
+  const [filter, setFilter] = useState('');
   const policy = record(value);
   const offered: unknown[] | null = Array.isArray(policy.allowed) ? policy.allowed : null;
   const allowed = offered?.every(audience) === true ? offered : null;
   if (allowed === null) return <p className="text-sm text-text-muted" data-policy-port-value>{t('machinePortValue.unavailable')}</p>;
+  const loopback = Array.isArray(policy.loopback_tcp) ? policy.loopback_tcp.filter((port: unknown): port is number =>
+    typeof port === 'number' && Number.isInteger(port) && port > 0 && port <= 65535) : [];
   const publish = record(policy.publish);
   const publishedRanges = ranges(publish.ranges);
   const declared = typeof publish.incoming_address === 'string' && publish.incoming_address.trim() !== ''
@@ -39,6 +44,10 @@ export function PortPolicyValue({ value }: { value: unknown }) {
   const address = (candidate: unknown) => typeof candidate === 'string' && candidate.trim() !== '' ? candidate : t('machinePortValue.unavailable');
   const listen = (candidate: unknown) => candidate === 'all' ? choiceCopy(t, 'hostBinding.all').name : address(candidate);
   return <div className="flex flex-col gap-3" data-policy-port-value>
+    {loopback.length > 0 && <details className="text-sm"><summary>{t('ports.namedLoopback')} ({loopback.length})</summary>
+      {loopback.length > 10 && <Input type="search" label={t('ports.findPort')} value={filter} onChange={(event) => setFilter(event.target.value)} />}
+      <ul className="max-h-40 overflow-y-auto">{loopback.filter((port) => String(port).includes(filter)).map((port) => <li key={port}>{port}</li>)}</ul>
+    </details>}
     <div><p className="text-sm font-medium">{t('machinePortValue.audiences')}</p>
       {allowed.length === 0 ? <EmptyState compact title={t('machines.policy.none')} />
           : <ul className="flex flex-col gap-1">{allowed.map((kind) => <li key={kind}><Choice {...choiceCopy(t, `portAudience.${kind}`)} compact /></li>)}</ul>}

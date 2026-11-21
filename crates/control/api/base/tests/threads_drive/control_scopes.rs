@@ -8,7 +8,7 @@ use http::StatusCode;
 use orch_access_contract::{key_scope::KeyScope, permissions::Permission};
 use orch_api_contract::threads::{ThreadInputRun, ThreadPlanDecide, ThreadPlanDecideBody};
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::{Act, Caller, Policy, Principal};
@@ -38,7 +38,7 @@ async fn key(s: &Scene, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -195,16 +195,52 @@ async fn plan(s: &Scene, name: &str) -> Plan {
     // A terminal row precedes its retained follow-up and workspace invalidations.
     // Finish that authored work before a refusal's exact no-effect baseline.
     rig::eventually(
-        "the plan's terminal and workspace work have committed",
+        "the plan's terminal work and workspace observation have committed",
         || async {
             sqlx::query_scalar::<_, bool>(
-                "SELECT end_work IS NULL AND NOT files_end_due AND NOT files_work_pending
+                "SELECT end_work IS NULL AND NOT files_end_due
              FROM turns WHERE id=$1",
             )
             .bind(start.turn_id)
             .fetch_one(s.rig.db.pool())
             .await
             .unwrap()
+        },
+    )
+    .await;
+    // Invalidations run on the retention schedule. Drain them deliberately rather than
+    // depend on the startup sweep happening to follow this turn's observation.
+    rig::eventually(
+        "the plan's workspace invalidations have committed",
+        || async {
+            s.rig.engine.run_retention().await.unwrap();
+            sqlx::query_scalar::<_, bool>("SELECT NOT files_work_pending FROM turns WHERE id=$1")
+                .bind(start.turn_id)
+                .fetch_one(s.rig.db.pool())
+                .await
+                .unwrap()
+        },
+    )
+    .await;
+    // The retention call also schedules native-history assessment. Its first committed
+    // receipt belongs before the exact no-effect baseline, just like workspace follow-up.
+    rig::eventually(
+        "the plan's native history assessment has committed",
+        || async {
+            let ready = sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS(SELECT 1 FROM segments WHERE thread_id=$1
+             AND native_session_ref IS NOT NULL AND agent_history_removed_at IS NULL
+             AND ((agent_history_measured_at IS NULL AND agent_history_error IS NULL)
+                  OR (agent_history_owned AND agent_history_policy IS NULL)))",
+            )
+            .bind(thread)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+            if !ready {
+                s.rig.engine.run_retention().await.unwrap();
+            }
+            ready
         },
     )
     .await;
@@ -657,6 +693,79 @@ async fn plan_scope_does_not_grant_an_ordinary_stranger_decision_authority() {
     assert_eq!(snapshot(&s, p.thread).await, before);
 }
 #[tokio::test]
+async fn accepting_a_held_input_includes_its_queue_check_and_rechecking_adds_no_thread_effect() {
+    let s = Scene::without_supervisor().await;
+    let i = bypass_input(&s, "The accepted held queue is already checked", false).await;
+    let accepted = snapshot(&s, i.thread).await;
+    let checked = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    s.rig.engine.preflight(i.thread).await.unwrap();
+    assert_eq!(
+        snapshot(&s, i.thread).await,
+        accepted,
+        "the first later reconciliation cannot add a second effect to an already accepted held input"
+    );
+    assert!(matches!(
+        checked.as_ref(),
+        Some(orch_api_contract::threads::QueueEligibility::None { .. })
+    ));
+    assert_eq!(
+        s.rig
+            .engine
+            .sync(i.thread, Some(s.ada.id()), None, 1)
+            .await
+            .unwrap()
+            .thread
+            .queue
+            .eligibility,
+        checked
+    );
+}
+
+#[tokio::test]
+async fn an_unused_key_does_not_retire_a_held_inputs_checked_queue_state() {
+    let s = Scene::without_supervisor().await;
+    let i = bypass_input(&s, "An unrelated credential leaves the queue alone", false).await;
+    s.rig.engine.preflight(i.thread).await.unwrap();
+    let observed = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    assert!(matches!(
+        observed,
+        Some(orch_api_contract::threads::QueueEligibility::None { .. })
+    ));
+    let before = snapshot(&s, i.thread).await;
+    let _unused = key(&s, s.eve.id(), bypass_rules(&i, true, true)).await;
+    let after = s
+        .rig
+        .engine
+        .sync(i.thread, Some(s.ada.id()), None, 1)
+        .await
+        .unwrap()
+        .thread
+        .queue
+        .eligibility;
+    assert_eq!(
+        after, observed,
+        "only credentials retained by queued work can invalidate its check"
+    );
+    assert_eq!(snapshot(&s, i.thread).await, before);
+}
+
+#[tokio::test]
 async fn bypass_scope_does_not_grant_an_ordinary_provider_manager_right() {
     let s = Scene::new().await;
     let i = bypass_input(&s, "Ordinary cap right retained", false).await;
@@ -764,9 +873,28 @@ async fn blocked_http(
         }
     }).await
 }
+
+async fn report_native_waits(s: &Scene, session: bool) {
+    // Only backend and lock metadata: no query text or credential material.
+    let waits = sqlx::query_scalar::<_, Json>(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'pid',a.pid,'wait_type',a.wait_event_type,'wait_event',a.wait_event,
+            'blocked_by',pg_blocking_pids(a.pid),
+            'credential_lock',EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid
+                AND l.locktype='relation' AND l.mode='RowShareLock'
+                AND l.relation=CASE WHEN $1 THEN 'access_tokens'::regclass ELSE 'api_tokens'::regclass END)
+        )),'[]'::jsonb) FROM pg_stat_activity a
+        WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()",
+    )
+    .bind(session)
+    .fetch_one(s.rig.db.pool())
+    .await;
+    eprintln!("thread-control native waits={waits:?}");
+}
+
 async fn legacy(s: &Scene, actor: Id) -> Key {
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token(
         &mut *s.rig.world.conn().await,
         &identity::NewApiToken {
@@ -877,7 +1005,7 @@ async fn deadline(work: Work, wait: Wait) {
     });
     tokio::select! {
         finished=&mut pending=>{held.rollback().await.unwrap();let reply=finished.unwrap();panic!("{work:?}/{wait:?} finished before the exact credential-holding native blocker premise: status={}",reply.status);}
-        witness=blocked_http(&s,locker,session)=>{match witness{Ok(pid)=>eprintln!("thread-control phase=blocked work={work:?} wait={wait:?} request_pid={pid} locker_pid={locker}"),Err(_)=>{pending.abort();let _=pending.await;held.rollback().await.unwrap();panic!("no exact credential-holding native blocker chain for {work:?}/{wait:?}");}}}
+        witness=blocked_http(&s,locker,session)=>{match witness{Ok(pid)=>eprintln!("thread-control phase=blocked work={work:?} wait={wait:?} request_pid={pid} locker_pid={locker}"),Err(_)=>{report_native_waits(&s,session).await;pending.abort();let _=pending.await;held.rollback().await.unwrap();panic!("no exact credential-holding native blocker chain for {work:?}/{wait:?}");}}}
     }
     s.rig.world.advance(chrono::Duration::seconds(2));
     held.commit().await.unwrap();
