@@ -78,7 +78,7 @@ fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifi
 }
 
 /// Web Push signed with the deployment's key, which is told to a push service
-/// together with the address of the system.
+/// together with the sender contact when the installation has one.
 fn web_push(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Option<PushNotifier>> {
     let file = secrets_dir.join(VAPID_KEY_FILE);
     if !file.is_file() {
@@ -86,9 +86,12 @@ fn web_push(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Option<
     }
     let secret = orch_config::read_secret(&file)?;
     let key = std::str::from_utf8(secret.expose()).context("the key is not text")?;
-    let vapid = Vapid::read(key, &config.system.public_url).context(
-        "the key, with [system] public_url as the sender's address, which must start with https://",
-    )?;
+    let vapid = Vapid::for_installation(
+        key,
+        &config.system.public_url,
+        &config.system.web_push_contact,
+    )
+    .context("reading the Web Push key and the installation's sender contact")?;
     Ok(Some(PushNotifier::new(vapid)))
 }
 
@@ -264,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn web_push_is_there_only_with_a_key_and_an_https_address_to_sign_it_with() {
+    fn a_local_worker_uses_the_same_browser_key_as_an_https_installation() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = ServerConfig::default();
         config.system.public_url = "https://orch.example".to_owned();
@@ -282,10 +285,8 @@ mod tests {
             "BMjQIp55pdbU8pfCBKyXcZjlmER_mXt5LqNrN1hrXbdBS5EnhIbMu3Au-RV53iIpztzNXkGI56BFB1udQ8Bq_H4"
         );
         config.system.public_url = "http://localhost:8080".to_owned();
-        assert!(
-            web_push(&config, dir.path()).is_err(),
-            "a push service is told who sends; an address without TLS says nothing"
-        );
+        let local = web_push(&config, dir.path()).unwrap().unwrap();
+        assert_eq!(local.public_key(), push.public_key());
         std::fs::write(dir.path().join(VAPID_KEY_FILE), "not a key").unwrap();
         config.system.public_url = "https://orch.example".to_owned();
         assert!(web_push(&config, dir.path()).is_err());

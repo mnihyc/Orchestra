@@ -4,9 +4,12 @@ import { screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach,beforeEach,describe,expect,it,vi } from 'vitest';
 import type * as Resources from '@/api/resources';
-import { registerAgent } from '@/api/resources';
+import { probeMachine,registerAgent,registerProvider } from '@/api/resources';
 import { changeMachinePrograms } from '@/api/machinePrograms';
 import { AddAgentDialog } from '@/features/resources/agents/AddAgent';
+import { RegisterInstalledSignInDialog } from '@/features/resources/machines/RegisterAgent';
+import { planProvider } from '../unit/provider-plan-fixtures';
+import { detailMachine } from './resource-detail-fixtures';
 import type { HomePickerProps } from '@/features/resources/HomePicker';
 import type { Agent,Machine,MachineProgram } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
@@ -16,14 +19,14 @@ import { harnessName } from '../doubles/harness-names';
 skipOverflowFallback();
 
 const help=vi.hoisted(()=>vi.fn());
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>help}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>help}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn()}));
 vi.mock('@/features/resources/HomePicker',()=>({HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose</option><option value="org">Acme</option></select>}));
-const machine:Pick<Machine,'id'|'name'|'roles'|'facts'|'online'>={id:'gpu',name:'GPU computer',roles:['agent'],facts:{adapters:[],harnesses:[]},online:true};
-vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),registerAgent:vi.fn(),
+const machine:Machine={...detailMachine,id:'gpu',name:'GPU computer',roles:['agent','provider'],facts:{adapters:[],harnesses:[]},online:true};
+vi.mock('@/api/resources',async(load)=>({...await load<typeof Resources>(),registerAgent:vi.fn(),registerProvider:vi.fn(),probeMachine:vi.fn(),
   harnessKindsQuery:{queryKey:['agent-kinds'],queryFn:()=>Promise.resolve([])},
   machinesQuery:{queryKey:['agent-machines'],queryFn:()=>Promise.resolve([machine])},
-  machineQuery:(id:string)=>({queryKey:['agent-machine',id],queryFn:()=>Promise.resolve(machine)}),
+  machineQuery:(id:string)=>({queryKey:['machine',id],queryFn:()=>Promise.resolve(machine)}),
 }));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs',id],changeMachinePrograms:vi.fn(),
   machineProgramsQuery:(id:string)=>({queryKey:['programs',id],queryFn:()=>Promise.resolve({entries:[],can_manage:true,config_file:null,
@@ -80,4 +83,80 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
     await user.click(screen.getByRole('button',{name:t('taskGuides.open',{title:t('taskGuides.registerProgram')})}));
     expect(help).toHaveBeenCalledExactlyOnceWith('register-your-program');expect(changeMachinePrograms).not.toHaveBeenCalled();
   });
+});
+
+for(const locale of ['en','zh-CN'] as const) {
+  it(`registers a found native sign-in and its profile together without a typed program path (${locale})`,async()=>{
+    await setLocale(locale);machine.facts={adapters:[{kind:'codex',builtin:true}],harnesses:[],discovered_harnesses:[{kind:'codex',path:'/opt/codex',version:'0.167.2',daemon:true}],policy:{'agent.harnesses':[],'policy.delegated':['agent.harnesses']}};
+    const provider=planProvider({id:'native-provider',kind:'subscription'});vi.mocked(registerProvider).mockResolvedValue(provider);
+    const done=vi.fn();show(<RegisterInstalledSignInDialog machineId={machine.id} initialHome="org" onClose={vi.fn()} onDone={done}/>);
+    const submit=await screen.findByRole('button',{name:i18n.t('machineSignup.register')});
+    await userEvent.click(submit);
+    await waitFor(()=>expect(done).toHaveBeenCalledExactlyOnceWith(agent,provider));
+    expect(changeMachinePrograms).toHaveBeenCalledExactlyOnceWith(machine.id,{action:'confirm_harness',kind:'codex',path:'/opt/codex'});
+    expect(registerAgent).toHaveBeenCalledWith(machine.id,expect.objectContaining({home_id:'org',harness_kind:'codex',profile:{attach:{binary:'/opt/codex'}}}),expect.any(String));
+    expect(registerProvider).toHaveBeenCalledWith(machine.id,expect.objectContaining({kind:'subscription',home_id:'org',agent_id:agent.id}),expect.any(String));
+  });
+  it(`keeps the created profile and retries only its provider after a partial failure (${locale})`,async()=>{
+    await setLocale(locale);machine.facts={adapters:[{kind:'codex',builtin:true}],harnesses:[{kind:'codex',path:'/opt/codex',version:'0.167.2',daemon:true}],policy:{'agent.harnesses':[{kind:'codex',path:'/opt/codex'}]}};
+    vi.mocked(registerProvider).mockRejectedValueOnce(new Error('The connection was interrupted.')).mockResolvedValueOnce(planProvider());
+    show(<RegisterInstalledSignInDialog machineId={machine.id} initialHome="org" onClose={vi.fn()} onDone={vi.fn()}/>);
+    await userEvent.click(await screen.findByRole('button',{name:i18n.t('machineSignup.register')}));
+    await screen.findByText(i18n.t('machineSignup.profileReady'));
+    await userEvent.click(screen.getByRole('button',{name:i18n.t('common.tryAgain')}));
+    await waitFor(()=>expect(registerProvider).toHaveBeenCalledTimes(2));
+    expect(registerAgent).toHaveBeenCalledTimes(1);expect(changeMachinePrograms).not.toHaveBeenCalled();
+  });
+}
+
+
+it('asks for the Provider role before offering a local sign-in command on an Agent-only machine', async () => {
+  const savedRoles = machine.roles;
+  machine.roles = ['agent'];
+  machine.facts = {
+    adapters: [{kind:'research-agent',builtin:true}],
+    harnesses: [],
+    discovered_harnesses: [{kind:'research-agent',path:'/opt/research',version:'1',daemon:true}],
+    policy: {'agent.harnesses': [], 'policy.delegated': []},
+  };
+  try {
+    show(<RegisterInstalledSignInDialog machineId={machine.id} initialHome="org" onClose={vi.fn()} />);
+    expect(await screen.findByText(i18n.t('machineSignup.providerNeeded'))).toBeVisible();
+    expect(screen.queryByRole('button', {name:i18n.t('machinePrograms.nativeRefresh')})).toBeNull();
+    const register = screen.getByRole('button', {name:i18n.t('machineSignup.register')});
+    expect(register).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(register);
+    expect(registerAgent).not.toHaveBeenCalled();
+    expect(registerProvider).not.toHaveBeenCalled();
+  } finally {
+    machine.roles = savedRoles;
+  }
+});
+
+it('copies the local command for the selected program and registers it after the machine reports the change',async()=>{
+  const other={kind:'fake',path:'/opt/example agent'};
+  const found={kind:'codex',path:'/opt/codex',version:'0.167.2',daemon:true};
+  const kept={'agent.harnesses':[other],'policy.local':{'agent.harnesses':[other]},'policy.delegated':[]};
+  const originalInstallation=machine.installation;
+  const prefix='"/opt/Orch Connector" --data "/home/operator/testing" policy';
+  machine.installation={program:'orch-connector',executable:'/opt/Orch Connector',config_file:'/home/operator/testing/config.toml',data_dir:'/home/operator/testing',user:'operator',system:false,service:null,
+    commands:{policy:prefix,roles:null,start:'start',stop:'stop',update:'update',uninstall:null}};
+  try {
+    machine.facts={adapters:[{kind:'codex',builtin:true}],harnesses:[],discovered_harnesses:[found],policy:kept};
+    vi.mocked(probeMachine).mockResolvedValueOnce({...machine,facts:{...machine.facts as object,harnesses:[found],discovered_harnesses:[]}});
+    const user=userEvent.setup();
+    show(<RegisterInstalledSignInDialog machineId={machine.id} initialHome="org" onClose={vi.fn()} onDone={vi.fn()}/>);
+    const register=await screen.findByRole('button',{name:i18n.t('machineSignup.register')});
+    expect(register).toHaveAttribute('aria-disabled','true');
+    const command=prefix+" set agent.harnesses '"+JSON.stringify([other,{kind:found.kind,path:found.path}])+"'";
+    expect(screen.getByText(command,{selector:'code'})).toBeVisible();
+    expect(screen.getByRole('button',{name:i18n.t('machines.policy.copy')})).toBeVisible();
+    await user.click(screen.getByRole('button',{name:i18n.t('machinePrograms.nativeRefresh')}));
+    await waitFor(()=>expect(register).not.toHaveAttribute('aria-disabled','true'));
+    expect(probeMachine).toHaveBeenCalledExactlyOnceWith(machine.id);
+    expect(screen.queryByText(command)).toBeNull();
+    await user.click(register);
+    await waitFor(()=>expect(registerAgent).toHaveBeenCalledTimes(1));
+    expect(changeMachinePrograms).not.toHaveBeenCalled();
+  } finally { if(originalInstallation===undefined)delete machine.installation;else machine.installation=originalInstallation; }
 });

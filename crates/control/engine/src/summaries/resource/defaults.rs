@@ -16,6 +16,7 @@ pub async fn manual_default(
     conn: &mut Conn,
     principal: &Principal,
     place: Id,
+    field: orch_summarizer_contract::descriptor::SummaryField,
     now: Time,
 ) -> Result<ManualDefault, EngineError> {
     let preferred = orch_settings::get::<Id>(
@@ -59,13 +60,13 @@ pub async fn manual_default(
                 continue;
             };
             let Ok(mut config) = Config::read(
-                &serde_json::json!({"provider_id":provider_id,"model_name":model_name,"params":params}),
+                &serde_json::json!({"backend":{"route":orch_summarizer_model::capabilities::ROUTE,"offering":{"provider":provider_id,"offering":model_name}},"params":params}),
             ) else {
                 continue;
             };
             let Ok(tokens) = orch_summarizer_model::context::fit_window(
                 config.context_tokens,
-                config.max_output_tokens,
+                config.output_reserve(field, parameters.needs_reasoning_room()),
                 parameters
                     .context_open()
                     .or(parameters.context_window.filter(|window| *window > 0)),

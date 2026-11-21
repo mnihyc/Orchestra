@@ -6,6 +6,7 @@ import { timelineUi } from '@/features/timeline/state';
 import { allTabs, type Layout, type Tab } from './layout';
 import { useWorkbench } from './store';
 import { contentThreadId } from './contentAddress';
+import { retainedClosedTabs } from './persistence';
 
 function threadOf(tab: Tab): string | null {
   if (tab.scope?.mode === 'fixed' && tab.scope.target.kind === 'thread') return tab.scope.target.id;
@@ -17,15 +18,19 @@ function threadOf(tab: Tab): string | null {
 }
 
 export function retireThreadWindows(before: Layout, after: Layout): void {
-  const current = new Map(allTabs(after).map((tab) => [tab.id, tab]));
-  const retired = new Set(allTabs(before).filter((tab) => {
+  retireWindowTabs(allTabs(before), allTabs(after));
+}
+
+function retireWindowTabs(before: Tab[], after: Tab[]): void {
+  const current = new Map(after.map((tab) => [tab.id, tab]));
+  const retired = new Set(before.filter((tab) => {
     const next = current.get(tab.id);
     return next?.view !== tab.view || threadOf(next) !== threadOf(tab);
   }).map((tab) => tab.id));
   if (retired.size === 0) return;
   // Promotion keeps the same logical main timeline, but its old transport/receipts must retire
   // before the full controls owner is admitted. Derived child readers still retire normally.
-  const promoted = new Map(allTabs(before).flatMap((tab) => {
+  const promoted = new Map(before.flatMap((tab) => {
     const next = current.get(tab.id), thread = contentThreadId(tab);
     return tab.view === 'search-result' && next?.view === 'page' && thread !== null && contentThreadId(next) === thread ? [[tab.id, thread] as const] : [];
   }));
@@ -41,6 +46,8 @@ export function retireThreadWindows(before: Layout, after: Layout): void {
 
 export function useThreadWindowLifetime(): void {
   useEffect(() => useWorkbench.subscribe((next, before) => {
-    if (next.layout !== before.layout) retireThreadWindows(before.layout, next.layout);
+    if (next.layout === before.layout && next.closedTabs === before.closedTabs && next.closedLimit === before.closedLimit) return;
+    const retained = (state: typeof next) => [...allTabs(state.layout), ...retainedClosedTabs(state.layout, state.closedTabs, state.closedLimit).map((entry) => entry.tab)];
+    retireWindowTabs(retained(before), retained(next));
   }), []);
 }

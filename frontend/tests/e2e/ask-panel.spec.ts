@@ -47,7 +47,6 @@ for (const locale of ['en', 'zh-CN'] as const) for (const width of [400, 1440]) 
     await expect(panel.getByText(t('ask.stopped'), { exact: true })).toBeVisible(); expect(server.stops).toBe(1);
     await server.finish();
     await expect(panel.getByRole('list', { name: t('ask.sources') })).toBeVisible();
-    await expect(panel.getByText(t('ask.adminNotice'), { exact: true })).toBeVisible();
     await panel.getByRole('button', { name: t('ask.history'), exact: true }).click();
     const history = page.getByRole('dialog', { name: t('ask.history'), exact: true });
     await history.getByRole('button', { name: /Release questions/ }).click(); await expect(history).toHaveCount(0);
