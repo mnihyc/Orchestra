@@ -79,7 +79,8 @@ pub async fn try_lock(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
         .bind(id).fetch_optional(conn).await?.is_some())
 }
 
-/// Saves metadata; only a visible change advances the environment's revision.
+/// Saves timing metadata; association alone owns the first creating-thread link.
+/// Only a visible change advances the environment's revision.
 pub async fn save(
     conn: &mut Conn,
     row: &Lifetime,
@@ -87,7 +88,7 @@ pub async fn save(
     visible_change: bool,
 ) -> Result<(), DbError> {
     sqlx::query("INSERT INTO environment_lifetimes(environment_id,thread_id,idle_hours,activity_at,archive_at,expires_at,warned_at,warned_owner_id,checked_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(environment_id) DO UPDATE SET thread_id=EXCLUDED.thread_id,idle_hours=EXCLUDED.idle_hours,
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(environment_id) DO UPDATE SET idle_hours=EXCLUDED.idle_hours,
         activity_at=EXCLUDED.activity_at,archive_at=EXCLUDED.archive_at,expires_at=EXCLUDED.expires_at,warned_at=EXCLUDED.warned_at,
         warned_owner_id=EXCLUDED.warned_owner_id,checked_at=EXCLUDED.checked_at")
         .bind(row.environment_id).bind(row.thread_id).bind(row.idle_hours).bind(row.activity_at).bind(row.archive_at)

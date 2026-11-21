@@ -104,6 +104,16 @@ async fn inventory_prefix_uses_actual_empty_body_and_one_native_measurement_with
     assert_eq!(count.result, Some(json!(expected)));
     assert_eq!(count.reference.job_id, reference.job_id);
     assert!(count.reference.measured_at.is_some());
+    let timing = serde_json::to_value(count.reference).unwrap();
+    assert!(
+        timing["timing"]["cache_valid_until"]["at"].is_string(),
+        "a real reused count records the native cache assessment"
+    );
+    assert_eq!(
+        timing["timing"]["observer_grace_until"]["state"],
+        "not_applicable"
+    );
+    assert!(timing["timing"]["assessed_at"].is_string());
     assert!(
         count.source().is_none(),
         "a prefix result never supplies a complete captured business operation"
@@ -275,6 +285,8 @@ async fn inventory_prefix_durable_issue_keeps_exact_command_raw_key_and_an_obser
     let id: Id = serde_json::from_value(frame["id"].clone()).unwrap();
     let body = json!({});
     let wire = link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id,
         machine_id: host.machine,
         kind: "node.resources.list",
@@ -302,6 +314,8 @@ async fn inventory_prefix_durable_issue_keeps_exact_command_raw_key_and_an_obser
     clock.advance(chrono::Duration::seconds(2));
     let mut tx = world.pool.begin().await.unwrap();
     let wire = link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id,
         machine_id: host.machine,
         kind: "node.resources.list",

@@ -8,6 +8,9 @@ import { useTranslation } from 'react-i18next';
 
 import { FileLink, FilePathAttachment } from '@/features/files/FileLink';
 import type { Item } from '@/generated/api-types';
+import { nativeFieldMasked } from '../masking';
+import { FileAttachment } from '@/features/files/FileChip';
+import { blobSource } from '@/features/files/source';
 
 type ReadItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -15,7 +18,8 @@ export function FileReadDisplay({ item }: { item: ReadItem }) {
   const { t } = useTranslation();
   const tool = item.payload.tool;
   if (tool.kind !== 'file_read') return null;
-  if (tool.media_type?.startsWith('image/') === true) {
+  const hidden = nativeFieldMasked(item.payload, '/tool/path');
+  if (!hidden && tool.media_type?.startsWith('image/') === true) {
     return <FilePathAttachment path={tool.path} mediaType={tool.media_type} />;
   }
   const first = tool.start_line ?? 1;
@@ -23,8 +27,10 @@ export function FileReadDisplay({ item }: { item: ReadItem }) {
   return (
     <div className="flex flex-col gap-1">
       <p className="font-mono text-sm text-text wrap-anywhere">
-        <FileLink path={tool.path} line={tool.start_line} />
+        {hidden ? tool.path : <FileLink path={tool.path} line={tool.start_line} />}
+        {hidden && <span className="ml-2 font-sans text-xs text-text-subtle">{t('timeline.masking.path')}</span>}
       </p>
+      {hidden && tool.content.blob !== null && <FileAttachment source={blobSource('thread', item.thread_id, tool.content.blob, tool.path, undefined, tool.media_type ?? 'text/plain')} />}
       <div className="max-h-(--output-height) overflow-auto rounded-lg border border-border bg-bg-inset">
         <table aria-label={t('timeline.read.excerpt', { path: tool.path })} className="w-full border-collapse font-mono text-sm">
           <tbody>

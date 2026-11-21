@@ -542,10 +542,7 @@ async fn visit(
             socket.visible(&feed);
             let one = [id];
             let last_hundred = query(&[("limit", "100")]);
-            let health = state.threads[t]
-                .provider
-                .as_deref()
-                .map(|p| query(&[("provider_id", p)]));
+            let opened = Instant::now();
             let mut reads: Vec<Call<'_>> = vec![
                 Box::pin(api.get(who, "/nodes/{id}", &one, "")),
                 Box::pin(api.get(who, "/threads/{id}/sync", &one, &last_hundred)),
@@ -560,11 +557,18 @@ async fn visit(
             {
                 reads.push(Box::pin(api.get(who, "/threads/{id}/draft", &one, "")));
             }
-            // The status bar's provider health (the page asks it again every 10 s while it stays open).
-            if let Some(health) = health.as_deref() {
-                reads.push(Box::pin(api.get(who, "/usage/health", &[], health)));
+            let replies = join_all(reads).await;
+            // The open panel uses the provider permission already reported by its parameters.
+            if let Some(provider) = replies.get(2).and_then(readable_provider) {
+                api.get(
+                    who,
+                    "/usage/health",
+                    &[],
+                    &query(&[("provider_id", provider)]),
+                )
+                .await;
             }
-            page(ctx, "thread", reads).await;
+            ctx.api.rec.page("thread", opened.elapsed());
             true
         }
         "document" => {
@@ -691,6 +695,20 @@ async fn visit(
             false
         }
     }
+}
+
+fn readable_provider(parameters: &Reply) -> Option<&str> {
+    if !parameters.ok()
+        || !parameters
+            .body
+            .pointer("/provider/access/permissions")?
+            .as_array()?
+            .iter()
+            .any(|permission| permission.as_str() == Some("provider.view"))
+    {
+        return None;
+    }
+    parameters.body.pointer("/provider/id")?.as_str()
 }
 
 /// A person adds a paragraph at the top of a document.

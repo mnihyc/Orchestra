@@ -632,12 +632,13 @@ export class Change implements Part {
     let from: ForkPlan['from'];
     if (program !== null && program !== undefined) {
       const model = thread.program_model;
-      if (model === null) throw new Refusal(400, 'request.invalid', 'The built-in source has no recorded model selection');
+      const offering = model?.backend.offering;
+      if (offering === null || offering === undefined) throw new Refusal(400, 'request.invalid', 'The built-in source has no recorded model selection');
       if (!isRecord(request.to) || asText(request.to.provider_id) === '' || asText(request.to.agent_id) === '' || asText(request.to.model) === '' || asked.environment.kind === 'same') {
         throw new Refusal(400, 'request.invalid', 'Choose the native provider, agent profile, model and destination environment');
       }
       asked.directory = asText(request.directory);
-      from = { kind: 'program', program, provider: this.providerRef(model.provider_id), model: model.model };
+      from = { kind: 'program', program, provider: this.providerRef(offering.provider), model: offering.offering };
     } else {
       const source = this.environment(bound.environment);
       from = { kind: 'agent', agent: this.agentRef(bound.agent), environment: source === undefined ? null : this.environmentRef(source.id), provider: this.providerRef(bound.provider) };
@@ -1935,14 +1936,14 @@ export class Change implements Part {
     return { input, seq: side.seq };
   }
 
-  private sideInterrupt(person: Person, id: string): Turn {
+  private sideInterrupt(person: Person, id: string): { state: 'stopped'; requested_at: string; turn: Turn } {
     const side = this.sideOf(id);
     this.world.places.need(person, side.parent, 'thread.interact');
     const running = [...side.turns.values()].find((entry) => entry.state === 'running');
     if (running === undefined) throw new Refusal(409, 'thread.not_running', 'nothing runs in this side thread');
     const stopped: Turn = { ...running, state: 'interrupted', completed_at: iso(Date.now()), phase: null, interrupted_by: this.user(person.me.username) };
     this.sideEmit(side, { turns: [stopped], thread: { state: 'idle', current_turn_id: null } });
-    return stopped;
+    return { state: 'stopped', requested_at: iso(Date.now()), turn: stopped };
   }
 
   private sideEmit(side: SideRecord, rows: { items?: Item[]; turns?: Turn[]; inputs?: ThreadInput[]; thread?: Partial<Thread> }): void {

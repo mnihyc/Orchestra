@@ -35,3 +35,15 @@ it.each(['en', 'zh-CN'] as const)('leaves unknown paste delivery unselected but 
  expect(within(item).queryByText(`→ ${paste.path}`, { exact: true })).not.toBeInTheDocument();
  expect(within(item).getByText(i18n.t('uploads.pasteInline'), { exact: true })).toBeVisible();
 });
+
+it.each(['en', 'zh-CN'] as const)('keeps the estimate cause with the actual paste outcome and replaces it after an explicit choice (%s)', async (locale) => {
+  await setLocale(locale);
+  const choose = () => undefined;
+  const view = show(<AttachmentChips parts={[paste]} pasteMode={() => false} pasteTokens={() => 900} pasteReason={() => 'over'} onPasteDelivery={choose} />);
+  expect(screen.getByText(locale === 'en' ? 'Exceeds the context share estimate' : '超出上下文占比估算')).toBeVisible();
+  expect(screen.getByText(i18n.t('uploads.pasteFile'), { exact: false })).toBeVisible();
+  view.rerender(<AttachmentChips parts={[{ ...paste, delivery: 'inline' }]} pasteMode={() => false} pasteTokens={() => 900} pasteReason={() => 'over'} onPasteDelivery={choose} />);
+  expect(screen.getByText(locale === 'en' ? 'Chosen for this paste' : '本次粘贴的选择')).toBeVisible();
+  expect(screen.queryByText(locale === 'en' ? 'Exceeds the context share estimate' : '超出上下文占比估算')).not.toBeInTheDocument();
+  expect(screen.getByText(i18n.t('uploads.pasteInline'), { exact: false })).toBeVisible();
+});
