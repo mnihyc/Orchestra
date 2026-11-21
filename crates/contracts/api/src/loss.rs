@@ -18,7 +18,7 @@ pub struct OperationNotificationPlan {
     pub preview_id: Option<Id>,
     /// Active people counted once for the whole operation.
     pub people: i64,
-    /// Initially on when accepting the operation blocks work.
+    /// The initial choice from the effective operation-notice policy; off by default.
     pub default_on: bool,
 }
 

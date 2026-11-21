@@ -76,6 +76,8 @@ enum Command {
     /// says what was tried and what came back, and the exit status is 1 when a
     /// check failed.
     Doctor(doctor::Options),
+    /// Read the effective public address or restore its file seed through the local database.
+    PublicAddress(commands::public_address::Options),
     /// Complete or repair the existing database-only dump/manifest record on the installation host.
     Backup(commands::backup::BackupArgs),
     /// Print the updater's configured release source, without contacting it.
@@ -163,6 +165,7 @@ fn main() -> ExitCode {
         Command::Channel(args) => return commands::channel::run(&args),
         Command::Plugin(args) => return commands::plugin::run(&args),
         Command::Doctor(options) => doctor::run(&options),
+        Command::PublicAddress(options) => return commands::public_address::run(&options),
         Command::Backup(args) => return commands::backup::run(&args),
         Command::OperatorStorage(options) => commands::operator_storage::run(&options),
         Command::ReleaseSource { config } => orch_config::load::<ServerConfig>(&config)

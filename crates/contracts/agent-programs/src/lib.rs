@@ -20,6 +20,7 @@
 pub mod browsers;
 pub mod catalogue;
 pub mod channels;
+pub mod confirmation;
 pub mod executors;
 pub mod localized;
 pub mod manifest;

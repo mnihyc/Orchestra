@@ -22,7 +22,9 @@ use orch_db::{
     Conn, DbError,
     queries::environments::workspace::{self, EnvironmentRow},
 };
-use orch_link_contract::commands::{CommandKind, FsFetch, FsStat, SerialKey};
+use orch_link_contract::commands::{
+    CommandKind, FsAccess, FsFetch, FsRelayDescribe, FsRelaySend, FsStat, SerialKey,
+};
 use orch_types::{Clock, Id, Time};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +32,7 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct FileSource {
     origin: CapturedOperation,
+    access: FsAccess,
     physical: Physical,
 }
 impl std::fmt::Debug for FileSource {
@@ -147,6 +150,20 @@ impl Source for Reader {
             {
                 return Err(Error::Refused);
             }
+            let current = orch_authz::file_reach::effective(
+                conn,
+                principal,
+                input.physical.environment,
+                Policy::default(),
+            )
+            .await?;
+            if !input
+                .access
+                .view
+                .is_some_and(|asked| current.view.is_some_and(|held| held >= asked))
+            {
+                return Err(Error::Refused);
+            }
             Ok(())
         })
     }
@@ -182,9 +199,10 @@ impl FileSource {
         caller: &Caller,
         environment: Id,
         path: &str,
+        access: FsAccess,
     ) -> Result<Self, EngineError> {
         if caller.admitted_operation() != Some("ReferencePreviewGet")
-            || !orch_documents::references::relative_path(path)
+            || !orch_documents::references::file_path(path)
         {
             return Err(EngineError::unreadable(
                 "the reference file source changed its operation or path",
@@ -194,9 +212,13 @@ impl FileSource {
             .await?
             .ok_or_else(|| EngineError::unreadable("the reference environment disappeared"))?;
         Ok(Self {
+            access,
             origin: CapturedOperation::capture(caller).map_err(EngineError::unreadable)?,
             physical: physical(conn, &row, path).await?,
         })
+    }
+    pub fn access(&self) -> FsAccess {
+        self.access
     }
     pub fn origin(&self) -> &CapturedOperation {
         &self.origin
@@ -208,7 +230,7 @@ impl FileSource {
             .await
             .map_err(DbError::from)?;
         if let Some(machine) = self.physical.machine {
-            let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR SHARE")
+            let _ = sqlx::query("SELECT id FROM machines WHERE id=$1 FOR KEY SHARE")
                 .bind(machine)
                 .fetch_optional(&mut *conn)
                 .await
@@ -241,7 +263,8 @@ impl FileSource {
         match command.kind {
             CommandKind::FsStat => {
                 let body: FsStat = serde_json::from_value(command.body.clone())?;
-                if body.environment_id != self.physical.environment
+                if body.access != self.access
+                    || body.environment_id != self.physical.environment
                     || body.mount.is_some()
                     || body.path != self.physical.path
                 {
@@ -255,7 +278,8 @@ impl FileSource {
             }
             CommandKind::FsFetch => {
                 let body: FsFetch = serde_json::from_value(command.body.clone())?;
-                if body.environment_id != self.physical.environment
+                if body.access != self.access
+                    || body.environment_id != self.physical.environment
                     || body.mount.is_some()
                     || body.path != self.physical.path
                     || body.expect.is_some()
@@ -268,6 +292,41 @@ impl FileSource {
                 Ok(super::http_command_source::CommandEvidence::ReferenceFetch(
                     self.clone(),
                 ))
+            }
+            CommandKind::FsRelayDescribe => {
+                let body: FsRelayDescribe = serde_json::from_value(command.body.clone())?;
+                if body.access != self.access
+                    || body.environment_id != self.physical.environment
+                    || body.mount.is_some()
+                    || body.path != self.physical.path
+                {
+                    return Err(EngineError::unreadable(
+                        "the reference description changed its native source",
+                    ));
+                }
+                Ok(
+                    super::http_command_source::CommandEvidence::ReferenceRelayDescribe(
+                        self.clone(),
+                    ),
+                )
+            }
+            CommandKind::FsRelaySend => {
+                let body: FsRelaySend = serde_json::from_value(command.body.clone())?;
+                if body.access != self.access
+                    || body.environment_id != self.physical.environment
+                    || body.mount.is_some()
+                    || body.path != self.physical.path
+                    || body.offset != 0
+                    || body.len < 0
+                    || body.relay_id.is_nil()
+                    || body.idle_secs == 0
+                    || body.retry_ms == 0
+                {
+                    return Err(EngineError::unreadable(
+                        "the reference relay changed its native source",
+                    ));
+                }
+                Ok(super::http_command_source::CommandEvidence::ReferenceRelaySend(self.clone()))
             }
             _ => Err(EngineError::unreadable(
                 "the reference source cannot send that command",
