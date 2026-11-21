@@ -36,6 +36,13 @@ use crate::session::{
     ApprovalDecision, SessionOpened, SessionSpec, ThreadId, ToolError, TurnId, TurnStart, TurnSteer,
 };
 
+/// A shared path to the running program's exact turn, independent of mutable session work.
+pub type Interrupt = std::sync::Arc<
+    dyn Fn(ThreadId, TurnId) -> futures::future::BoxFuture<'static, Result<(), AdapterError>>
+        + Send
+        + Sync,
+>;
+
 /// The names of the methods of an adapter on the plugin transport: the agent-role commands of the link.
 pub mod method {
     /// Start the harness or attach to a running one; idempotent. Answers the harness version and the
@@ -170,13 +177,13 @@ pub enum AdapterError {
     NotFound(String),
     /// The harness does not hold that session. The engine ends the segment and opens a new one by neutral
     /// import.
-    #[error("the harness has no session {0}")]
+    #[error("the agent program has no session {0}")]
     SessionNotFound(String),
     /// The harness cannot be run here: it is not installed, or not at a version this adapter drives.
-    #[error("harness unavailable: {0}")]
+    #[error("agent program unavailable: {0}")]
     HarnessUnavailable(String),
     /// The harness failed.
-    #[error("harness error: {0}")]
+    #[error("agent program error: {0}")]
     HarnessError(String),
     /// The harness has to be signed in first.
     #[error("a sign-in is needed")]
@@ -188,10 +195,10 @@ pub enum AdapterError {
     #[error("the lease is closed")]
     LeaseClosed,
     /// The harness cannot run on the credential it was given.
-    #[error("the harness cannot run on the credential it was given: {0}")]
+    #[error("the agent program cannot run on the credential it was given: {0}")]
     CredentialUnusable(String),
     /// A native archive could not be imported; the engine falls back to a neutral import.
-    #[error("the native archive could not be imported: {0}")]
+    #[error("the agent program's own history could not be imported: {0}")]
     ImportNativeFailed(String),
     /// It took longer than its deadline.
     #[error("timed out")]
@@ -696,6 +703,16 @@ pub trait AgentAdapter: Send + 'static {
     /// Opens a session: a new one, a resumed one, a fork, an import or an adoption.
     async fn open_session(&mut self, spec: SessionSpec) -> Result<SessionOpened, AdapterError>;
 
+    /// A capability session uses only its confined IO port; ordinary local execution is no fallback.
+    async fn open_program_session(
+        &mut self,
+        spec: SessionSpec,
+        io: std::sync::Arc<dyn crate::program_work::ProgramIo>,
+    ) -> Result<SessionOpened, AdapterError> {
+        let _ = (spec, io);
+        unsupported("isolated capability execution")
+    }
+
     /// Resolves a current native user reference to its retained item/client identity
     /// and inspects that boundary in a quiescent exact native lane.
     /// No model call, source mutation, session replacement or file restore.
@@ -848,6 +865,12 @@ pub trait AgentAdapter: Send + 'static {
         unsupported("steer")
     }
 
+    /// A Stop can reach the program while export, resync or steer is waiting. The connector refreshes
+    /// this handle after each adapter call and on process restart; implementations share live session state.
+    fn interrupt_handle(&self) -> Option<Interrupt> {
+        None
+    }
+
     /// Stops a running turn (`capabilities.interrupt`). The turn ends with `turn.completed` and the status
     /// `interrupted`.
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
@@ -904,6 +927,29 @@ pub trait AgentAdapter: Send + 'static {
     async fn resync_session(&mut self, thread: ThreadId) -> Result<u32, AdapterError> {
         let _ = thread;
         unsupported("resync")
+    }
+
+    /// Reobserves the exact accepted turn after host restart, without submitting input or resuming a lane.
+    /// True means its confirmed terminal history was emitted under `turn_id`; false means its native
+    /// outcome remains unavailable. Unsupported inspection never proves native work was lost.
+    async fn recover_turn(
+        &mut self,
+        source: crate::history::NativePrefixSource,
+        turn_id: orch_types::Id,
+        native_turn_ref: Option<String>,
+        directory: String,
+        cwd: String,
+        output_capture_bytes: u64,
+    ) -> Result<bool, AdapterError> {
+        let _ = (
+            source,
+            turn_id,
+            native_turn_ref,
+            directory,
+            cwd,
+            output_capture_bytes,
+        );
+        unsupported("recover_turn")
     }
 
     /// Lists the sessions the harness already has (`capabilities.discover_sessions`).
@@ -1205,6 +1251,7 @@ mod tests {
         drop(stream);
         assert_eq!(
             sink.emit(AdapterEvent::Status(HarnessStatus {
+                home: None,
                 status: crate::facts::HarnessState::Offline,
                 detail: None,
                 harness_version: None,
@@ -1241,6 +1288,7 @@ mod tests {
     #[test]
     fn the_other_events_of_an_adapter_go_by_their_own_names() {
         let status = AdapterEvent::Status(HarnessStatus {
+            home: None,
             status: crate::facts::HarnessState::Online,
             detail: None,
             harness_version: Some("0.160.1".into()),
@@ -1326,6 +1374,7 @@ mod tests {
             for index in 0..EVENTS {
                 writer
                     .emit(AdapterEvent::Status(HarnessStatus {
+                        home: None,
                         status: crate::facts::HarnessState::Online,
                         detail: Some(format!("native-event-{index}")),
                         harness_version: None,
@@ -1385,6 +1434,7 @@ mod mapped_sink_tests {
                 other => other,
             });
         let status = HarnessStatus {
+            home: None,
             status: HarnessState::Online,
             detail: None,
             harness_version: None,

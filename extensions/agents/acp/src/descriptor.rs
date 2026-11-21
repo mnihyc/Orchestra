@@ -277,10 +277,12 @@ pub fn descriptor(program: &AcpProgram, learned: &Learned) -> AgentDescriptor {
         direct_protocols: Vec::new(),
         credentials: orch_agent_contract::credentials::CredentialSupport::default(),
         runtime_template: None,
+        approval_auto: None,
         approval_modes,
         sandbox_modes: program.sandbox_modes.clone(),
         side_thread_modes: Vec::new(),
         capabilities,
+        features: Default::default(),
         parameters,
         extensions,
     }

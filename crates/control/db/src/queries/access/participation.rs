@@ -17,8 +17,8 @@ pub struct Mark {
 /// It does not evaluate View: the caller's frame still decides every returned row.
 /// Ordinary thread ownership is aggregated into requested ancestors instead of
 /// expanding a hundred thousand owned threads into the permission graph.
-/// `resources_only` selects the direct query only with no node targets or node/chat pages;
-/// other shapes retain the full query.
+/// When the caller specifies its participation targets, a resource-only page reads direct grants
+/// and a single unrestricted node reads its descendant count. Other shapes use the full query.
 #[expect(
     clippy::too_many_arguments,
     reason = "one request's ordinary identity and requested pages are bound together"
@@ -37,6 +37,107 @@ pub async fn marks(
     scope_roots: &[Id],
     resources_only: bool,
 ) -> Result<Vec<Mark>, DbError> {
+    read(
+        conn,
+        Request {
+            user,
+            groups,
+            members,
+            at,
+            nodes,
+            pages,
+            member_roots,
+            closed,
+            subtree,
+            scope_roots,
+            resources_only,
+        },
+        false,
+    )
+    .await
+}
+
+/// The actual assignment read with the same SQL and bindings, including planning and buffer work.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the plan uses exactly the ordinary frame's dependency bindings"
+)]
+pub async fn explain_marks(
+    conn: &mut Conn,
+    user: Id,
+    groups: &[Id],
+    members: &[Id],
+    at: Time,
+    nodes: &[Id],
+    pages: &[PageKey],
+    member_roots: &[Id],
+    closed: &[Id],
+    subtree: Option<Id>,
+    scope_roots: &[Id],
+    resources_only: bool,
+) -> Result<orch_types::Json, DbError> {
+    let mut rows: Vec<(orch_types::Json,)> = read(
+        conn,
+        Request {
+            user,
+            groups,
+            members,
+            at,
+            nodes,
+            pages,
+            member_roots,
+            closed,
+            subtree,
+            scope_roots,
+            resources_only,
+        },
+        true,
+    )
+    .await?;
+    rows.pop().map(|(plan,)| plan).ok_or_else(|| DbError::Rule {
+        constraint: "explain_plan_missing".into(),
+    })
+}
+
+struct Request<'a> {
+    user: Id,
+    groups: &'a [Id],
+    members: &'a [Id],
+    at: Time,
+    nodes: &'a [Id],
+    pages: &'a [PageKey],
+    member_roots: &'a [Id],
+    closed: &'a [Id],
+    subtree: Option<Id>,
+    scope_roots: &'a [Id],
+    resources_only: bool,
+}
+
+fn statement(sql: String, explain: bool) -> String {
+    if explain {
+        format!("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {sql}")
+    } else {
+        sql
+    }
+}
+
+async fn read<R>(conn: &mut Conn, request: Request<'_>, explain: bool) -> Result<Vec<R>, DbError>
+where
+    R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Unpin + Send,
+{
+    let Request {
+        user,
+        groups,
+        members,
+        at,
+        nodes,
+        pages,
+        member_roots,
+        closed,
+        subtree,
+        scope_roots,
+        resources_only,
+    } = request;
     let kinds: Vec<&str> = pages.iter().map(|page| page.object_kind.as_str()).collect();
     let ids: Vec<Id> = pages.iter().map(|page| page.object_id).collect();
     if resources_only
@@ -45,20 +146,39 @@ pub async fn marks(
             .iter()
             .all(|page| !matches!(page.object_kind.as_str(), "node" | "chat"))
     {
-        return Ok(sqlx::query_as(include_str!("participation_resources.sql"))
-            .bind(user)
-            .bind(groups)
-            .bind(at.get())
-            .bind(&kinds)
-            .bind(&ids)
-            .bind(member_roots)
-            .bind(closed)
-            .bind(subtree)
-            .bind(scope_roots)
-            .fetch_all(conn)
-            .await?);
+        return Ok(sqlx::query_as(sqlx::AssertSqlSafe(statement(
+            include_str!("participation_resources.sql").to_owned(),
+            explain,
+        )))
+        .bind(user)
+        .bind(groups)
+        .bind(at.get())
+        .bind(&kinds)
+        .bind(&ids)
+        .bind(member_roots)
+        .bind(closed)
+        .bind(subtree)
+        .bind(scope_roots)
+        .fetch_all(conn)
+        .await?);
     }
+    // A node is the home of its own assignments. For one unrestricted node,
+    // its descendant count therefore includes both direct and descendant grants.
+    // Each count is keyed by the original subject, scope root and expiry bucket.
+    let assignments = if resources_only
+        && kinds.as_slice() == ["node"]
+        && ids.as_slice() == nodes
+        && closed.is_empty()
+        && subtree.is_none()
+    {
+        "SELECT 'node' AS kind, p.node_id AS id FROM participation_paths p
+          WHERE p.node_id=ANY($5::uuid[]) AND p.live
+          AND orch_participation_node_count(p.node_id,$1,$2,$8,$11,$4)>0"
+    } else {
+        include_str!("participation_assignments.sql")
+    };
     let sql = include_str!("participation.sql")
+        .replace("__ASSIGNMENTS__", assignments)
         .replace(
             "__ROLE_SUBJECT__",
             &role_subject_sql("$1", "$2", "$3", "$4"),
@@ -71,9 +191,8 @@ pub async fn marks(
             "__PEOPLE_FOLLOW_LEVEL__",
             &chats::people_follow_level_sql("s", "p"),
         );
-    // The same text at every call: prepared once per connection, so that a frame does not plan it again (planning
-    // took 17 ms for 5 ms of work, at every one of a request's frames).
-    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+    // Parameter values share the same prepared statement for each projection shape.
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(statement(sql, explain)))
         .bind(user)
         .bind(groups)
         .bind(members)

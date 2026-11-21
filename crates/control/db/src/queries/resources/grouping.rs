@@ -53,6 +53,7 @@ fn table(kind: ResourceKind) -> (&'static str, &'static str) {
         ResourceKind::McpServer => ("mcp_servers", "home_id"),
         ResourceKind::Mount => ("mounts", "home_id"),
         ResourceKind::Skill => ("skills", "home_id"),
+        ResourceKind::Pool => ("pools", "home_id"),
     }
 }
 

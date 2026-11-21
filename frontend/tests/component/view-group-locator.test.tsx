@@ -8,21 +8,29 @@ import { show } from './support';
 
 it('filters duplicate names by path and closes only the addressed dirty tab without selecting it', async () => {
   const select = vi.fn(), close = vi.fn();
+  const path = vi.fn((group: string) => `Team ${group} / Plan`);
   function Group() {
     const [active, setActive] = useState('one');
-    const entries = [{ id: 'one', title: 'Plan', path: 'Team A / Plan', unsaved: true }, { id: 'two', title: 'Plan', path: 'Team B / Plan' },
-      ...Array.from({ length: 20 }, (_, index) => ({ id: `other-${index}`, title: `Other ${index}`, path: 'Elsewhere' }))];
+    const entries = [{ id: 'one', title: 'Plan', group: 'A', unsaved: true }, { id: 'two', title: 'Plan', group: 'B' },
+      ...Array.from({ length: 20 }, (_, index) => ({ id: `other-${index}`, title: `Other ${index}`, group: 'Elsewhere' }))];
     return <ViewGroup label="Main area" tabIds={entries.map((tab) => tab.id)} activeId={active}
-      tabInfo={entries.map((tab) => ({ ...tab, onSelect: () => { select(tab.id); setActive(tab.id); }, onClose: () => { close(tab.id); } }))}
+      tabInfo={entries.map((tab) => ({ ...tab, get path() { return path(tab.group); }, onSelect: () => { select(tab.id); setActive(tab.id); }, onClose: () => { close(tab.id); } }))}
       tabElementId={(id) => `locator-tab-${id}`} panelId="locator-panel"
       renderTab={(id, state) => <button id={`locator-tab-${id}`} role="tab" aria-selected={state.active} tabIndex={state.tabbable ? 0 : -1}>{id}</button>}>
       <p>Retained working content</p>
     </ViewGroup>;
   }
   show(<Group />); const user = userEvent.setup();
+  expect(path).not.toHaveBeenCalled();
   const firstTab = screen.getByRole('tab', { name: 'one' });
   await user.click(screen.getByRole('button', { name: 'Find tab in Main area' }));
   let chooser = screen.getByRole('dialog', { name: 'Find tab in Main area' });
+  const field = within(chooser).getByRole('combobox', { name: 'Find an open tab' });
+  expect(field).toHaveFocus();
+  await user.keyboard('{End}{ArrowDown}');
+  expect(field).toHaveAttribute('aria-activedescendant', within(chooser).getByRole('option', { name: 'Plan, unsaved' }).id);
+  await user.keyboard('{ArrowUp}');
+  expect(field).toHaveAttribute('aria-activedescendant', within(chooser).getByRole('option', { name: 'Other 19' }).id);
   await user.type(within(chooser).getByRole('combobox', { name: 'Find an open tab' }), 'Team B');
   expect(within(chooser).getAllByRole('option')).toHaveLength(1);
   await user.keyboard('{Enter}'); expect(select).toHaveBeenCalledExactlyOnceWith('two');

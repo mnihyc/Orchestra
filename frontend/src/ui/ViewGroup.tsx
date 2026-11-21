@@ -8,15 +8,12 @@
  * The group draws what it is given. What a tab's menu holds, what moves a tab and what its view is
  * are the caller's.
  */
-import { Fragment, type KeyboardEvent, type ReactNode, useRef, useState } from 'react';
-import { Search, X } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Fragment, type KeyboardEvent, type ReactNode } from 'react';
 
 import { cx } from '@/ui/cx';
 import { useTabStripReveal } from '@/ui/useTabStripReveal';
 import { type ChoiceHelp } from '@/ui/Choice';
-import { IconButton } from '@/ui/IconButton';
-import { Palette, PaletteInput, PaletteItem, PaletteList, PaletteEmpty } from '@/ui/Palette';
+import { TabLocator } from '@/ui/TabLocator';
 import { ScrollArea } from '@/ui/ScrollArea';
 
 export interface GroupTabInfo {
@@ -80,14 +77,7 @@ export function ViewGroup({
   onFocusWithin,
   className,
 }: ViewGroupProps) {
-  const { t } = useTranslation();
-  const strip = useTabStripReveal(activeId, tabIds, tabElementId);
-  const menuDestination = useRef<string | null>(null);
-  const [choosing, setChoosing] = useState(false);
-  const [query, setQuery] = useState('');
-  const [chosen, setChosen] = useState('');
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const information = tabInfo.filter((tab) => terms.every((term) => `${tab.title} ${tab.path ?? ''}`.toLocaleLowerCase().includes(term)));
+  const strip = useTabStripReveal(activeId, tabIds, tabElementId, panelId);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -137,30 +127,7 @@ export function ViewGroup({
           {stripEnd}
         </div>
         {(!compactTabs || tabIds.length > 1) && <span className="flex h-(--tab-strip-height) shrink-0 items-center self-start">
-        <IconButton size="sm" label={t('workbench.allTabs', { name: label })} icon={<Search aria-hidden />}
-          onClick={() => { setQuery(''); setChosen(activeId ?? ''); setChoosing(true); }} />
-        <Palette label={t('workbench.allTabs', { name: label })} inputLabel={t('workbench.workspace.findTab')} showTitle
-          open={choosing} onOpenChange={setChoosing} value={chosen} onValueChange={setChosen}
-          onCloseAutoFocus={(event) => {
-            const destination = menuDestination.current;
-            if (destination === null) return;
-            menuDestination.current = null;
-            event.preventDefault();
-            requestAnimationFrame(() => document.getElementById(tabElementId(destination))?.focus());
-          }}>
-          <PaletteInput aria-label={t('workbench.workspace.findTab')} placeholder={t('workbench.workspace.findTab')} value={query} onValueChange={setQuery} />
-          <PaletteList><PaletteEmpty>{t('workbench.workspace.noMatchingTabs')}</PaletteEmpty>
-            {information.map((tab) => <PaletteItem key={tab.id} value={tab.id} onSelect={() => {
-              menuDestination.current = tab.id; tab.onSelect(); setChoosing(false);
-            }} aria-label={tab.unsaved ? t('workbench.tab.unsaved', { title: tab.title }) : tab.title}>
-              {tab.icon}<span className="min-w-0 flex-1"><span className="block truncate">{tab.title}</span>
-                {tab.path !== undefined && <span className="block truncate text-xs text-text-muted">{tab.path}</span>}
-              </span>{tab.unsaved && <span aria-hidden data-unsaved className="size-2 shrink-0 rounded-full bg-text-muted" />}
-              {tab.closable !== false && <IconButton size="sm" label={t('workbench.tab.closeNamed', { title: tab.title })} icon={<X aria-hidden />}
-                onKeyDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); tab.onClose(); }} />}
-            </PaletteItem>)}
-          </PaletteList>
-        </Palette>
+          <TabLocator label={label} activeId={activeId} tabs={tabInfo} tabElementId={tabElementId} />
         </span>}
         </div>
         {actions !== undefined && <div className="flex h-(--tab-strip-height) shrink-0 items-center gap-0.5 px-1">{actions}</div>}

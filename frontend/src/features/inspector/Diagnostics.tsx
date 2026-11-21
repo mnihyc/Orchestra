@@ -29,6 +29,7 @@ import { ScrollArea } from '@/ui/ScrollArea';
 import { Tabs } from '@/ui/Tabs';
 import { AgentTerminal } from './AgentTerminal';
 import { ThreadPanel } from './ThreadPanel';
+import { CaptureFacts } from './CaptureFacts';
 
 function Frames({ threadId, segment }: { threadId: string; segment: string }) {
   const { t } = useTranslation();
@@ -49,7 +50,8 @@ function Frames({ threadId, segment }: { threadId: string; segment: string }) {
     <div className="flex flex-wrap gap-2 p-2"><Select<RawDirection | ''> label={t('threadViews.diagnostics.direction')} value={direction} onValueChange={setDirection} options={[{ value: '', ...choiceOption(t, 'rawDirection.all') }, { value: 'to_harness', ...choiceOption(t, 'rawDirection.to_harness') }, { value: 'from_harness', ...choiceOption(t, 'rawDirection.from_harness') }]} /><Input label={t('threadViews.diagnostics.search')} value={search} onChange={(event) => setSearch(event.target.value)} /></div>
     <div className="p-2"><Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.error} onMore={() => void query.fetchNextPage()} />
       {events.length === 0 && <EmptyState compact icon={<Bug aria-hidden />} title={t('threadViews.diagnostics.empty')} />}
-      <ol aria-label={t('threadViews.diagnostics.frames')}>{events.map((event) => <li key={event.n} className="border-b border-border py-2"><details><summary className="cursor-pointer text-sm">{event.n} · {t(event.direction === 'to_harness' ? 'threadViews.diagnostics.to' : 'threadViews.diagnostics.from')} · <RelativeTime at={event.at} /></summary><JsonTree value={event.payload} search={search} label={t('threadViews.diagnostics.frame', { n: event.n })} /></details></li>)}</ol>
+      <ol aria-label={t('threadViews.diagnostics.frames')}>{events.map((event) => <li key={event.n} className="border-b border-border py-2"><details><summary className="cursor-pointer text-sm">{event.n} · {t(event.direction === 'to_harness' ? 'threadViews.diagnostics.to' : 'threadViews.diagnostics.from')} · <RelativeTime at={event.at} />{event.masking !== undefined && <span className="ml-2 text-xs text-text-muted">{t(`timeline.masking.${event.masking}`)}</span>}</summary><JsonTree value={event.payload} search={search} label={t('threadViews.diagnostics.frame', { n: event.n })} /></details></li>)}</ol>
+      <div className="border-t border-border pt-2"><CaptureFacts capture={query.data.pages.at(-1)?.capture} retention={query.data.pages.at(-1)?.retention} /></div>
     </div>
   </div>;
 }
