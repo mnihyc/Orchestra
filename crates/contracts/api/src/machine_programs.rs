@@ -89,9 +89,48 @@ pub struct MachineProgramCapability {
     pub reason: Option<String>,
 }
 
+/// A manager's recorded execution decision, projected using the ordinary people reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionApproval {
+    /// The actual manager, including the historical reference when their name is unavailable.
+    pub by: crate::users::UserRef,
+    /// When the manager made this decision.
+    pub at: orch_types::Time,
+}
+
+/// The factual subject of a machine manager's execution decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MachineExecutionSubject {
+    /// The native system and exact connector executable reviewed by the machine manager.
+    System {
+        build: orch_agent_programs::confirmation::PlatformBuild,
+    },
+    /// A currently selected machine program.
+    Program {
+        /// The harness whose program was selected.
+        harness_kind: String,
+        /// The selected program's path.
+        path: String,
+    },
+}
+
+/// One current machine execution decision with its server-recorded author.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineExecutionApproval {
+    /// The exact currently selected subject.
+    pub subject: MachineExecutionSubject,
+    /// The shared manager and moment.
+    #[serde(flatten)]
+    pub approval: ExecutionApproval,
+}
+
 /// One whole projection: initial reported state and every mutation's acknowledgement have this shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MachinePrograms {
+    /// Filled by the API from its own decision records; native reports supply no people.
+    #[serde(default)]
+    pub approvals: Vec<MachineExecutionApproval>,
     /// The changed machine's authorized view on HTTP mutation acknowledgement; absent in native reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_view: Option<crate::resources::Machine>,

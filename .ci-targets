@@ -1,0 +1,2 @@
+test -p orch-api-core --test document_files --test thread_read_tools --test people_notify --test exports
+test -p orch-engine --test orch_capabilities
