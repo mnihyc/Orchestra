@@ -153,7 +153,7 @@ for (const navigation of ['open', 'closed'] as const) test(`a cold thread with t
     expect(initial.filter((entry) => entry === `GET /api/v1/nodes/${ACME.mainThread}` || entry === `GET /api/v1/nodes/${ACME.mainThread}/settings`)).toEqual([]);
     if (navigation === 'closed') {
       expect(initial.filter((entry) => entry.startsWith(`GET /api/v1/orgs/${ACME.org}/tree`) || entry.startsWith(`GET /api/v1/orgs/${ACME.org}/chats`) || entry === `GET /api/v1/nodes/${ACME.org}/settings`)).toEqual([]);
-    } else await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
+    } else await expect(page.getByRole('tree', { name: 'Organizations, projects, topics and threads' })).toBeVisible();
     await page.clock.install(); await page.clock.fastForward(120_000); await settled(page);
     expect(measured.requests).toEqual(initial);
     await test.info().attach('thread-initial-traffic', { body: initial.join('\n'), contentType: 'text/plain' });
