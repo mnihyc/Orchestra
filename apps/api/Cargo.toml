@@ -21,6 +21,7 @@ orch-blob-local.workspace = true
 orch-build-info.workspace = true
 orch-config.workspace = true
 orch-db.workspace = true
+orch-human-check.workspace = true
 orch-identity-oidc.workspace = true
 orch-image-backends.workspace = true
 orch-notifier-email.workspace = true

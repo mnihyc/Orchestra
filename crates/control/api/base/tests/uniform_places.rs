@@ -37,6 +37,7 @@ async fn choose(
         .call(NodeSettingSet, &[&node, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,
@@ -116,6 +117,7 @@ async fn the_default_environment_resolves_at_every_place_and_an_ancestor_lock_de
         .call(NodeSettingSet, &[&topic.base.id, &"env.default_id"])
         .token(&owner.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(ids[4]),
             locked: None,
             expected_revision: None,
@@ -139,6 +141,7 @@ async fn the_default_environment_resolves_at_every_place_and_an_ancestor_lock_de
         .call(NodeSettingSet, &[&topic.base.id, &"env.default_id"])
         .token(&viewer.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(ids[4]),
             locked: None,
             expected_revision: None,

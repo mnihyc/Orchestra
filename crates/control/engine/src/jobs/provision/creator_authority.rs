@@ -861,6 +861,11 @@ async fn current_selected(
         };
         let places = if authority.wake.is_some() && env.generation > 0 {
             places::retained_host_places(conn, &principal, &ask, env.id, current.host_id).await?
+        } else if let Some(place) =
+            crate::resource_choice::host::current(conn, &principal, row, &env, current.host_id)
+                .await?
+        {
+            vec![place]
         } else {
             places::host_places_for_environment(conn, &principal, &ask, env.id).await?
         };

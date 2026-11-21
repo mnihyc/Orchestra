@@ -7,9 +7,7 @@
 
 pub use super::*;
 
-use crate::middleware::authentication::API_TOKEN_PREFIX;
-
-use crate::middleware::authentication::new_token;
+use crate::middleware::authentication::new_api_token;
 
 use crate::middleware::authentication::token_hash;
 
@@ -250,8 +248,8 @@ pub async fn control(kind: K, change: Change) {
         {"target":{"kind":"org","id":desk.org,"reach":"subtree"},"resources":["org","project","topic","thread"],"allow":[{"operation":"ObjectTransfer","actions":["read"]}]}
     ]})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
     let key = new_id();
+    let token = new_api_token(key);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {

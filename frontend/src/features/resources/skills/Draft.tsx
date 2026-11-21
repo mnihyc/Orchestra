@@ -20,6 +20,7 @@ import { Input } from '@/ui/Input';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { SkillRefusal } from './Refusal';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 const SKILL_FILE = 'SKILL.md';
 
@@ -46,6 +47,7 @@ export function SkillDraftPanel({ skill }: { skill: Skill }) {
 function DraftEditor({ skill, draft }: { skill: Skill; draft: SkillDraft }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
+  const application=useApplicationImpact({object:{kind:'skill',id:skill.id},model_id:null},true,{skill_publication:true});
   const [selected, setSelected] = useState(draft.files.some((file) => file.path === SKILL_FILE) ? SKILL_FILE : draft.files[0]?.path ?? '');
   const [adding, setAdding] = useState<string | null>(null);
   const [discarding, setDiscarding] = useState(false);
@@ -84,9 +86,10 @@ function DraftEditor({ skill, draft }: { skill: Skill; draft: SkillDraft }) {
       <span className="text-sm text-text-muted">{t('resourceDetails.skill.draft.files', { count: draft.files.length })} · <ByteSize bytes={draft.files.reduce((sum, one) => sum + one.size, 0)} /></span>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" icon={<Trash2 aria-hidden />} disabled={busy} onClick={() => setDiscarding(true)}>{t('resourceDetails.skill.draft.discard')}</Button>
-        <Button size="sm" variant="primary" icon={<Send aria-hidden />} pending={publish.isPending} disabled={busy} onClick={() => publish.mutate()}>{t('resourceDetails.skill.draft.publish')}</Button>
+        <Button size="sm" variant="primary" icon={<Send aria-hidden />} pending={publish.isPending} disabled={busy||!application.ready} onClick={() => {if(application.ready)publish.mutate();}}>{t('resourceDetails.skill.draft.publish')}</Button>
       </div>
     </div>
+    <ApplicationPreview read={application.read}/>
     {error !== null && <SkillRefusal error={error} />}
     <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(12rem,16rem)_minmax(0,1fr)]">
       <div className="flex min-w-0 flex-col gap-2">
