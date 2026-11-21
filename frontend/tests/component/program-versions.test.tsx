@@ -17,11 +17,11 @@ import { withGroup } from '@/features/settings/settingsModel';
 import { localizedSetting } from '@/features/settings/settingText';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { HarnessVersions } from '@/features/admin/HarnessVersions';
-import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { EnvironmentPrograms, ProgramBuild } from '@/features/resources/agents/ProgramBuild';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
 import { UpdateDialog } from '@/features/fleet/UpdateDialog';
 import { PlanSwitch } from '@/features/composer/PlanSwitch';
-import type { EnvironmentUpdateBatchPlan, HarnessBuild, HarnessBuildUsage, HarnessKindInfo, Job, ProviderRuntimeUpdateBatchPreflightReply, ResolvedSetting } from '@/generated/api-types';
+import type { EnvironmentUpdateBatchPlan, HarnessBuild, HarnessBuildUsage, HarnessKindInfo, Job, ProviderRuntimeUpdateBatchPreflightReply, ResolvedSetting, RunningHarnessBuild } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { detailEnvironment, detailUnitProvider } from './resource-detail-fixtures';
@@ -31,17 +31,18 @@ import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 import { harnessName } from '../doubles/harness-names';
 
-const state = vi.hoisted(() => ({ kinds: [] as HarnessKindInfo[], builds: [] as HarnessBuild[], usage: [] as HarnessBuildUsage[], plan: null as EnvironmentUpdateBatchPlan | null, fetch: vi.fn<typeof HarnessesApi.fetchProgramVersion>(), write: vi.fn(), settingWrite: vi.fn<typeof SettingsApi.putSetting>(), start: vi.fn<typeof ChangesApi.startEnvironmentUpdates>(), providerRead: vi.fn<typeof ChangesApi.planProviderUpdates>(), providerStart: vi.fn<typeof ChangesApi.startProviderUpdates>() }));
+const state = vi.hoisted(() => ({ running: [] as RunningHarnessBuild[], kinds: [] as HarnessKindInfo[], builds: [] as HarnessBuild[], usage: [] as HarnessBuildUsage[], plan: null as EnvironmentUpdateBatchPlan | null, fetch: vi.fn<typeof HarnessesApi.fetchProgramVersion>(), write: vi.fn(), settingWrite: vi.fn<typeof SettingsApi.putSetting>(), start: vi.fn<typeof ChangesApi.startEnvironmentUpdates>(), providerRead: vi.fn<typeof ChangesApi.planProviderUpdates>(), providerStart: vi.fn<typeof ChangesApi.startProviderUpdates>() }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>(), harnessKindsQuery: { queryKey: ['version-program-kinds'], queryFn: () => Promise.resolve(state.kinds) } }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<object>(), putSetting: state.settingWrite }));
 vi.mock('@/api/harnesses', async (load) => ({ ...await load<object>(),
+  environmentProgramsQuery: (id: string) => ({ queryKey: ['programs-seen', id], queryFn: () => Promise.resolve(state.running) }),
   programBuildsQuery: { queryKey: ['program-builds'], queryFn: () => Promise.resolve(state.builds) },
   harnessUsageQuery: { queryKey: ['admin', 'harness-usage'], queryFn: () => Promise.resolve(state.usage) },
   fetchProgramVersion: state.fetch,
 }));
 vi.mock('@/api/changes', async (load) => ({ ...await load<object>(), planEnvironmentUpdates: () => Promise.resolve(state.plan), startEnvironmentUpdates: state.start, planProviderUpdates: state.providerRead, startProviderUpdates: state.providerStart }));
 vi.mock('@/features/admin/SettingRows', () => ({ useSystemSettings: () => ({ find: () => ({ value: {} }) }), useSettingChange: () => ({ writable: true, save: { variables: undefined, mutate: state.write } }), SettingChangeStatus: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject, children }: { subject: { kind: string; environment?: { name: string }; provider?: { name: string } }; children?: ReactNode }) => <span>{children ?? subject.environment?.name ?? subject.provider?.name}</span> }));
 vi.mock('@/features/change/Progress', () => ({ JobProgress: ({ job }: { job: Job }) => <p>{job.state}</p>, committed: () => false }));
 vi.mock('@/api/forks', async (load) => ({ ...await load<object>(), jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => Promise.resolve({ ...failedStart().job, id }) }) }));
@@ -126,9 +127,13 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   const name = locale === 'zh-CN' ? '研究助理' : 'Research assistant';
   const program = { kind: 'named-external', version: '1.2.3', build: null,
     harness: { kind: 'named-external', name: 'Research assistant', names: { 'zh-CN': '研究助理' } } };
-  show(<ProgramBuild program={program} />);
-  expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
-  expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  state.running = [program];
+  show(<EnvironmentPrograms id="environment" />);
+  const programs = await screen.findByRole('region', { name: i18n.t('programVersions.running') });
+  expect(within(programs).getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
+  expect(within(programs).getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  expect(within(programs).getByText(i18n.t('programVersions.unknownCheckWhy'))).toBeVisible();
+  expect(within(programs).getByText(locale === 'en' ? /Choose a checked build/i : /已.*检查|已.*验证/)).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
 });
