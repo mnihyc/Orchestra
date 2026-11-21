@@ -269,6 +269,8 @@ orch_api_base::__api_bind_cfc8a895c0!();
 /// nothing to say is empty, off or null.
 pub(crate) fn through_a_thread(view: Environment) -> Environment {
     Environment {
+        attach_retry: None,
+        file_reach: None,
         provenance: Default::default(),
         sandbox_readiness: None,
         can_declare_lost: false,
@@ -321,6 +323,8 @@ pub(crate) fn through_a_thread(view: Environment) -> Environment {
         manifest_at: None,
         last_activity_at: None,
         idle_stop_at: None,
+        idle_stop_deferred: false,
+        removal_keep_days: None,
         unused_since: None,
         remove_at: None,
         remove_reason: None,
