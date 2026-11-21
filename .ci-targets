@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --test realtime_threads --test realtime_feeds --test realtime_socket --test realtime_continuations --test realtime_origins
+test -p orch-api-core --test realtime_threads -- --show-output each_step_of_a_turn_reaches_the_open_page_at_once_while_the_agents_words_stream a_step_reaches_the_open_page_at_once_while_another_request_changes_its_readers_session
+test -p orch-api-core --test realtime_threads -- after_a_process_restarts_mid_stream
+test -p orch-api-core --test realtime_threads -- after_a_process_restarts_mid_stream
+test -p orch-api-core --test realtime_threads -- after_a_process_restarts_mid_stream
+test -p orch-api-core --lib

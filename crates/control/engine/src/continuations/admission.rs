@@ -812,8 +812,15 @@ pub async fn apply(
         commands: Commands::of(operation),
         accepted_at: Time::new(now),
         deadline: Time::new(
-            now + chrono::Duration::minutes(options.wait_minutes)
-                + chrono::Duration::seconds(options.verify_timeout_secs),
+            chrono::Duration::try_minutes(options.wait_minutes)
+                .and_then(|wait| now.checked_add_signed(wait))
+                .and_then(|at| {
+                    chrono::Duration::try_seconds(options.verify_timeout_secs)
+                        .and_then(|check| at.checked_add_signed(check))
+                })
+                .ok_or(Error::Invalid(
+                    "The combined wait and health-check time exceeds the supported clock range.",
+                ))?,
         ),
         prefix: if retry && needs_prefix {
             retained_prefix
