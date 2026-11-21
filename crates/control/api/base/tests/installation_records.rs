@@ -288,12 +288,12 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
         .send()
         .await
         .ok();
-    for reply in [
-        (200, "not JSON".to_owned(), 0),
-        (200, "x".repeat(1_048_577), 0),
-        (302, String::new(), 0),
-        (200, manifest("0.1.0"), 0),
-        (200, manifest("2.0.0"), 2000),
+    for (reply, older) in [
+        ((200, "not JSON".to_owned(), 0), false),
+        ((200, "x".repeat(1_048_577), 0), false),
+        ((302, String::new(), 0), false),
+        ((200, manifest("0.1.0"), 0), true),
+        ((200, manifest("2.0.0"), 2000), false),
     ] {
         *site.reply.lock().unwrap() = reply;
         world.advance(Duration::hours(1));
@@ -305,6 +305,10 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
             .await
             .ok();
         assert!(failed.error.is_some());
+        assert_eq!(
+            failed.error.as_deref() == Some("release.source_older"),
+            older
+        );
         assert_eq!(failed.checked_at, first.checked_at);
         assert_eq!(failed.offered_version, first.offered_version);
         let shown = world

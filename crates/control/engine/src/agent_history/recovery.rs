@@ -58,33 +58,39 @@ impl Engine {
         let cut_id: Option<Id> = serde_json::from_value(recipe["cut"].clone())?;
         let source_id: Id = serde_json::from_value(recipe["source_segment"].clone())?;
         let source = agent_history::get(unit.conn, source_id).await?;
-        let cut = match cut_id {
-            Some(id) => cuts::cut(unit.conn, id).await?,
+        // Completion reads only bounded receipt facts, never the carried notice or full cut under Thread.
+        let plan: Option<Json> = match cut_id {
+            Some(id) => sqlx::query_scalar("SELECT jsonb_build_object(
+                'native',artifacts#>'{recovery_plan,native}', 'summary',artifacts#>'{recovery_plan,summary}',
+                'brief',artifacts#>'{recovery_plan,brief}', 'carried',artifacts#>'{recovery_plan,carried}',
+                'recorded_turn_coverage',artifacts#>'{recovery_plan,recorded_turn_coverage}',
+                'transcript',artifacts ? 'recovery_transcript') FROM thread_history_cuts WHERE id=$1")
+                .bind(id).fetch_optional(&mut *unit.conn).await.map_err(orch_db::DbError::from)?,
             None => None,
         };
         use orch_api_contract::threads::AgentHistoryRecovery as Mode;
         let mode = if recipe["history"] == "none" {
             Mode::None
-        } else if !cut
+        } else if !plan
             .as_ref()
             .ok_or_else(|| EngineError::unreadable("The recovery history is unavailable."))?
-            .artifacts["recovery_plan"]["native"]
+            ["native"]
             .is_null()
         {
             Mode::Native
-        } else if cut
+        } else if plan
             .as_ref()
-            .is_some_and(|cut| cut.artifacts["recovery_plan"]["summary"] == true)
+            .is_some_and(|plan| plan["summary"] == true)
         {
             Mode::Summary
-        } else if cut
+        } else if plan
             .as_ref()
-            .is_some_and(|cut| cut.artifacts["recovery_plan"]["brief"] == true)
+            .is_some_and(|plan| plan["brief"] == true)
         {
             Mode::Brief
-        } else if cut
+        } else if plan
             .as_ref()
-            .is_some_and(|cut| cut.artifacts["recovery_plan"]["carried"] != true)
+            .is_some_and(|plan| plan["carried"] != true)
         {
             Mode::File
         } else {
@@ -92,6 +98,50 @@ impl Engine {
         };
         if !delivered && !matches!(mode, Mode::Native | Mode::None) {
             return Ok(());
+        }
+        use orch_api_contract::threads::{
+            NativeSessionCoverage, NativeSessionOutcome, NativeSessionOutcomeKind,
+            SessionHistoryCoverage,
+        };
+        let outcome = if mode == Mode::None {
+            None
+        } else {
+            let recorded_turns = plan
+                .as_ref()
+                .and_then(|plan| {
+                    plan.get("recorded_turn_coverage")
+                        .filter(|value| !value.is_null())
+                })
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or(SessionHistoryCoverage::NotReported);
+            Some(NativeSessionOutcome {
+                kind: NativeSessionOutcomeKind::Reconstructed,
+                reason: None,
+                carried_method: Some(mode),
+                coverage: NativeSessionCoverage {
+                    recorded_turns,
+                    transcript_file: if mode == Mode::Native {
+                        SessionHistoryCoverage::NotApplicable
+                    } else if plan.as_ref().is_some_and(|plan| plan["transcript"] == true) {
+                        SessionHistoryCoverage::Complete
+                    } else {
+                        SessionHistoryCoverage::NotReported
+                    },
+                },
+                at: Time::new(unit.now()),
+            })
+        };
+        if let Some(outcome) = &outcome {
+            let seq = unit.stamp(snapshot.thread.node_id).await?;
+            sqlx::query("UPDATE segments SET session_outcome=$2,seq_updated=$3 WHERE id=$1")
+                .bind(recipient)
+                .bind(serde_json::to_value(outcome)?)
+                .bind(seq)
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
         }
         Self::agent_history_marker(
             unit,
@@ -101,6 +151,7 @@ impl Engine {
             source_id,
             &snapshot.descriptor.harness.name,
             Some(mode),
+            outcome,
             &format!("history-recovered:{recipient}"),
         )
         .await?;
@@ -124,6 +175,7 @@ impl Engine {
         source_id: Id,
         program: &str,
         recovered: Option<orch_api_contract::threads::AgentHistoryRecovery>,
+        outcome: Option<orch_api_contract::threads::NativeSessionOutcome>,
         key: &str,
     ) -> Result<(), EngineError> {
         let by = if let Some(by) = source.and_then(|source| source.removed_by) {
@@ -135,6 +187,7 @@ impl Engine {
         };
         let payload = orch_api_contract::threads::MarkerPayload::AgentHistory(
             orch_api_contract::threads::MarkerAgentHistory {
+                outcome,
                 segment_id: source_id,
                 program: program.to_owned(),
                 bytes: source.and_then(|source| source.bytes),
@@ -238,6 +291,7 @@ impl Engine {
                     WHERE id=$1 AND NOT (artifacts ? 'recovery_summary_attempted')")
                     .bind(cut.id).execute(&mut *self.db().acquire().await?).await.map_err(orch_db::DbError::from)?.rows_affected() == 1;
                 if attempted {
+                    let mut handoff_receipt = None;
                     let made = async {
                         let choice = crate::summaries::capture_handoff_choice(
                             &mut *self.db().acquire().await?,
@@ -252,9 +306,14 @@ impl Engine {
                         crate::summaries::handoff_captured(
                             self,
                             cut.thread_id,
-                            &previous,
+                            &previous.text,
                             cut.id,
                             &choice,
+                            Some(crate::summaries::HandoffCapture {
+                                cut: cut.id,
+                                input: &previous,
+                                receipt: &mut handoff_receipt,
+                            }),
                         )
                         .await
                     }
@@ -265,12 +324,20 @@ impl Engine {
                                 &mut *self.db().acquire().await?,
                                 cut.id,
                                 "recovery_summary",
-                                &json!({"text":text,"at":Time::new(self.inner.clock.now())}),
+                                &json!({"text":text,"at":Time::new(self.inner.clock.now()),"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
                                 &[],
                             )
                             .await?;
                         }
                         Err(error) => {
+                            cuts::keep_artifact(
+                                &mut *self.db().acquire().await?,
+                                cut.id,
+                                "recovery_summary_failed",
+                                &json!({"handoff":handoff_receipt.as_ref().map(|observation| &observation.result)}),
+                                &[],
+                            )
+                            .await?;
                             tracing::info!(%error,"the recovery uses brief recent turns because its summary is unavailable");
                         }
                     }
@@ -363,7 +430,19 @@ impl Engine {
                     .as_ref()
                     .map(|recent| (recent, Time::new(cut.captured_at))),
             );
-            let plan = json!({"native":native,"notice":notice,"summary":summary.is_some(),"brief":recent.as_ref().is_some_and(|recent|recent.brief),"carried":recent.is_some(),"summary_skipped":wants_summary && summary.is_none()});
+            let recorded_turn_coverage = recent.as_ref().map_or(
+                orch_api_contract::threads::SessionHistoryCoverage::NotReported,
+                |recent| {
+                    if recent.from == i64::from(cut.first_turn.max(1))
+                        && recent.to == i64::from(cut.last_turn)
+                    {
+                        orch_api_contract::threads::SessionHistoryCoverage::Complete
+                    } else {
+                        orch_api_contract::threads::SessionHistoryCoverage::Partial
+                    }
+                },
+            );
+            let plan = json!({"native":native,"notice":notice,"summary":summary.is_some(),"brief":recent.as_ref().is_some_and(|recent|recent.brief),"carried":recent.is_some(),"summary_skipped":wants_summary && summary.is_none(),"recorded_turn_coverage":recorded_turn_coverage});
             cuts::keep_artifact(
                 &mut *self.db().acquire().await?,
                 cut.id,
@@ -510,6 +589,7 @@ impl Engine {
             machine,
             SerialKey::Environment(snapshot.environment.id),
             &FsMaterialize {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 work: None,
                 environment_id: snapshot.environment.id,
                 job_id: None,
@@ -532,6 +612,7 @@ impl Engine {
         link::insert_command(
             &mut tx,
             &link::NewCommand {
+                content_transit: false,
                 id: command.id,
                 machine_id: command.machine,
                 kind: command.kind.as_str(),

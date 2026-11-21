@@ -12,13 +12,13 @@ import ci_targeted
 
 
 class TargetedJobs(unittest.TestCase):
-    def invoke(self, lines, group):
+    def invoke(self, lines, group, **options):
         with tempfile.TemporaryDirectory() as directory:
             targets = Path(directory) / "targets"
             targets.write_text(lines, encoding="utf-8")
             with patch.object(ci_targeted, "run", return_value=True) as run, \
                     patch.object(ci_targeted, "prepare_native_fixtures", return_value=(True, {})) as prepare:
-                result = ci_targeted.main(targets, group)
+                result = ci_targeted.main(targets, group, **options)
         return result, run.call_args_list, prepare.call_args_list
 
     def test_independent_jobs_keep_every_target_and_web_never_starts_rust_or_fixtures(self):
@@ -37,6 +37,36 @@ class TargetedJobs(unittest.TestCase):
         self.assertFalse(set(rust_labels) & {"web typecheck", "web lint", "install the browser"})
         self.assertTrue(all(call.args[1][0] not in {"cargo", ci_targeted.sys.executable} for call in web))
         self.assertEqual(sum(label == "npm ci" for label in web_labels), 1)
+
+    def test_release_checks_can_run_without_publishing_a_tag(self):
+        targets = "release-checks\nrelease-first-start\n"
+        result, checks, fixtures = self.invoke(targets, "rust")
+        self.assertEqual(result, 0)
+        self.assertFalse(fixtures)
+        self.assertEqual([call.args[1][-1] for call in checks], [
+            "test_release_*.py", ".github/scripts/workflow_lint.py",
+            "scripts/smoke/update-doctor/run.sh", "scripts/smoke/update-files/run.sh",
+            "--skip-image", "scripts/smoke/first-start/run.sh",
+        ])
+        self.assertEqual(self.invoke(targets, "web"), (0, [], []))
+
+    def test_the_installer_uses_the_same_runs_native_programs_on_a_fresh_runner(self):
+        targets = "release-checks\nrelease-first-start\n"
+        result, build, _ = self.invoke(targets, "rust", prepare_first_start=True)
+        self.assertEqual(result, 0)
+        commands = [call.args[1] for call in build]
+        cli = next(cmd for cmd in commands if "--cli-only" in cmd)
+        native = next(cmd for cmd in commands if "--native-connector" in cmd)
+        self.assertFalse(any("scripts/smoke/first-start/run.sh" in cmd for cmd in commands))
+        result, install, _ = self.invoke(targets, "install")
+        self.assertEqual(result, 0)
+        package, scenario = install
+        command = package.args[1]
+        self.assertEqual(command[command.index("--cli") + 1], str(Path(cli[cli.index("--out") + 1]) / "orchctl"))
+        self.assertEqual(command[command.index("--connectors") + 1], native[native.index("--out") + 1])
+        self.assertEqual(scenario.args[1], ["bash", "scripts/smoke/first-start/run.sh"])
+        self.assertEqual(scenario.kwargs["env"]["ORCH_SMOKE_RELEASE_A"], command[command.index("--out") + 1])
+        self.assertEqual(self.invoke("release-checks\n", "install"), (0, [], []))
 
     def test_group_with_no_selected_work_succeeds_without_starting_any_tool(self):
         for targets, group in (("web typecheck\n", "rust"), ("fmt\n", "web")):
