@@ -7,6 +7,9 @@ use orch_types::{Id, Json};
 use std::path::{Component, Path};
 
 fn same(one: &Json, other: &Json) -> bool {
+    if let (Some(one), Some(other)) = (one.get("source_key"), other.get("source_key")) {
+        return one == other;
+    }
     one.get("kind") == other.get("kind")
         && one.get("path") == other.get("path")
         && one.get("label") == other.get("label")
@@ -74,6 +77,7 @@ impl Engine {
         thread: Id,
         segment: Id,
         files: &[InstructionFile],
+        masker: &orch_chat::redaction::Redactor,
     ) -> Result<(), EngineError> {
         let Some(row) = threads::segment(&mut *unit.conn, segment)
             .await?
@@ -88,7 +92,10 @@ impl Engine {
         };
         let mut incoming = Vec::new();
         for file in files {
-            let mut source = file_json(file, environment.id, &environment.workspace_root)?;
+            let source = file_json(file, environment.id, &environment.workspace_root)?;
+            let mut source =
+                crate::redaction::presentation::instruction(unit.conn, segment, &source, masker)
+                    .await?;
             source["observed_at"] = serde_json::json!(unit.now());
             incoming.push(source);
         }

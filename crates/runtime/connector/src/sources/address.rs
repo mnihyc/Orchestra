@@ -236,7 +236,7 @@ impl AddressClient {
         secrets: &[String],
     ) -> Result<Json, AddressError> {
         let answer = self.upstream.send(request).await.map_err(|why| {
-            let code = if matches!(why, UpstreamError::TimedOut(_)) {
+            let code = if matches!(why, UpstreamError::TimedOut { .. }) {
                 "timeout"
             } else {
                 "unavailable"

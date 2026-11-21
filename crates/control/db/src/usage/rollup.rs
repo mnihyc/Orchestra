@@ -608,8 +608,8 @@ pub async fn rebuild(conn: &mut Conn, from: Option<NaiveDate>) -> Result<Rebuilt
         .bind(first_day)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
-      SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
+    sqlx::query("INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members,credits,estimated_credits,unrated_tokens,rated_rows)
+      SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*),sum(p.credits),sum(p.estimated_credits),sum(p.unrated_tokens),sum(p.rated_rows) FROM usage_events e
       CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p
       WHERE e.turn_id IS NOT NULL AND ($1::date IS NULL OR (e.at AT TIME ZONE 'UTC')::date >= $1)
       GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable")
@@ -1239,7 +1239,26 @@ async fn turn_counts(conn: &mut Conn, read: &Read<'_>) -> Result<Vec<TurnCount>,
     Ok(query.build_query_as::<TurnCount>().fetch_all(conn).await?)
 }
 
-/// Exact-time request figures for short health windows, using the provider/time ledger index.
+/// Exact provider-health windows read timestamp prefixes folded with their source observations.
+pub async fn performance_window(
+    conn: &mut Conn,
+    from: DateTime<Utc>,
+    until: DateTime<Utc>,
+    filter: &Filter,
+) -> Result<super::performance::Sums, DbError> {
+    if let Some(provider) = filter.provider {
+        let root = Filter {
+            provider: Some(provider),
+            ..Filter::default()
+        };
+        if filter == &root {
+            return super::health_window::read(conn, provider, from, until).await;
+        }
+    }
+    Ok(window(conn, from, until, filter).await?.performance)
+}
+
+/// Exact-time figures for arbitrary attribution filters.
 pub async fn window(
     conn: &mut Conn,
     from: DateTime<Utc>,

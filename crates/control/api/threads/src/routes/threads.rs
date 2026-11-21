@@ -59,6 +59,17 @@ pub fn mount(registry: &mut Registry) {
 }
 orch_api_base::__api_bind_6de5279cdb!();
 
+fn model_refusal(model: &str, why: orch_engine::models::NotAllowed) -> ApiError {
+    let reason = if why == orch_engine::models::NotAllowed::GenerationUnsupported {
+        "generation_unsupported"
+    } else {
+        "model"
+    };
+    ApiError::new(ErrorCode::ModelNotAllowed, why.describe(model))
+        .with("reason", reason)
+        .with("model", model)
+}
+
 /// The thread `thread` as the caller sees it.
 pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
     let principal = authorization::principal(ctx, conn).await?;
@@ -68,6 +79,24 @@ pub async fn one(ctx: &Ctx, conn: &mut Conn, thread: Id) -> ApiResult<Thread> {
         Some(Node::Thread(thread)) => Ok(thread),
         _ => Err(ApiError::not_found()),
     }
+}
+
+/// A failed native probe retains its actual blocking policy, without exposing arbitrary program diagnostics.
+pub(crate) fn harness_start_failed(policy: Option<&str>) -> ApiError {
+    let mut error = ApiError::new(
+        ErrorCode::BindingIncompatible,
+        "the selected harness could not start on this machine",
+    )
+    .with("reason", "harness_error");
+    if let Some(policy) = policy.filter(|policy| {
+        matches!(
+            *policy,
+            "agent.programs" | "tools.fetch" | "agent.harnesses"
+        )
+    }) {
+        error = error.with("policy", policy);
+    }
+    error
 }
 
 /// Why a thread could not be made, as the problem a client acts on.
@@ -102,17 +131,13 @@ pub async fn create_failed(conn: &mut Conn, error: CreateThreadError) -> ApiErro
             "environment.use",
             "the environment is not there or is being removed",
         ),
+        CreateThreadError::AgentStartFailed(policy) => harness_start_failed(policy.as_deref()),
         CreateThreadError::AgentNotReported => ApiError::new(
             ErrorCode::BindingIncompatible,
             "the agent profile has not reported what its harness is",
         )
         .with("reason", "harness_unreported"),
-        CreateThreadError::ModelNotAllowed(model) => ApiError::new(
-            ErrorCode::ModelNotAllowed,
-            format!("the model {model} is not available here"),
-        )
-        .with("reason", "model")
-        .with("model", model),
+        CreateThreadError::ModelNotAllowed(model, why) => model_refusal(&model, why),
         CreateThreadError::EffortNotListed(effort) => ApiError::new(
             ErrorCode::ModelNotAllowed,
             format!("the model does not take the effort {effort}"),

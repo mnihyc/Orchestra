@@ -38,6 +38,24 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
     )
     .await
     .unwrap();
+    let blocked = orch_api_contract::resources::SpoolStatus {
+        problem: Some(orch_api_contract::resources::SpoolProblem::Full),
+        waiting_events: 3,
+    };
+    world
+        .app
+        .app
+        .link
+        .record_spool_status(
+            id,
+            &Eph::of(
+                &Stream::Machine,
+                world.app.app.clock.time(),
+                &orch_link_contract::events::Report::SpoolStatus(blocked.clone()),
+            )
+            .unwrap(),
+        )
+        .await;
     for (rates, expected) in [
         (MachineFactsRates::default(), json!({})),
         (
@@ -91,7 +109,42 @@ async fn an_unmeasured_or_partial_link_stays_absent_through_report_and_machine_a
             .await
             .ok();
         assert_eq!(shown.facts["rates"], expected);
+        assert_eq!(
+            shown.spool,
+            Some(blocked.clone()),
+            "ordinary facts do not erase an out-of-band storage failure"
+        );
+        assert_eq!(
+            orch_api_contract::resource_rows::MachineListRow::from(&shown).spool,
+            shown.spool
+        );
     }
+    world
+        .app
+        .app
+        .link
+        .record_spool_status(
+            id,
+            &Eph::of(
+                &Stream::Machine,
+                world.app.app.clock.time(),
+                &orch_link_contract::events::Report::SpoolStatus(Default::default()),
+            )
+            .unwrap(),
+        )
+        .await;
+    let shown = world
+        .app
+        .call(MachineGet, &[&id])
+        .token(&owner.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        shown.spool,
+        Some(Default::default()),
+        "recovery clears the same full and compact state fact"
+    );
 }
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

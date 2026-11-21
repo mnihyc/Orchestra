@@ -10,9 +10,9 @@ import { findTab } from './layout';
 import { pageAddress, parsePageAddress } from './PageView';
 import { contentThreadRead } from '@/realtime/threadScope';
 import { ThreadReadProvider } from '@/realtime/threadReadContext';
-import { CircleCheck, Gauge, GitBranch, LoaderCircle, Shield, SquareTerminal } from 'lucide-react';
+import { CircleCheck, Gauge, GitBranch, LoaderCircle, Shield, SquareTerminal, WifiOff } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
+import { ThreadWhere } from '@/features/start/ThreadWhere';
 import { useQuery } from '@tanstack/react-query';
 
 import { shellsQuery } from '@/api/terminals';
@@ -27,7 +27,6 @@ import { isolationWords, nearLimit, workspaceWords } from '@/features/workbench/
 import { changeTotals } from '@/features/workbench/Summaries';
 import type { Thread } from '@/generated/api-types';
 import { useThreadRow } from '@/realtime/stores/thread';
-import { EnvironmentDot } from '@/ui/EnvironmentDot';
 
 import { useAppearance, useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
@@ -36,16 +35,14 @@ import { useSocketStatus } from '@/realtime/live';
 import { StatusPart } from '@/ui/StatusBar';
 import { StatusPlace } from '@/features/status-items/StatusPlace';
 
-/** Above this round trip a connection is called slow: the latency pages are commonly measured under. */
-export const SLOW_ABOVE_MS = 150;
 
 /** How long the socket may be gone before anything says so: a line that comes and goes does not make the screen flicker. */
 export const LOST_SAID_AFTER_MS = 2_000;
 
-/** A sustained reconnect names its elapsed duration after the short status has been visible. */
+/** A connection that has been down this long says so, with how long and what to check, in place of the short status. */
 export const RECONNECT_ELAPSED_AFTER_MS = 10_000;
 
-/** The connection: nothing while it is there and quick. */
+/** The connection warns only when it became worse than this reader's measured usual. */
 export function ConnectionPart() {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
@@ -53,13 +50,17 @@ export function ConnectionPart() {
   // build is populated only by an actual ready frame and reset with this session's socket.
   const reconnecting = status.build !== null;
   const waiting = status.phase !== 'idle' && status.phase !== 'ready';
-  const now = useRunningClock(waiting && reconnecting && status.lostAt !== null);
+  const now = useRunningClock(waiting && status.lostAt !== null);
   const elapsed = status.lostAt === null ? 0 : Math.max(0, now - status.lostAt);
-  const label = !reconnecting ? t('workbench.status.connecting')
-    : elapsed >= RECONNECT_ELAPSED_AFTER_MS ? t('workbench.status.reconnectingSince', { time: formatSpan(elapsed, { locale }, 'short') })
-      : t('workbench.status.reconnecting');
+  const label = !reconnecting ? t('workbench.status.connecting') : t('workbench.status.reconnecting');
 
   if (status.phase === 'idle') return null;
+  // A connection that stays down says so, and says the one thing to check: a front that does not pass the upgrade of the socket.
+  if (status.phase !== 'ready' && elapsed >= RECONNECT_ELAPSED_AFTER_MS) {
+    return <StatusPart tone="warning" icon={<WifiOff size={16} aria-hidden />} hint={t('workbench.status.noLiveHint')}>
+      {t('workbench.status.noLive', { time: formatSpan(elapsed, { locale }, 'short') })}
+    </StatusPart>;
+  }
   if (status.phase !== 'ready') {
     return (
       <StatusPart icon={<LoaderCircle size={16} className="animate-spin" aria-hidden />} hint={t(reconnecting ? 'workbench.status.reconnectingHint' : 'workbench.status.connectingHint')}>
@@ -67,9 +68,9 @@ export function ConnectionPart() {
       </StatusPart>
     );
   }
-  if (status.roundTripMs === null || status.roundTripMs <= SLOW_ABOVE_MS) return <StatusPart icon={<CircleCheck size={16} aria-hidden />} hint={t('workbench.status.connectedHint')}>{t('workbench.status.connected')}</StatusPart>;
+  if (status.roundTripMs === null || !status.slow || typeof status.usualRoundTripMs !== 'number') return <StatusPart icon={<CircleCheck size={16} aria-hidden />} hint={t('workbench.status.connectedHint')}>{t('workbench.status.connected')}</StatusPart>;
   return (
-    <StatusPart tone="warning" icon={<Gauge size={16} aria-hidden />} hint={t('workbench.status.slowHint')}>
+    <StatusPart tone="warning" icon={<Gauge size={16} aria-hidden />} hint={t('workbench.status.slowHint', { ms: formatNumber(Math.round(status.usualRoundTripMs), locale) })}>
       {t('workbench.status.slow', { ms: formatNumber(Math.round(status.roundTripMs), locale) })}
     </StatusPart>
   );
@@ -147,13 +148,12 @@ export function ThreadStatusParts() {
 }
 
 function StatusForThread({ threadId }: { threadId: string }) {
-  const { t } = useTranslation();
   const thread = useThreadRow(threadId);
   if (thread === null) return null;
   const environment = thread.environment;
   return <span className="contents" data-thread-status>
     <StatusPlace place="bar" threadId={threadId} fixed={[
-      ...(environment === null ? [] : [{ id: 'environment', content: <ResourceName subject={{ kind: 'environment', environment }} asChild><button type="button" className="focus-inset flex min-w-0 items-center gap-1 rounded-sm px-1 hover:bg-bg-muted hover:text-text" aria-label={t('workbench.status.openEnvironment', { name: environment.name })}><EnvironmentDot status={environment.status} /><span className="truncate">{environment.name}</span><ResourceHint subject={{ kind: 'environment', environment }} className="truncate" /></button></ResourceName> }]),
+      ...(environment === null ? [] : [{ id: 'environment', content: <ThreadWhere key={thread.id} thread={thread} /> }]),
       { id: 'workspace', content: <WorkspacePart thread={thread} /> },
       { id: 'isolation', content: <IsolationPart thread={thread} /> },
       { id: 'limits', content: <LimitPart thread={thread} /> },
