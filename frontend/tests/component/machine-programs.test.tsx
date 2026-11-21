@@ -10,12 +10,12 @@ import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 const {read,write}=vi.hoisted(()=>({read:vi.fn<()=>Promise<MachinePrograms>>(),write:vi.fn<(id:string,body:MachineProgramsCommand)=>Promise<MachinePrograms>>()}));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['machine-programs',id],machineProgramsQuery:(id:string)=>({queryKey:['machine-programs',id],queryFn:read}),changeMachinePrograms:write}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
-vi.mock('@/features/resources/harnesses',()=>({useHarnessTitle:()=>((kind:string)=>kind)}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/resources/harnesses',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHarnessTitle:()=>((kind:string)=>kind)}));
 vi.mock('@/features/resources/machines/Enrollment',()=>({AddMachineDialog:()=>null}));
-vi.mock('@tanstack/react-router',()=>({Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children}:{children:ReactNode})=><a href="/resources/machines/machine?tab=policy">{children}</a>}));
 const machine={id:'machine',facts:{},roles:['agent','provider']};
-function snapshot(remote=true):MachinePrograms {return {entries:[],can_manage:true,config_file:'/var/user/orch/config.toml',capabilities:(['agent','provider_source'] as const).map((kind)=>({kind,supported:true,remote,delegated:remote,enabled:remote,policy_key:kind==='agent'?'agent.programs':'provider.programs',reason:remote?null:'Kept by the operator.'}))};}
+function snapshot(remote=true):MachinePrograms {return {approvals:[],entries:[],can_manage:true,config_file:'/var/user/orch/config.toml',capabilities:(['agent','provider_source'] as const).map((kind)=>({kind,supported:true,remote,delegated:remote,enabled:remote,policy_key:kind==='agent'?'agent.programs':'provider.programs',reason:remote?null:'Kept by the operator.'}))};}
 function program(kind:MachineProgramKind):MachineProgram {return {kind,name:'local-program',command:['/opt/my program','--model','local model'],origin:'orch',ready:true,version:'1.0.0',descriptor:kind==='agent'?{kind:'local-agent',harness:{name:'Local agent'},sandbox_modes:['open'],approval_modes:['on_request']}:{title:'GPU service',models:{}},models:null,detail:null};}
 beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue(snapshot());write.mockResolvedValue(snapshot());});
 
@@ -62,7 +62,7 @@ it('preserves the command and name after a failed describe and lets the person c
   const done=vi.fn();const user=userEvent.setup();show(<RegisterMachineProgram machineId="machine" kind="agent" onClose={vi.fn()} onRegistered={done}/>);
   const name=await screen.findByRole('textbox',{name:'Name'});const command=screen.getByRole('textbox',{name:'Command'});
   await user.type(name,'my-agent');await user.type(command,'/missing-program');
-  await user.click(screen.getByRole('button',{name:'Register and describe'}));
+  await user.click(screen.getByRole('button',{name:'Register and read details'}));
   expect(await screen.findByText('The program could not start.')).toBeVisible();
   expect(name).toHaveValue('my-agent');expect(command).toHaveValue('/missing-program');expect(done).not.toHaveBeenCalled();
 });
@@ -124,4 +124,28 @@ it('distinguishes an Orch-controlled off switch from a key kept on the machine',
   expect(screen.getByRole('link',{name:'Open policy'})).toHaveAttribute('href','/resources/machines/machine?tab=policy');
   expect(screen.queryByRole('button',{name:'Reload'})).not.toBeInTheDocument();
   expect(screen.queryByText(/Kept on this machine/u)).not.toBeInTheDocument();
+});
+
+it.each(['en','zh-CN'] as const)('says when the connected machine can fetch a needed build and names the policy that blocks it (%s)', async(locale)=>{
+  await setLocale(locale);
+  const current={...machine,facts:{harnesses:[],discovered_harnesses:[],searched_harness_kinds:[],build_fetch:{supported:true,reason:null},
+    policy:{'agent.harnesses':[],'agent.programs':true,'tools.fetch':true}}};
+  const view=show(<MachineProgramsTab machine={current}/>);
+  expect(await screen.findByText(i18n.t('machinePrograms.nativeFetch'))).toBeVisible();
+  expect(screen.queryByText(i18n.t('machinePrograms.nativeKept'))).not.toBeInTheDocument();
+  current.facts.policy['tools.fetch']=false;
+  view.rerender(<MachineProgramsTab machine={{...current}}/>);
+  expect(screen.getByText(i18n.t('machinePrograms.nativeFetchBlocked',{key:'tools.fetch'}))).toBeVisible();
+  expect(screen.getByRole('link',{name:i18n.t('machinePrograms.nativeFetchPolicy')})).toHaveAttribute('href','/resources/machines/machine?tab=policy');
+  expect(write).not.toHaveBeenCalled();
+});
+
+it('lets a viewer find one registered program in a long list without another read',async()=>{
+  const entries=Array.from({length:12},(_,index)=>({...program('agent'),name:`entry-${index}`,descriptor:{harness:{name:`Program ${index}`}}}));
+  read.mockResolvedValue({...snapshot(),can_manage:false,entries});
+  const user=userEvent.setup();show(<MachineProgramsTab machine={machine}/>);
+  await user.type(await screen.findByRole('textbox',{name:i18n.t('programList.search')}),'entry-11');
+  expect(screen.getByText('Program 11')).toBeVisible();
+  expect(screen.queryByText('Program 0')).not.toBeInTheDocument();
+  expect(write).not.toHaveBeenCalled();expect(read).toHaveBeenCalledTimes(1);
 });

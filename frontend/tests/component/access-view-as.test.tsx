@@ -1,13 +1,15 @@
 /** One View as mechanism for every permission-page kind, preserving native provenance and recoverable failures. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { type ComponentType, type ReactNode, Suspense } from 'react';
+import type * as LazyModule from '@/features/files/lazy';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as AccessApi from '@/api/access';
 import type { AccessKind, AccessTarget } from '@/api/access';
 import { ApiError } from '@/api/client';
-import { AccessDialog } from '@/features/access/AccessDialog';
+import { AccessDialog } from '@/features/access/AccessDialogBody';
+import { AccessHost, openAccess, openAccessToMany } from '@/features/access/AccessDialog';
 import { ViewAs } from '@/features/access/ViewAs';
 import type { Candidates } from '@/features/access/candidates';
 import type { EffectiveAccess } from '@/generated/api-types';
@@ -18,6 +20,14 @@ import { BEA, CATALOGUE, TOPIC, pageFor } from '../unit/general-access-fixtures'
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ effective: vi.fn<(target: AccessTarget, user: string) => Promise<EffectiveAccess>>() }));
+const chunks = vi.hoisted(() => ({ wait: null as Promise<void> | null }));
+vi.mock('@/features/files/lazy', async (loadOriginal) => {
+  const original = await loadOriginal<typeof LazyModule>();
+  return { ...original, lazyPart: <Props extends object>(load: () => Promise<{ default: ComponentType<Props> }>) => original.lazyPart(async () => {
+    if (chunks.wait !== null) await chunks.wait;
+    return load();
+  }) };
+});
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(),
   pageQuery: (target: AccessTarget) => ({ queryKey: ['view-as-page', target.kind, target.id], retry: false,
     queryFn: () => Promise.resolve(pageFor(target.kind)) }),
@@ -30,11 +40,11 @@ vi.mock('@/features/access/candidates', () => ({ useTargetOrg: () => null,
     byValue: new Map([[BEA.id, { input: { kind: 'user', id: BEA.id }, holder: { kind: 'user', user: BEA }, user: BEA, name: BEA.display_name, outside: false }]]),
     loading: false, placePicker: null }),
 }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
 vi.mock('@/features/access/ByArea', () => ({ ByArea: () => <p>Full permissions</p> }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string, name: string) => name,
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string, name: string) => name,
   usePlaceLabel: () => (place: { name: string | null } | null) => place?.name ?? null, useKnownPlaces: () => new Map() }));
 
 const kinds: Exclude<AccessKind, 'chat'>[] = ['org', 'project', 'topic', 'thread', 'document', 'provider', 'agent', 'environment', 'host', 'machine', 'template', 'mcp_server', 'mount'];
@@ -50,6 +60,21 @@ async function choose() {
 }
 beforeEach(() => { calls.effective.mockReset(); calls.effective.mockImplementation((target) => Promise.resolve(result(target.kind))); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it.each(['one', 'several'])('keeps the conversation and other panes visible while first Share for %s loads', async (amount) => {
+  let finish!: () => void;
+  chunks.wait = new Promise<void>((resolve) => { finish = resolve; });
+  const view = show(<Suspense fallback={<p>The whole workbench is waiting</p>}><p>Conversation stays visible</p><AccessHost /></Suspense>);
+  try {
+    const target: AccessTarget = { kind: 'provider', id: `cold-${amount}`, name: 'Shared work' };
+    act(() => { if (amount === 'one') openAccess(target); else openAccessToMany([target, { ...target, id: 'cold-second' }]); });
+    const dialog = await screen.findByRole('dialog');
+    expect(screen.getByText('Conversation stays visible')).toBeVisible();
+    expect(within(dialog).getByRole('status')).toBeInTheDocument();
+    expect(screen.queryByText('The whole workbench is waiting')).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: i18n.t('common.close') }));
+  } finally { view.unmount(); finish(); chunks.wait = null; }
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it.each(kinds)(`reads %s after choosing a person, through the same request (${locale}, ${theme})`, async (kind) => {
