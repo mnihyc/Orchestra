@@ -1,5 +1,5 @@
 /** The rows and exact missing projections of a successful act, derived from its answer rather than broad invalidation. */
-import type { Change, PathParam, Stale } from '@/api/acts';
+import type { Change, MissingProjection, PathParam, Stale } from '@/api/acts';
 import type { Act } from '@/api/client';
 import { agentShareAnswer } from '@/api/agentShareChanges';
 import { isCompleteThread, record, type RowChange } from '@/api/cache';
@@ -9,6 +9,7 @@ import { META_SETTINGS } from '@/api/adminState';
 import { isPeopleProjection } from '@/api/peopleChanges';
 import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
 import { outsideKey, routesKey } from '@/api/away';
+import { searchedPageChanges } from '@/api/collectionChanges';
 
 const KINDS: Readonly<Record<string, string>> = {
   nodes: 'node', orgs: 'node', projects: 'node', topics: 'node', threads: 'thread',
@@ -16,13 +17,15 @@ const KINDS: Readonly<Record<string, string>> = {
   machines: 'machine', templates: 'template', 'mcp-servers': 'mcp_server', mounts: 'mount', skills: 'skill',
   documents: 'document', tags: 'tag', groups: 'group', approvals: 'approval', jobs: 'job',
   exports: 'export', 'notification-channels': 'notification_channel',
+  pools:'pool',
 };
 const MEMBERS: Readonly<Record<string, string>> = {
   provider: 'provider', agent: 'agent', environment: 'environment', host: 'host',
   machine: 'machine', template: 'template', mcp_server: 'mcp_server', mount: 'mount', skill: 'skill',
   node: 'node', thread: 'thread', document: 'document', approval: 'approval', job: 'job',
+  pool:'pool',
 };
-const FULL_ROW_KINDS=new Set(['node','thread','document','provider','agent','environment','host','machine','template','mcp_server','mount','skill']);
+const FULL_ROW_KINDS=new Set(['node','thread','document','provider','agent','environment','host','machine','template','mcp_server','mount','skill','pool']);
 
 function reachChanges(parts: readonly string[]): AgentReachChange[] {
   const id = parts[1];
@@ -47,13 +50,21 @@ export function answerChanges(act: Act, p: PathParam, dependencies: readonly Cha
   const related = dependencies.filter((change) => 'relatedViews' in change);
   const outside = dependencies.filter((change) => 'outsideViews' in change);
   const missing = dependencies.filter((change) => 'missing' in change);
-  const native = dependencies.filter((change) => !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change));
+  const poolReads=dependencies.filter((change)=>'poolReads' in change);
+  // These derived choices have no feed or row receipt; every mounted reader needs its own current answer.
+  const bindings = dependencies.filter((change): change is Stale => 'key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'));
+  const native = dependencies.filter((change) => !('key' in change && (change.key[0] === 'start-options' || change.key[0] === 'thread-binding-options'))
+    && !('relatedViews' in change) && !('outsideViews' in change) && !('missing' in change) && !('poolReads' in change));
   const answered = nativeAnswerChanges(act, p, native);
   // An entry that says its membership repair is always needed (an org moved answers with the org, not with who is in the tree it
   // went to) keeps it with whatever the answer made of the row, as the related views and the exact views are kept.
   const membership = native.filter((change) => 'people' in change && change.always === true);
   const kept = answered.some((change) => 'people' in change) ? [] : membership;
-  return [...answered, ...kept, ...related, ...outside, ...missing];
+  // Destination receipts already settle complete pages and retake only the missing projections.
+  const destinationPages = answered.some((change) => 'collection' in change && change.collection.key[0] === 'destinations'
+    || 'missing' in change && change.containingRow !== undefined && change.missing.some((part) => part.key[0] === 'destinations'));
+  const pages = destinationPages ? { early: [], late: [] } : searchedPageChanges(act, p);
+  return [...poolReads, ...pages.early, ...answered, ...kept, ...related, ...outside, ...missing, ...(bindings.length === 0 ? [] : [{ missing: bindings, allObserved: true as const, cancelPending: true as const }]), ...pages.late];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
@@ -160,7 +171,7 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
   // Adoption returns the thread, but not its source session list's new thread link.
   if (act.method === 'POST' && parts[0] === 'topics' && parts[2] === 'threads' && parts[3] === 'adopt' && parts.length === 4
     && record(input) && typeof input.provider_id === 'string' && typeof input.agent_id === 'string') {
-    changes.push({ missing: [{ key: ['harness-sessions', input.provider_id, input.agent_id], exact: true }], cancelPending: true });
+    changes.push({ missing: [{ key: ['harness-sessions', input.provider_id, input.agent_id] }], allObserved: true, cancelPending: true });
   }
   // Transfer routes name their source, not the collection or accepted destination.
   // Explicit source-view hints remain scoped; missing inventory projections keep their own readers.
@@ -180,7 +191,7 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     // The nested writer returns a server, never its parent Environment. Restricted receipts
     // contain no stored server view; only an already loaded parent MCP page may be retaken.
     if (record(answer) && record(answer.access) && record(answer.spec)) put('mcp_server', answer, true);
-    changes.push({ missing: [{ key: ['environment-mcp', parts[1]], exact: true }], cancelPending: true });
+    changes.push({ environmentMcp: parts[1] });
     return changes;
   }
   if (act.method==='POST' && parts[0]==='threads' && parts[2]==='calls' && parts[3]==='recovery' && record(answer) && 'recovery' in answer) {
@@ -209,24 +220,32 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
   if (parts[0] === 'destinations' && parts[1] !== undefined
     && (act.method === 'DELETE' && parts.length === 2 || act.method === 'POST' && parts[2] === 'test')) {
     // These receipts omit the stored list state; the loaded row identifies its exact owner.
-    return [{ missing: [{ key: ['destinations'] }], containingRow: parts[1], cancelPending: true }];
+    return [{ missing: [{ key: ['destinations'] }], containingRow: parts[1], allObserved: true, cancelPending: true }];
   }
   if (act.method === 'DELETE' && parts[0] === 'service-accounts' && parts[1] !== undefined && parts.length === 2) {
     return [{ missing: [{ key: ['service-accounts'] }], containingAccount: parts[1], cancelPending: true }];
   }
   if (parts[0] === 'service-accounts' && parts[1] !== undefined && parts[2] === 'tokens'
     && (act.method === 'POST' && parts.length === 3 || act.method === 'DELETE' && parts.length === 4)) {
-    const id = act.method === 'POST' && record(answer) && record(answer.info) && typeof answer.info.id === 'string' ? answer.info.id : parts[3];
-    if (id !== undefined) changes.push({ collection: { key: ['service-tokens', parts[1]], identity: 'id', id, data: act.method === 'DELETE' ? null : record(answer) ? answer.info : null } });
-    // TokenCreated omits the independently projected account count. Retake its shown owner once;
-    // another org and an unopened account list cannot be read by this act.
-    changes.push({ missing: [{ key: ['service-accounts'] }], containingAccount: parts[1], cancelPending: true });
-    return changes;
+    const key = ['service-tokens', parts[1]];
+    const account: MissingProjection = { missing: [{ key: ['service-accounts'] }], containingAccount: parts[1], cancelPending: true };
+    if (act.method === 'DELETE' && parts[3] !== undefined) {
+      return [{ collection: { key, identity: 'id', id: parts[3], data: null }, cancelPending: true }, account];
+    }
+    if (record(answer) && record(answer.info) && typeof answer.info.id === 'string') {
+      return [{ collection: { key, identity: 'id', id: answer.info.id, data: answer.info }, cancelPending: true }, account];
+    }
+    // The public creation receipt omits both the token row and the account count.
+    return [{ parallelRepairs: [{ missing: [{ key, exact: true }], cancelPending: true }, account] }];
   }
   if (parts[0] === 'hosts' && parts[1] !== undefined && parts[2] === 'runtimes' && parts[3] !== undefined) {
     const key = ['host-runtimes', parts[1]];
     if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.id === parts[3]) {
       return [{ collection: { key, identity: 'id', id: parts[3], data: answer }, cancelPending: true }];
+    }
+    if (act.method === 'POST' && parts[4] === 'stop' && record(answer) && answer.projection === 'receipt'
+      && answer.host_id === parts[1] && answer.runtime_id === parts[3]) {
+      return [{ missing: [{ key, exact: true }], cancelPending: true }];
     }
     // Removal may be scheduled. Its acknowledgement cannot say which rows remain on the host.
     if (act.method === 'DELETE' && parts.length === 4) return [{ missing: [{ key, exact: true }], cancelPending: true }];
@@ -315,15 +334,19 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
       ...pendingParameters,
       ...(parts[0] === 'admin' && META_SETTINGS.has(answer.key) ? [meta()] : [])];
   }
+  const modelPages = (id: string): Change => ({ missing: [{ key:['provider-model-pages',id] },{ key:['provider-suggestion-pages',id] }], allObserved:true, cancelPending:true });
+  if (parts[0] === 'providers' && parts[2] !== 'models' && record(answer) && Array.isArray(answer.models)) changes.push(modelPages(p('id')));
   if (parts[0] === 'providers' && parts[2] === 'models') {
     if(parts[3]==='suggestions' && parts[4]==='accept' && record(answer) && record(answer.provider)) {
       put('provider',answer.provider);
       if(Array.isArray(answer.provider.models))value(['provider-models',p('id')],answer.provider.models);
+      changes.push(modelPages(p('id')));
       return changes;
     }
     const modelChanges=(id:string,data:unknown):Change[]=>[
       {collection:{key:['provider-models',p('id')],identity:'id',id,data}},
       {collection:{key:['provider',p('id')],field:'models',identity:'id',id,data}},
+      modelPages(p('id')),
     ];
     if (Array.isArray(answer)) return answer.flatMap((model: unknown) => record(model) && typeof model.id === 'string'
       ? modelChanges(model.id,model) : []);

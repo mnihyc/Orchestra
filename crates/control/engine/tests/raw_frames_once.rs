@@ -40,11 +40,14 @@ async fn a_frame_delivered_twice_is_kept_once_and_a_new_frame_with_the_same_json
     world.running_turn(thread, "Keep the frames").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 7,
         direction: "in".to_owned(),
         payload: json!({ "method": "frame", "authorization": "private credential" }),
     });
     let first = DeliveredEvent {
+        native_opening_id: None,
         seq: 41,
         at: Time::new(world.clock.now()),
         kind: frame.kind().as_str().to_owned(),
@@ -93,18 +96,21 @@ async fn a_frame_delivered_twice_is_kept_once_and_a_new_frame_with_the_same_json
 
 #[tokio::test]
 async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_bytes_are_pruned() {
-    use orch_link_contract::commands::{Command, CommandKind};
+    use orch_link_contract::commands::Command;
     use orch_link_contract::events::TurnOutcome;
     let world = World::new().await;
     let thread = world.thread("Raw cursor survives retention").await;
     let (turn, _) = world.running_turn(thread, "First turn").await;
     let segment = world.segment_of(thread).await;
     let frame = Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 71,
         direction: "in".to_owned(),
         payload: json!({"frame": "old"}),
     });
     let event = DeliveredEvent {
+        native_opening_id: None,
         seq: 41,
         at: Time::new(world.clock.now()),
         kind: "raw.frame".to_owned(),
@@ -123,15 +129,41 @@ async fn a_reopened_session_starts_above_the_segment_cursor_after_all_frame_byte
         .execute(world.pool.pool())
         .await
         .unwrap();
+    assert_eq!(
+        orch_db::queries::raw_events::last_number(
+            &mut world.pool.acquire().await.unwrap(),
+            segment
+        )
+        .await
+        .unwrap(),
+        71,
+        "pruning frame bytes preserves the captured source cursor",
+    );
+    // A changed instruction forces a new opening instead of replaying a retained idempotent one.
+    world
+        .set(
+            thread,
+            "agent.instructions",
+            json!("Use the durable source cursor on reopening"),
+        )
+        .await;
     // A fresh API process has no session cache; its opening uses the durable segment cursor.
     world.restart_api().await;
     world.running_turn(thread, "Second turn").await;
+    assert_eq!(
+        world.segment_of(thread).await,
+        segment,
+        "the case reopened the same retained segment"
+    );
     let floors: Vec<_> = world
         .seen
-        .of_kind(CommandKind::SessionOpen)
+        .all()
         .into_iter()
         .filter_map(|cmd| match cmd {
             Command::SessionOpen(open) if open.thread_id == thread => Some(open.raw_after),
+            Command::SessionOpenFenced(open) if open.thread_id == thread => {
+                Some(open.session.raw_after)
+            }
             _ => None,
         })
         .collect();

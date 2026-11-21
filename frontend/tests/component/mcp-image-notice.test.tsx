@@ -11,7 +11,7 @@ it.each(['en', 'zh-CN'] as const)('names an unretainable returned image in %s', 
   await setLocale(locale);
   const view = show(<FailureAlert error={{ code: 'image_result_unavailable', message: 'Native diagnostic', retryable: false,
     details: { reason: 'invalid_base64' } }} />);
-  expect(screen.getByRole('alert')).toHaveTextContent(locale === 'en' ? 'The returned image could not be retained.' : '无法保留返回的图像。');
+  expect(screen.getByRole('alert')).toHaveTextContent(locale === 'en' ? 'The returned image could not be retained.' : '无法保留返回的图片。');
   expect(screen.queryByText('Native diagnostic')).not.toBeInTheDocument();
   expect(screen.queryByText(i18n.t('timeline.failure.resets'))).not.toBeInTheDocument();
   expect(view.container.querySelector('time')).toBeNull();

@@ -146,6 +146,7 @@ async fn a_person_chooses_wake_and_is_refused_where_it_is_unavailable() {
         )
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(false),
             locked: None,
             expected_revision: None,
@@ -192,6 +193,7 @@ async fn a_person_chooses_wake_and_is_refused_where_it_is_unavailable() {
         )
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value: json!(true),
             locked: None,
             expected_revision: None,
@@ -607,7 +609,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         .await
         .ok();
     let mut config = environment.config;
-    config["env.host_id"] = json!(host);
+    config["env.host_id"] = json!(orch_provider_contract::pools::Target::host(host));
     s.rig
         .world
         .app

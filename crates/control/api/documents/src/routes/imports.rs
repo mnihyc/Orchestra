@@ -34,7 +34,7 @@ use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::imports::Import;
 
