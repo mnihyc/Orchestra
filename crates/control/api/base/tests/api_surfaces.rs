@@ -10,7 +10,7 @@ mod support;
 use axum::body::Body;
 use http::{Request, StatusCode};
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_db::queries::identity;
 use orch_types::{Id, new_id};
@@ -65,7 +65,8 @@ async fn request(
 }
 
 async fn key(world: &World, owner: Id, modern: bool) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let scope: KeyScope = serde_json::from_value(json!({"rules":[{
         "target":{"kind":"account","id":owner,"reach":"self"}, "resources":["account"],
         "allow":[{"operation":"MeGet","actions":["read"]},{"operation":"MeRecoveryCodesGet","actions":["read"]},{"operation":"MeUpdate.profile","actions":["write","read"]}]
@@ -75,7 +76,7 @@ async fn key(world: &World, owner: Id, modern: bool) -> String {
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: owner,
             name: "Surface control",
             token_hash: &token_hash(&secret),

@@ -110,6 +110,7 @@ async fn scene() -> Proof<(Scene, Id)> {
             .call(EnvironmentMcpImportCreate, &[&env])
             .token(&token)
             .body(&EnvironmentMcpImportCreateBody {
+                origin: None,
                 source: "codex".into(),
                 scope: McpScope::User,
                 name: "search".into(),

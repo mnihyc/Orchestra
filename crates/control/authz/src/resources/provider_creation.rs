@@ -7,6 +7,79 @@ use super::*;
 use orch_access_contract::key_scope::{KeyAction, KeyTargetKind};
 use orch_access_contract::permissions::WhenArchived;
 
+/// The actual admitted provider creator, retained only for its native placement dependencies.
+/// It cannot be serialized or constructed from a provider identifier alone.
+#[derive(Clone)]
+pub struct ProviderBirth {
+    caller: crate::Caller,
+    provider: Id,
+}
+impl ProviderBirth {
+    pub async fn current(
+        conn: &mut Conn,
+        principal: &Principal,
+        provider: Id,
+    ) -> Result<Option<Self>, Error> {
+        Ok(admitted_home(conn, principal, provider)
+            .await?
+            .then(|| Self {
+                caller: principal.caller().clone(),
+                provider,
+            }))
+    }
+    pub(crate) fn matches(&self, principal: &Principal) -> bool {
+        principal.caller() == &self.caller
+    }
+    pub(crate) async fn usage(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        object: ObjectRef,
+        node: Option<Id>,
+        policies: &crate::usable::Policies,
+    ) -> Result<Option<Box<crate::usable::Use>>, Error> {
+        if !self.matches(principal)
+            || !admitted_home(conn, principal, self.provider).await?
+            || !matches!(
+                object.kind,
+                ObjectKind::Host | ObjectKind::Template | ObjectKind::Pool
+            )
+        {
+            return Ok(None);
+        }
+        let (mut graph, resource, site) = site(conn, object).await?;
+        if resource.deleted || resource.disabled {
+            return Ok(None);
+        }
+        let work = if let Some(node) = node {
+            graph.extend(conn, &[node]).await?;
+            graph.get(node).map(|node| node.path.clone())
+        } else {
+            None
+        };
+        let permissions = object.kind.permissions().collect::<Vec<_>>();
+        let frame = Frame::load(
+            conn,
+            principal,
+            policies.sharing_at(resource.home),
+            graph,
+            std::slice::from_ref(&site),
+            &permissions,
+        )
+        .await?;
+        Ok(crate::usable::for_provider_birth(
+            &frame,
+            &resource,
+            &site,
+            work.as_deref(),
+            policies.at(resource.home).keeps_to_its_owner(&resource),
+            self,
+        )?
+        .ok()
+        .map(Box::new))
+    }
+}
+
 async fn admitted_home(
     conn: &mut Conn,
     principal: &Principal,

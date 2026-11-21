@@ -68,6 +68,7 @@ export function Account({ preview }: { preview: PagePreview }) {
   return (
     <div className="flex flex-col gap-2" aria-live="polite">
       <OwnerReadNotice disclosure={preview.owner_reads} />
+      <OwnerReadNotice disclosure={preview.server_host_use} />
       {preview.pages > 1 && (
         <p className="text-sm text-text-muted">
           {t('access.preview.pages', { count: preview.pages })}
@@ -95,7 +96,6 @@ export function ChangePreview({ source, asked, changes, onClose }: { source: Pag
     },
     enabled: wanted && page.data !== undefined,
     retry: false,
-    staleTime: 0,
     gcTime: 0,
   });
 

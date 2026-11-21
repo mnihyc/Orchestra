@@ -14,6 +14,17 @@
 //! endpoints and the roles and name it enrolled with (`config.toml`), and a record of the enrollment
 //! with the pin (`identity/enrollment.json`). A refused or distrusted answer leaves nothing behind.
 //!
+//! **A new unit on an old volume.** A managed runtime's data directory is on a volume that outlives the
+//! unit, so that a person's sign-in survives a unit that is made again, and a replacement runs on the
+//! volume of the unit it replaces. The machine is the unit's own: the directories that belong to it
+//! (`identity/`, `secrets/`, `spool/`, `journal/` and `state/`) are marked with the unit's identifier
+//! (`unit`). A unit that finds another's puts them aside, in a directory of that unit's name below
+//! `previous/`, and begins with none, which enrolls it as a new machine; a unit that finds its own there (a
+//! replacement that failed gave the volume back) takes them again ([`DataDir::claim_machine_state`]). Only
+//! what a machine really holds is put aside, one earlier machine is kept, and every machine that is left
+//! behind or dropped is named to whoever starts the unit. What a person signed in (`harness/`) and what
+//! they set up stay where they are.
+//!
 //! **Where the answer comes from** is a [`EnrollTransport`]: the HTTPS requests of the system in a
 //! running connector, and in a test whatever stands for the system.
 
@@ -50,6 +61,17 @@ const SUBDIRECTORIES: [&str; 9] = [
 ];
 /// The file in `identity/` that records the enrollment.
 pub const RECORD_FILE: &str = "enrollment.json";
+/// The file of the data directory that names the unit whose machine the directories of
+/// [`MACHINE_DIRECTORIES`] hold.
+pub const UNIT_FILE: &str = "unit";
+/// The directories of a data directory that belong to the machine enrolled in it: its identity, what its
+/// key sealed, what it told the system and was told, and the harness processes it hosted.
+pub const MACHINE_DIRECTORIES: [&str; 5] = ["identity", "secrets", "spool", "journal", "state"];
+/// Where the machine state of an earlier unit is kept, in a directory of the unit's name, so that it
+/// comes back with its unit.
+pub const PREVIOUS_DIR: &str = "previous";
+/// The name a machine nobody marked is kept under: no unit is named so.
+const UNMARKED: &str = "unmarked";
 /// The configuration file of a connector.
 pub const CONFIG_FILE: &str = "config.toml";
 /// The permissions of the data directory and of the directories that hold secrets: the user's alone.
@@ -121,6 +143,84 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> EnrollError + '_ {
         path: path.to_owned(),
         source,
     }
+}
+
+/// What a file that names a unit says, without the line end; `None` where there is no such file or it is empty.
+fn read_marker(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let word = text.trim();
+    (!word.is_empty()).then(|| word.to_owned())
+}
+
+/// Removes a directory and what is in it; nothing is wrong if it is not there.
+fn remove_directory(path: &Path) -> Result<(), EnrollError> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(io(path)(error)),
+        _ => Ok(()),
+    }
+}
+
+/// Whether a directory holds anything.
+fn holds_something(path: &Path) -> bool {
+    std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Makes a directory below the data directory, and where the platform has permissions it is the user's alone:
+/// what is put aside is a machine's key and what its key sealed.
+fn private_directory(path: &Path) -> Result<(), EnrollError> {
+    std::fs::create_dir_all(path).map_err(io(path))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(PRIVATE_DIRECTORY_MODE),
+        )
+        .map_err(io(path))?;
+    }
+    Ok(())
+}
+
+/// Moves a directory to a place that is not there yet, or is there empty (a move that was cut short made it).
+fn move_directory(from: &Path, to: &Path) -> Result<(), EnrollError> {
+    if let Some(parent) = to.parent() {
+        private_directory(parent)?;
+    }
+    if to.exists() {
+        // Only an empty place makes way: what is in it is not ours to overwrite, and `remove_dir` says so.
+        std::fs::remove_dir(to).map_err(io(to))?;
+    }
+    std::fs::rename(from, to).map_err(io(from))
+}
+
+/// A unit's name as a name of a directory: the identifiers the system gives are letters, digits and dashes.
+fn unit_name(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(name)
+}
+
+/// What a unit found of the machine state in its data directory ([`DataDir::claim_machine_state`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The state is the unit's own, or there is none yet.
+    Own,
+    /// What the directory held of another's machine was put aside, and the unit begins with none.
+    Fresh {
+        /// The machine put aside: the unit it was of, or `unmarked`.
+        put_aside: String,
+        /// The machines kept before that were dropped, because one earlier machine is kept.
+        dropped: Vec<String>,
+    },
+    /// The unit's own machine, put aside for another unit before, has been brought back.
+    Restored {
+        /// The machine put aside to make room for it, when the directory held one.
+        put_aside: Option<String>,
+        /// The machines kept before that were dropped, because one earlier machine is kept.
+        dropped: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -223,6 +323,120 @@ impl DataDir {
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(error)) => Err(io(&path)(error)),
         }
+    }
+
+    /// Whether any directory of [`MACHINE_DIRECTORIES`] holds something.
+    fn holds_machine_state(&self) -> bool {
+        MACHINE_DIRECTORIES
+            .iter()
+            .any(|name| holds_something(&self.root.join(name)))
+    }
+
+    /// Where the machine of the unit `unit` is put aside.
+    fn put_aside_place(&self, unit: &str) -> PathBuf {
+        self.root.join(PREVIOUS_DIR).join(unit)
+    }
+
+    /// Brings the machine put aside for `unit` back into the places that hold nothing, and answers whether
+    /// anything came back. What is there already is not overwritten; what is not brought back stays aside.
+    fn bring_back(&self, unit: &str) -> Result<bool, EnrollError> {
+        let aside = self.put_aside_place(unit);
+        if !aside.is_dir() {
+            return Ok(false);
+        }
+        let mut brought = false;
+        for name in MACHINE_DIRECTORIES {
+            let from = aside.join(name);
+            let to = self.root.join(name);
+            if !from.exists() || holds_something(&to) {
+                continue;
+            }
+            // The empty place that `DataDir::open` or an earlier claim left makes way.
+            match std::fs::remove_dir(&to) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(io(&to)(error)),
+            }
+            std::fs::rename(&from, &to).map_err(io(&from))?;
+            brought = true;
+        }
+        if !holds_something(&aside) {
+            remove_directory(&aside)?;
+            // `previous/` itself goes when nothing is kept in it; it is not empty otherwise, and stays.
+            let _ = std::fs::remove_dir(self.root.join(PREVIOUS_DIR));
+        }
+        Ok(brought)
+    }
+
+    /// Drops every machine put aside except those of the units named, and answers which were dropped.
+    fn drop_put_aside_except(&self, keep: &[&str]) -> Result<Vec<String>, EnrollError> {
+        let place = self.root.join(PREVIOUS_DIR);
+        let Ok(entries) = std::fs::read_dir(&place) else {
+            return Ok(Vec::new());
+        };
+        let mut dropped = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if keep.contains(&name.as_str()) || !entry.path().is_dir() {
+                continue;
+            }
+            remove_directory(&entry.path())?;
+            dropped.push(name);
+        }
+        dropped.sort();
+        Ok(dropped)
+    }
+
+    /// Makes the machine state of this directory the state of the unit `unit`, which a managed runtime
+    /// does at its start, before anything of the machine is read.
+    ///
+    /// What the directories of the machine hold of another unit's machine (a new unit made on the volume of
+    /// a unit that failed or was replaced), or of a machine nobody marked, is put aside in `previous/`, under
+    /// the name of that unit, and the unit begins with none, so that it enrolls as a new machine and not as
+    /// the old one, which the system has revoked. Only a machine that holds something is put aside: a unit
+    /// that never enrolled leaves what was put aside before where it is. A unit whose own machine was put
+    /// aside (a replacement that failed has given the volume back) takes it again. One earlier machine is
+    /// kept, and any other that was kept is dropped and named. Every step moves a whole directory, so that
+    /// a start that is cut short is finished by the next, and nothing it had moved is lost. What a person
+    /// signed in, and the configuration, are not touched.
+    pub fn claim_machine_state(&self, unit: &str) -> Result<Claim, EnrollError> {
+        let unit = unit_name(unit).ok_or_else(|| {
+            EnrollError::Launch(format!("ORCH_RUNTIME_ID {unit:?} is not a unit identifier"))
+        })?;
+        let marker = self.root.join(UNIT_FILE);
+        let owner = read_marker(&marker);
+        if owner.as_deref() == Some(unit) {
+            // A return of its own machine that was cut short is finished.
+            self.bring_back(unit)?;
+            return Ok(Claim::Own);
+        }
+        let mut put_aside = None;
+        let mut dropped = Vec::new();
+        if self.holds_machine_state() {
+            let label = owner
+                .as_deref()
+                .and_then(unit_name)
+                .unwrap_or(UNMARKED)
+                .to_owned();
+            let place = self.put_aside_place(&label);
+            for name in MACHINE_DIRECTORIES {
+                let from = self.root.join(name);
+                if holds_something(&from) {
+                    move_directory(&from, &place.join(name))?;
+                }
+            }
+            dropped = self.drop_put_aside_except(&[label.as_str(), unit])?;
+            put_aside = Some(label);
+        }
+        std::fs::write(&marker, unit).map_err(io(&marker))?;
+        let restored = self.bring_back(unit)?;
+        // The directories that are missing are made, with their permissions.
+        Self::open(&self.root)?;
+        Ok(match (restored, put_aside) {
+            (true, put_aside) => Claim::Restored { put_aside, dropped },
+            (false, Some(put_aside)) => Claim::Fresh { put_aside, dropped },
+            (false, None) => Claim::Own,
+        })
     }
 
     /// The identity this connector enrolled with.
@@ -1133,11 +1347,14 @@ fn accept_renewal(
 // A runtime the system made
 
 /// What a driver gives the connector it starts in a managed runtime: the launch variables of
-/// `orch_driver_contract::runtime::LAUNCH_VARIABLES`, read.
+/// `orch_driver_contract::runtime::LAUNCH_VARIABLES`, read, and the runtime the system says the unit is of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedInputs {
     /// The roles it plays.
     pub roles: Vec<Role>,
+    /// The runtime this unit is of (`ORCH_RUNTIME_ID`, which the system puts in the unit's variables): the machine
+    /// state in the data directory is marked with it.
+    pub unit: String,
     /// Where it reaches the gateway.
     pub gateway_url: String,
     /// The file that holds the certificate authority.
@@ -1168,6 +1385,7 @@ impl ManagedInputs {
             value
         };
         let roles_text = need("ORCH_ROLES");
+        let unit = need("ORCH_RUNTIME_ID");
         let gateway_url = need("ORCH_GATEWAY_URL");
         let ca_file = need("ORCH_CA_FILE");
         let enroll_file = need("ORCH_ENROLL_FILE");
@@ -1210,6 +1428,7 @@ impl ManagedInputs {
         let required = |value: Option<String>| value.unwrap_or_default();
         Ok(Self {
             roles: roles.into_iter().map(|(_, role)| role).collect(),
+            unit: required(unit),
             gateway_url: required(gateway_url),
             ca_file: PathBuf::from(required(ca_file)),
             enroll_file: PathBuf::from(required(enroll_file)),
@@ -1712,6 +1931,7 @@ mod tests {
     fn the_launch_variables_of_a_runtime_are_read_and_each_that_is_missing_is_named() {
         let vars: HashMap<&str, &str> = HashMap::from([
             ("ORCH_ROLES", "environment"),
+            ("ORCH_RUNTIME_ID", "0199abcd-1234"),
             ("ORCH_GATEWAY_URL", "wss://gateway.orch.internal:9443"),
             ("ORCH_CA_FILE", "/run/orch/ca.pem"),
             ("ORCH_ENROLL_FILE", "/run/orch/token"),
@@ -1724,11 +1944,13 @@ mod tests {
         let var = |name: &str| vars.get(name).map(|v| (*v).to_owned());
         let read = ManagedInputs::from_variables(var).unwrap();
         assert_eq!(read.roles, [Role::Environment]);
+        assert_eq!(read.unit, "0199abcd-1234");
         assert_eq!(read.workspace_dir.as_deref(), Some(Path::new("/workspace")));
 
         let few = |name: &str| (name == "ORCH_ROLES").then(|| "provider,agent".to_owned());
         let error = ManagedInputs::from_variables(few).unwrap_err().to_string();
         for name in [
+            "ORCH_RUNTIME_ID",
             "ORCH_GATEWAY_URL",
             "ORCH_CA_FILE",
             "ORCH_ENROLL_FILE",
@@ -1766,6 +1988,7 @@ mod tests {
         std::fs::write(files.path().join("token"), format!("{}\n", system.token())).unwrap();
         let launch = ManagedInputs {
             roles: vec![Role::Agent, Role::Provider],
+            unit: "unit-a".into(),
             gateway_url: "wss://gateway.orch.internal:9443".into(),
             ca_file: files.path().join("ca.pem"),
             enroll_file: files.path().join("token"),
@@ -1794,6 +2017,288 @@ mod tests {
             launch.enrollment("x", platform, "0.1.0"),
             Err(EnrollError::Distrusted(TrustFault::WrongPin))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_unit_made_on_the_volume_of_an_earlier_one_enrolls_as_a_new_machine_keeping_what_a_person_signed_in_and_the_earlier_unit_gets_its_own_back()
+     {
+        let clock = clock();
+        let system = System::new(&clock);
+        let dir = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        std::fs::write(
+            files.path().join("ca.pem"),
+            system.authority.certificate_pem(),
+        )
+        .unwrap();
+        let launch = ManagedInputs {
+            roles: vec![Role::Agent, Role::Provider],
+            unit: "unit-a".into(),
+            gateway_url: "wss://gateway.orch.internal:9443".into(),
+            ca_file: files.path().join("ca.pem"),
+            enroll_file: files.path().join("token"),
+            data_dir: dir.path().to_owned(),
+            tools_dir: dir.path().join("tools"),
+            workspace_dir: None,
+            home_dir: None,
+            mounts_file: None,
+        };
+        let platform = Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+        };
+        let data = DataDir::open(dir.path()).unwrap();
+        let state_of = |name: &str| dir.path().join(name);
+
+        // The first unit enrolls with its token on a volume that has nothing yet.
+        std::fs::write(files.path().join("token"), format!("{}\n", system.token())).unwrap();
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        let inputs = launch
+            .enrollment("orch-provider-a", platform, "0.1.0")
+            .unwrap();
+        enroll(&inputs, &data, &system, &clock).await.unwrap();
+        let first = data.record().unwrap().machine_id;
+        std::fs::write(state_of("harness").join("login.json"), "signed in").unwrap();
+        std::fs::write(state_of("secrets").join("provider-a"), "sealed by a").unwrap();
+        std::fs::write(state_of("spool").join("segment"), "events of a").unwrap();
+        std::fs::write(state_of("state").join("hosted.json"), "{}").unwrap();
+
+        // The same unit started again keeps its machine, with its token or with it emptied by its stop.
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        std::fs::write(files.path().join("token"), "").unwrap();
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        assert!(data.is_enrolled());
+
+        // A new unit on the same volume has a token of its own: the machine of the first is put aside.
+        std::fs::write(files.path().join("token"), format!("{}\n", system.token())).unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-b").unwrap(),
+            Claim::Fresh {
+                put_aside: "unit-a".into(),
+                dropped: Vec::new()
+            }
+        );
+        assert!(!data.is_enrolled());
+        assert_eq!(
+            std::fs::read_to_string(state_of("harness").join("login.json")).unwrap(),
+            "signed in",
+            "what a person signed in stays on the volume"
+        );
+        for put_aside in ["identity", "secrets", "spool", "state"] {
+            assert_eq!(
+                std::fs::read_dir(state_of(put_aside)).unwrap().count(),
+                0,
+                "{put_aside} of the first unit is not the second's"
+            );
+        }
+        let inputs = launch
+            .enrollment("orch-provider-b", platform, "0.1.0")
+            .unwrap();
+        enroll(&inputs, &data, &system, &clock).await.unwrap();
+        let second = data.record().unwrap().machine_id;
+        assert_ne!(first, second, "the new unit is a new machine");
+        assert_eq!(
+            system.sent.lock().unwrap().last().unwrap().machine_id,
+            None,
+            "and it asks to be enrolled as one, not to replace the first"
+        );
+
+        // The second unit fails and the first is given the volume back: it finds its own machine again.
+        std::fs::write(files.path().join("token"), "").unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-a").unwrap(),
+            Claim::Restored {
+                put_aside: Some("unit-b".into()),
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(data.record().unwrap().machine_id, first);
+        assert_eq!(
+            std::fs::read_to_string(state_of("secrets").join("provider-a")).unwrap(),
+            "sealed by a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_of("harness").join("login.json")).unwrap(),
+            "signed in"
+        );
+
+        // And the second finds its own when it is given the volume once more.
+        assert_eq!(
+            data.claim_machine_state("unit-b").unwrap(),
+            Claim::Restored {
+                put_aside: Some("unit-a".into()),
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(data.record().unwrap().machine_id, second);
+    }
+
+    /// Whether any file below `root` holds exactly `text`: where a machine put aside is kept does not matter to
+    /// what a person is promised, which is that it is not lost.
+    fn somewhere_below(root: &Path, text: &str) -> bool {
+        std::fs::read_dir(root).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                if path.is_dir() {
+                    somewhere_below(&path, text)
+                } else {
+                    std::fs::read_to_string(&path).is_ok_and(|found| found == text)
+                }
+            })
+        })
+    }
+
+    #[test]
+    fn a_unit_that_never_enrolled_does_not_displace_the_machine_put_aside_for_an_earlier_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        let keep = |name: &str, file: &str, text: &str| {
+            std::fs::write(dir.path().join(name).join(file), text).unwrap();
+        };
+        let read = |name: &str, file: &str| {
+            std::fs::read_to_string(dir.path().join(name).join(file)).unwrap_or_default()
+        };
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        keep("identity", "key", "the key of a");
+        keep("secrets", "sealed", "what a sealed");
+        // The second unit takes the volume and never enrolls; a third takes it after.
+        assert_eq!(
+            data.claim_machine_state("unit-b").unwrap(),
+            Claim::Fresh {
+                put_aside: "unit-a".into(),
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(
+            data.claim_machine_state("unit-c").unwrap(),
+            Claim::Own,
+            "there was no machine of the second unit to put aside"
+        );
+        assert!(
+            somewhere_below(dir.path(), "the key of a"),
+            "the machine of the first unit is still on the volume"
+        );
+        // The first unit is given the volume back, and finds what is its own.
+        assert_eq!(
+            data.claim_machine_state("unit-a").unwrap(),
+            Claim::Restored {
+                put_aside: None,
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(read("identity", "key"), "the key of a");
+        assert_eq!(read("secrets", "sealed"), "what a sealed");
+        assert!(
+            !dir.path().join(PREVIOUS_DIR).exists(),
+            "nothing is kept aside once it is back"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_a_third_unit_has_to_make_room_for_is_dropped_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        let keep = |name: &str, file: &str, text: &str| {
+            std::fs::write(dir.path().join(name).join(file), text).unwrap();
+        };
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        keep("identity", "key", "the key of a");
+        // The second unit enrolled too, and the first was put aside for it.
+        data.claim_machine_state("unit-b").unwrap();
+        keep("identity", "key", "the key of b");
+        // A third finds two machines and room for one: the later one is kept, and the earlier is named.
+        assert_eq!(
+            data.claim_machine_state("unit-c").unwrap(),
+            Claim::Fresh {
+                put_aside: "unit-b".into(),
+                dropped: vec!["unit-a".into()]
+            }
+        );
+        assert!(somewhere_below(dir.path(), "the key of b"));
+        assert!(!somewhere_below(dir.path(), "the key of a"));
+    }
+
+    #[test]
+    fn a_change_of_machine_that_was_cut_short_is_finished_by_the_next_start_and_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        assert_eq!(data.claim_machine_state("unit-a").unwrap(), Claim::Own);
+        std::fs::write(dir.path().join("secrets").join("sealed"), "what a sealed").unwrap();
+        // The process died after it had moved `identity/` aside and before it moved the rest: the
+        // next start finds the empty place `DataDir::open` makes, and the marker where it was.
+        std::fs::remove_dir(dir.path().join("identity")).unwrap();
+        let aside = dir.path().join(PREVIOUS_DIR).join("unit-a");
+        std::fs::create_dir_all(aside.join("identity")).unwrap();
+        std::fs::write(aside.join("identity").join("key"), "the key of a").unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-c").unwrap(),
+            Claim::Fresh {
+                put_aside: "unit-a".into(),
+                dropped: Vec::new()
+            }
+        );
+        for text in ["the key of a", "what a sealed"] {
+            assert!(
+                somewhere_below(dir.path(), text),
+                "{text:?} was moved or left, and is not lost"
+            );
+        }
+        // And the first unit, given the volume back, has all of its machine again.
+        assert_eq!(
+            data.claim_machine_state("unit-a").unwrap(),
+            Claim::Restored {
+                put_aside: None,
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("identity").join("key")).unwrap(),
+            "the key of a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("secrets").join("sealed")).unwrap(),
+            "what a sealed"
+        );
+    }
+
+    #[test]
+    fn a_machine_nobody_marked_is_another_units_and_is_put_aside_not_taken_for_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("identity").join("key"),
+            "a key nobody marked",
+        )
+        .unwrap();
+        assert_eq!(
+            data.claim_machine_state("unit-a").unwrap(),
+            Claim::Fresh {
+                put_aside: "unmarked".into(),
+                dropped: Vec::new()
+            }
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("identity"))
+                .unwrap()
+                .count(),
+            0,
+            "the unit begins with no machine"
+        );
+        assert!(somewhere_below(dir.path(), "a key nobody marked"));
+    }
+
+    #[test]
+    fn a_unit_named_so_that_it_would_leave_the_data_directory_claims_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = DataDir::open(dir.path()).unwrap();
+        for name in ["", "../other", "a/b", "unit a"] {
+            assert!(
+                matches!(data.claim_machine_state(name), Err(EnrollError::Launch(_))),
+                "{name:?} is not a unit identifier"
+            );
+        }
+        assert!(!dir.path().join(UNIT_FILE).exists());
     }
 
     #[test]
