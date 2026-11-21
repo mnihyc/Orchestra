@@ -176,3 +176,48 @@ async fn directory_observation_never_overlaps_and_stop_ends_a_held_measurement()
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(!directory.observed().unwrap().complete);
 }
+
+#[test]
+fn each_report_and_probe_samples_the_current_cpu_memory_and_data_volume_capacity() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let selected = Arc::clone(&step);
+    let source = sampled_facts(
+        move || {
+            let (cpus, memory, disk) = [
+                (6, 42_764_201_984, 267_900_000_000),
+                (4, 41_696_751_616, 300_000_000_000),
+                (8, 43_000_000_000, 280_000_000_000),
+            ][selected.load(Ordering::SeqCst)];
+            (
+                Host {
+                    hostname: "elastic-machine".into(),
+                    os_version: "fixture".into(),
+                    cpus,
+                    memory_bytes: memory,
+                },
+                Some(disk),
+            )
+        },
+        |host| machine_facts(host, FactsDraft::default(), None, Default::default(), 0),
+    );
+    for (i, expected) in [
+        (6, 42_764_201_984, 267_900_000_000),
+        (4, 41_696_751_616, 300_000_000_000),
+        (8, 43_000_000_000, 280_000_000_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        step.store(i, Ordering::SeqCst);
+        let report = source();
+        assert_eq!(
+            (
+                report.cpus,
+                report.memory_bytes,
+                report.data_volume_bytes.unwrap()
+            ),
+            expected
+        );
+        assert_eq!(report.capacity_refresh_secs, Some(FACTS_EVERY.as_secs()));
+    }
+}
