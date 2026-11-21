@@ -1,4 +1,5 @@
 /** Current readable place groups, actionable rows first, with paged identity merging and explicit read/Undo. */
+import { PathLink } from '@/shell/TrailLink';
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCheck, ExternalLink, Inbox as InboxIcon } from 'lucide-react';
 import { useEffect, useMemo, useRef } from 'react';
@@ -48,7 +49,7 @@ export function PlaceInbox({ filter }: { filter: InboxFilter }) {
           <h2 className="min-w-0 flex-1 text-base font-medium text-text wrap-anywhere">{name}</h2>
           <span className="text-xs text-text-muted">{t('away.inbox.unread', { count: quiet ? 0 : group.unread })}</span>
           <div className="flex w-full flex-wrap gap-2 sm:w-auto">
-            {url !== null && <Button size="sm" asChild><a href={url}><ExternalLink aria-hidden />{t('away.inbox.open')}</a></Button>}
+            {url !== null && <Button size="sm" asChild><PathLink href={url}><ExternalLink aria-hidden />{t('away.inbox.open')}</PathLink></Button>}
             <Button size="sm" icon={<CheckCheck aria-hidden />} pending={pending} disabled={group.unread === 0 && !pending} onClick={() => reads.read(group, name)}>{t('away.inbox.mark')}</Button>
           </div>
         </div>

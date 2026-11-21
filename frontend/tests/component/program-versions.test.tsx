@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 import type * as HarnessesApi from '@/api/harnesses';
 import type * as ChangesApi from '@/api/changes';
 import type * as SettingsApi from '@/api/settings';
+import type { changeMachinePrograms } from '@/api/machinePrograms';
 import type * as ResourcesApi from '@/api/resources';
 import { LiveQueryClient } from '@/api/query';
 import { ApiError } from '@/api/client';
@@ -17,31 +18,33 @@ import { withGroup } from '@/features/settings/settingsModel';
 import { localizedSetting } from '@/features/settings/settingText';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { HarnessVersions } from '@/features/admin/HarnessVersions';
-import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { EnvironmentPrograms, ProgramBuild } from '@/features/resources/agents/ProgramBuild';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
 import { UpdateDialog } from '@/features/fleet/UpdateDialog';
 import { PlanSwitch } from '@/features/composer/PlanSwitch';
-import type { EnvironmentUpdateBatchPlan, HarnessBuild, HarnessBuildUsage, HarnessKindInfo, Job, ProviderRuntimeUpdateBatchPreflightReply, ResolvedSetting } from '@/generated/api-types';
+import type { EnvironmentUpdateBatchPlan, HarnessBuild, HarnessBuildUsage, HarnessKindInfo, Job, ProviderRuntimeUpdateBatchPreflightReply, ResolvedSetting, RunningHarnessBuild } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
-import { detailEnvironment, detailUnitProvider } from './resource-detail-fixtures';
+import { detailEnvironment, detailMachine, detailUnitProvider } from './resource-detail-fixtures';
 import { ADA } from '../doubles/chat-rows';
 import { failedStart } from './failed-start-fixtures';
 import { show } from './support';
 import { agentDescriptor } from '../doubles/agent-descriptor';
 import { harnessName } from '../doubles/harness-names';
 
-const state = vi.hoisted(() => ({ kinds: [] as HarnessKindInfo[], builds: [] as HarnessBuild[], usage: [] as HarnessBuildUsage[], plan: null as EnvironmentUpdateBatchPlan | null, fetch: vi.fn<typeof HarnessesApi.fetchProgramVersion>(), write: vi.fn(), settingWrite: vi.fn<typeof SettingsApi.putSetting>(), start: vi.fn<typeof ChangesApi.startEnvironmentUpdates>(), providerRead: vi.fn<typeof ChangesApi.planProviderUpdates>(), providerStart: vi.fn<typeof ChangesApi.startProviderUpdates>() }));
-vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>(), harnessKindsQuery: { queryKey: ['version-program-kinds'], queryFn: () => Promise.resolve(state.kinds) } }));
+const state = vi.hoisted(() => ({ machineRead: vi.fn<() => Promise<typeof detailMachine>>(), refreshMachine: vi.fn<typeof changeMachinePrograms>(), running: [] as RunningHarnessBuild[], kinds: [] as HarnessKindInfo[], builds: [] as HarnessBuild[], usage: [] as HarnessBuildUsage[], plan: null as EnvironmentUpdateBatchPlan | null, fetch: vi.fn<typeof HarnessesApi.fetchProgramVersion>(), write: vi.fn(), settingWrite: vi.fn<typeof SettingsApi.putSetting>(), start: vi.fn<typeof ChangesApi.startEnvironmentUpdates>(), providerRead: vi.fn<typeof ChangesApi.planProviderUpdates>(), providerStart: vi.fn<typeof ChangesApi.startProviderUpdates>() }));
+vi.mock('@/api/machinePrograms', async (load) => ({ ...await load<object>(), changeMachinePrograms: state.refreshMachine }));
+vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>(), machineQuery: (id: string) => ({queryKey: ['machine', id], queryFn: state.machineRead}), harnessKindsQuery: { queryKey: ['version-program-kinds'], queryFn: () => Promise.resolve(state.kinds) } }));
 vi.mock('@/api/settings', async (load) => ({ ...await load<object>(), putSetting: state.settingWrite }));
 vi.mock('@/api/harnesses', async (load) => ({ ...await load<object>(),
+  environmentProgramsQuery: (id: string) => ({ queryKey: ['programs-seen', id], queryFn: () => Promise.resolve(state.running) }),
   programBuildsQuery: { queryKey: ['program-builds'], queryFn: () => Promise.resolve(state.builds) },
   harnessUsageQuery: { queryKey: ['admin', 'harness-usage'], queryFn: () => Promise.resolve(state.usage) },
   fetchProgramVersion: state.fetch,
 }));
 vi.mock('@/api/changes', async (load) => ({ ...await load<object>(), planEnvironmentUpdates: () => Promise.resolve(state.plan), startEnvironmentUpdates: state.start, planProviderUpdates: state.providerRead, startProviderUpdates: state.providerStart }));
 vi.mock('@/features/admin/SettingRows', () => ({ useSystemSettings: () => ({ find: () => ({ value: {} }) }), useSettingChange: () => ({ writable: true, save: { variables: undefined, mutate: state.write } }), SettingChangeStatus: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resource-facts/ResourceFacts', () => ({ ResourceChip: ({ subject, children }: { subject: { kind: string; environment?: { name: string }; provider?: { name: string } }; children?: ReactNode }) => <span>{children ?? subject.environment?.name ?? subject.provider?.name}</span> }));
 vi.mock('@/features/change/Progress', () => ({ JobProgress: ({ job }: { job: Job }) => <p>{job.state}</p>, committed: () => false }));
 vi.mock('@/api/forks', async (load) => ({ ...await load<object>(), jobQuery: (id: string) => ({ queryKey: ['job', id], queryFn: () => Promise.resolve({ ...failedStart().job, id }) }) }));
@@ -126,11 +129,48 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a running program even 
   const name = locale === 'zh-CN' ? '研究助理' : 'Research assistant';
   const program = { kind: 'named-external', version: '1.2.3', build: null,
     harness: { kind: 'named-external', name: 'Research assistant', names: { 'zh-CN': '研究助理' } } };
-  show(<ProgramBuild program={program} />);
-  expect(screen.getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
-  expect(screen.getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  state.running = [program];
+  show(<EnvironmentPrograms id="environment" />);
+  const programs = await screen.findByRole('region', { name: i18n.t('programVersions.running') });
+  expect(within(programs).getByText(`${name} 1.2.3`, { exact: true })).toBeVisible();
+  expect(within(programs).getByText(i18n.t('programVersions.unknownCheck'))).toBeVisible();
+  expect(within(programs).getByText(i18n.t('programVersions.unknownCheckWhy'))).toBeVisible();
+  expect(within(programs).getByText(locale === 'en' ? /Choose a checked build/i : /已.*检查|已.*验证/)).toBeVisible();
   expect(document.body).not.toHaveTextContent(i18n.t('resources.harnessNameUnknown'));
   expect(document.body).not.toHaveTextContent('named-external');
+});
+
+it.each(['en', 'zh-CN'] as const)('identifies and refreshes the selected executable and identifies a built-in program from their rows in %s', async (locale) => {
+  await setLocale(locale);
+  const old = 'a'.repeat(64);
+  const fresh = 'b'.repeat(64);
+  const machine = (sha256: string) => ({ ...detailMachine, facts: {
+    policy: { 'agent.harnesses': [{ kind: 'codex', path: '/selected/codex' }, {kind: 'fake', path: '/bin/orch-connector'}] },
+    adapters: [{kind: 'fake', builtin: true, needs_binary: false}],
+    harnesses: [
+      { kind: 'codex', version: '0.167.2', path: '/other/codex', sha256: 'c'.repeat(64) },
+      { kind: 'codex', version: '0.167.2', path: '/selected/codex', sha256 },
+      { kind: 'fake', version: 'unknown', path: '/bin/orch-connector' },
+    ],
+  } });
+  state.running = [{kind:'codex',version:'0.167.2',build:null}, {kind:'fake',version:'unknown',build:null}];
+  state.machineRead.mockReset().mockResolvedValue(machine(old));
+  state.refreshMachine.mockReset().mockResolvedValue({can_manage:true, entries:[], capabilities:[], approvals:[], config_file:null, machine_view:machine(fresh)});
+  show(<EnvironmentPrograms id="lab" machineId={detailMachine.id} />);
+  const region = await screen.findByRole('region', {name: i18n.t('programVersions.running')});
+  const identify = within(region).getAllByRole('button', {name: locale === 'en' ? 'Identify program' : '识别程序'});
+  expect(state.machineRead).not.toHaveBeenCalled();
+  await userEvent.click(identify[0]!);
+  expect(await screen.findByText(old)).toBeVisible();
+  expect(screen.getByText('selected/codex')).toBeVisible();
+  expect(screen.queryByText('other/codex')).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', {name: i18n.t('machinePrograms.nativeRefresh')}));
+  expect(state.refreshMachine).toHaveBeenCalledExactlyOnceWith(detailMachine.id, {action:'reload'});
+  expect(await screen.findByText(fresh)).toBeVisible();
+  await userEvent.keyboard('{Escape}');
+  await userEvent.click(identify[1]!);
+  expect(await screen.findByText(locale === 'en' ? 'Built into the connector' : '连接器内置程序')).toBeVisible();
+  expect(screen.getByText('bin/orch-connector')).toBeVisible();
 });
 
 it('fetches a typed version before allowing it into the policy and preserves a vendor refusal', async () => {

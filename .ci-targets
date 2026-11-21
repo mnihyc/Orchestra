@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web build
