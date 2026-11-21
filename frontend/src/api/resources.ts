@@ -11,6 +11,8 @@
  * makes nothing twice. A change to something with a revision carries the revision the person saw, and
  * a stale one comes back as `conflict.stale_revision`, which the screen shows and never retries alone.
  */
+import { RELEASE_READ } from '@/api/freshness';
+import { providerFactsModelsKey } from './resourceKeys';
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
@@ -44,6 +46,7 @@ import type {
   ProviderFactsOverridesSetBody,
   ProviderListScope,
   ProviderModel,
+  ProviderModelUpdateBody,
   ProviderSetup,
   ProviderSourcesSetBody,
   ProviderThreadListReply,
@@ -73,7 +76,7 @@ export const providerKey = (id: string) => ['provider', id] as const;
 export const providerSetupKey = (orgId: string, providerId?: string) => providerId === undefined ? ['provider-setup', orgId] as const : ['provider-setup', orgId, providerId] as const;
 export const providerSettingsKey = (id: string) => ['provider-settings', id] as const;
 export const providerModelsKey = (id: string) => ['provider-models', id] as const;
-export const providerSuggestionsKey = (id: string) => ['provider-suggestions', id] as const;
+export { providerFactsModelsKey };
 export const providerThreadsKey = (id: string) => ['provider-threads', id] as const;
 export const agentsKey = ['agents'] as const;
 export const agentKey = (id: string) => ['agent', id] as const;
@@ -175,16 +178,21 @@ export function registerProvider(machineId: string, body: MachineProviderRegistr
 // ---------------------------------------------------------------- providers
 
 /** The providers of the caller, by what they own, may use or manage; for an org's admin, all that lie in it. */
-export const providersQuery = (scope: ProviderListScope, orgId: string | null = null) =>
+export const providersQuery = (scope: ProviderListScope, orgId: string | null = null, connectionEnvironmentId: string | null = null) =>
   queryOptions({
-    queryKey: [...providersKey, scope, orgId] as const,
-    queryFn: async ({ signal }): Promise<ResourceRows<Provider>> => {
+    queryKey: [...providersKey, scope, orgId, ...(connectionEnvironmentId === null ? [] : ['environment',connectionEnvironmentId])] as const,
+    queryFn: ({signal})=>readProviders(scope,orgId,connectionEnvironmentId,signal),
+  });
+
+/** The same complete readable collection for picker proposals, under their own reader and cancellation. */
+export async function readProviders(scope:ProviderListScope,orgId:string|null,connectionEnvironmentId:string|null,signal:AbortSignal):Promise<ResourceRows<Provider>> {
       const all: ProviderListed[] = [];
       const seen = new Set<string>();
       let cursor: string | null = null;
       do {
         const page: ProviderListedPage = await ok(api.GET('/providers', { params: { query: {
           scope, ...(orgId === null ? {} : { org_id: orgId }),
+          ...(connectionEnvironmentId === null ? {} : {connection_environment_id:connectionEnvironmentId}),
           ...(cursor === null ? {} : { cursor }),
         } }, signal }));
         all.push(...page.items);
@@ -193,8 +201,7 @@ export const providersQuery = (scope: ProviderListScope, orgId: string | null = 
         if (cursor !== null) seen.add(cursor);
       } while (cursor !== null);
       return resourceRows<Provider>(all);
-    },
-  });
+}
 
 export const providerQuery = (id: string, options: ReadOptions = {}) =>
   queryOptions({
@@ -222,19 +229,31 @@ export const providerSettingsQuery = (id: string) =>
 export const providerModelsQuery = (id: string) =>
   queryOptions({
     queryKey: providerModelsKey(id),
-    queryFn: ({ signal }): Promise<ProviderModel[]> =>
-      ok(api.GET('/providers/{id}/models', { params: { path: { id } }, signal })),
+    queryFn: ({signal})=>readProviderModels(id,signal),
   });
 
-/** The models the provider's endpoint or harness names that are not listed yet. It fails where the provider cannot be asked. */
-export const providerSuggestionsQuery = (id: string) =>
+/** Read declared models without lending another reader's historical cache to a proposal. */
+export function readProviderModels(id:string,signal:AbortSignal):Promise<ProviderModel[]> {
+  return ok(api.GET('/providers/{id}/models',{params:{path:{id}},signal}));
+}
+/** Resolve only the named catalogue entry through the same policy that creates it. */
+export const providerModelDefaultsQuery = (id: string, modelName: string) => queryOptions({
+  queryKey: ['provider-model-defaults', id, modelName] as const,
+  queryFn: ({ signal }): Promise<ModelParameters> => ok(api.GET('/providers/{id}/models/defaults', { params: { path: { id }, query: { model_name: modelName } }, signal })),
+  retry: false,
+});
+
+/**
+ * The models the provider's endpoint or harness last listed, as it kept them: a provider's view says only how many.
+ * `at` is when that list was read (`facts.field_times.models`): a list read anew is another key, so it is asked for again.
+ */
+export const providerFactsModelsQuery = (id: string, at: string | null) =>
   queryOptions({
-    queryKey: providerSuggestionsKey(id),
+    queryKey: providerFactsModelsKey(id, at),
     queryFn: ({ signal }): Promise<ModelSuggestion[]> =>
-      ok(api.GET('/providers/{id}/models/suggestions', { params: { path: { id } }, signal })),
-    // A discovery is a question put to the vendor: it is asked when the reader asks, not on every visit.
-    staleTime: 5 * 60_000,
-    retry: false,
+      ok(api.GET('/providers/{id}/facts/models', { params: { path: { id } }, signal })),
+    // A list read at one time never changes: a list read anew is another key.
+    staleTime: Infinity,
   });
 
 /** The threads bound to a provider that the caller may view, a page at a time. */
@@ -262,12 +281,12 @@ export function updateProvider(id: string, body: ProviderUpdateBody): Promise<Pr
   return ok(api.PATCH('/providers/{id}', { params: { path: { id } }, body }));
 }
 
-export function deleteProvider(id: string): Promise<void> {
-  return done(api.DELETE('/providers/{id}', { params: { path: { id } } }));
+export function deleteProvider(id: string, notification?: {notify:boolean;notification_review?:string}): Promise<void> {
+  return done(api.DELETE('/providers/{id}', { params: { path: { id }, ...(notification===undefined?{}:{query:notification}) } }));
 }
 
-export function disableProvider(id: string,note?:string): Promise<Provider> {
-  return ok(api.POST('/providers/{id}/disable', { params: { path: { id },...(note===undefined?{}:{query:{note}}) } }));
+export function disableProvider(id: string,note?:string, notification?: {notify:boolean;notification_review?:string}): Promise<Provider> {
+  return ok(api.POST('/providers/{id}/disable', { params: { path: { id },query:{...notification,...(note===undefined?{}:{note})} } }));
 }
 
 export function enableProvider(id: string,runWaiting=false): Promise<Provider> {
@@ -322,7 +341,7 @@ export function createModel(providerId: string, body: NewModel): Promise<Provide
 export function updateModel(
   providerId: string,
   modelId: string,
-  body: { display_name?: string; enabled?: boolean; parameters?: ModelParameters; groups?: string[] },
+  body: ProviderModelUpdateBody,
   note?: string,
   runWaiting?: boolean,
 ): Promise<ProviderModel> {
@@ -371,10 +390,11 @@ export const agentQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Agent> => ok(api.GET('/agents/{id}', { params: { path: { id } }, signal })),
   });
 
-/** The harnesses the system has an adapter for, with the builds there are. */
+/** The harnesses the system has an adapter for, with the builds there are. It changes with a release or an administrator's own act, which says so: it is read once. */
 export const harnessKindsQuery = queryOptions({
   queryKey: harnessKindsKey,
   queryFn: ({ signal }): Promise<HarnessKindInfo[]> => ok(api.GET('/harness-kinds', { signal })),
+  ...RELEASE_READ,
 });
 
 /** Makes a profile for a harness in an org. */
@@ -432,14 +452,14 @@ export const hostRuntimesQuery = (id: string) =>
     queryFn: ({ signal }): Promise<Runtime[]> => ok(api.GET('/hosts/{id}/runtimes', { params: { path: { id } }, signal })),
   });
 
-/** Stops a unit on a host, interrupting the turns that run in it only when asked to. */
-export function stopHostRuntime(hostId: string, runtimeId: string, interrupt: boolean): Promise<Runtime> {
-  return ok(api.POST('/hosts/{id}/runtimes/{runtime_id}/stop', { params: { path: { id: hostId, runtime_id: runtimeId } }, body: { interrupt } }));
+/** Stops a unit on a host, interrupting the turns that run in it only when asked to; by force it is settled although its host does not confirm. */
+export function stopHostRuntime(hostId: string, runtimeId: string, interrupt: boolean, force = false): Promise<Runtime> {
+  return ok(api.POST('/hosts/{id}/runtimes/{runtime_id}/stop', { params: { path: { id: hostId, runtime_id: runtimeId } }, body: { interrupt, ...(force ? { force } : {}) } }));
 }
 
-/** Takes a unit away from a host after naming it; its volumes go too only when asked to. */
-export function removeHostRuntime(hostId: string, runtimeId: string, confirm: string, volumes: boolean): Promise<void> {
-  return done(api.DELETE('/hosts/{id}/runtimes/{runtime_id}', { params: { path: { id: hostId, runtime_id: runtimeId }, query: { confirm, ...(volumes ? { volumes } : {}) } } }));
+/** Takes a unit away from a host after naming it; its volumes go too only when asked to, and a job that works on it is ended only by force. */
+export function removeHostRuntime(hostId: string, runtimeId: string, confirm: string, volumes: boolean, force = false): Promise<void> {
+  return done(api.DELETE('/hosts/{id}/runtimes/{runtime_id}', { params: { path: { id: hostId, runtime_id: runtimeId }, query: { confirm, ...(volumes ? { volumes } : {}), ...(force ? { force } : {}) } } }));
 }
 
 // ---------------------------------------------------------------- templates, drivers, capabilities
@@ -468,13 +488,14 @@ export const templateQuery = (id: string) =>
 export const driversQuery = queryOptions({
   queryKey: driversKey,
   queryFn: ({ signal }): Promise<DriverInfo[]> => ok(api.GET('/drivers', { signal })),
+  ...RELEASE_READ,
 });
 
 /** What an environment may be granted beyond the ordinary, each with its risk. */
 export const capabilitiesQuery = queryOptions({
   queryKey: capabilitiesKey,
   queryFn: ({ signal }): Promise<CapabilityDef[]> => ok(api.GET('/capabilities', { signal })),
-  staleTime: Number.POSITIVE_INFINITY,
+  ...RELEASE_READ,
 });
 
 export function createTemplate(body: TemplateCreateBody, key: string): Promise<Template> {
