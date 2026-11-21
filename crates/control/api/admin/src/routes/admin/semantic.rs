@@ -105,6 +105,7 @@ fn view(org: NodeRef, state: OrgState) -> SemanticSearchOrg {
         allowed_bytes: state.allowed_bytes,
         rebuild_bytes: state.rebuild_bytes,
         rebuild_seconds: state.rebuild_seconds,
+        retry: state.retry,
     }
 }
 

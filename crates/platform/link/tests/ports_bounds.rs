@@ -58,6 +58,7 @@ fn rule_2_full_udp_storage_and_oversize_drop_and_count_without_waiting_or_replay
 
 fn claims(environment: orch_types::Id, opening: orch_types::Id, caller: usize) -> PortTicketClaims {
     PortTicketClaims {
+        machine_reach: false,
         environment_id: environment,
         generation: 0,
         port: 9000,
