@@ -27,7 +27,15 @@ fn has_code(message: &str) -> bool {
 pub(super) fn prepare(problem: &mut Problem) {
     // Flattened extras cannot overwrite the contract fields (some native failures used
     // an extra `detail`, producing a second JSON member with the unreviewed diagnostics).
-    for reserved in ["type", "code", "title", "status", "detail", "request_id"] {
+    for reserved in [
+        "type",
+        "code",
+        "title",
+        "status",
+        "detail",
+        "request_id",
+        "session_end",
+    ] {
         problem.extra.remove(reserved);
     }
     problem.title = problem.code.title().to_owned();
@@ -62,7 +70,15 @@ pub mod tests {
             .with("message", diagnostic);
         problem.request_id = "request-for-support".to_owned();
         let original = problem.clone();
-        let reserved = ["type", "code", "title", "status", "detail", "request_id"];
+        let reserved = [
+            "type",
+            "code",
+            "title",
+            "status",
+            "detail",
+            "request_id",
+            "session_end",
+        ];
         for member in reserved {
             problem.extra.insert(member.to_owned(), json!(diagnostic));
         }
