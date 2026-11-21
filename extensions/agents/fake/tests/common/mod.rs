@@ -241,7 +241,10 @@ impl Fake {
     pub fn spec(&self, mode: SessionMode) -> SessionSpec {
         let directory = self.work_path();
         SessionSpec {
+            opening_id: orch_types::new_id(),
+            opening_command: None,
             settings: SessionSettings {
+                output_capture_bytes: 67_108_864,
                 native_model: None,
                 agent_id: self.agent,
                 thread_id: new_id(),
@@ -264,6 +267,7 @@ impl Fake {
                 subagent_limits: Default::default(),
                 prompt_cache_ttl: None,
                 background_wake: true,
+                web_action_wait_secs: 120,
                 image_generation: None,
                 memory: None,
                 arrangement: ArrangementType::Together,

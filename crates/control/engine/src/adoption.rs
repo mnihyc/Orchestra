@@ -361,6 +361,8 @@ impl Engine {
             .provider_use(
                 &mut conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: adoption.topic,
                     provider: adoption.provider,
@@ -652,7 +654,11 @@ impl Engine {
             settings.models_allowed.as_deref(),
             model,
         ) {
-            Err(crate::models::NotAllowed::NotEnabled) => {
+            Err(
+                crate::models::NotAllowed::NotEnabled
+                | crate::models::NotAllowed::GenerationUnsupported
+                | crate::models::NotAllowed::Unreadable,
+            ) => {
                 return Ok(refused(AdoptModelReason::NotOffered));
             }
             Err(crate::models::NotAllowed::LeftOutByThePlace) => {
@@ -680,6 +686,8 @@ impl Engine {
             .provider_use(
                 conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person,
                     node: adoption.topic,
                     provider: adoption.provider,

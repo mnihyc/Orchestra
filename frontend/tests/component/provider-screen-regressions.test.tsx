@@ -24,13 +24,13 @@ beforeAll(async () => { await loadSearchCatalogues(); });
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),providersQuery:()=>({queryKey:['qs-provider-list'],queryFn:()=>Promise.resolve(listed.rows),initialData:listed.rows})}));
 vi.mock('@/features/resources/providers/AddProvider',()=>({AddProviderDialog:()=>null}));
 vi.mock('@/features/resources/providers/acts',()=>({useProviderActs:()=>({list:{bulk:[],dialogs:null}})}));
-vi.mock('@/features/resources/harnesses',()=>({useHarnessTitle:()=>(kind:string)=>kind}));
+vi.mock('@/features/resources/harnesses',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHarnessTitle:()=>(kind:string)=>kind}));
 vi.mock('@/features/resources/HomePicker',()=>({useViewedOrg:()=>null}));
-vi.mock('@/features/navigation/placeLabels',()=>({useKnownPlaces:()=>knownPlaces([
+vi.mock('@/features/navigation/placeLabels',async (loadOriginal) => ({ ...await loadOriginal<object>(),useKnownPlaces:()=>knownPlaces([
   {id:'acme',name:'Acme',above:[]},{id:'beta',name:'Beta',above:[]},
 ])}));
 // The help question beside a column reads the router when it renders (useHelpOpener).
-vi.mock('@tanstack/react-router',()=>({Link:({children,params,to:_to,...props}:ComponentPropsWithRef<'a'> & {params?:{id:string};to?:string})=>
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),Link:({children,params,to:_to,...props}:ComponentPropsWithRef<'a'> & {params?:{id:string};to?:string})=>
   <a {...props} href={'/resources/providers/' + (params?.id ?? '')}>{children}</a>,
   useRouter:()=>({state:{location:{pathname:'/resources/providers'}},history:{push:()=>undefined}})}));
 // The name column is the behavior under review; geometry, row menus and the list frame have their own proofs.
@@ -90,6 +90,25 @@ for (const language of ['en','zh-CN'] as const) describe('QS-029 in ' + language
     expect(screen.queryByText(t('providers.phrase.needsKey'))).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button',{name:t('resources.act.nextModels')}));
     expect(onTab).toHaveBeenCalledWith('models');
+  });
+  it('takes a lapsed subscription to sign-in and a renewed subscription with no model to Models', async () => {
+    const words = i18n.cloneInstance({ lng: language });
+    const onTab = vi.fn();
+    const provider = planProvider({ kind: 'subscription', status: 'needs_setup', models: [], status_detail: null });
+    provider.facts.credential = { method: null, yields: 'token', issued_at: null, expires_at: '2001-01-01T00:00:00Z' };
+    const notice = (row: Provider, currentTab: 'overview' | 'key' = 'overview') => <I18nextProvider i18n={words}><ProviderSetupNotice provider={row} manage onTab={onTab} currentTab={currentTab} /></I18nextProvider>;
+    const view = show(notice(provider));
+    expect(screen.getByText(t('providers.phrase.signInLapsed'))).toBeVisible();
+    expect(screen.queryByText(t('providers.phrase.needsModel'))).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: t('resources.act.signInAgain') }));
+    expect(onTab).toHaveBeenLastCalledWith('key');
+    view.rerender(notice(provider, 'key'));
+    expect(screen.getByText(t('providers.phrase.signInLapsed'))).toBeVisible();
+    expect(screen.queryByRole('button', { name: t('resources.act.signInAgain') })).not.toBeInTheDocument();
+    view.rerender(notice({ ...provider, facts: { ...provider.facts, credential: { ...provider.facts.credential, expires_at: null } } }));
+    expect(screen.getByText(t('providers.phrase.needsModel'))).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: t('resources.act.nextModels') }));
+    expect(onTab).toHaveBeenLastCalledWith('models');
   });
   it('keeps the setup reason visible to an observer without offering a manager act', () => {
     const words=i18n.cloneInstance({lng:language});

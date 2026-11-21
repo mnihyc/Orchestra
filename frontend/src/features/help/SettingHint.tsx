@@ -4,7 +4,7 @@ import { useState } from 'react';
 
 import type { SettingsTarget } from '@/api/settings';
 import { useHelpOpener } from '@/features/help/open';
-import { authoredSettingGuide, settingArticle, settingDefinitionForKey, settingHelpEntries } from '@/features/help/settings';
+import { authoredSettingGuide, settingArticle, settingHelpEntry } from '@/features/help/settings';
 import { useHelpState } from '@/features/help/state';
 import { WhereSet } from '@/features/help/WhereSet';
 import { useGuideEntry } from '@/features/help/guideEntries';
@@ -42,6 +42,6 @@ export function SettingHint({ def, setting, target }: { def: SettingDef; setting
 /** In-place controls use a key; their entry is still the generated registry's, not a second hand-written hint. */
 export function SettingHelpLink({ settingKey, target }: { settingKey: string; target?: SettingsTarget }) {
   const { i18n } = useTranslation();
-  const def = settingDefinitionForKey(settingHelpEntries(i18n), settingKey);
+  const def = settingHelpEntry(i18n, settingKey);
   return def === undefined ? null : <SettingHint def={def} target={target} />;
 }

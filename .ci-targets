@@ -1,0 +1,2 @@
+test -p orch-settings --test resolution
+test -p orch-engine --test failures --test orch_tools
