@@ -470,3 +470,226 @@ async fn the_effort_the_mode_and_the_model_are_changed_between_turns() {
     );
     rig.adapter.stop().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_free_summary_reads_only_its_supplied_words_and_cannot_execute_a_forced_tool() {
+    use orch_agent_contract::descriptor::SideReading;
+    let Some(mut rig) = Rig::new().await else {
+        return;
+    };
+    let poison = "ambient material must never enter a supplied-only summary";
+    std::fs::write(rig.work.path().join("CLAUDE.md"), poison).unwrap();
+    std::fs::write(rig.home.path().join("CLAUDE.md"), poison).unwrap();
+    rig.start_quick().await;
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    spec.settings.raw_events = true;
+    spec.settings.instructions = "Use only the supplied material.".into();
+    rig.open_with(spec).await;
+    let (_, events) = rig
+        .run("#!mock\nsay A summary of the supplied material.\n")
+        .await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert!(said(&events).contains("A summary of the supplied material."));
+    let init = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::RawFrame(frame)
+                if frame.payload["type"] == "system" && frame.payload["subtype"] == "init" =>
+            {
+                Some(&frame.payload)
+            }
+            _ => None,
+        })
+        .expect("the real program must report its actual tool inventory");
+    assert!(
+        init["tools"].as_array().unwrap().is_empty(),
+        "no native, skill or MCP tool is available"
+    );
+    assert!(init["mcp_servers"].as_array().unwrap().is_empty());
+    assert!(rig.model.requests().iter().all(|request| {
+        !request.body.to_string().contains(poison)
+            && request
+                .body
+                .get("tools")
+                .is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty))
+    }));
+    let marker = rig.work.path().join("forbidden-summary-action");
+    let command = format!("printf forbidden > '{}'", marker.display());
+    let script = format!(
+        "#!mock\ntool Bash {}\nthen\nsay The forbidden tool was unavailable.\n",
+        json!({"command":command})
+    );
+    let (_, events) = rig.run_deciding(&script, common::allow).await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert!(
+        !marker.exists(),
+        "even an explicitly forced model tool and an allowing reviewer cannot act"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ApprovalRequested(_))),
+        "the absent tool cannot obtain an approval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_model_turn_uses_its_output_allowance_without_running_another_tool_turn() {
+    use orch_agent_contract::{
+        descriptor::SideReading,
+        session::{NativeModelContext, ProgramOutput},
+    };
+    let mut rig = Rig::new()
+        .await
+        .expect("the prepared native program is required for this case");
+    let started = rig.start_quick().await;
+    let program = started.descriptor.capability_program();
+    let ask = program
+        .access
+        .get("native")
+        .and_then(|access| access.native.get("ask"))
+        .expect("the tool-free model is offered for Ask");
+    assert_eq!(
+        ask.extensions
+            .get("structured_output")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert!(ask.execution.iter().any(|support| support.confined_tools
+        && support.read_tools
+        && support.input == "ask.step"
+        && support.result == "ask.reply"));
+    let summary = program
+        .access
+        .get("native")
+        .and_then(|native| native.native.get("summary"))
+        .expect("the proved text consumer is offered on the native sign-in");
+    assert_eq!(summary.delegated_mode.as_deref(), Some("native"));
+    assert!(
+        summary
+            .execution
+            .iter()
+            .any(|support| support.input == "summary.request"
+                && support.result == "summary.result"
+                && support.confined_tools)
+    );
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    let mut native =
+        NativeModelContext::captured(spec.settings.model.clone(), Default::default(), &[]).unwrap();
+    native
+        .set_program_output(ProgramOutput {
+            max_output_tokens: 120,
+            schema: None,
+        })
+        .unwrap();
+    let native = Box::new(native);
+    spec.settings.native_model = Some(native.clone());
+    rig.open_with(spec).await;
+    let mut turn = rig.turn("#!mock\nsay A bounded model answer.\n");
+    turn.native_model = Some(native.clone());
+    rig.adapter.start_turn(turn).await.unwrap();
+    let events = rig.until_the_turn_ends().await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    assert!(said(&events).contains("A bounded model answer."));
+    let requests = rig.model.requests();
+    assert_eq!(requests.len(), 1);
+    let allowance = requests[0].body["max_tokens"]
+        .as_i64()
+        .expect("the actual request must state an allowance");
+    assert!(
+        allowance > 0 && allowance <= 120,
+        "the native request must honor the source's allowance: {allowance}"
+    );
+    let before = requests.len();
+    let mut turn = rig.turn("#!mock\ntool Bash {\"command\":\"printf forbidden\"}\nthen\nsay A second model request must not run.\n");
+    turn.native_model = Some(native);
+    rig.adapter.start_turn(turn).await.unwrap();
+    let events = rig.until_the_turn_ends().await;
+    assert_ne!(outcome(&events), TurnOutcome::Completed);
+    assert_eq!(
+        rig.model.requests().len() - before,
+        1,
+        "Orch owns the next model step, not the native agent loop"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ApprovalRequested(_)))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_model_turn_uses_the_declared_response_schema_and_keeps_its_final_reply() {
+    use orch_agent_contract::{
+        descriptor::SideReading,
+        session::{NativeModelContext, ProgramOutput},
+    };
+    use orch_testkit::doubles::model::QueueFilter;
+    let mut rig = Rig::new()
+        .await
+        .expect("the prepared native program is required for this case");
+    rig.start_quick().await;
+    let answer = json!({"text":"A schema-held answer.","tool_calls":[]});
+    rig.model
+        .queue_matching(
+            &format!("tool StructuredOutput {answer}"),
+            &QueueFilter::default(),
+            1,
+            |body| {
+                body.get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| {
+                        tools.iter().any(|tool| tool["name"] == "StructuredOutput")
+                    })
+            },
+        )
+        .unwrap();
+    rig.model.set_default(&format!("say {answer}")).unwrap();
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    let mut native =
+        NativeModelContext::captured(spec.settings.model.clone(), Default::default(), &[]).unwrap();
+    native.set_program_output(ProgramOutput {
+        max_output_tokens: 512,
+        schema: Some(json!({"type":"object","required":["text","tool_calls"],"properties":{"text":{"type":"string"},"tool_calls":{"type":"array","items":{"type":"object"}}},"additionalProperties":false})),
+    }).unwrap();
+    let native = Box::new(native);
+    spec.settings.native_model = Some(native.clone());
+    rig.open_with(spec).await;
+    let mut turn = rig.turn("Return the supplied response in its requested schema.");
+    turn.native_model = Some(native);
+    rig.adapter.start_turn(turn).await.unwrap();
+    let events = rig.until_the_turn_ends().await;
+    assert_eq!(outcome(&events), TurnOutcome::Completed);
+    let replies: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ItemCompleted(item) if item.payload["phase"] == "final" => {
+                item.payload["text"].as_str()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    let reply: serde_json::Value = serde_json::from_str(replies[0]).unwrap();
+    assert_eq!(reply, answer);
+    assert_eq!(rig.model.requests().len(), 1);
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref.ends_with(":structured-output"))), "the validated native result must reach the ordinary text reader");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_free_session_cannot_open_an_extra_model_callable_server() {
+    use orch_agent_contract::descriptor::SideReading;
+    let Some(mut rig) = Rig::new().await else {
+        return;
+    };
+    rig.start_quick().await;
+    let mut spec = rig.spec(SessionMode::New, None);
+    spec.settings.side_reading = Some(SideReading::NoTools);
+    spec.mcp.push("unrequested-server".into());
+    let refused = rig.adapter.open_session(spec).await.unwrap_err();
+    assert_eq!(refused.code(), "unsupported");
+    assert!(rig.model.requests().is_empty());
+}

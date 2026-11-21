@@ -521,7 +521,7 @@ async fn nobody_who_is_not_signed_in_sets_up_or_changes_a_destination() {
 #[tokio::test]
 async fn a_destination_creation_key_replays_current_native_content_without_another_save() {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let p = place().await;
     let far = FarSide::taking().await;
@@ -562,12 +562,13 @@ async fn a_destination_creation_key_replays_current_native_content_without_anoth
         )
         .unwrap();
         assert!(scope.validate().is_empty());
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = orch_types::new_id();
+        let secret = new_api_token(issued_key_id);
         let mut conn = p.o.world.conn().await;
         identity::create_api_token_scoped(
             &mut conn,
             &identity::NewApiToken {
-                id: orch_types::new_id(),
+                id: issued_key_id,
                 user_id: p.o.bea.id(),
                 name: "Creation current Read",
                 token_hash: &token_hash(&secret),

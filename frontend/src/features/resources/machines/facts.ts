@@ -19,6 +19,7 @@ export function architectureName(value: string, t: TFunction): string {
 export const SLOW_LINK_MS = 150;
 
 export interface FoundHarness {
+  sha256?: string;
   title?:string;
   kind: string;
   path: string;
@@ -71,7 +72,7 @@ const count = (value: unknown): number | null => (typeof value === 'number' && N
 
 function harness(entry: Record<string, unknown>): FoundHarness | null {
   const kind = text(entry.kind);
-  return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', daemon: entry.daemon === true };
+  return kind === null ? null : { kind, path: text(entry.path) ?? '', version: text(entry.version) ?? '', ...(typeof entry.sha256 === 'string' ? {sha256: entry.sha256} : {}), daemon: entry.daemon === true };
 }
 
 function list<Item>(value: unknown, read: (entry: Record<string, unknown>) => Item | null): Item[] {
@@ -142,10 +143,7 @@ export function formatRate(bitsPerSecond: number, locale: string): string {
 export function machineLinkWords(link: MachineLink | null, t: TFunction, locale: string): string {
   const missing = '–';
   if (link === null) return missing;
-  if (link.roundTripMs !== null && link.upBps !== null && link.downBps !== null) return t('machines.overview.linkValue', {
-    trip: formatNumber(link.roundTripMs, locale), up: formatRate(link.upBps, locale), down: formatRate(link.downBps, locale),
-  });
-  return t('machines.overview.linkPartial', {
+  return t('machines.overview.linkValue', {
     trip: link.roundTripMs === null ? missing : t('machines.overview.linkTrip', { value: formatNumber(link.roundTripMs, locale) }),
     up: link.upBps === null ? missing : formatRate(link.upBps, locale),
     down: link.downBps === null ? missing : formatRate(link.downBps, locale),
