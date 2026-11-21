@@ -15,14 +15,20 @@ use std::path::{Path, PathBuf};
 
 /// The file that names a release and its assets.
 pub const MANIFEST_FILE: &str = "version.json";
+/// The updater, published as a file of its own beside the bundle that carries it: its SHA-256 stands in the release notes.
+pub const UPDATER: &str = "update.sh";
 /// The version of the manifest's own format.
 pub const SCHEMA_VERSION: u32 = 1;
 /// The project a manifest belongs to; a file of another project is refused.
 pub const PROJECT: &str = "orch";
-/// The oldest connector release this release accepts. The gateway announces the
-/// same figure to the connectors that reach it; both are raised together, when a
-/// release stops speaking to a connector.
-pub const CONNECTOR_MINIMUM: &str = "0.1.0";
+/// The oldest connector release the release `version` accepts: the figure its own
+/// gateway announces to the connectors that reach it, so that the manifest and the
+/// system say the same. It is raised in the link's contract, when a release stops
+/// speaking to a connector.
+#[must_use]
+pub fn connector_minimum(version: &str) -> String {
+    orch_link_contract::version::ConnectorVersions::of_release(version).min
+}
 /// How much of a file is read at a time while hashing: large enough that the
 /// disk, not the loop, is the limit.
 const HASH_CHUNK_BYTES: usize = 1 << 20;
@@ -33,6 +39,16 @@ pub struct LinkProtocol {
     /// The newest version the release speaks.
     pub current: u32,
     /// The oldest version it still speaks.
+    pub minimum: u32,
+}
+
+/// What a release says of the deployment files of its bundle (`deploy/FILE_SETS`): the generation they are, and the oldest
+/// generation its programs work with, so that an updater that keeps an edited set can say when the set is too old.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployFiles {
+    /// The generation of the deployment files in this release.
+    pub generation: u32,
+    /// The oldest generation of them that the programs of this release work with.
     pub minimum: u32,
 }
 
@@ -49,8 +65,8 @@ pub struct Asset {
     /// Its BLAKE3 hash, in lowercase hexadecimal.
     pub blake3: String,
     /// Its SHA-256 hash, in lowercase hexadecimal, for the files an installer fetches from a
-    /// system (`connectors/version.json`): a POSIX shell and PowerShell have a SHA-256 tool
-    /// everywhere and a BLAKE3 one almost nowhere. Absent from the other listings.
+    /// system (`connectors/version.json`) and for `update.sh`: a POSIX shell and PowerShell have a
+    /// SHA-256 tool everywhere and a BLAKE3 one almost nowhere. Absent from the other listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
 }
@@ -89,6 +105,9 @@ pub struct Manifest {
     pub images: Vec<Image>,
     /// The pinned builds of the harnesses, as `harness-builds.json` holds them.
     pub harness_builds: Vec<serde_json::Value>,
+    /// The deployment files of the bundle; absent from releases made before an update followed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy_files: Option<DeployFiles>,
 }
 
 /// The names of the files a release for one architecture is made of.
@@ -141,7 +160,7 @@ impl AssetNames {
 #[must_use]
 pub fn is_release_asset_name(name: &str) -> bool {
     let arch = |text: &str| matches!(text, "x86_64" | "aarch64");
-    if name == "orch-frontend-dist.tar.gz" {
+    if name == "orch-frontend-dist.tar.gz" || name == UPDATER {
         return true;
     }
     if let Some(rest) = name
@@ -317,12 +336,17 @@ pub fn assets_of(dir: &Path, base_url: Option<&str>) -> Result<Vec<Asset>, Relea
             Some(base) => format!("{}/{name}", base.trim_end_matches('/')),
             None => name.clone(),
         };
+        let sha256 = if name == UPDATER {
+            Some(sha256_of(&path)?)
+        } else {
+            None
+        };
         assets.push(Asset {
             name,
             download_url,
             size,
             blake3,
-            sha256: None,
+            sha256,
         });
     }
     Ok(assets)
@@ -376,7 +400,7 @@ mod tests {
                 current: 1,
                 minimum: 1,
             },
-            connector_minimum: CONNECTOR_MINIMUM.to_owned(),
+            connector_minimum: connector_minimum("0.1.0"),
             assets: vec![Asset {
                 name: "orch-frontend-dist.tar.gz".to_owned(),
                 download_url: "orch-frontend-dist.tar.gz".to_owned(),
@@ -386,6 +410,7 @@ mod tests {
             }],
             images: vec![],
             harness_builds: vec![],
+            deploy_files: None,
         }
     }
 
@@ -448,6 +473,11 @@ mod tests {
             assert!(is_release_asset_name(name), "{name}");
         }
         assert!(is_release_asset_name("orch-connector-macos-aarch64"));
+        assert!(
+            is_release_asset_name("update.sh"),
+            "the updater is published beside the bundle"
+        );
+        assert!(!is_release_asset_name("update.sh.new"));
         assert!(!is_release_asset_name("orch-server-linux-riscv.zip"));
         assert!(!is_release_asset_name("notes.txt"));
     }

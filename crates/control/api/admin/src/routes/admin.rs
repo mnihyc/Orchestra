@@ -68,10 +68,12 @@ pub fn mount(registry: &mut Registry) {
     defaults::mount(registry);
     audit::mount(registry);
     system::mount(registry);
+    server_update::mount(registry);
     fleet::mount(registry);
     catalogue::mount(registry);
     programs::mount(registry);
     identity_providers::mount(registry);
+    human_check::mount(registry);
 }
 orch_api_base::__api_bind_6e6c1a7061!();
 
@@ -164,6 +166,9 @@ pub mod defaults;
 #[path = "admin/fleet.rs"]
 pub mod fleet;
 
+#[path = "admin/human_check.rs"]
+pub mod human_check;
+
 #[path = "admin/identity_providers.rs"]
 pub mod identity_providers;
 
@@ -184,6 +189,9 @@ pub mod sessions;
 
 #[path = "admin/settings.rs"]
 pub mod settings;
+
+#[path = "admin/server_update.rs"]
+pub mod server_update;
 
 #[path = "admin/system.rs"]
 pub mod system;
