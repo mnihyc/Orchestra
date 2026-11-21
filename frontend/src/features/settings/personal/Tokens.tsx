@@ -1,3 +1,4 @@
+import { CopyId } from '@/ui/CopyId';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 /** Personal API-token operation rules, expiry, review and revocation.
  *
@@ -182,6 +183,7 @@ export function Tokens() {
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
             <span className="font-medium wrap-anywhere text-text">{token.name}</span>
+            <CopyId value={token.id} />
             {!scopesShown && <div className="text-sm text-text-muted"><ScopesCell token={token} compact /></div>}
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">

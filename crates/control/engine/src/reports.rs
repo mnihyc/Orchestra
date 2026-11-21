@@ -17,8 +17,8 @@ use crate::unit::Unit;
 use orch_db::queries::environments::hosting::{self as environments, runtime_state, status};
 use orch_db::queries::resources::hosting as hosts;
 use orch_link::streams::DeliveredEvent;
-use orch_link_contract::events::{Event, NodeFacts, NodeHook, NodeLoad, NodeNetwork, NodeRuntime};
-use orch_types::{Id, Json};
+use orch_link_contract::events::{Event, NodeFacts, NodeHook, NodeNetwork, NodeRuntime};
+use orch_types::Id;
 use serde_json::json;
 
 impl Engine {
@@ -37,8 +37,8 @@ impl Engine {
         for event in events {
             let decoded = match Event::decode(&event.kind, event.body.clone()) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %event.kind, "an event of a host does not read");
+                Err(_) => {
+                    tracing::warn!(%machine, sequence = event.seq, "a native host event could not be read and was skipped");
                     continue;
                 }
             };
@@ -50,7 +50,16 @@ impl Engine {
                     self.reconcile_host_networks(&mut *unit.conn, host, Some(event.seq))
                         .await?;
                 }
-                Event::NodeLoad(load) => self.on_node_load(unit, host, &load).await?,
+                Event::NodeLoad(load) if event.at.get() <= at => {
+                    // A node may deliver buffered measurements after it reconnects.
+                    hosts::record_node_load(
+                        unit.conn,
+                        host,
+                        &serde_json::to_value(load)?,
+                        event.at.get(),
+                    )
+                    .await?;
+                }
                 Event::NodeKeptImages(report) => {
                     self.on_kept_images(unit, host, &report, event.seq).await?
                 }
@@ -129,9 +138,113 @@ impl Engine {
                 _ => "the unit failed".to_owned(),
             });
         let now = unit.now();
+        // A unit whose stop was begun and that its host finds stopped, failed or gone has been stopped,
+        // whatever became of the command that asked for it: an answer that was lost, or a container that
+        // somebody had removed already, leaves nothing else to wait for. The reason of a person's stop or
+        // of the idle stop stays with the unit, so that nothing starts it again by itself.
+        // A unit that a job works on (a restart or a replacement stops the old unit on its own) leaves it
+        // to the job.
+        let stopped_while_stopping = runtime.state == runtime_state::STOPPING && gone;
+        // A provider's unit that reads as being made is settled by what its host reports when no work makes it any more.
+        let being_made = runtime.state == runtime_state::CREATING;
+        let in_a_job = match (runtime.environment_id, runtime.provider_id) {
+            (Some(environment), _) if stopped_while_stopping || being_made => {
+                !orch_db::queries::jobs::open_of_environment(&mut *unit.conn, environment)
+                    .await?
+                    .is_empty()
+            }
+            (None, Some(provider)) if stopped_while_stopping || being_made => {
+                !orch_db::queries::jobs::provider_jobs::open_of_provider(&mut *unit.conn, provider)
+                    .await?
+                    .is_empty()
+            }
+            _ => false,
+        };
+        let left_half_made = being_made
+            && runtime.kind == "provider"
+            && !in_a_job
+            && matches!(
+                report.state.as_str(),
+                "running" | "stopped" | "absent" | "failed"
+            );
+        if stopped_while_stopping && !in_a_job {
+            let deliberate = runtime.state_detail.as_deref().filter(|why| {
+                orch_db::queries::resources::provider_runtime::INTENTIONAL_STOP_DETAILS
+                    .contains(why)
+            });
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[runtime_state::STOPPING],
+                runtime_state::STOPPED,
+                deliberate,
+                now,
+            )
+            .await?;
+            if moved {
+                tracing::info!(
+                    runtime = %runtime.id, provider = ?runtime.provider_id,
+                    environment = ?runtime.environment_id, %host, reported = %report.state,
+                    "a unit that was being stopped is stopped: its host says so ({detail})"
+                );
+            }
+            if moved
+                && runtime.kind == "provider"
+                && let Some(provider) = runtime.provider_id
+            {
+                self.provider_unit_failed(
+                    &mut *unit.conn,
+                    provider,
+                    runtime.id,
+                    runtime.machine_id,
+                    now,
+                )
+                .await?;
+            }
+            if moved
+                && runtime.kind == "environment"
+                && let Some(environment) = runtime.environment_id
+            {
+                environments::set_status(
+                    &mut *unit.conn,
+                    environment,
+                    &[status::RUNNING, status::OFFLINE],
+                    status::STOPPED,
+                    None,
+                    now,
+                )
+                .await?;
+                environments::close_shells(&mut *unit.conn, environment, now).await?;
+            }
+            return Ok(());
+        }
+        // A provider's unit that a person stopped by force, and that its host now reports stopped, failed or gone,
+        // has been stopped: nothing is left to tell the host, and the reason is the plain one of a person's stop.
+        if runtime.state == runtime_state::STOPPED
+            && runtime.state_detail.as_deref()
+                == Some(orch_db::queries::resources::provider_runtime::STOPPED_FORCED)
+            && gone
+        {
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[runtime_state::STOPPED],
+                runtime_state::STOPPED,
+                Some(orch_db::queries::resources::provider_runtime::STOPPED_PERSON),
+                now,
+            )
+            .await?;
+            if moved {
+                tracing::info!(
+                    runtime = %runtime.id, provider = ?runtime.provider_id, %host, reported = %report.state,
+                    "the host reports the unit that a person stopped by force as stopped: it is not told again"
+                );
+            }
+            return Ok(());
+        }
         let fails = match runtime.state.as_str() {
             runtime_state::RUNNING => gone,
-            runtime_state::CREATING => report.state == "failed",
+            runtime_state::CREATING => report.state == "failed" || left_half_made,
             _ => false,
         };
         if !fails {
@@ -168,15 +281,29 @@ impl Engine {
             }
             return Ok(());
         }
+        // What a provider's unit that was left half made says is a word the page has its sentence for; the host's own
+        // words are in the log.
+        let reason = if left_half_made {
+            orch_db::queries::resources::provider_runtime::UNFINISHED.to_owned()
+        } else {
+            detail.clone()
+        };
         let moved = environments::set_runtime_state(
             &mut *unit.conn,
             runtime.id,
             &[runtime_state::RUNNING, runtime_state::CREATING],
             runtime_state::FAILED,
-            Some(&detail),
+            Some(&reason),
             now,
         )
         .await?;
+        if moved {
+            tracing::warn!(
+                runtime = %runtime.id, provider = ?runtime.provider_id, environment = ?runtime.environment_id,
+                %host, reported = %report.state, was = %runtime.state, reason = %detail, left_half_made,
+                "a host reports that a unit is not up: its runtime failed"
+            );
+        }
         // A provider's unit that is gone leaves the provider without a machine (the part that keeps
         // providers): the next turn that needs it makes the unit again.
         if moved
@@ -356,23 +483,6 @@ impl Engine {
         Ok(())
     }
 
-    async fn on_node_load(
-        &self,
-        unit: &mut Unit<'_>,
-        host: Id,
-        load: &NodeLoad,
-    ) -> Result<(), EngineError> {
-        let load: Json = json!({
-            "cpu_percent": load.cpu_percent,
-            "memory_used_mb": load.memory_used_mb,
-            "disk_used_gb": load.disk_used_gb,
-            "disk_free_gb": load.disk_free_gb,
-        });
-        let at = unit.now();
-        hosts::record_node_load(&mut *unit.conn, host, &load, at).await?;
-        Ok(())
-    }
-
     /// Applies what an environment's connector reported.
     pub(crate) async fn apply_env_events(
         &self,
@@ -415,8 +525,11 @@ impl Engine {
         for event in events {
             let decoded = match Event::decode(&event.kind, event.body.clone()) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %event.kind, "an event of an environment does not read");
+                Err(_) => {
+                    tracing::warn!(
+                        sequence = event.seq,
+                        "an event of an environment does not read"
+                    );
                     continue;
                 }
             };
@@ -506,6 +619,100 @@ fn hook_summary(run: &NodeHook) -> String {
 
 #[cfg(test)]
 mod provider_runtime_tests;
+
+#[cfg(test)]
+mod load_tests {
+    use super::{DeliveredEvent, Unit};
+    use crate::test_common::World;
+    use chrono::Duration;
+    use orch_db::queries::{placement_room::host_samples, resources::testing::insert_machine};
+    use orch_types::{Time, new_id};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn host_choices_use_the_latest_observed_load_from_the_current_session()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let world = World::observed().await;
+        let receipt = Time::new(world.clock.now()).get();
+        let observed = |seconds| Time::new(receipt + Duration::seconds(seconds));
+        let host = new_id();
+        let mut tx = world.pool.begin().await?;
+        let machine = insert_machine(&mut tx, "Load report node", "connected").await?;
+        sqlx::query("UPDATE machines SET online=true, session_started_at=$2 WHERE id=$1")
+            .bind(machine)
+            .bind(observed(-10).get())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO hosts(id,machine_id,name) VALUES($1,$2,'Load report host')")
+            .bind(host)
+            .bind(machine)
+            .execute(&mut *tx)
+            .await?;
+        let event = |seq, seconds, pids: Option<i64>| {
+            let mut body = json!({"cpu_percent": 10.0, "memory_used_mb": 8,
+                                  "disk_used_gb": 2, "disk_free_gb": 12});
+            if let Some(count) = pids {
+                body["pids"] = json!(count);
+            }
+            DeliveredEvent {
+                seq,
+                at: observed(seconds),
+                kind: "node.load".into(),
+                body,
+            }
+        };
+        let engine = world.engine();
+        let mut unit = Unit::new(&mut tx, receipt);
+        // A buffered report from before the connection cannot make the host eligible.
+        engine
+            .apply_node_events(&mut unit, machine, &[event(1, -11, Some(0))])
+            .await?;
+        assert!(host_samples(unit.conn, &[host]).await?.is_empty());
+
+        // An older arrival and a future-dated report cannot displace a real observation.
+        engine
+            .apply_node_events(
+                &mut unit,
+                machine,
+                &[
+                    event(2, -3, Some(7)),
+                    event(3, -4, Some(1)),
+                    event(4, 1, Some(99)),
+                ],
+            )
+            .await?;
+        let current = host_samples(unit.conn, &[host])
+            .await?
+            .pop()
+            .ok_or("missing host sample")?;
+        assert_eq!(current.load_at, observed(-3).get());
+        assert_eq!(current.load["pids"], 7);
+
+        engine
+            .apply_node_events(&mut unit, machine, &[event(5, -2, Some(0))])
+            .await?;
+        let idle = host_samples(unit.conn, &[host])
+            .await?
+            .pop()
+            .ok_or("missing idle sample")?;
+        assert_eq!(idle.load["pids"], 0);
+
+        engine
+            .apply_node_events(&mut unit, machine, &[event(6, -1, None)])
+            .await?;
+        let unknown = host_samples(unit.conn, &[host])
+            .await?
+            .pop()
+            .ok_or("missing scoped sample")?;
+        assert!(unknown.load.get("pids").is_none());
+        assert_eq!(unknown.load["memory_used_mb"], 8);
+        unit.finish().await?;
+        tx.commit().await?;
+        drop(engine);
+        world.shutdown().await;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[allow(

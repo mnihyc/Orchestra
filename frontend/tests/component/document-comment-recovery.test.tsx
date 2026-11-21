@@ -11,7 +11,7 @@ import { CommentsPanel } from '@/features/documents/Comments';
 import { commentDraftGuard, commentSlotKey, forgetCommentDraftDeviceData, getCommentDrafts, retireCommentDraftSession, setCommentText } from '@/features/documents/commentDrafts';
 import { DocumentMarksProvider, retireDocumentMarks, useDocumentMarksStore, type Marks } from '@/features/documents/marks';
 import { CloseViews, requestViewAction } from '@/features/workbench/CloseViews';
-import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewInstanceProvider } from '@/features/workbench/instance';
 import { findTab } from '@/features/workbench/layout';
 import { setPanelScope } from '@/features/workbench/panelScope';
 import { useUnsavedGuard, useWorkbench } from '@/features/workbench/store';
@@ -58,9 +58,9 @@ function Pane({ id, owner = 'main-document' }: { id: string; owner?: string }) {
   const state = useDocumentState(id);
   const live = useWorkbench((workbench) => findTab(workbench.layout, viewId) !== null);
   if (!live || state.document === null) return null;
-  return <ViewInstanceContext.Provider value={{ id: viewId, root: createRef(), target: { kind: 'document', id }, headingOwner: owner, content: false, focusedContent: false }}>
+  return <ViewInstanceProvider value={{ id: viewId, root: createRef(), target: { kind: 'document', id }, headingOwner: owner, content: false, focusedContent: false }}>
     <DocumentMarksProvider owner={owner} documentId={id}><CaptureMarks /><CommentsPanel key={id} doc={state.document} /></DocumentMarksProvider>
-  </ViewInstanceContext.Provider>;
+  </ViewInstanceProvider>;
 }
 function Frame({ id, owner }: { id: string; owner?: string }) { useUnsavedGuard(); return <><Pane id={id} owner={owner} /><CloseViews /></>; }
 function card(id: string): HTMLElement {
