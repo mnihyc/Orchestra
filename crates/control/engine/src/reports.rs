@@ -37,12 +37,22 @@ impl Engine {
         for event in events {
             let decoded = match Event::decode(&event.kind, event.body.clone()) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %event.kind, "an event of a host does not read");
+                Err(_) => {
+                    tracing::warn!(%machine, sequence = event.seq, "a native host event could not be read and was skipped");
                     continue;
                 }
             };
             match decoded {
+                Event::NodeServerUpdate(report) => {
+                    crate::jobs::server_update::report(
+                        &mut *unit.conn,
+                        host,
+                        machine,
+                        &report,
+                        orch_types::Time::new(at),
+                    )
+                    .await?
+                }
                 Event::NodeRuntime(report) => self.on_node_runtime(unit, host, &report).await?,
                 Event::NodeNetwork(report) => self.on_node_network(unit, host, &report).await?,
                 Event::NodeFacts(facts) => {
@@ -101,9 +111,62 @@ impl Engine {
                 return Ok(());
             };
             current
+        } else if let Some(environment) = runtime.environment_id {
+            environments::lock_environment(&mut *unit.conn, environment).await?;
+            let Some(current) = environments::runtime(&mut *unit.conn, runtime.id).await? else {
+                return Ok(());
+            };
+            current
         } else {
             runtime
         };
+        let gone = matches!(report.state.as_str(), "absent" | "stopped" | "failed");
+        if !orch_db::queries::runtime_incarnations::observe(
+            &mut *unit.conn,
+            host,
+            runtime.id,
+            report.source,
+            gone,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let pending =
+            orch_db::queries::runtime_incarnations::stop(&mut *unit.conn, runtime.id).await?;
+        let same_source = pending.as_ref().is_some_and(|stop| {
+            stop.source == report.source
+                || report
+                    .source
+                    .incarnation
+                    .is_some_and(|id| stop.control.pending().contains(&id))
+        });
+        let original_stop = if let Some(stop) = &pending
+            && same_source
+        {
+            stop.registration
+                .matches(&mut *unit.conn, &stop.control)
+                .await?
+                && orch_db::queries::runtime_controls::is_current(&mut *unit.conn, &stop.control)
+                    .await?
+        } else {
+            false
+        };
+        if gone
+            && same_source
+            && let Some(stop) = &pending
+            && (!original_stop
+                || (stop.forced && !stop.ready)
+                || !orch_db::queries::runtime_incarnations::pending_terminal(
+                    &mut *unit.conn,
+                    &stop.control,
+                )
+                .await?)
+        {
+            // The host's physical observation is retained. Publication still belongs
+            // to the matching registration after all admitted openings are accounted for.
+            return Ok(());
+        }
         let missing_changed = sqlx::query(
             "UPDATE runtimes SET loss_missing=$2 WHERE id=$1 AND loss_missing IS DISTINCT FROM $2",
         )
@@ -119,7 +182,6 @@ impl Engine {
             let now = unit.now();
             orch_db::queries::jobs::stamp_environment(unit.conn, environment, now).await?;
         }
-        let gone = matches!(report.state.as_str(), "absent" | "stopped" | "failed");
         let detail = report
             .detail
             .clone()
@@ -129,9 +191,116 @@ impl Engine {
                 _ => "the unit failed".to_owned(),
             });
         let now = unit.now();
+        // A unit whose stop was begun and that its host finds stopped, failed or gone has been stopped,
+        // whatever became of the command that asked for it: an answer that was lost, or a container that
+        // somebody had removed already, leaves nothing else to wait for. The reason of a person's stop or
+        // of the idle stop stays with the unit, so that nothing starts it again by itself.
+        // A unit that a job works on (a restart or a replacement stops the old unit on its own) leaves it
+        // to the job.
+        let stopped_while_stopping = runtime.state == runtime_state::STOPPING && gone;
+        // A provider's unit that reads as being made is settled by what its host reports when no work makes it any more.
+        let being_made = runtime.state == runtime_state::CREATING;
+        let in_a_job = match (runtime.environment_id, runtime.provider_id) {
+            (Some(environment), _) if stopped_while_stopping || being_made => {
+                !orch_db::queries::jobs::open_of_environment(&mut *unit.conn, environment)
+                    .await?
+                    .is_empty()
+            }
+            (None, Some(provider)) if stopped_while_stopping || being_made => {
+                !orch_db::queries::jobs::provider_jobs::open_of_provider(&mut *unit.conn, provider)
+                    .await?
+                    .is_empty()
+            }
+            _ => false,
+        };
+        let left_half_made = being_made
+            && runtime.kind == "provider"
+            && !in_a_job
+            && matches!(
+                report.state.as_str(),
+                "running" | "stopped" | "absent" | "failed"
+            );
+        if gone
+            && runtime.state != runtime_state::STOPPED
+            && (original_stop || (stopped_while_stopping && !in_a_job && pending.is_none()))
+        {
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[
+                    runtime_state::RUNNING,
+                    runtime_state::CREATING,
+                    runtime_state::STOPPING,
+                    runtime_state::FAILED,
+                ],
+                runtime_state::STOPPED,
+                runtime.state_detail.as_deref().filter(|why| {
+                    orch_db::queries::resources::provider_runtime::INTENTIONAL_STOP_DETAILS
+                        .contains(why)
+                }),
+                now,
+            )
+            .await?;
+            if moved && let Some(provider) = runtime.provider_id {
+                self.provider_unit_failed(
+                    &mut *unit.conn,
+                    provider,
+                    runtime.id,
+                    runtime.machine_id,
+                    now,
+                )
+                .await?;
+            }
+            if moved
+                && let Some(environment) = runtime.environment_id
+                && environments::live_runtime(&mut *unit.conn, environment)
+                    .await?
+                    .is_some_and(|current| current.id == runtime.id)
+            {
+                environments::set_status(
+                    &mut *unit.conn,
+                    environment,
+                    &[status::RUNNING, status::OFFLINE, status::PROVISIONING],
+                    status::STOPPED,
+                    None,
+                    now,
+                )
+                .await?;
+                environments::close_shells(&mut *unit.conn, environment, now).await?;
+            }
+            return Ok(());
+        }
+        // A provider's unit that a person stopped by force, and that its host now reports stopped, failed or gone,
+        // has been stopped: nothing is left to tell the host, and the reason is the plain one of a person's stop.
+        if runtime.state == runtime_state::STOPPED
+            && runtime.state_detail.as_deref()
+                == Some(orch_db::queries::resources::provider_runtime::STOPPED_FORCED)
+            && original_stop
+            && pending
+                .as_ref()
+                .is_some_and(|stop| stop.forced && stop.ready)
+            && gone
+        {
+            let moved = environments::set_runtime_state(
+                &mut *unit.conn,
+                runtime.id,
+                &[runtime_state::STOPPED],
+                runtime_state::STOPPED,
+                Some(orch_db::queries::resources::provider_runtime::STOPPED_PERSON),
+                now,
+            )
+            .await?;
+            if moved {
+                tracing::info!(
+                    runtime = %runtime.id, provider = ?runtime.provider_id, %host, reported = %report.state,
+                    "the host reports the unit that a person stopped by force as stopped: it is not told again"
+                );
+            }
+            return Ok(());
+        }
         let fails = match runtime.state.as_str() {
             runtime_state::RUNNING => gone,
-            runtime_state::CREATING => report.state == "failed",
+            runtime_state::CREATING => report.state == "failed" || left_half_made,
             _ => false,
         };
         if !fails {
@@ -168,15 +337,29 @@ impl Engine {
             }
             return Ok(());
         }
+        // What a provider's unit that was left half made says is a word the page has its sentence for; the host's own
+        // words are in the log.
+        let reason = if left_half_made {
+            orch_db::queries::resources::provider_runtime::UNFINISHED.to_owned()
+        } else {
+            detail.clone()
+        };
         let moved = environments::set_runtime_state(
             &mut *unit.conn,
             runtime.id,
             &[runtime_state::RUNNING, runtime_state::CREATING],
             runtime_state::FAILED,
-            Some(&detail),
+            Some(&reason),
             now,
         )
         .await?;
+        if moved {
+            tracing::warn!(
+                runtime = %runtime.id, provider = ?runtime.provider_id, environment = ?runtime.environment_id,
+                %host, reported = %report.state, was = %runtime.state, reason = %detail, left_half_made,
+                "a host reports that a unit is not up: its runtime failed"
+            );
+        }
         // A provider's unit that is gone leaves the provider without a machine (the part that keeps
         // providers): the next turn that needs it makes the unit again.
         if moved
@@ -415,8 +598,11 @@ impl Engine {
         for event in events {
             let decoded = match Event::decode(&event.kind, event.body.clone()) {
                 Ok(decoded) => decoded,
-                Err(error) => {
-                    tracing::warn!(%error, kind = %event.kind, "an event of an environment does not read");
+                Err(_) => {
+                    tracing::warn!(
+                        sequence = event.seq,
+                        "an event of an environment does not read"
+                    );
                     continue;
                 }
             };

@@ -193,7 +193,8 @@ impl Fixture {
                 thread,
                 common::queued("Original retained words"),
             )
-            .await?;
+            .await
+            .map_err(|error| format!("submitting the source input: {error}"))?;
         let turn = world.run_turn(thread, 0, "Retained original answer").await;
         common::eventually("the source turn's native accounting finishes", || async {
             match world.pool.acquire().await {
@@ -215,7 +216,8 @@ impl Fixture {
                 row.active_continuation_id,
                 row.current_segment_id.ok_or("source segment missing")?,
             )
-            .await?
+            .await
+            .map_err(|error| format!("reading the source lane: {error}"))?
             .0;
             let input = threads::turn(&mut conn, turn.turn_id)
                 .await?
@@ -276,7 +278,8 @@ impl Fixture {
                     thread,
                     common::queued("Valid current generation"),
                 )
-                .await?;
+                .await
+                .map_err(|error| format!("submitting the selected input: {error}"))?;
             world.run_turn(thread, 1, "Valid current answer").await;
             common::eventually(
                 "the selected generation finishes its native accounting",
@@ -317,7 +320,8 @@ impl Fixture {
                 row.active_continuation_id,
                 row.current_segment_id.ok_or("current segment missing")?,
             )
-            .await?
+            .await
+            .map_err(|error| format!("reading the selected lane: {error}"))?
             .0
         };
         let mut descriptor = common::descriptor();
@@ -327,14 +331,7 @@ impl Fixture {
             .bind(&descriptor)
             .execute(world.pool.pool())
             .await?;
-        let engine = Engine::new(EngineParts {
-            db: world.pool.clone(),
-            clock: world.clock.clone(),
-            config: common::config(),
-            commands: world.commands.as_engine(),
-            access: world.access.clone(),
-            live: world.live.clone(),
-        });
+        let engine = world.recovery_worker();
         let current = Arc::new(Mutex::new(Some(original.source.clone())));
         let known = Arc::new(Mutex::new(HashSet::from([
             source.source.native_session_ref.clone(),
@@ -344,6 +341,7 @@ impl Fixture {
         world.machine.handler.on(CommandKind::AgentStart, move |_| {
             Ok(CommandResult::AgentStart(
                 orch_link_contract::commands::AgentStartResult {
+                    home: None,
                     reused: true,
                     harness_version: "1.0.0".into(),
                     descriptor: serde_json::from_value(described.clone()).map_err(|error| {
@@ -410,6 +408,7 @@ impl Fixture {
                 Ok(CommandResult::SessionPrefixOpen(NativePrefixOpened {
                     prefix: body.prefix.clone(),
                     session: orch_agent_contract::session::SessionOpened {
+                        mcp: None,
                         native_session_ref: native,
                         resumed: false,
                         import_report: None,
@@ -450,6 +449,7 @@ impl Fixture {
                 });
                 Ok(CommandResult::SessionContinuationResume(
                     SessionOpenResult {
+                        mcp: None,
                         native_session_ref: body.source.native_session_ref.clone(),
                         resumed: true,
                         import_report: None,
@@ -482,16 +482,27 @@ impl Fixture {
                 thread,
                 common::queued("Unrelated retained queued input"),
             )
-            .await?;
+            .await
+            .map_err(|error| format!("submitting the retained queue input: {error}"))?;
         let latest = {
             let mut conn = world.pool.acquire().await?;
-            threads::latest_turn(&mut conn, thread)
+            threads::latest_active_turn(&mut conn, thread)
                 .await?
                 .ok_or("latest turn absent")?
         };
         engine
-            .interrupt(&Caller::session(world.ada), thread, latest.id)
-            .await?;
+            .stop_thread(&Caller::session(world.ada), thread, Some(latest.id))
+            .await
+            .map_err(|error| format!("stopping the retained queue: {error}"))?;
+        common::eventually("the accepted Stop holds the retained input", || async {
+            let Ok(mut conn) = world.pool.acquire().await else {
+                return false;
+            };
+            threads::input(&mut conn, submitted.input.id)
+                .await
+                .is_ok_and(|row| row.is_some_and(|input| input.queue_held))
+        })
+        .await;
         let pending = {
             let mut conn = world.pool.acquire().await?;
             threads::input(&mut conn, submitted.input.id)
@@ -1402,6 +1413,11 @@ async fn an_actual_recovered_started_journal_refusal_never_authorizes_another_pr
         .await,
     )?;
     let command = orch_link_contract::commands::Cmd {
+        authority_until: None,
+        native_members: None,
+        native_revision: None,
+
+        native_target: None,
         id: outgoing.id,
         kind: outgoing.kind.as_str().into(),
         key: Some(fixture.thread.to_string()),

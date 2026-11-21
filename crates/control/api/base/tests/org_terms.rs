@@ -42,7 +42,7 @@ fn offer(kind: InvitationKind, target: Id) -> InvitationCreateBody {
         permissions: None,
         email: None,
         max_uses: None,
-        expires_in_hours: None,
+        expires_in_minutes: None,
         note: None,
     }
 }

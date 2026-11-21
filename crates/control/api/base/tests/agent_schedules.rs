@@ -446,7 +446,7 @@ async fn an_agent_schedule_keeps_the_actual_starters_key_deadline_instead_of_min
     use orch_api_contract::threads::{
         ContentPart, Delivery, ThreadInputCreate, ThreadInputCreateBody,
     };
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity;
     let (scene, thread, first) = setup(true).await;
     finish(&scene, thread, first).await;
@@ -456,11 +456,12 @@ async fn an_agent_schedule_keeps_the_actual_starters_key_deadline_instead_of_min
         "allow":[{"operation":"ThreadInputCreate","actions":["write"]}]}]}))
         .unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut scene.rig.db.acquire().await.unwrap(),
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: scene.ada.id(),
             name: "Actual native schedule source",
             token_hash: &token_hash(&secret),

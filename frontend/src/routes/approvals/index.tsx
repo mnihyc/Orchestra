@@ -4,6 +4,7 @@
  * the kind it is limited to and whether everything the person could decide is listed are in the address, so
  * that a link reproduces them.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { usePageSearch, usePageNavigate } from '@/features/workbench/pageContext';
 import { createFileRoute } from '@tanstack/react-router';
 import { Approvals } from '@/features/approvals/Approvals';
@@ -50,11 +51,11 @@ function ApprovalsRoute() {
   return (
     <Approvals
       tab={tab}
-      onTab={(next) => change({ tab: next })}
+      onTab={carryDeviceChoice((next: ApprovalsTab) => change({ tab: next }), keepTab)}
       all={all==='all'}
       onAll={(next) => change({ all: next })}
       kind={kind==='all'?null:kind}
-      onKind={(next) => change({ kind: next })}
+      onKind={carryDeviceChoice((next: ApprovalKind | null) => change({ kind: next }), keepKind)}
     />
   );
 }

@@ -11,3 +11,10 @@ it('changes only effort aliases while preserving declared and extension siblings
   expect(selectionWithEffort(preset, 'high')).toEqual({ reasoning: { summary: 'brief' }, output_config: { format: 'text' }, temperature: 0.2, effort: 'high' });
   expect(preset.reasoning.effort).toBe('low');
 });
+
+
+it('reads Gemini thinking and changes it without losing other generation options', () => {
+  const options = { generation_config: { thinking_level: 'high', temperature: 0.2 } };
+  expect(selectionEffort(options)).toBe('high');
+  expect(selectionWithEffort(options, 'low')).toEqual({ generation_config: { temperature: 0.2 }, effort: 'low' });
+});
