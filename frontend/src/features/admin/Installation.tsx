@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { checkRelease, installationRecordsQuery, systemSettingsQuery } from '@/api/admin';
+import { metaQuery } from '@/api/auth';
 import { BackupRestoreList } from '@/features/admin/BackupRestoreList';
 import { Facts, CommandBox } from '@/features/resources/Facts';
 import { SettingsEditor } from '@/features/settings/Editor';
@@ -28,8 +29,11 @@ const RELEASE_ENVIRONMENT = 'ORCH_RELEASE_URL';
 function ReleaseFacts({ release }: { release: ReleaseCheck | null }) {
   const { t } = useTranslation();
   if (release === null) return <p className="text-sm text-text-muted">{t('installationRecords.notChecked')}</p>;
+  const olderOffer = release.error === 'release.source_older';
   return <div className="flex flex-col gap-3">
-    {release.error !== null && <InlineAlert tone="warning" title={t('installationRecords.checkFailed')}>{release.error}</InlineAlert>}
+    {release.error !== null && <InlineAlert tone="warning" title={olderOffer ? t('installationRecords.olderOffer') : t('installationRecords.checkFailed')}>
+      {olderOffer ? null : release.error}
+    </InlineAlert>}
     {release.newer === true && release.offered_version !== null ? <p className="font-medium text-text">{t('installationRecords.newer', { version: release.offered_version })}</p> : release.newer === false ? <p className="text-text">{t('installationRecords.current')}</p> : <p className="text-sm text-text-muted">{t('installationRecords.noOffer')}</p>}
     <Facts rows={[
       { name: release.offered_version === null ? t('installationRecords.attempted') : t('installationRecords.checked'), value: <RelativeTime at={release.checked_at} /> },
@@ -111,7 +115,13 @@ function RecordSections({ records, refreshing }: { records: InstallationRecords;
 export function Installation() {
   const { t } = useTranslation();
   const query = useQuery(installationRecordsQuery);
+  const meta = useQuery({ ...metaQuery, enabled: false });
+  const address = meta.data?.public_url;
   return <section aria-label={t('installationRecords.title')} className="flex min-w-0 flex-col gap-6" aria-busy={query.isFetching}>
+    {address !== undefined && address !== '' && <Facts rows={[{ name: t('installationRecords.edgeAddress'), value: <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+      <code className="wrap-anywhere">{address}</code>
+      {address.startsWith('http:') && <span className="text-text-muted">{t('installationRecords.httpEdge')}</span>}
+    </span> }]} />}
     {query.isPending ? <SkeletonRows read={query} rows={5} /> : query.isError ? <div className="flex flex-col gap-2">
       {query.dataUpdatedAt > 0 && <p className="text-sm text-text-muted">{t('installationRecords.lastRead')}{' '}<RelativeTime at={new Date(query.dataUpdatedAt).toISOString()} /></p>}
       <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} action={<Button size="sm" pending={query.isRefetching} onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />

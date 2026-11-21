@@ -166,7 +166,7 @@ async fn a_confirm_after_an_answer_that_was_refused_takes_the_new_word_from_the_
         .tool_result(
             session.thread,
             "call_2",
-            Err(ToolError {
+            Err(ToolError { rate_limit: None,
                 code: "not_confirmed".to_owned(),
                 message: format!(
                     "Nothing was done. The plan as it stands now: {{\"done\":false,\"confirm\":\"{new_word}\",\"expires_in\":600}}."
@@ -199,6 +199,7 @@ async fn a_confirm_with_nothing_to_confirm_says_so_and_calls_nothing() {
             session.thread,
             "call_1",
             Err(ToolError {
+                rate_limit: None,
                 code: "not_manageable".to_owned(),
                 message: "You may read docs/Plan.md and not manage it.".to_owned(),
             }),

@@ -1,8 +1,6 @@
 //! Display lifecycle checks the environment door and audits only safe committed facts.
 
-pub use crate::browsers::{
-    BrowserFailure as DisplayFailure, CLOSED_LIST_KEPT, Requester, SITTING_GAP,
-};
+pub use crate::browsers::{BrowserFailure as DisplayFailure, Requester, SITTING_GAP};
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -748,13 +746,7 @@ impl Displays {
         site: &rows::Site,
         found: &[orch_link_contract::browser::ScreenLookDisplay],
     ) -> Result<(), EngineError> {
-        for row in rows::list(
-            conn,
-            site.id,
-            self.engine.inner.clock.now() - CLOSED_LIST_KEPT,
-        )
-        .await?
-        {
+        for row in rows::list(conn, site.id).await? {
             if row.state == "open"
                 && row.env_generation == site.generation
                 && !found.iter().any(|d| d.display_id == row.id)

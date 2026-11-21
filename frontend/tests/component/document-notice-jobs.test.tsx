@@ -11,9 +11,9 @@ import { DocumentNoticeJobs } from '@/features/people/DocumentNoticeJobs';
 import type { Job } from '@/generated/api-types';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ stop: vi.fn<typeof Exports.cancelJob>(), pages: vi.fn<(cursor: string | null) => Promise<{ items: Job[]; next_cursor: string | null }>>() }));
+const calls = vi.hoisted(() => ({ search:vi.fn(), stop: vi.fn<typeof Exports.cancelJob>(), pages: vi.fn<(cursor: string | null) => Promise<{ items: Job[]; next_cursor: string | null }>>() }));
 vi.mock('@/api/exports', async (original) => ({ ...await original<typeof Exports>(), cancelJob: calls.stop }));
-vi.mock('@/api/documentNoticeJobs', async (original) => ({ ...await original<typeof Queries>(), documentNoticeJobsQuery: (id: string, reader = 0) => ({ queryKey: ['document-notice-jobs', id, reader], initialPageParam: null as string | null, maxPages: 1, queryFn: ({ pageParam }: { pageParam: string | null }) => calls.pages(pageParam), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor ?? undefined }) }));
+vi.mock('@/api/documentNoticeJobs', async (original) => ({ ...await original<typeof Queries>(), documentNoticeJobsQuery: (id: string, reader = 0,q='') => {calls.search(q);return { queryKey: ['document-notice-jobs', id, reader,q], initialPageParam: null as string | null, maxPages: 1, queryFn: ({ pageParam }: { pageParam: string | null }) => calls.pages(pageParam), getNextPageParam: (page: { next_cursor: string | null }) => page.next_cursor ?? undefined };} }));
 const priorSession = client.session.getState();
 afterEach(() => client.session.setState(priorSession));
 const job: Job = { id: 'job-0', kind: 'document_notices', node_id: null, environment_id: null, provider_id: null, batch_id: null, created_by: null,
@@ -49,4 +49,25 @@ it('shows checked people, pages without growing rows and stops a chosen job', as
   expect(others).toHaveLength(1000);
   expect(others.every((query) => query.state.data === retained)).toBe(true);
   } finally { view.unmount(); cache.clear(); }
+});
+
+it('keeps a pending Stop with its original job when native work search changes pages', async () => {
+  calls.search.mockClear();calls.pages.mockReset();calls.stop.mockReset();
+  client.session.setState({status:'signed_in',userId:'notice-reader',readerVersion:73});
+  const selected={...job,id:'selected-running'};
+  calls.pages.mockImplementation(()=>Promise.resolve({items:calls.search.mock.calls.at(-1)?.[0]==='queued'?[{...job,id:'older-queued',state:'queued'}]:[selected],next_cursor:null}));
+  let finish:(job:Job)=>void=()=>undefined;
+  calls.stop.mockImplementation(()=>new Promise<Job>((resolve)=>{finish=resolve;}));
+  const cache=new LiveQueryClient({defaultOptions:{queries:{retry:false}}});
+  const view=show(<QueryClientProvider client={cache}><DocumentNoticeJobs document="doc-search"/></QueryClientProvider>);
+  try {
+    const input=userEvent.setup();await input.click(await screen.findByRole('button',{name:'Stop notifications'}));
+    await input.type(screen.getByRole('searchbox'),'queued');
+    await waitFor(()=>expect(calls.search).toHaveBeenLastCalledWith('queued'));
+    expect(view.container.querySelector('[data-notice-job="selected-running"]')).toBeInTheDocument();
+    expect(calls.stop).toHaveBeenCalledExactlyOnceWith('selected-running');
+    finish({...selected,state:'cancelled'});
+    await waitFor(()=>expect(view.container.querySelector('[data-notice-job="selected-running"]')).toBeNull());
+    expect(view.container.querySelector('[data-notice-job="older-queued"]')).toBeInTheDocument();
+  } finally {view.unmount();cache.clear();}
 });
