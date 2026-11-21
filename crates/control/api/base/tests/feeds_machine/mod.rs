@@ -90,7 +90,7 @@ impl Machine {
             loop {
                 let notice = tokio::select! { () = reports_stop.cancelled() => break, notice = notices.recv() => notice };
                 match notice {
-                    Some(Notice::Report(eph)) => {
+                    Some(Notice::Report { eph, .. }) => {
                         orch_api_core::realtime::ephemeral::forward_report(
                             &reports_app.db,
                             &Report {
@@ -154,6 +154,8 @@ impl Machine {
             &SerialKey::Environment(environment),
             Time::new(app.clock.now() + chrono::Duration::minutes(5)),
             &EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: Some(i64::from(generation)),
                 storage: None,

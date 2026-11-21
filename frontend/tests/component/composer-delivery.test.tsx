@@ -1,8 +1,10 @@
 /** The one split action stops a running turn independently of its draft and sends only the delivery the person chooses. */
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as ThreadsApi from '@/api/threads';
+import { threadWriter } from '@/realtime/stores/thread';
+import { snapshot } from '../unit/continuation-fixtures';
 import type * as ThreadState from '@/realtime/stores/thread';
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { DeliveryControl } from '@/features/composer/DeliveryControl';
@@ -15,16 +17,16 @@ const calls = vi.hoisted(() => ({ interrupt: vi.fn(), send: vi.fn<(delivery: Del
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), interruptTurn: calls.interrupt }));
 vi.mock('@/realtime/stores/thread', async (load) => { const actual = await load<typeof ThreadState>(); return { ...actual, threadWriter: { ...actual.threadWriter, apply: calls.apply } }; });
 
-function Harness({ active = true, empty = false, mayDrive = true, live = true, noSteer = false, waitingFiles = false, side = false, sideUnavailable = false, missingTurn = false, schedule = false }: { active?: boolean; empty?: boolean; mayDrive?: boolean; live?: boolean; noSteer?: boolean; waitingFiles?: boolean; side?: boolean; sideUnavailable?: string | false; missingTurn?: boolean; schedule?: boolean }) {
+function Harness({ active = true, empty = false, mayDrive = true, live = true, noSteer = false, waitingFiles = false, side = false, sideUnavailable = false, missingTurn = false, schedule = false, starting = false }: { active?: boolean; empty?: boolean; mayDrive?: boolean; live?: boolean; noSteer?: boolean; waitingFiles?: boolean; side?: boolean; sideUnavailable?: string | false; missingTurn?: boolean; schedule?: boolean; starting?: boolean }) {
   const turnId = active && !missingTurn ? 'turn-1' : null;
-  const stop = useStop('thread-1', turnId, live);
-  return <DeliveryControl state={{ active, starting: false, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop} turnId={turnId}
+  const stop = useStop('thread-1', turnId, live, starting);
+  return <DeliveryControl state={{ active, starting, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop}
     mayDrive={mayDrive} empty={empty} tooLong={false} attachmentsWaiting={waitingFiles} onSend={calls.send} onAskOnSide={side ? calls.aside : undefined} sideUnavailable={sideUnavailable}
     onSchedule={schedule ? calls.schedule : undefined} scheduleUnavailable={false} />;
 }
 
-beforeEach(() => { calls.send.mockClear(); calls.aside.mockClear(); calls.schedule.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ id: 'turn-1', state: 'interrupted' }); });
-afterEach(async () => { await setLocale('en'); });
+beforeEach(() => { threadWriter.evict('thread-1'); calls.send.mockClear(); calls.aside.mockClear(); calls.schedule.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ state: 'stopped', requested_at: new Date().toISOString(), turn: { id: 'turn-1', state: 'interrupted' } }); });
+afterEach(async () => { threadWriter.evict('thread-1'); await setLocale('en'); });
 
 describe('the message delivery action', () => {
   it.each(['en', 'zh-CN'] as const)('keeps Send later available while the running turn is still being read in %s', async (locale) => {
@@ -76,6 +78,24 @@ describe('the message delivery action', () => {
       expect(button).not.toHaveClass('h-(--control-md)');
       expect(button).not.toHaveClass('w-full');
     }
+  });
+
+  it.each(['en', 'zh-CN'] as const)('keeps Stopping visible after a start without a turn is accepted in %s', async (locale) => {
+    await setLocale(locale);
+    const requested = new Date().toISOString();
+    calls.interrupt.mockResolvedValue({ state: 'stopping', requested_at: requested, turn: null, stopping: { version: 1, requested_at: requested, pending: true, thread_seq: 1, state_seq: 1 } });
+    const view = show(<Harness active={false} starting />);
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('composer.stop') }));
+    await waitFor(() => expect(calls.interrupt).toHaveBeenCalledExactlyOnceWith(defaultThreadRead('thread-1'), null));
+    const stopping = screen.getByRole('button', { name: i18n.t('composer.stopping') });
+    expect(stopping).toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(stopping);
+    expect(calls.interrupt).toHaveBeenCalledTimes(1);
+    view.rerender(<Harness active={false} />);
+    expect(screen.getByRole('button', { name: i18n.t('composer.stopping') })).toBeVisible();
+    act(() => { threadWriter.reset('thread-1', { thread: { ...snapshot(null).thread, id: 'thread-1', seq: 2, state: 'idle', current_turn_id: null,
+      stopping: { version: 2, requested_at: requested, pending: false, thread_seq: 2, state_seq: 2 } } }, false); });
+    expect(screen.getByRole('button', { name: i18n.t('composer.send') })).toBeEnabled();
   });
 
   it('sends an idle message once with queue delivery', async () => {

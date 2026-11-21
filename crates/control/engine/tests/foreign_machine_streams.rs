@@ -24,6 +24,7 @@ use serde_json::json;
 
 fn lost() -> Event {
     Event::SessionLost(SessionLost {
+        uncertain: false,
         reason: "the session closed".to_owned(),
     })
 }
@@ -212,6 +213,8 @@ fn tool(turn: Id, call_ref: &str) -> Event {
 
 fn raw() -> Event {
     Event::RawFrame(RawFrame {
+        text: Vec::new(),
+        text_complete: true,
         n: 1,
         direction: "in".to_owned(),
         payload: json!({"message":"a private harness frame"}),

@@ -1,0 +1,6 @@
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-engine --test call_recovery --test resource_summaries
+test -p orch-api-core --lib
+test -p orch-api-core --test resource_groups --test workspace_processes --test realtime_machine_views --test realtime_environment --test realtime_feeds --test realtime_threads
+test -p orch-api-core --test hosted_environments --test binding_options --test call_recovery
+test -p orch-api-core --test runtime_updates -- recovery_source::

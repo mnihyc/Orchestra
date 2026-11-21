@@ -172,6 +172,7 @@ impl native::Selected for Sessions {
     type Query = PageQuery;
     type Value = Selected;
     type Reply = Page<AdminSession>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::USER_SESSIONS;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(
@@ -354,7 +355,7 @@ impl<const ALL: bool> effects::Effect for Revoke<ALL> {
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
             super::native::standing(ctx, &principal)?;
             let owner = ctx.id("id")?;
-            let person = transaction_guard::lock_person(conn, owner)
+            let person = transaction_guard::lock_credential_writer(conn, owner)
                 .await?
                 .filter(|row| row.kind == "human")
                 .ok_or_else(ApiError::not_found)?;
