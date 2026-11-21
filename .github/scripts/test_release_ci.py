@@ -48,8 +48,23 @@ class CiWaitTests(unittest.TestCase):
         self.assertIsNone(status(TAG, COMMIT, [run(run_attempt=2, status="in_progress", conclusion=None)]))
         self.assertEqual(status(TAG, COMMIT, [run(run_attempt=2)])["run_attempt"], 2)
 
-    def test_other_commits_tags_and_pull_requests_cannot_satisfy_the_gate(self):
-        self.assertIsNone(status(TAG, COMMIT, [run(head_branch="main"), run(head_sha="b" * 40), run(event="pull_request")]))
+    def test_a_commit_green_on_main_can_be_tagged_without_running_ci_again(self):
+        with patch("release_ci.fetch", return_value=[run(head_branch="main")]), patch("release_ci.dispatch") as start:
+            self.assertEqual(wait(TAG, COMMIT, "example/orch", start_missing=True)["id"], 12)
+            start.assert_not_called()
+
+    def test_a_tag_waits_for_the_running_branch_check(self):
+        with patch("release_ci.fetch", side_effect=[[], [run(head_branch="main", status="queued")], [run(head_branch="main")]]), patch("release_ci.dispatch") as start:
+            wait(TAG, COMMIT, "example/orch", start_missing=True, sleep=lambda _: None)
+            start.assert_not_called()
+
+    def test_a_tag_without_any_ci_starts_one_check_even_if_it_takes_time_to_appear(self):
+        with patch("release_ci.fetch", side_effect=[[], [], [], [run(event="workflow_dispatch")]]), patch("release_ci.dispatch") as start:
+            wait(TAG, COMMIT, "example/orch", start_missing=True, sleep=lambda _: None)
+            start.assert_called_once_with("example/orch", TAG)
+
+    def test_other_commits_and_pull_requests_cannot_satisfy_the_gate(self):
+        self.assertIsNone(status(TAG, COMMIT, [run(head_sha="b" * 40), run(event="pull_request")]))
 
 
 class PublicationTests(unittest.TestCase):

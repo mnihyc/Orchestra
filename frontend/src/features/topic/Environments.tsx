@@ -1,3 +1,11 @@
+import { useInfiniteQuery } from '@tanstack/react-query';
+import { topicEnvironmentsPageQuery } from '@/api/topics';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { Table, type Column } from '@/ui/Table';
+import { ErrorState } from '@/ui/ErrorState';
+import { SkeletonRows } from '@/ui/Skeleton';
 /** The environments this topic's threads use: owner, place, threads bound, mounts, the default for new threads, and adding one.
  *
  * The environments the threads of a topic run in, and those made for it, as the topic names them: each
@@ -7,16 +15,13 @@
  * which each name leads to.
  */
 import { Link } from '@tanstack/react-router';
-import { Box, Laptop, Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { EnvironmentRef, Topic } from '@/generated/api-types';
-import { PortsExposure } from '@/features/ports/Exposure';
-import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
+import { ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
-import { InlineAlert } from '@/ui/InlineAlert';
 import { UserChip } from '@/ui/UserChip';
 
 /** How many environments a row of a list draws a dot for, before it counts the rest. */
@@ -38,49 +43,27 @@ export function EnvironmentDots({ environments, className }: { environments: rea
   );
 }
 
-function EnvironmentCard({ environment, isDefault }: { environment: EnvironmentRef; isDefault: boolean }) {
+/** Overview and the full tab share the same native selector and bounded rows. */
+export function TopicEnvironments({ topic, compact = false }: { topic: Pick<Topic, 'id' | 'environments' | 'default_environment_id'>; compact?: boolean }) {
   const { t } = useTranslation();
-  const Icon = environment.placement === 'connected' ? Laptop : Server;
-  return (
-    <li className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4">
-      <div className="flex items-start gap-3">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-bg-muted text-text-muted">
-          <Icon aria-hidden />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <ResourceName subject={{ kind: 'environment', environment }} asChild><Link to="/resources/environments/$id" params={{ id: environment.id }} className="font-medium wrap-anywhere text-text hover:underline">
-            {environment.name}
-          </Link></ResourceName><ResourceHint subject={{ kind: 'environment', environment }} />
-          <PortsExposure environment={environment} />
-        </div>
-        <EnvironmentDot status={environment.status} showLabel />
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-text-muted">
-        <span className="inline-flex items-center gap-2">
-          {t('places.environments.ownedBy')} <UserChip user={environment.owner} size={24} thing={{ kind: 'environment', id: environment.id }} />
-        </span>
-        <span>{environment.placement === 'connected' ? t('places.environments.onMachine') : t('places.environments.onHost')}</span>
-      </div>
-      {isDefault && <p className="text-sm font-medium text-accent-text">{t('places.environments.default')}</p>}
-    </li>
-  );
-}
-
-export function TopicEnvironments({ topic }: { topic: Pick<Topic, 'environments' | 'default_environment_id'> }) {
-  const { t } = useTranslation();
-  const environments = [...topic.environments].sort((one, other) => Number(other.id === topic.default_environment_id) - Number(one.id === topic.default_environment_id));
-  if (environments.length === 0) {
-    return <EmptyState icon={<Box aria-hidden />} title={t('places.environments.empty')} description={t('places.environments.emptyAbout')} />;
-  }
-  return (
-    <div className="flex flex-col gap-4">
-      <p className="max-w-prose text-sm text-text-muted">{t('places.environments.lead')}</p>
-      <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {environments.map((environment) => (
-          <EnvironmentCard key={environment.id} environment={environment} isDefault={environment.id === topic.default_environment_id} />
-        ))}
-      </ul>
-      <InlineAlert tone="info">{t('places.environments.ownPage')}</InlineAlert>
-    </div>
-  );
+  const search = useCollectionSearch('topic-environments:' + topic.id);
+  const snapshot = topic.environments;
+  const choices = topicEnvironmentsPageQuery(topic.id, search.q, JSON.stringify([snapshot.map((row) => [row.id, row.name]), topic.default_environment_id]));
+  const query = useInfiniteQuery({ ...choices,
+    // This complete small native topic projection is already admitted; searches always use the server.
+    ...(search.q === '' && snapshot.length <= 50 ? { initialData: { pages: [{ items: snapshot, next_cursor: null }], pageParams: [null] }, staleTime: Infinity } : {}),
+  });
+  const rows = search.q === '' && snapshot.length <= 50
+    ? snapshot.toSorted((one, other) => Number(other.id === topic.default_environment_id) - Number(one.id === topic.default_environment_id) || one.name.localeCompare(other.name) || one.id.localeCompare(other.id))
+    : query.data?.pages.flatMap((page) => page.items) ?? [];
+  const columns: Column<EnvironmentRef>[] = [
+    { id: 'name', header: t('resources.listName'), cell: (environment) => <span className="flex min-w-0 flex-col gap-1"><ResourceName subject={{ kind: 'environment', environment }} asChild><Link to="/resources/environments/$id" params={{ id: environment.id }} className="truncate font-medium hover:underline">{environment.name}</Link></ResourceName>{environment.id === topic.default_environment_id && <span className="text-sm text-text-muted">{t('places.environments.default')}</span>}</span> },
+    { id: 'state', header: t('hosts.runtimes.state'), cell: (environment) => <EnvironmentDot status={environment.status} showLabel /> },
+    ...(!compact ? [{ id: 'owner', header: t('places.topic.owner'), from: 'md' as const, cell: (environment: EnvironmentRef) => <UserChip user={environment.owner} size={24} thing={{ kind: 'environment', id: environment.id }} /> }] : []),
+  ];
+  return <div className="flex min-w-0 flex-col gap-3">
+    <CollectionSearch name={t('places.topic.environments')} {...search} />
+    {query.isPending ? <SkeletonRows read={query} rows={3} /> : query.isError && !query.isFetchNextPageError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('places.environments.empty')} /> : <Table label={t('places.topic.environments')} columns={columns} rows={rows} rowKey={(row) => row.id} virtual key={topic.id + search.q} />}
+    <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.isFetchNextPageError ? query.error : null} onMore={() => void query.fetchNextPage()} />
+  </div>;
 }

@@ -1,0 +1,1 @@
+test -p orch-api-core --test everything_resources --test hidden_rows -- --nocapture --test-threads=1
