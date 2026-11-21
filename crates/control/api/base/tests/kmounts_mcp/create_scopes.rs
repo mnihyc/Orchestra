@@ -3,7 +3,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::new_id;
@@ -54,11 +54,12 @@ fn full(env: Id, home: Id) -> Vec<Json> {
 pub(super) async fn key(world: &World, actor: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: actor,
             name: "Owned MCP creation fixture",
             token_hash: &token_hash(&secret),

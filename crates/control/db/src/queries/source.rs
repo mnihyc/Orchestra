@@ -80,6 +80,27 @@ pub async fn last_agent_message(conn: &mut Conn, thread: Id) -> Result<Option<Js
     .await?)
 }
 
+/// The latest completed main answer of the thread selected as `t`.
+pub(super) const LAST_AGENT_PAYLOAD: &str = "(SELECT payload FROM items WHERE thread_id=t.node_id
+    AND kind='agent_message' AND status='completed' AND stream='main' ORDER BY seq_created DESC,id DESC LIMIT 1)";
+
+/// The same completed-main source for a page, retaining explicit absence for each actual thread.
+pub async fn last_agent_messages(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<std::collections::BTreeMap<Id, Option<Json>>, DbError> {
+    if threads.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let rows: Vec<(Id, Option<Json>)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT t.node_id,{LAST_AGENT_PAYLOAD} FROM threads t WHERE t.node_id=ANY($1)"
+    )))
+    .bind(threads)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// One declared attention projection, on the fixed `th` alias, shared by tree and finder reads.
 pub const ATTENTION_SQL: &str = "CASE WHEN th.node_id IS NOT NULL THEN jsonb_build_object(
     'uncommitted', th.work_observed -> 'uncommitted', 'unpushed', th.work_observed -> 'unpushed',
@@ -182,21 +203,24 @@ pub async fn thread_display_facts(
     if threads.is_empty() {
         return Ok(Vec::new());
     }
+    super::snapshot::matching(
+        conn,
+        threads,
+        move |rows| rows.displays.entry((reader, at)).or_default(),
+        |facts| facts.id,
+        move |conn, threads| Box::pin(load_thread_display_facts(conn, threads, reader, at)),
+    )
+    .await
+}
+
+async fn load_thread_display_facts(
+    conn: &mut Conn,
+    threads: &[Id],
+    reader: Option<Id>,
+    at: orch_types::Time,
+) -> Result<Vec<ThreadDisplayFacts>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(
-        "WITH pending AS MATERIALIZED (
-          SELECT a.thread_id,count(*) approvals,
-            bool_or(a.request->>'request_kind' IN ('user_input','mcp_elicitation')) waiting_for_answer
-           FROM approvals a JOIN threads selected ON selected.node_id=a.thread_id
-           WHERE a.thread_id=ANY($1) AND selected.node_id=ANY($1) AND a.state='pending' AND (a.expires_at IS NULL OR a.expires_at>$3)
-            AND (a.turn_id IS NULL OR EXISTS(SELECT 1 FROM turns t WHERE t.id=a.turn_id AND t.continuation_id=selected.active_continuation_id))
-           GROUP BY a.thread_id
-         ), scheduled AS MATERIALIZED (
-          SELECT s.target->>'thread_id' thread_id,count(*) queued_inputs FROM input_schedules s
-           WHERE s.state='active' AND s.deleted_at IS NULL AND s.target->>'kind'='thread'
-            AND s.target->>'thread_id' IN (SELECT id::text FROM unnest($1::uuid[]) id)
-           GROUP BY s.target->>'thread_id'
-         )
-         SELECT th.node_id id, th.next_seq-1 seq, COALESCE(r.last_read_seq,0) read_seq, th.state, th.blocked_reason, th.blocked_detail, th.queue_held,
+        "SELECT th.node_id id, th.next_seq-1 seq, COALESCE(r.last_read_seq,0) read_seq, th.state, th.blocked_reason, th.blocked_detail, th.queue_held,
           CASE WHEN th.state='blocked' AND th.blocked_reason='error' AND th.blocked_detail='call_recovery'
            AND call_recovery.state IN ('scheduled','running','stopped','waiting')
            THEN EXISTS(SELECT 1 FROM jobs j WHERE __RECOVERY_HOLD__) ELSE false END recovery_has_lock,
@@ -212,8 +236,8 @@ pub async fn thread_display_facts(
           (call_recovery.action->>'count')::bigint recovery_count,
           (call_recovery.action->>'window_secs')::bigint recovery_window_secs,
           EXISTS(SELECT 1 FROM nodes ancestor WHERE ancestor.id=ANY(n.path) AND ancestor.archived_at IS NOT NULL) archived,
-          COALESCE(pending.approvals,0) approvals, COALESCE(pending.waiting_for_answer,false) waiting_for_answer,
-          inputs.queued_inputs + COALESCE(scheduled.queued_inputs,0) queued_inputs,
+          pending.approvals, COALESCE(pending.waiting_for_answer,false) waiting_for_answer,
+          inputs.queued_inputs + scheduled.queued_inputs queued_inputs,
           inputs.held_inputs, inputs.waiting_inputs,
           CASE WHEN last_turn.state='failed' THEN
             NOT COALESCE((SELECT max(i.seq_created) FROM thread_inputs i WHERE i.thread_id=th.node_id AND i.seq_created>0)
@@ -226,8 +250,12 @@ pub async fn thread_display_facts(
          LEFT JOIN model_call_recovery call_recovery ON call_recovery.node_id=th.node_id
           AND call_recovery.purpose='agent' AND call_recovery.call_key=th.node_id
           AND call_recovery.state NOT IN ('completed','dismissed')
-         LEFT JOIN pending ON pending.thread_id=th.node_id
-         LEFT JOIN scheduled ON scheduled.thread_id=th.node_id::text
+         CROSS JOIN LATERAL (SELECT count(*) approvals,
+            bool_or(a.request->>'request_kind' IN ('user_input','mcp_elicitation')) waiting_for_answer
+            FROM approvals a WHERE a.thread_id=th.node_id AND a.state='pending' AND (a.expires_at IS NULL OR a.expires_at>$3)
+            AND (a.turn_id IS NULL OR EXISTS(SELECT 1 FROM turns t WHERE t.id=a.turn_id AND t.continuation_id=th.active_continuation_id))) pending
+         CROSS JOIN LATERAL (SELECT count(*) queued_inputs FROM input_schedules s
+            WHERE s.target->>'thread_id'=th.node_id::text AND s.state='active' AND s.deleted_at IS NULL AND s.target->>'kind'='thread') scheduled
          LEFT JOIN thread_reads r ON r.user_id=$2 AND r.thread_id=th.node_id AND r.continuation_id=th.active_continuation_id
          LEFT JOIN LATERAL (SELECT t.state,t.completed_seq,t.seq_updated,t.completed_at FROM turns t
            WHERE t.thread_id=th.node_id ORDER BY t.ordinal DESC LIMIT 1) last_turn ON true
@@ -243,7 +271,7 @@ pub async fn thread_display_facts(
           FROM thread_inputs i WHERE i.thread_id=th.node_id AND i.continuation_id=th.active_continuation_id
             AND i.state IN ('pending','delivering')) inputs
          WHERE th.node_id=ANY($1)"
-            .replace("__RECOVERY_HOLD__", &super::jobs::changes::thread_hold_predicate("th.node_id")),
+            .replace("__RECOVERY_HOLD__", super::jobs::changes::THREAD_HOLD),
     )).bind(threads).bind(reader).bind(at.get()).fetch_all(conn).await?)
 }
 
@@ -318,10 +346,11 @@ pub async fn finish_recorded(
     };
     Ok(sqlx::query("UPDATE snapshots SET state = $2, tree_ref = $3, repository_head = $4,
         manifest_blob = $5, file_count = $6, total_bytes = $7, missing_count = 0,
-        expires_at = $8, unavailable_reason = $9, completed_at = $10 WHERE id = $1 AND state = 'running'")
+        expires_at = $8, unavailable_reason = $9, completed_at = $10, recording_indexing = $11 WHERE id = $1 AND state = 'running'")
         .bind(snapshot).bind(state).bind(&result.tree_ref).bind(&result.repository_head)
         .bind(result.manifest_blob.map(|hash| hash.as_bytes().to_vec())).bind(result.files).bind(result.bytes)
-        .bind(result.expires_at.map(|at| at.get())).bind(&result.reason).bind(at).execute(conn).await?.rows_affected() == 1)
+        .bind(result.expires_at.map(|at| at.get())).bind(&result.reason).bind(at)
+        .bind(result.indexing.map(|progress| serde_json::json!({ "done": progress.done, "total": progress.total }))).execute(conn).await?.rows_affected() == 1)
 }
 
 /// Replaces accepted labelled links while the caller holds the thread's row and action guard.
@@ -369,7 +398,7 @@ pub async fn expire_recorded(
 ) -> Result<Option<Option<Hash>>, DbError> {
     let raw: Option<Option<Vec<u8>>> = sqlx::query_scalar("WITH prior AS (
         SELECT id, manifest_blob FROM snapshots WHERE id = $1 AND storage = 'environment' AND state <> 'running' FOR UPDATE
-        ), changed AS (UPDATE snapshots s SET state = 'expired', unavailable_reason = 'expired', manifest_blob = NULL,
+        ), changed AS (UPDATE snapshots s SET state = 'expired', unavailable_reason = CASE WHEN s.unavailable_reason = 'cancelled' THEN 'cancelled' ELSE 'expired' END, manifest_blob = NULL,
             expires_at = LEAST(COALESCE(s.expires_at, $2), $2) FROM prior p WHERE s.id = p.id RETURNING p.manifest_blob)
         SELECT manifest_blob FROM changed")
         .bind(snapshot).bind(now).fetch_optional(&mut *conn).await?;
@@ -403,6 +432,41 @@ pub async fn set_work(
         .bind(thread).bind(observation).bind(seq).execute(conn).await?.rows_affected() == 1)
 }
 
+/// A complete unsolicited report updates and announces every sharing thread in one statement.
+/// A report retires an older read's reservation; its late answer cannot replace the report.
+/// Delayed or replayed reports never move facts backwards.
+pub async fn remember_work_report(
+    conn: &mut Conn,
+    environment: Id,
+    directory: &str,
+    observation: &Json,
+    at: orch_types::Time,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "WITH locked AS MATERIALIZED (
+        SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
+        WHERE t.environment_id = $1 AND t.workspace_dir = $2 AND n.deleted_at IS NULL
+        ORDER BY t.node_id FOR UPDATE OF t
+    ), changed AS (
+        UPDATE threads t SET work_observed = $3, seq_state = t.next_seq, next_seq = t.next_seq + 1
+        FROM locked WHERE t.node_id = locked.node_id
+          AND t.environment_id = $1 AND t.workspace_dir = $2
+          AND (t.work_observed IS NULL OR (t.work_observed->>'as_of')::timestamptz <= $4)
+          AND (t.work_observed->>'_requested_at' IS NULL OR (t.work_observed->>'_requested_at')::timestamptz <= $4)
+          AND t.work_observed IS DISTINCT FROM $3::jsonb
+        RETURNING t.node_id, t.seq_state
+    ) SELECT pg_notify($5, node_id::text || ':' || seq_state::text) FROM changed",
+    )
+    .bind(environment)
+    .bind(directory)
+    .bind(observation)
+    .bind(at.get())
+    .bind(crate::sequences::THREAD_CHANNEL)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Reserves a requested observation without replacing the previous public facts.
 pub async fn reserve_work(
     conn: &mut Conn,
@@ -411,9 +475,9 @@ pub async fn reserve_work(
     at: orch_types::Time,
     seq: Seq,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE threads SET work_observed = jsonb_set(COALESCE(work_observed,
+    sqlx::query("UPDATE threads SET work_observed = jsonb_set(jsonb_set(COALESCE(work_observed,
         jsonb_build_object('uncommitted',NULL,'unpushed',NULL,'changed_files',NULL,'ahead',NULL,'as_of',to_jsonb($3::timestamptz),
-            'stale',true,'reason','not_observed')), '{_requested}', to_jsonb($2::text)) - '_requested_changed' - '_requested_reason',
+            'stale',true,'reason','not_observed')), '{_requested}', to_jsonb($2::text)), '{_requested_at}', to_jsonb($3::timestamptz)) - '_requested_changed' - '_requested_reason',
         seq_state = GREATEST(seq_state, $4) WHERE node_id = $1")
         .bind(thread).bind(request.to_string()).bind(at.get()).bind(seq).execute(conn).await?;
     Ok(())
@@ -518,11 +582,26 @@ pub async fn take_end_due(conn: &mut Conn, turn: Id) -> Result<bool, DbError> {
 /// The oldest turn of `thread` whose end observation is due, if one is.
 pub async fn end_due_turn(conn: &mut Conn, thread: Id) -> Result<Option<Id>, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT id FROM turns WHERE thread_id = $1 AND files_end_due ORDER BY ordinal LIMIT 1",
+        "SELECT id FROM turns WHERE thread_id = $1 AND files_end_due AND files_end_sealed ORDER BY ordinal LIMIT 1",
     )
     .bind(thread)
     .fetch_optional(conn)
     .await?)
+}
+
+/// A small native seal still needed before another turn may change these files.
+pub async fn unsealed_end_turn(conn: &mut Conn, thread: Id) -> Result<Option<Id>, DbError> {
+    Ok(sqlx::query_scalar("SELECT id FROM turns WHERE thread_id=$1 AND files_end_due AND NOT files_end_sealed ORDER BY ordinal LIMIT 1")
+        .bind(thread).fetch_optional(conn).await?)
+}
+
+/// Publication can continue in the background once its exact native observation is durable.
+pub async fn seal_end(conn: &mut Conn, turn: Id) -> Result<(), DbError> {
+    sqlx::query("UPDATE turns SET files_end_sealed=true WHERE id=$1 AND files_end_due")
+        .bind(turn)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// The threads that have a turn whose end observation is due, for the engine's sweep: a process that
@@ -549,18 +628,30 @@ pub async fn set_before_state(conn: &mut Conn, turn: Id, snapshot: Id) -> Result
         == 1)
 }
 
-/// Keeps complete end hashes or explicit unknown coverage before this thread's next turn.
-pub async fn set_end_manifest(
+/// Keeps how many included files a turn changed, from its before-state and its observed end; none when either
+/// is unknown.
+pub async fn set_end_changes(
     conn: &mut Conn,
     turn: Id,
-    manifest: Option<&Json>,
-    blob: Option<&Hash>,
+    changed: Option<i32>,
+    paths: Option<&Json>,
+    complete: Option<bool>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE turns SET files_end_manifest = $2, end_manifest_blob = $3 WHERE id = $1")
+    sqlx::query("UPDATE turns SET files_changed = $2, files_changed_paths = $3, files_changed_complete = $4 WHERE id = $1")
         .bind(turn)
-        .bind(manifest)
-        .bind(blob.map(|hash| hash.as_bytes().to_vec()))
+        .bind(changed)
+        .bind(paths)
+        .bind(complete)
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Attaches immutable semantic end metadata once; the caller pins it in this same transaction.
+pub async fn retain_end_manifest(conn: &mut Conn, turn: Id, blob: &Hash) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE turns SET end_manifest_blob = $2 WHERE id = $1 AND files_end_due AND end_manifest_blob IS NULL")
+        .bind(turn)
+        .bind(blob.as_bytes().to_vec())
+        .execute(conn)
+        .await?.rows_affected() == 1)
 }

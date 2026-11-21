@@ -102,6 +102,63 @@ pub enum Sent {
     Unknown,
 }
 
+/// Only a real summary source supplies these retained facts; the marker grants no Read.
+pub(crate) async fn retain_summary_governors(
+    conn: &mut orch_db::Conn,
+    record: Id,
+    request: Option<Id>,
+    viewer: Option<Id>,
+    refs: &[orch_api_contract::summaries::SummaryTarget],
+) -> Result<(), EngineError> {
+    if refs.is_empty() {
+        return Err(EngineError::unreadable(
+            "The summary prompt has no native governors",
+        ));
+    }
+    let refs = serde_json::to_value(refs)?;
+    sqlx::query("INSERT INTO resource_summary_model_inputs(model_input_id,request_id,viewer_id,source_refs) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(record).bind(request).bind(viewer).bind(&refs).execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let kept: (Option<Id>, Option<Id>, Json) = sqlx::query_as("SELECT request_id,viewer_id,source_refs FROM resource_summary_model_inputs WHERE model_input_id=$1")
+        .bind(record).fetch_one(conn).await.map_err(orch_db::DbError::from)?;
+    if kept != (request, viewer, refs) {
+        return Err(EngineError::unreadable(
+            "The prompt belongs to another summary source",
+        ));
+    }
+    Ok(())
+}
+
+/// An actual delegated producer retains its source identities; the marker grants no Read.
+pub(crate) async fn retain_program_governors(
+    conn: &mut orch_db::Conn,
+    record: Id,
+    work: Id,
+    viewer: Option<Id>,
+    refs: &[orch_api_contract::summaries::SummaryTarget],
+) -> Result<(), EngineError> {
+    if refs.is_empty() {
+        return Err(EngineError::unreadable(
+            "The copied prompt has no native governors",
+        ));
+    }
+    let refs = serde_json::to_value(refs)?;
+    sqlx::query("INSERT INTO delegated_program_model_inputs(model_input_id,work_id,source_refs,viewer_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+        .bind(record).bind(work).bind(&refs).bind(viewer).execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
+    let kept: (Option<Id>, Json,Option<Id>) = sqlx::query_as(
+        "SELECT work_id,source_refs,viewer_id FROM delegated_program_model_inputs WHERE model_input_id=$1",
+    )
+    .bind(record)
+    .fetch_one(conn)
+    .await
+    .map_err(orch_db::DbError::from)?;
+    if kept != (Some(work), refs, viewer) {
+        return Err(EngineError::unreadable(
+            "The prompt belongs to another native source",
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
     /// Bounded inline tails with the exact full bytes in the ordinary content store.
     async fn stored_model_blocks(
@@ -225,15 +282,10 @@ impl Engine {
                 .ok_or_else(|| {
                     EngineError::unreadable("The summary prompt has no native governors")
                 })?;
-            sqlx::query("INSERT INTO resource_summary_model_inputs(model_input_id,request_id,viewer_id,source_refs) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
-                .bind(id).bind(request).bind(row.requested_by).bind(refs).execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
-            let kept:(Option<Id>,Option<Id>,Json)=sqlx::query_as("SELECT request_id,viewer_id,source_refs FROM resource_summary_model_inputs WHERE model_input_id=$1")
-                .bind(id).fetch_one(&mut *tx).await.map_err(orch_db::DbError::from)?;
-            if kept != (Some(request), row.requested_by, refs.clone()) {
-                return Err(EngineError::unreadable(
-                    "The prompt belongs to another summary source",
-                ));
-            }
+            let refs = serde_json::from_value::<Vec<orch_api_contract::summaries::SummaryTarget>>(
+                refs.clone(),
+            )?;
+            retain_summary_governors(&mut tx, id, Some(request), row.requested_by, &refs).await?;
         }
         if thread_seq.is_some() {
             orch_db::sequences::notify(&mut tx, node, seq).await?;
@@ -356,14 +408,28 @@ impl Engine {
                 },
             )
             .await?;
+            if let Some(input_id) = delivery.input {
+                let input = threads::input(unit.conn, input_id)
+                    .await?
+                    .filter(|input| input.thread_id == delivery.thread)
+                    .ok_or_else(|| EngineError::unreadable("The native prompt input is gone"))?;
+                if let Some(authority) =
+                    crate::inputs::saved_authority(input.submission_authority.as_ref())?
+                    && let Some(parent) = authority.capability_parent()
+                {
+                    parent
+                        .retain_prompt_governors(unit.conn, input_id, id)
+                        .await?;
+                }
+            }
             if matches!(delivery.purpose, "session" | "input") {
                 let key = format!("model-input:{id}");
                 crate::ingest::add_marker(&mut unit,delivery.thread,delivery.segment,delivery.turn,&json!({"marker":"orch_context","data":{"model_input_id":id,"purpose":delivery.purpose}}),&key).await?;
                 let seq = unit.stamp(delivery.thread).await?;
-                sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND native_ref=$2")
-                    .bind(delivery.thread).bind(&key).bind(id).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-                sqlx::query("UPDATE model_inputs SET item_id=(SELECT id FROM items WHERE thread_id=$2 AND native_ref=$3) WHERE id=$1")
-                    .bind(id).bind(delivery.thread).bind(&key).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND segment_id=$5 AND native_ref=$2")
+                    .bind(delivery.thread).bind(&key).bind(id).bind(seq).bind(delivery.segment).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+                sqlx::query("UPDATE model_inputs SET item_id=(SELECT id FROM items WHERE thread_id=$2 AND segment_id=$4 AND native_ref=$3) WHERE id=$1")
+                    .bind(id).bind(delivery.thread).bind(&key).bind(delivery.segment).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
                 if let Some(input) = delivery.input {
                     sqlx::query("UPDATE items SET model_input_id=$3,seq_updated=$4 WHERE thread_id=$1 AND kind='user_message' AND payload->>'input_id'=$2::text")
                         .bind(delivery.thread).bind(input).bind(id).bind(seq).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;

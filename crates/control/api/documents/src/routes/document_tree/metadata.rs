@@ -417,6 +417,7 @@ async fn projected_bounded(
                 continue;
             };
             let banner = orch_api_contract::nodes::DeletedInspection {
+                cleanup_hold: None,
                 deleted_at: Time::new(deleted),
                 deleted_by: facts
                     .and_then(|facts| facts.deleted_by)

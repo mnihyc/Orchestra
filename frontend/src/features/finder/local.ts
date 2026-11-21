@@ -4,7 +4,6 @@
  * once, and ranked again for every letter typed. A group that has nothing to say of the letters typed
  * is empty and is not drawn.
  */
-import { screenBuilt } from '@/shell/availability';
 import { actionKeys } from '@/shell/keys';
 import { articleAvailable } from '@/help/guide';
 import type { TFunction } from 'i18next';
@@ -220,7 +219,7 @@ export function settingRows(
       run: (how) => env.go(destination, how),
     };
     return { row, score };
-  }).filter(({ row }) => row.destination === undefined || screenBuilt(row.destination.to));
+  });
 }
 
 // ---------------------------------------------------------------- the rows of a permission page

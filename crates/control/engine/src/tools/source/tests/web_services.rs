@@ -1534,7 +1534,7 @@ async fn extra_service_provider(scene: &Scene, name: &str, owner: Id) -> Proof<I
     Ok(provider)
 }
 fn route_candidate(provider: Id) -> Json {
-    json!({"provider_id":provider,"model":"","params":{},"route":{"route":"web_search.service-api","offering":{"provider":provider,"offering":OFFERING}}})
+    json!({"target":{"type":"single","resource":{"kind":"model","backend":{"route":"web_search.service-api","offering":{"provider":provider,"offering":OFFERING},"config":{}}}},"params":{}})
 }
 fn native_service_error(code: &str) -> CommandError {
     let mut error = CommandError::new(ErrorCode::Conflict, "synthetic pre-request service refusal");

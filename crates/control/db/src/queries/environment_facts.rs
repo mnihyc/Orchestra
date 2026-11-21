@@ -22,6 +22,21 @@ pub struct EnvironmentMachine {
 }
 
 impl EnvironmentMachine {
+    fn from_report(
+        machine_id: Option<Id>,
+        descriptor: Option<Json>,
+        policy: Option<Json>,
+        runtime: Option<&str>,
+    ) -> Self {
+        Self {
+            machine_id,
+            descriptor: descriptor.map(|declared| {
+                orch_driver_contract::isolation::effective_json(&declared, runtime)
+            }),
+            policy,
+        }
+    }
+
     /// Unreported confinement never counts as isolation.
     #[must_use]
     pub fn confinement(&self) -> &str {
@@ -72,46 +87,98 @@ pub async fn access_profiles(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        environments,
+        |rows| &mut rows.placements,
+        |row| row.0,
+        |conn, ids| Box::pin(load_access_profiles(conn, ids)),
+    )
+    .await
+}
+
+// Use the same runtime during a move in both the directory and host resolution paths.
+macro_rules! current_runtime {
+    () => {
+        "r.environment_id=e.id AND r.state NOT IN ('retired','removed') AND r.successor_of IS NULL
+         AND NOT (e.status='moving' AND e.machine_id IS NOT NULL AND r.generation>e.generation)"
+    };
+}
+
+async fn load_access_profiles(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<(Id, orch_access_contract::permissions::Placement)>, DbError> {
     use orch_access_contract::permissions::Placement;
     if environments.is_empty() {
         return Ok(Vec::new());
     }
-    let units: Vec<(Id, bool)> = sqlx::query_as(
-        "SELECT id, placement='managed' OR template_id IS NOT NULL FROM environments WHERE id=ANY($1)",
-    ).bind(environments).fetch_all(&mut *conn).await?;
-    let directories: Vec<Id> = units
-        .iter()
-        .filter_map(|(id, unit)| (!*unit).then_some(*id))
-        .collect();
-    let facts: std::collections::HashMap<_, _> = if directories.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        of_many(conn, &directories).await?.into_iter().collect()
-    };
-    Ok(units
-        .into_iter()
-        .map(|(id, unit)| {
-            let reported = facts.get(&id);
-            let controlled = unit
-                || reported.is_some_and(|facts| {
-                    facts
-                        .descriptor
-                        .as_ref()
-                        .and_then(|descriptor| descriptor.get("lifecycle"))
-                        .and_then(Json::as_str)
-                        == Some("unit")
-                        || environment_delegated(facts.policy.as_ref())
-                });
+    #[derive(sqlx::FromRow)]
+    struct ProfileRow {
+        id: Id,
+        managed: bool,
+        directory: bool,
+        machine_id: Option<Id>,
+        descriptor: Option<Json>,
+        policy: Option<Json>,
+        runtime: Option<String>,
+    }
+
+    let rows: Vec<ProfileRow> = sqlx::query_as(concat!(
+        "SELECT e.id, e.placement='managed' OR e.template_id IS NOT NULL AS managed,
+                CASE WHEN e.placement='managed' OR e.template_id IS NOT NULL THEN false
+                     ELSE NOT EXISTS (SELECT 1 FROM runtimes r WHERE ", current_runtime!(), ") END AS directory,
+                e.machine_id, m.facts->'environment_descriptor' AS descriptor, m.facts->'policy' AS policy,
+                e.config->>'env.runtime' AS runtime
+         FROM environments e LEFT JOIN machines m ON m.id=e.machine_id AND e.template_id IS NULL AND e.placement<>'managed'
+         WHERE e.id=ANY($1)"
+    )).bind(environments).fetch_all(&mut *conn).await?;
+    let mut profiles = Vec::with_capacity(rows.len());
+    let mut hosted = Vec::new();
+    for row in rows {
+        if row.managed {
+            profiles.push((row.id, Placement::Managed));
+        } else if row.directory {
+            let machine = EnvironmentMachine::from_report(
+                row.machine_id,
+                row.descriptor,
+                row.policy,
+                row.runtime.as_deref(),
+            );
+            profiles.push((row.id, profile_for_machine(&machine)));
+            let _ = super::snapshot::with(conn, |rows| {
+                rows.machines
+                    .entry(row.id)
+                    .or_insert_with(|| vec![(row.id, machine)]);
+            });
+        } else {
+            hosted.push(row.id);
+        }
+    }
+    if !hosted.is_empty() {
+        let machines: std::collections::HashMap<_, _> =
+            of_many(conn, &hosted).await?.into_iter().collect();
+        profiles.extend(hosted.into_iter().map(|id| {
             (
                 id,
-                if controlled {
-                    Placement::Managed
-                } else {
-                    Placement::Connected
-                },
+                machines
+                    .get(&id)
+                    .map_or(Placement::Connected, profile_for_machine),
             )
-        })
-        .collect())
+        }));
+    }
+    Ok(profiles)
+}
+
+fn profile_for_machine(
+    machine: &EnvironmentMachine,
+) -> orch_access_contract::permissions::Placement {
+    use orch_access_contract::permissions::Placement;
+    if machine.makes_units() || environment_delegated(machine.policy.as_ref()) {
+        Placement::Managed
+    } else {
+        Placement::Connected
+    }
 }
 
 /// Current environment services; a unit connector never substitutes its policy for its host's.
@@ -130,8 +197,22 @@ pub async fn of_many(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        environments,
+        |rows| &mut rows.machines,
+        |row| row.0,
+        |conn, ids| Box::pin(load_of_many(conn, ids)),
+    )
+    .await
+}
+
+async fn load_of_many(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<(Id, EnvironmentMachine)>, DbError> {
     type ReportRow = (Id, Option<Id>, Option<Json>, Option<Json>, Option<String>);
-    let rows:Vec<ReportRow> = sqlx::query_as(
+    let rows:Vec<ReportRow> = sqlx::query_as(concat!(
         "SELECT e.id,CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END AS machine_id,
                 CASE WHEN r.id IS NOT NULL THEN jsonb_build_object('lifecycle','unit') || COALESCE(h.drivers -> r.driver,'{}'::jsonb)
                      WHEN e.template_id IS NULL THEN m.facts -> 'environment_descriptor'
@@ -145,11 +226,10 @@ pub async fn of_many(
            FROM environments e
            LEFT JOIN env_templates t ON t.id=e.template_id
            LEFT JOIN LATERAL (SELECT r.id,r.host_id,r.driver FROM runtimes r
-               WHERE r.environment_id=e.id AND r.state NOT IN ('retired','removed') AND r.successor_of IS NULL
-                 AND NOT (e.status='moving' AND e.machine_id IS NOT NULL AND r.generation>e.generation)
+               WHERE ", current_runtime!(), "
                ORDER BY r.created_at DESC LIMIT 1) r ON true
            LEFT JOIN nodes home ON home.id=e.home_node_id
-           LEFT JOIN LATERAL (SELECT s.value #>> '{}' AS host_id,s.locked FROM settings s
+           LEFT JOIN LATERAL (SELECT CASE WHEN s.value->>'type'='single' AND s.value#>>'{resource,kind}'='host' THEN s.value#>>'{resource,id}' END AS host_id,s.locked FROM settings s
                WHERE s.key='env.host_id' AND (s.node_id IS NULL OR s.node_id=ANY(home.path))
                ORDER BY s.locked DESC,
                    CASE WHEN s.locked THEN COALESCE(array_position(home.path,s.node_id),0) END ASC,
@@ -159,32 +239,21 @@ pub async fn of_many(
            LEFT JOIN LATERAL (SELECT target.* FROM hosts target
                WHERE CASE WHEN r.id IS NOT NULL THEN target.id=r.host_id ELSE
                    target.id::text=COALESCE(planned.host_id,CASE WHEN scoped.locked THEN scoped.host_id
-                        WHEN e.config ? 'env.host_id' THEN e.config->>'env.host_id' ELSE scoped.host_id END) END
+                        WHEN e.config ? 'env.host_id' THEN CASE WHEN e.config->'env.host_id'->>'type'='single' AND e.config#>>'{env.host_id,resource,kind}'='host' THEN e.config#>>'{env.host_id,resource,id}' END ELSE scoped.host_id END) END
                ORDER BY target.schedulable DESC,target.id LIMIT 1) h ON true
            LEFT JOIN LATERAL (SELECT target.drivers -> t.driver AS descriptor FROM hosts target
                WHERE r.id IS NULL AND e.template_id IS NOT NULL AND h.id IS NULL
                  AND target.drivers ? t.driver AND NOT target.disabled
                ORDER BY target.schedulable DESC,target.id LIMIT 1) offered ON true
            LEFT JOIN machines m ON m.id=CASE WHEN r.id IS NOT NULL OR e.template_id IS NOT NULL THEN h.machine_id ELSE e.machine_id END
-          WHERE e.id=ANY($1)",
-    ).bind(environments).fetch_all(conn).await?;
+          WHERE e.id=ANY($1)"
+    )).bind(environments).fetch_all(conn).await?;
     Ok(rows
         .into_iter()
         .map(|(id, machine_id, descriptor, policy, runtime)| {
             (
                 id,
-                EnvironmentMachine {
-                    machine_id,
-                    // What the driver declares, laid over by the runtime the unit is made under (or will be): what
-                    // holds for this environment, not for the driver as a whole.
-                    descriptor: descriptor.map(|declared| {
-                        orch_driver_contract::isolation::effective_json(
-                            &declared,
-                            runtime.as_deref(),
-                        )
-                    }),
-                    policy,
-                },
+                EnvironmentMachine::from_report(machine_id, descriptor, policy, runtime.as_deref()),
             )
         })
         .collect())
@@ -442,6 +511,20 @@ pub async fn has_unit(conn: &mut Conn, environment: Id) -> Result<bool, DbError>
 /// Physical ownership sources of connected directory environments. Managed units keep
 /// their own ownership semantics; a node host uses its existing canonical host facade.
 pub async fn ownership_sources(
+    conn: &mut Conn,
+    environments: &[Id],
+) -> Result<Vec<(Id, String, Id)>, DbError> {
+    super::snapshot::matching(
+        conn,
+        environments,
+        |rows| &mut rows.environment_owners,
+        |row| row.0,
+        |conn, ids| Box::pin(load_ownership_sources(conn, ids)),
+    )
+    .await
+}
+
+async fn load_ownership_sources(
     conn: &mut Conn,
     environments: &[Id],
 ) -> Result<Vec<(Id, String, Id)>, DbError> {

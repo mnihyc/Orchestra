@@ -146,6 +146,8 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
   const nativeReported=facts.discoveredHarnesses!==null || facts.searchedHarnessKinds!==null || harnesses.length>0;
   const nativeRole=machine.roles.some((role)=>role==='environment' || role==='agent');
   const nativeRelevant=nativeReported || nativeRole;
+  const nativeFetch=nativeRole && object(object(machine.facts).build_fetch).supported===true;
+  const fetchPolicy=facts.policy?.['agent.programs']!==true?'agent.programs':facts.policy['tools.fetch']!==true?'tools.fetch':null;
   const harnessTitle=useHarnessTitle(harnesses.length+discovered.length>0);
   const [enrolling,setEnrolling]=useState(false);
   const [kind,setKind]=useState<MachineProgramKind>('agent');
@@ -185,7 +187,8 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
     </div>
     {nativeRelevant && <section aria-labelledby="machine-native-harnesses" className="flex flex-col gap-2">
       <h3 id="machine-native-harnesses" className="font-medium">{t('machinePrograms.nativeTitle')}</h3>
-      {nativeRows.length===0?<StateLine compact message={t(facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}/>:
+      {nativeRows.length===0?<StateLine compact message={nativeFetch?t(fetchPolicy===null?'machinePrograms.nativeFetch':'machinePrograms.nativeFetchBlocked',{key:fetchPolicy}):t(facts.searchedHarnessKinds===null?'machinePrograms.nativeNotReported':facts.searchedHarnessKinds.length===0?'machinePrograms.nativeNotSearched':'machinePrograms.nativeEmpty')}
+        action={nativeFetch && fetchPolicy!==null && programs.can_manage?<Button size="sm" asChild><Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'policy'}}>{t('machinePrograms.nativeFetchPolicy')}</Link></Button>:undefined}/>:
         <ul className="divide-y divide-border rounded-lg border border-border">{nativeRows.map(({harness,confirmed})=><li key={`${harness.kind}:${harness.path}`} className="flex flex-wrap items-start gap-3 px-3 py-2">
           <div className="min-w-0 flex-1"><p className="flex min-h-(--control-sm) flex-wrap items-baseline gap-x-3 gap-y-1"><span className="font-medium">{harnessTitle(harness.kind)}</span>
             <span className="text-sm text-text-muted">{harness.version==='' || harness.version==='unknown'?t('machinePrograms.nativeUnknownVersion'):harness.version}</span>
@@ -193,7 +196,7 @@ export function MachineProgramsTab({machine}:{machine:Pick<Machine,'id'|'facts'|
           {nativeManage && harness.path!=='' && <Button size="sm" disabled={apply.isPending} onClick={()=>confirmed?setUnconfirming(harness):apply.mutate({action:'confirm_harness',kind:harness.kind,path:harness.path})}>{t(confirmed?'machinePrograms.nativeRemove':'machinePrograms.nativeUse')}</Button>}
         </li>)}</ul>}
       {programs.can_manage && !nativeRole && <p className="text-sm text-text-muted">{t('machinePrograms.nativeRoleNeeded')}</p>}
-      {programs.can_manage && nativeKept && <div className="flex flex-col gap-2 text-sm text-text-muted"><p>{t(facts.policy===null?'machinePrograms.nativeCommandNotReported':'machinePrograms.nativeKept')}</p>
+      {programs.can_manage && nativeKept && (!nativeFetch || nativeRows.length>0) && <div className="flex flex-col gap-2 text-sm text-text-muted"><p>{t(facts.policy===null?'machinePrograms.nativeCommandNotReported':'machinePrograms.nativeKept')}</p>
         {facts.policy!==null && (actualPolicyCommand!==undefined && Array.isArray(currentHarnessPolicy)?<CommandBox command={policyCommand('agent.harnesses',currentHarnessPolicy,actualPolicyCommand,machine.platform_os==='windows')} label={t('machines.policy.copy')}/>:
           <p>{t('machinePrograms.nativeCommandNotReported')}</p>)}
       </div>}

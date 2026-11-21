@@ -11,8 +11,10 @@
 pub mod authority;
 mod host_probe;
 mod http_origin;
+mod input_facts;
 mod receipts;
 pub use http_origin::HttpCommand;
+pub use input_facts::{InputCommandFacts, retain_input_facts};
 pub use receipts::McpImportAck;
 mod machine_controls;
 mod terminal_creation;
@@ -20,8 +22,8 @@ pub(crate) mod workspace;
 pub use authority::{CommandAuthority, TerminalCloseAuthority};
 pub use host_probe::HostPortsProbe;
 pub use machine_controls::{
-    HostPolicyAuthority, MachinePolicyAuthority, MachineProbeAuthority, MachineProgramsAuthority,
-    MachineRolesAuthority, role_change_refusal,
+    HostPolicyAuthority, MachineDirectoryAuthority, MachinePolicyAuthority, MachineProbeAuthority,
+    MachineProgramsAuthority, MachineRolesAuthority, role_change_refusal,
 };
 pub use machine_controls::{
     PolicyFailure, PolicyPreparation, driver_configuration_faults, policy_key_about,
@@ -46,6 +48,9 @@ pub(crate) const BUSY_RETRY_PAUSE: std::time::Duration = std::time::Duration::fr
 /// Why a command could not be sent, or its end not learned.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandsError {
+    /// Preserve the storage failure's class through queued command work.
+    #[error("the command's storage failed: {0}")]
+    Database(#[source] orch_db::DbError),
     /// The actual issuing writer's check failed immediately before its first queue insert.
     #[error("the command's current issuing boundary has ended: {0}")]
     BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
@@ -78,6 +83,11 @@ pub type BeforeCommand<'a> =
 /// A command to send to a machine.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_offer: Option<Box<crate::tools::catalogue::AcceptedOrchTools>>,
+    /// Private observations retained with first durable admission, never sent to a machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_facts: Option<Box<InputCommandFacts>>,
     /// Its identifier: a command asked for twice under one is made once.
     pub id: Id,
     /// The machine it is for.
@@ -100,6 +110,8 @@ pub struct Outgoing {
         skip_serializing_if = "Option::is_none"
     )]
     pub authority: Option<CommandAuthority>,
+    /// Content is carried only for this transfer; the marker stays off the native wire.
+    pub content_transit: bool,
 }
 
 /// A saved engine command retains the semantic key kind as well as its value. UUID keys
@@ -142,7 +154,17 @@ impl Outgoing {
                 .map_err(|error| CommandsError::Body(error.to_string()))?,
             deadline: None,
             authority: None,
+            content_transit: false,
+            input_facts: None,
+            session_offer: None,
         })
+    }
+
+    /// Marks the bytes this command uploads as transit without changing its native body.
+    #[must_use]
+    pub fn for_transfer(mut self) -> Self {
+        self.content_transit = true;
+        self
     }
 
     /// Retains login-origin evidence until the durable link's first-send/retry checkpoint.
@@ -159,6 +181,18 @@ impl Outgoing {
     #[must_use]
     pub fn with_authority(mut self, authority: CommandAuthority) -> Self {
         self.authority = Some(authority);
+        self
+    }
+
+    #[must_use]
+    pub fn with_session_offer(mut self, offer: crate::tools::catalogue::AcceptedOrchTools) -> Self {
+        self.session_offer = Some(Box::new(offer));
+        self
+    }
+
+    #[must_use]
+    pub fn with_input_facts(mut self, facts: Option<InputCommandFacts>) -> Self {
+        self.input_facts = facts.map(Box::new);
         self
     }
 
@@ -321,6 +355,12 @@ pub struct RetainedCommand {
 /// The commands the engine sends and waits for.
 #[async_trait]
 pub trait Commands: Send + Sync {
+    /// Whether the dispatcher can reach this machine on its primary session now.
+    /// Ports without a separate routing table use the stored presence checked by their caller.
+    fn machine_connected(&self, _machine: Id) -> bool {
+        true
+    }
+
     /// Private physical provenance of a retained credential-return command, never a grant.
     async fn retained_return_source(
         &self,
@@ -363,6 +403,14 @@ pub trait Commands: Send + Sync {
     }
 
     /// Reads one frozen frame so a replay cannot borrow a different recipient, kind or serial lane.
+    /// The original admitted session offer, including when a queued command is replayed after restart.
+    async fn retained_session_offer(
+        &self,
+        _id: Id,
+    ) -> Result<Option<crate::tools::catalogue::AcceptedOrchTools>, CommandsError> {
+        Ok(None)
+    }
+
     async fn retained_command(&self, id: Id) -> Result<Option<RetainedCommand>, CommandsError> {
         if self.retained_body(id).await?.is_some() {
             return Err(CommandsError::Other(

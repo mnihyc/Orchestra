@@ -234,6 +234,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
     assert_eq!(initial.value, Some(json!(7)));
     assert!(!initial.writable);
     let value = NodeSettingSetBody {
+        model_choice: None,
         value: json!(0),
         locked: None,
         expected_revision: Some(0),
@@ -268,6 +269,7 @@ async fn host_cleanup_follows_the_system_accepts_zero_and_cannot_override_a_syst
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     let bad = NodeSettingSetBody {
+        model_choice: None,
         value: json!(-1),
         locked: None,
         expected_revision: Some(revision),
@@ -1406,6 +1408,7 @@ async fn a_host_manager_removes_another_owners_provider_unit_with_the_requested_
         let query = HostRuntimeDeleteQuery {
             confirm: unit_name.clone(),
             volumes,
+            force: None,
         };
         let denied = world
             .app
@@ -1424,6 +1427,7 @@ async fn a_host_manager_removes_another_owners_provider_unit_with_the_requested_
             .query(&HostRuntimeDeleteQuery {
                 confirm: "Private provider".to_owned(),
                 volumes,
+                force: None,
             })
             .send()
             .await
@@ -1564,6 +1568,21 @@ async fn a_change_against_an_old_revision_is_refused_and_a_change_that_asks_for_
     let c = company(&world).await;
     let id = a_host(&world, &c.boss, Some(c.acme), "Build box").await;
     let first = read(&world, &c.boss, id).await;
+    orch_db::queries::resources::hosting::record_node_load(
+        &mut *world.conn().await,
+        id,
+        &json!({"cpus":1,"memory_mb":100}),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hosts SET capacity=jsonb_set(capacity,'{cpus}','16',true),storages='[]' WHERE id=$1")
+        .bind(id).execute(&world.db.pool).await.unwrap();
+    assert_eq!(
+        read(&world, &c.boss, id).await.revision,
+        first.revision,
+        "capacity, storage and load reports leave the pending host edit current"
+    );
     let renamed = world
         .app
         .call(HostUpdate, &[&id])
@@ -1890,7 +1909,7 @@ fn host_enrollment_request(
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Node],
     }
 }
