@@ -70,7 +70,8 @@ async fn raw_deadline_after_identity_wait(key: bool) -> Proof {
     let lock = if key {
         "SELECT id FROM api_tokens WHERE id=$1 FOR NO KEY UPDATE"
     } else {
-        "SELECT id FROM sessions WHERE id=$1 FOR NO KEY UPDATE"
+        // This is a security-change wait; ordinary lifetime extensions deliberately coexist.
+        "SELECT id FROM sessions WHERE id=$1 FOR UPDATE"
     };
     let _: orch_types::Id = sqlx::query_scalar(lock)
         .bind(id)
@@ -111,7 +112,7 @@ async fn raw_deadline_after_identity_wait(key: bool) -> Proof {
         pending.abort();
         let _ = pending.await;
         return Err(
-            format!("actual socket identity SHARE-row wait was not reached: {reached:?}").into(),
+            format!("actual socket credential-row wait was not reached: {reached:?}").into(),
         );
     }
     // No revocation/authority SQL substitutes for the natural deadline crossing.
@@ -152,6 +153,7 @@ pub fn __api_run_key_login_checks_its_actual_key_deadline_after_identity_wait()
 struct Capacity {
     blocked: AtomicBool,
     selected_marker: AtomicBool,
+    after_selection: bool,
     marker: String,
     reached: Notify,
     wake: AtomicWaker,
@@ -204,7 +206,9 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for CapacitySink<S> {
             Poll::Ready(Ok(())) => {
                 if let Some(cut) = capacity(&this.connection) {
                     cut.wake.register(cx.waker());
-                    if cut.blocked.load(Ordering::Acquire) {
+                    if cut.blocked.load(Ordering::Acquire)
+                        && (!cut.after_selection || cut.selected_marker.load(Ordering::Acquire))
+                    {
                         cut.reached.notify_one();
                         return Poll::Pending;
                     }
@@ -232,9 +236,18 @@ struct Pause {
 
 impl Pause {
     fn arm(connection: &server::Connection, marker: &str) -> Self {
+        Self::arm_when(connection, marker, false)
+    }
+
+    fn after_selection(connection: &server::Connection, marker: &str) -> Self {
+        Self::arm_when(connection, marker, true)
+    }
+
+    fn arm_when(connection: &server::Connection, marker: &str, after_selection: bool) -> Self {
         let cut = Arc::new(Capacity {
             blocked: AtomicBool::new(true),
             selected_marker: AtomicBool::new(false),
+            after_selection,
             marker: marker.to_owned(),
             reached: Notify::new(),
             wake: AtomicWaker::new(),
@@ -420,6 +433,136 @@ async fn raw_session_expiry_cancels_an_unaccepted_real_socket_frame() -> Proof {
 pub fn __api_run_raw_session_expiry_cancels_an_unaccepted_real_socket_frame()
 -> ::futures::future::LocalBoxFuture<'static, crate::realtime::origin_read_tests::Proof> {
     ::std::boxed::Box::pin(self::raw_session_expiry_cancels_an_unaccepted_real_socket_frame())
+}
+
+async fn capacity_returning_after_a_guard_releases_the_subscription_and_rechecks_its_access()
+-> Proof {
+    use fixture::Client;
+    use orch_db::queries::access;
+    use orch_realtime_contract::feeds::{Feed, ResourceKind};
+
+    let rig = fixture::Rig::cramped_with_time_held(|tuning| {
+        tuning.close_grace = fixture::PATIENCE;
+    })
+    .await;
+    let (user, token) = rig.person("capacity-rechecked-reader").await;
+    let grant = orch_types::new_id();
+    {
+        let mut conn = rig.pool.acquire().await?;
+        access::insert_entry(
+            &mut conn,
+            &access::NewEntry {
+                id: grant,
+                page: &access::PageKey::new("provider", rig.provider, "live"),
+                profile: "any",
+                permission: "provider.view",
+                holder_kind: "user",
+                holder_id: Some(user),
+                holder_role: None,
+                options: &serde_json::json!({}),
+                expires_at: None,
+                note: "",
+                source: "page",
+                created_by: Some(rig.ada),
+                at: rig.clock.now(),
+            },
+        )
+        .await?;
+        access::bump_epoch(&mut conn).await?;
+    }
+    let feed = Feed::Resource {
+        kind: ResourceKind::Provider,
+        id: rig.provider,
+    };
+    let mut client = Client::signed_in(rig.server.addr, &token).await;
+    client
+        .sub(1, &format!("resource:provider:{}", rig.provider), None)
+        .await;
+    client.expect("subscribed").await;
+    let connection = rig
+        .server
+        .app
+        .realtime
+        .inner
+        .registry()
+        .connections
+        .values()
+        .find(|connection| connection.user == user)
+        .cloned()
+        .ok_or("the actual authenticated socket owner is absent")?;
+    let sub = connection
+        .subscriptions()
+        .into_iter()
+        .find(|sub| sub.feed() == &feed)
+        .ok_or("the acknowledged native resource subscription is absent")?;
+    const MARKER: &str = "capacity-after-guard-private-row";
+    // Initial capacity is real and ready. Only the subsequent capacity check, after selection
+    // and guarded preparation, stalls: a heartbeat can consume that initial ready slot too.
+    let pause = Pause::after_selection(&connection, MARKER);
+    let result: Proof = async {
+        sqlx::query("UPDATE providers SET name=$2 WHERE id=$1")
+            .bind(rig.provider)
+            .bind(MARKER)
+            .execute(rig.pool.pool())
+            .await?;
+        super::ephemeral::deliver(
+            &rig.server.app.realtime.inner,
+            &feed,
+            &serde_json::json!({"what":"changed"}),
+            None,
+        )
+        .await?;
+        tokio::time::timeout(fixture::PATIENCE, pause.cut.reached.notified()).await?;
+        let held = tokio::time::timeout(fixture::PATIENCE, sub.state.lock())
+            .await
+            .map_err(|error| {
+                format!("a capacity wait retained the subscription's lock: {error}")
+            })?;
+        {
+            let mut conn = rig.pool.acquire().await?;
+            sqlx::query("UPDATE permission_entries SET removed_at=$2,removed_by=$3 WHERE id=$1")
+                .bind(grant)
+                .bind(rig.clock.now())
+                .bind(rig.ada)
+                .execute(&mut *conn)
+                .await?;
+            access::bump_epoch(&mut conn).await?;
+        }
+        // Retain the subscription ourselves until a real pong proves the writer is active.
+        // Its old prepared projection must not escape while a fresh access check waits for us.
+        pause.release();
+        tokio::time::timeout(std::time::Duration::from_secs(1), client.heartbeat()).await?;
+        drop(held);
+        tokio::time::timeout(fixture::PATIENCE, async {
+            loop {
+                let frame = client.frame().await;
+                assert!(
+                    !frame.to_string().contains(MARKER),
+                    "the pre-wait native projection escaped after its View was revoked"
+                );
+                if frame["op"] == "closed" {
+                    assert_eq!(frame["reason"], "revoked");
+                    break;
+                }
+            }
+        })
+        .await?;
+        Ok(())
+    }
+    .await;
+    pause.release();
+    drop(pause);
+    drop(client);
+    rig.shutdown().await;
+    result
+}
+
+#[doc(hidden)]
+pub fn __api_run_capacity_returning_after_a_guard_releases_the_subscription_and_rechecks_its_access()
+-> ::futures::future::LocalBoxFuture<'static, Proof> {
+    Box::pin(
+        self::capacity_returning_after_a_guard_releases_the_subscription_and_rechecks_its_access(),
+    )
 }
 
 struct Publication {

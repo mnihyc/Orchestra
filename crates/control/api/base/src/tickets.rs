@@ -269,13 +269,32 @@ impl Tickets {
                 TicketFault::Request("has a `ttl_secs` that is not a number of seconds".to_owned())
             })?,
         };
+        let expires_at = if wanted.kind == TunnelKind::Program {
+            let expires: Time =
+                serde_json::from_value(more.get("expires_at").cloned().ok_or_else(|| {
+                    TicketFault::Request("a program channel lacks its original work expiry".into())
+                })?)
+                .map_err(|_| {
+                    TicketFault::Request(
+                        "a program channel has an invalid original work expiry".into(),
+                    )
+                })?;
+            if expires <= self.clock.time() {
+                return Err(TicketFault::Request(
+                    "the original program work has expired".into(),
+                ));
+            }
+            expires
+        } else {
+            self.expires_in(seconds)
+        };
         let request = TicketRequest {
             src,
             dst,
             service,
             thread_id: id("thread_id")?,
             tool_set: text("tool_set")?.map(str::to_owned),
-            expires_at: self.expires_in(seconds),
+            expires_at,
         };
         if matches!(wanted.kind, TunnelKind::Exec | TunnelKind::Mcp) {
             let environment = id("environment_id")?
@@ -352,6 +371,7 @@ pub mod tests {
                 node,
                 machine,
                 PortTicketClaims {
+                    machine_reach: false,
                     environment_id: environment,
                     generation: 1,
                     port: 3000,
@@ -427,6 +447,39 @@ pub mod tests {
             Time::new(clock.now()).unix_millis() / 1_000
                 + i64::try_from(DEFAULT_TICKET_SECS).unwrap()
         );
+        // Replaying a program command may sign a fresh channel, never a longer work lifetime.
+        let deadline = Time::new(clock.now() + chrono::Duration::seconds(120));
+        let helper = new_id();
+        let mut program = request(
+            TunnelKind::Program,
+            &Service::Program { work_id: new_id() },
+            environment,
+            Some(helper),
+        );
+        assert!(
+            tickets.for_request(&program, agent).is_err(),
+            "program channels require the actual work's absolute expiry"
+        );
+        program
+            .more
+            .insert("expires_at".into(), serde_json::to_value(deadline).unwrap());
+        let first = tickets.for_request(&program, agent).unwrap();
+        clock.advance(chrono::Duration::seconds(20));
+        let repeated = tickets.for_request(&program, agent).unwrap();
+        for ticket in [first, repeated] {
+            let claims = tickets
+                .verifier()
+                .verify(
+                    &ticket,
+                    TicketSource::Machine(agent),
+                    Time::new(clock.now()),
+                )
+                .unwrap();
+            assert_eq!(claims.exp, deadline.get().timestamp());
+            assert_eq!(claims.thread_id, Some(helper));
+        }
+        clock.advance(chrono::Duration::seconds(101));
+        assert!(tickets.for_request(&program, agent).is_err());
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

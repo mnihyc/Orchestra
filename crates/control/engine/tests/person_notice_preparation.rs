@@ -32,7 +32,7 @@ async fn native_person_notice_refusal_and_replay_consume_no_inbox_effect() {
         dedupe_key: &key,
         at: world.clock.now(),
     };
-    let initial: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id=$1")
+    let initial: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
         .bind(receiver)
         .fetch_one(world.pool.pool())
         .await
@@ -53,7 +53,7 @@ async fn native_person_notice_refusal_and_replay_consume_no_inbox_effect() {
     )
     .await;
     assert!(result.is_err());
-    let counts:(i64,i64)=sqlx::query_as("SELECT inbox_seq,(SELECT count(*) FROM notifications WHERE user_id=$1) FROM users WHERE id=$1")
+    let counts:(i64,i64)=sqlx::query_as("SELECT inbox_seq,(SELECT count(*) FROM notifications WHERE user_id=$1) FROM user_inboxes WHERE user_id=$1")
         .bind(receiver).fetch_one(&mut *tx).await.unwrap();
     assert_eq!(counts, (initial, 0));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -103,7 +103,7 @@ async fn native_person_notice_refusal_and_replay_consume_no_inbox_effect() {
     );
     tx.commit().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let final_seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id=$1")
+    let final_seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
         .bind(receiver)
         .fetch_one(world.pool.pool())
         .await
@@ -115,7 +115,7 @@ async fn native_person_notice_refusal_and_replay_consume_no_inbox_effect() {
 async fn native_inbox_first_effect_coexists_with_the_senders_real_identity_key_share_lock() {
     let world = World::new().await;
     let mut identity = world.pool.begin().await.unwrap();
-    let initial: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id=$1")
+    let initial: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
         .bind(world.ada)
         .fetch_one(&mut *identity)
         .await
