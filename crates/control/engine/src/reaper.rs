@@ -74,6 +74,8 @@ impl Engine {
     async fn reap(&self) -> Result<(), EngineError> {
         self.schedule_agent_history(false);
         self.reap_paid_service_commands(REAP_BATCH).await?;
+        self.close_idle_program_sessions(self.inner.clock.now())
+            .await?;
         self.reap_temporary_environments().await?;
         self.purge_due_kept().await?;
         self.finish_stale_stops().await?;

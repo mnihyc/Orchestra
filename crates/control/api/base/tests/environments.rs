@@ -322,6 +322,184 @@ async fn an_environment_takes_its_settings_from_a_project_or_topic_of_its_org_an
 }
 
 #[tokio::test]
+async fn cleanup_waits_report_the_accepted_retry_and_live_lease_without_revealing_private_failures()
+{
+    use orch_api_contract::workspace::JobGet;
+    use orch_db::queries::jobs::{self, NewJob};
+    let world = world().await;
+    let (c, laptop) = setup(&world).await;
+    let made = register(
+        &world,
+        &c.admin,
+        laptop,
+        &body(c.acme, "Work", "/srv/ada/work"),
+    )
+    .await;
+    let at = world.now();
+    let retry = at + chrono::Duration::seconds(20);
+    let lease = at + chrono::Duration::minutes(2);
+    let id = orch_types::new_id();
+    let runner = orch_types::new_id();
+    let progress = json!({"phase":"cleanup","phases":[],"percent":0,"files_done":0,"files_total":null,
+        "bytes_done":0,"bytes_total":null,"rate_bps":null,"eta_seconds":null,"message":null});
+    let plan = json!({"abort":{"kind":"failed","failure":{"code":"internal","message":"PRIVATE-DIAGNOSTIC","log":null}},
+        "lifecycle_wait":{"retry_eligible_at": retry,"last_attempt_at":at,"reason_code":"internal","observed_at":at}});
+    let mut conn = world.conn().await;
+    jobs::insert(
+        &mut conn,
+        &NewJob {
+            id,
+            kind: jobs::kind::ENVIRONMENT_REMOVE,
+            node_id: None,
+            environment_id: Some(made.base.id),
+            provider_id: None,
+            plan: &plan,
+            progress: &progress,
+            created_by: Some(c.admin.id()),
+        },
+        at,
+    )
+    .await
+    .unwrap();
+    assert!(jobs::claim(&mut conn, id, runner, lease, at).await.unwrap());
+    assert!(
+        jobs::claim(
+            &mut conn,
+            id,
+            runner,
+            lease,
+            at + chrono::Duration::seconds(5)
+        )
+        .await
+        .unwrap()
+    );
+    drop(conn);
+    let shown = world
+        .app
+        .call(JobGet, &[&id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    let shown = serde_json::to_value(shown).unwrap();
+    assert_eq!(
+        shown["lifecycle_wait"]["retry_eligible_at"],
+        json!({"state":"at","at":orch_types::Time::new(retry)})
+    );
+    assert_eq!(
+        shown["lifecycle_wait"]["lease_recoverable_at"],
+        json!({"state":"at","at":orch_types::Time::new(lease)})
+    );
+    assert_eq!(
+        shown["lifecycle_wait"]["last_attempt_at"],
+        json!({"state":"at","at":orch_types::Time::new(at)})
+    );
+    assert!(!shown.to_string().contains("PRIVATE-DIAGNOSTIC"));
+    let refused = world
+        .app
+        .call(JobGet, &[&id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    sqlx::query("UPDATE jobs SET plan=plan-'lifecycle_wait' WHERE id=$1")
+        .bind(id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let older = world
+        .app
+        .call(JobGet, &[&id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(older).unwrap()["lifecycle_wait"]["retry_eligible_at"],
+        json!({"state":"unreported"})
+    );
+}
+
+#[tokio::test]
+async fn a_directory_reports_its_recorded_attach_wait_without_borrowing_a_later_metadata_time() {
+    let world = world().await;
+    let (c, laptop) = setup(&world).await;
+    let made = register(
+        &world,
+        &c.admin,
+        laptop,
+        &body(c.acme, "Work", "/srv/ada/work"),
+    )
+    .await;
+    let attempted = world.now();
+    let eligible = attempted + chrono::Duration::seconds(30);
+    let receipt = json!({"last_attempt_at": orch_types::Time::new(attempted), "next_eligible_at": orch_types::Time::new(eligible),
+        "last_problem": "The directory is outside the allowed root", "revision": made.revision});
+    sqlx::query("UPDATE environments SET status='failed', facts=facts || jsonb_build_object('attach_retry',$2::jsonb), attach_retry_at=$3, updated_at=$4 WHERE id=$1")
+        .bind(made.base.id).bind(&receipt).bind(eligible).bind(eligible + chrono::Duration::hours(1))
+        .execute(&world.db.pool).await.unwrap();
+    let shown = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&shown).unwrap()["attach_retry"],
+        receipt
+    );
+    let refused = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    name_person(
+        &world,
+        "environment",
+        made.base.id,
+        "environment.view",
+        c.stranger.id(),
+    )
+    .await;
+    let admitted = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.stranger.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        serde_json::to_value(&admitted).unwrap()["attach_retry"],
+        receipt
+    );
+    sqlx::query(
+        "UPDATE environments SET facts=facts-'attach_retry', attach_retry_at=NULL WHERE id=$1",
+    )
+    .bind(made.base.id)
+    .execute(&world.db.pool)
+    .await
+    .unwrap();
+    let missing = world
+        .app
+        .call(EnvironmentGet, &[&made.base.id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        serde_json::to_value(&missing)
+            .unwrap()
+            .get("attach_retry")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn an_environment_is_read_by_whoever_holds_something_on_it_and_what_it_holds_is_the_managers()
 {
     let world = world().await;
@@ -628,6 +806,26 @@ async fn an_environment_is_changed_by_whoever_manages_it_within_what_its_machine
     )
     .await;
     let id = made.base.id;
+    orch_db::queries::environments::hosting::record_facts(
+        &mut *world.conn().await,
+        id,
+        &json!({"reported":"refreshed"}),
+        Some("/srv/ada/work"),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    let refreshed = world
+        .app
+        .call(EnvironmentGet, &[&id])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        refreshed.revision, made.revision,
+        "workspace observations leave the pending environment edit current"
+    );
     offer_switches(&world, laptop).await;
     let change = |revision: i64| EnvironmentUpdateBody {
         data_sources: None,
@@ -896,6 +1094,8 @@ async fn confirmed_directory_removal_settles_its_binding_and_forgets_only_the_re
     let query = |name: &str| EnvironmentDeleteQuery {
         confirm: name.to_owned(),
         at: None,
+        expected_keep_days: None,
+        expected_revision: None,
     };
     let wrong = world
         .app

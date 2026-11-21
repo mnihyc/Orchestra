@@ -1,0 +1,4 @@
+fmt
+test -p orch-engine --test approval_review
+test -p orch-engine --test approval_review -- auto_names_the_unrun_or_failed_build_check_before_opening_any_native_session
+test -p orch-engine --test approval_review -- auto_names_the_unrun_or_failed_build_check_before_opening_any_native_session

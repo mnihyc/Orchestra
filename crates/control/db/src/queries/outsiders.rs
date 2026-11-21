@@ -246,14 +246,14 @@ pub async fn lock_sources(conn: &mut Conn, entries: &[Id], roles: &[Id]) -> Resu
     Ok(())
 }
 
-/// The values `sharing.external_max_days` is set to, in whole days: at the system (`None`) and at each node
+/// The values `sharing.external_max_minutes` is set to, in whole minutes: at the system (`None`) and at each node
 /// that sets it. The policy only narrows wherever it is set, so the bound at a place is the fewest of those
 /// on its way; the access engine reads them where it decides, for a person from outside the tree.
-pub async fn external_max_days(conn: &mut Conn) -> Result<Vec<(Option<Id>, i64)>, DbError> {
+pub async fn external_max_minutes(conn: &mut Conn) -> Result<Vec<(Option<Id>, i64)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT node_id, floor((value #>> '{}')::numeric)::bigint
            FROM settings
-          WHERE key = 'sharing.external_max_days' AND jsonb_typeof(value) = 'number'",
+          WHERE key = 'sharing.external_max_minutes' AND jsonb_typeof(value) = 'number'",
     )
     .fetch_all(conn)
     .await?)
