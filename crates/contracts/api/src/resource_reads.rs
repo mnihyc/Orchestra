@@ -64,6 +64,7 @@ pub const fn resources(kind: ResourceKind) -> &'static [KeyTargetKind] {
         ResourceKind::McpServer => &[KeyTargetKind::Object(ObjectKind::McpServer)],
         ResourceKind::Mount => &[KeyTargetKind::Object(ObjectKind::Mount)],
         ResourceKind::Skill => &[KeyTargetKind::Object(ObjectKind::Skill)],
+        ResourceKind::Pool => &[KeyTargetKind::Object(ObjectKind::Pool)],
     }
 }
 

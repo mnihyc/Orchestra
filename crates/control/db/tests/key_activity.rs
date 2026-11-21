@@ -11,7 +11,7 @@ use serde_json::json;
 async fn key(conn: &mut Conn) -> (Id, Id) {
     let user = new_id();
     testing::insert_user(conn, user, "reader").await.unwrap();
-    let token = testing::insert_api_token(conn, user, user.as_bytes())
+    let token = testing::insert_api_token(conn, new_id(), user, user.as_bytes())
         .await
         .unwrap();
     (token, user)

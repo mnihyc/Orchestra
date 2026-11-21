@@ -39,7 +39,7 @@ export interface DropSpot {
 }
 
 /** Picking up does not yet move a view; keep that announcement until its measured position changes. */
-export function viewDragAnnouncements(layout: Layout, t: TFunction): Announcements {
+export function viewDragAnnouncements(readLayout: () => Layout, t: TFunction): Announcements {
   const spotOf = (data: unknown): DropSpot | null => (data as DropSpot | undefined) ?? null;
   return {
     onDragStart: ({ active }) => t('workbench.drag.pickedUp', { title: (active.data.current as { title: string }).title }),
@@ -48,7 +48,7 @@ export function viewDragAnnouncements(layout: Layout, t: TFunction): Announcemen
       if (initial !== null && translated !== null && initial.left === translated.left && initial.top === translated.top) return undefined;
       const spot = spotOf(over?.data.current);
       if (spot === null) return t('workbench.drag.nowhere');
-      const from = findTab(layout, String(active.id));
+      const from = findTab(readLayout(), String(active.id));
       if (from !== null && over?.id === spotId({ to: 'group', group: from.group.id, index: from.index })) return undefined;
       return t('workbench.drag.over', { spot: spot.label });
     },

@@ -59,7 +59,7 @@ impl Fixture {
         .execute(&mut *tx)
         .await?;
         // A unit's policy comes from its physical host, even when the fixture skips provisioning.
-        sqlx::query("UPDATE environments SET remote_write=true, config=config || jsonb_build_object('env.host_id',$2::text) WHERE id=$1")
+        sqlx::query("UPDATE environments SET remote_write=true, config=config || jsonb_build_object('env.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id=$1")
             .bind(world.environment).bind(host).execute(&mut *tx).await?;
         sqlx::query("UPDATE machines SET facts=jsonb_set(facts,'{policy,environment.remote_write}','true') WHERE id=$1")
             .bind(world.machine_id).execute(&mut *tx).await?;
@@ -135,8 +135,6 @@ impl Fixture {
                     },
                 },
                 source: frozen,
-                record_days: 7,
-                max_bytes: 1024,
             }
         } else {
             Action::Prepare {
@@ -156,6 +154,8 @@ impl Fixture {
             token: None,
             creator_origin: None,
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action,
         })
     }
