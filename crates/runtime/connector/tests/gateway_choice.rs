@@ -31,7 +31,7 @@ fn selected_gateway_choice_survives_advertisements_removal_and_process_restart()
             public_url: "https://orch.test".into(),
         },
         pin: "fixture-pin".into(),
-        protocol_version: 1,
+        protocol_version: orch_link_contract::version::PROTOCOL_VERSION,
         enrolled_at: "2026-11-06T08:00:00Z".parse::<Time>().unwrap(),
         managed: false,
     };

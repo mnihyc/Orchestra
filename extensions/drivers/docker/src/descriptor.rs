@@ -524,6 +524,14 @@ pub fn descriptor(facts: &DaemonFacts, config: &DockerConfig) -> DriverDescripto
         gateway_access: Some(orch_driver_contract::host::GatewayAccess::NodeAddress),
         volume_export_consistency: None,
         host_ports: orch_driver_contract::descriptor::OperationSupport::available(true, ""),
+        program_units: orch_driver_contract::descriptor::OperationSupport::available(
+            facts.os_type == "linux"
+                && facts.restricted_egress
+                && !facts.rootless
+                && config.egress.proxy_image.is_some()
+                && config.tool_cache.connector_dir.is_some(),
+            "this node needs its trusted restricted proxy and a proved isolated network for capability units",
+        ),
         kept_file_transfer: orch_driver_contract::descriptor::OperationSupport::available(true, ""),
         local_accounts: false,
         unavailable: BTreeMap::new(),
@@ -694,6 +702,22 @@ mod tests {
             runtimes: vec!["io.containerd.runc.v2".into(), "runc".into()],
             ..DaemonFacts::default()
         }
+    }
+
+    #[test]
+    fn isolated_programs_are_available_only_with_this_nodes_proved_restricted_proxy() {
+        let mut host = facts();
+        host.restricted_egress = true;
+        let mut config = DockerConfig::default();
+        config.tool_cache.connector_dir = Some(std::path::PathBuf::from("/fixture/connector"));
+        config.egress.proxy_image = None;
+        let missing = descriptor(&host, &config).availability()["program_units"].clone();
+        assert!(!missing.supported);
+        assert!(missing.reason.as_deref().unwrap().contains("proxy"));
+        config.egress.proxy_image = Some("trusted-node-proxy".into());
+        assert!(descriptor(&host, &config).availability()["program_units"].supported);
+        host.restricted_egress = false;
+        assert!(!descriptor(&host, &config).availability()["program_units"].supported);
     }
 
     #[test]

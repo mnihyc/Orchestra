@@ -40,6 +40,43 @@ where
     ))
 }
 
+/// The typed JSON transport produces one finite data frame. Its current-source check may
+/// replace that entire frame, including after a header/backpressure wait; raw streams keep
+/// the original-frame path above and never enter this adapter.
+pub(crate) async fn checked_rebuilding<F, Fut>(
+    response: Response,
+    mut check: F,
+) -> ApiResult<Response>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ApiResult<Option<bytes::Bytes>>> + Send + 'static,
+{
+    let replacement = check().await?;
+    let (mut parts, body) = response.into_parts();
+    // A later current body can have another length or identity after the headers are ready.
+    parts.headers.remove(http::header::CONTENT_LENGTH);
+    parts.headers.remove(http::header::ETAG);
+    let body = replacement.map_or(body, Body::from);
+    let frames = futures::stream::try_unfold((body, check), |(mut body, mut check)| async move {
+        let Some(frame) = body.frame().await else {
+            return Ok::<_, BodyError>(None);
+        };
+        let frame = frame.map_err(|error| Box::new(error) as BodyError)?;
+        let replacement = check()
+            .await
+            .map_err(|error| Box::new(error) as BodyError)?;
+        let frame = match replacement {
+            Some(bytes) => hyper::body::Frame::data(bytes),
+            None => frame,
+        };
+        Ok(Some((frame, (body, check))))
+    });
+    Ok(Response::from_parts(
+        parts,
+        Body::new(StreamBody::new(frames)),
+    ))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::unwrap_used, reason = "transport controls fail by panicking")]
 pub mod tests {

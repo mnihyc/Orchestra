@@ -26,6 +26,7 @@ pub mod feeds;
 pub mod first_steps;
 pub mod goals;
 pub mod hierarchy;
+pub mod human_check;
 pub mod identity;
 pub mod imports;
 pub mod imports_chats;
@@ -48,12 +49,17 @@ pub mod network;
 pub mod notifications;
 pub mod outsiders;
 pub mod package;
+pub mod placement_room;
+pub mod pools;
 pub mod ports;
 pub mod profiles;
+pub mod provider_connections;
 pub mod provider_credits;
 pub mod provider_facts;
 pub mod provider_plan;
+pub mod provider_relay;
 pub mod raw_events;
+pub(crate) mod read_facts;
 pub mod reconciliation;
 pub mod recovery_codes;
 pub mod related;
@@ -84,3 +90,6 @@ pub mod uploads;
 pub mod ask;
 /// Durable fenced progress of the offline document purge.
 pub mod document_purge_progress;
+
+/// Durable native pool choices and rotation facts.
+pub mod pool_choices;

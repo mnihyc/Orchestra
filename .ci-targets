@@ -1,0 +1,16 @@
+fmt
+test -p orch-api-core --test everything_scale -- under_one_hundred_milliseconds --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- simultaneous::a_team_opening_ --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- ten_simultaneous_openings_finish_within_half_again_the_time_of_one --nocapture
+test -p orch-api-core --test everything_scale -- read_facts:: --test-threads=1
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test environment_addresses
+test -p orch-api-core --test thread_display
+test -p orch-authz --test across_orgs -- the_address_of_a_resource_says_where_it_comes_from
+test -p orch-api-core --test accounts
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/thread.spec.ts tests/e2e/measure-pages.spec.ts tests/e2e/workbench-grid.spec.ts --grep "a folded opening fills|the shipped cold page fetches only its locale|a searchable exact-target locator"
