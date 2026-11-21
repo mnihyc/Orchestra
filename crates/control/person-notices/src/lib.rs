@@ -2,6 +2,8 @@
 //! An opaque operation reference is not authority. Deferred source copies keep current original
 //! credentials and native source checks. An ended move retains only its accepted personal receipt.
 
+pub mod resource_operations;
+
 use chrono::SubsecRound;
 use orch_access_contract::decisions::{Decision, ObjectRef};
 use orch_access_contract::key_scope::{KeyResolvedTarget, KeyTargetKind};
@@ -75,6 +77,9 @@ pub enum Error {
     /// The ordinary current source gate failed.
     #[error(transparent)]
     Access(#[from] orch_authz::Error),
+    /// Current channel sharing policy could not be read.
+    #[error(transparent)]
+    Settings(#[from] orch_settings::Error),
     /// Current account setup policy could not be evaluated.
     #[error(transparent)]
     Account(#[from] orch_settings::account_policy::Error),
@@ -751,7 +756,7 @@ impl Subject {
 }
 
 /// The original immutable source of a native rendered message; never reusable admission.
-pub struct Opened {
+pub struct PersonOpened {
     id: Id,
     evidence: Arc<Evidence>,
     inbox: Id,
@@ -760,6 +765,61 @@ pub struct Opened {
     names: Vec<ObjectRef>,
     places: Vec<orch_db::queries::notifications::people::PlaceRow>,
     org_name: Option<String>,
+}
+
+/// A private native disclosure source retained through rendering and delivery.
+pub enum Opened {
+    /// An explicit person notice retains the original sender admission.
+    Person(Box<PersonOpened>),
+    /// A grouped resource operation retains current recipient resource disclosure.
+    Resource(Box<resource_operations::Opened>),
+}
+impl Opened {
+    /// The recipient's renewable Inbox identity.
+    pub fn inbox(&self) -> Id {
+        match self {
+            Self::Person(source) => source.inbox(),
+            Self::Resource(source) => source.inbox(),
+        }
+    }
+    /// Names admitted for rendering the original source.
+    pub fn places(&self) -> &[orch_db::queries::notifications::people::PlaceRow] {
+        match self {
+            Self::Person(source) => source.places(),
+            Self::Resource(_) => &[],
+        }
+    }
+    /// The admitted original organization caption, when present.
+    pub fn org_name(&self) -> Option<&str> {
+        match self {
+            Self::Person(source) => source.org_name(),
+            Self::Resource(_) => None,
+        }
+    }
+    /// Bind grouped source checks to the actual channel chosen for this delivery.
+    pub async fn through(
+        &mut self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+        channel: Id,
+    ) -> Result<bool, Error> {
+        if let Self::Resource(source) = self {
+            source.through(channel);
+            return Ok(source.check(conn, clock).await?.is_some());
+        }
+        Ok(true)
+    }
+    /// Recheck the actual native source immediately before notifier IO.
+    pub async fn check(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn Clock,
+    ) -> Result<Option<SourceRead>, Error> {
+        match self {
+            Self::Person(source) => source.check(conn, clock).await,
+            Self::Resource(source) => source.check(conn, clock).await,
+        }
+    }
 }
 
 /// The validated native source of one recipient's notification.
@@ -788,19 +848,32 @@ pub async fn load(
         .and_then(Json::as_str)
         .and_then(|id| id.parse::<Id>().ok())
     else {
-        return Ok(if snapshot.kind == "person.notify" {
-            Loaded::Closed
-        } else {
-            Loaded::Legacy
-        });
+        return Ok(
+            if matches!(
+                snapshot.kind.as_str(),
+                "person.notify" | "environment.attention"
+            ) {
+                Loaded::Closed
+            } else {
+                Loaded::Legacy
+            },
+        );
     };
     let Some(json) = operations::get(conn, id).await? else {
-        return Ok(if snapshot.kind == "person.notify" {
-            Loaded::Closed
-        } else {
-            Loaded::Legacy
-        });
+        return Ok(
+            if matches!(
+                snapshot.kind.as_str(),
+                "person.notify" | "environment.attention"
+            ) {
+                Loaded::Closed
+            } else {
+                Loaded::Legacy
+            },
+        );
     };
+    if snapshot.kind == "environment.attention" {
+        return resource_operations::load(conn, clock, receiver, snapshot, json).await;
+    }
     if snapshot.kind != "person.notify"
         && json.get("producer").and_then(Json::as_str) != Some("explicit_person_notice")
     {
@@ -821,7 +894,7 @@ pub async fn load(
         return Ok(Loaded::Closed);
     }
     if evidence.completed_chat_move.is_some() || evidence.completed_thread_move.is_some() {
-        let opened = Opened {
+        let opened = PersonOpened {
             id,
             evidence: Arc::new(evidence),
             inbox: snapshot.id.ok_or(Error::Refused)?,
@@ -832,7 +905,7 @@ pub async fn load(
             org_name: None,
         };
         return Ok(if opened.check(conn, clock).await?.is_some() {
-            Loaded::Source(Box::new(opened))
+            Loaded::Source(Box::new(Opened::Person(Box::new(opened))))
         } else {
             Loaded::Closed
         });
@@ -849,7 +922,7 @@ pub async fn load(
     if placement.node_ancestors.last().and_then(|node| node.id) != snapshot.node_id {
         return Ok(Loaded::Closed);
     }
-    let mut opened = Opened {
+    let mut opened = PersonOpened {
         id,
         evidence: Arc::new(evidence),
         inbox: snapshot.id.ok_or(Error::Refused)?,
@@ -862,7 +935,7 @@ pub async fn load(
     if !opened.project_names(conn, clock).await? || opened.check(conn, clock).await?.is_none() {
         return Ok(Loaded::Closed);
     }
-    Ok(Loaded::Source(Box::new(opened)))
+    Ok(Loaded::Source(Box::new(Opened::Person(Box::new(opened)))))
 }
 
 fn normalized(snapshot: &Snapshot) -> Option<Snapshot> {
@@ -887,7 +960,7 @@ fn normalized(snapshot: &Snapshot) -> Option<Snapshot> {
     Some(actual)
 }
 
-impl Opened {
+impl PersonOpened {
     async fn current_source(
         &self,
         conn: &mut Conn,

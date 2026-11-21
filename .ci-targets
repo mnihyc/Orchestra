@@ -1,0 +1,2 @@
+test -p orch-api-core --test thread_read_tools
+test -p orch-engine --test orch_capabilities
