@@ -45,6 +45,7 @@ pub enum Evidence {
     Recovery(Box<Origin>),
     Parent(Box<ParentSource>),
     ProviderParent(Box<ProviderParentSource>),
+    ProviderRecovery(Box<crate::provider_recovery::Source>),
 }
 impl Evidence {
     pub async fn capture(
@@ -73,7 +74,7 @@ impl Evidence {
     fn source(&self) -> Result<&Origin, EngineError> {
         match self {
             Self::Move(source) | Self::Recovery(source) => Ok(source),
-            Self::Parent(_) | Self::ProviderParent(_) => Err(closed()),
+            Self::Parent(_) | Self::ProviderParent(_) | Self::ProviderRecovery(_) => Err(closed()),
         }
     }
     fn identity(&self) -> Result<&JobIdentity, EngineError> {
@@ -84,6 +85,7 @@ impl Evidence {
             Self::Move(source) | Self::Recovery(source) => source.http(),
             Self::Parent(source) => source.origin(),
             Self::ProviderParent(source) => source.origin(),
+            Self::ProviderRecovery(source) => source.origin(),
         }
     }
     /// Closed producer identity; a parent can never borrow a global move/recovery selection.
@@ -97,12 +99,14 @@ impl Evidence {
             }
             Self::Parent(source) => operation == source.operation(),
             Self::ProviderParent(source) => operation == source.operation(),
+            Self::ProviderRecovery(source) => operation == source.operation(),
         }
     }
     pub(crate) fn matches_row(&self, row: &JobRow) -> Result<bool, EngineError> {
         match self {
             Self::Parent(source) => source.matches(row),
             Self::ProviderParent(source) => source.matches(row),
+            Self::ProviderRecovery(source) => source.matches(row),
             _ => self.identity()?.matches(row),
         }
     }
@@ -117,7 +121,7 @@ impl Evidence {
         }
     }
     pub(crate) fn is_provider(&self) -> bool {
-        matches!(self, Self::ProviderParent(_))
+        matches!(self, Self::ProviderParent(_) | Self::ProviderRecovery(_))
     }
     pub(crate) async fn current_origin(
         &self,
@@ -135,6 +139,9 @@ impl Evidence {
             return source.lock_source(conn, row).await;
         }
         if let Self::ProviderParent(source) = self {
+            return source.lock_source(conn, row).await;
+        }
+        if let Self::ProviderRecovery(source) = self {
             return source.lock_source(conn, row).await;
         }
         if !self.identity()?.matches(row)? {
@@ -166,6 +173,9 @@ impl Evidence {
                 return source.principal(conn, row, clock, selection).await;
             }
             if let Self::ProviderParent(source) = self {
+                return source.principal(conn, row, clock, selection).await;
+            }
+            if let Self::ProviderRecovery(source) = self {
                 return source.principal(conn, row, clock, selection).await;
             }
             if !self.identity()?.matches(row)? {
@@ -209,7 +219,7 @@ impl Evidence {
                 .await;
         }
         // The departing Host owns retirement of the old Provider unit.
-        if matches!(self, Self::ProviderParent(_)) {
+        if matches!(self, Self::ProviderParent(_) | Self::ProviderRecovery(_)) {
             return Ok(false);
         }
         let identity = self.identity()?;
@@ -270,7 +280,7 @@ impl Evidence {
                 source.child(conn, parent, child).await?,
             )));
         }
-        if matches!(self, Self::ProviderParent(_)) {
+        if matches!(self, Self::ProviderParent(_) | Self::ProviderRecovery(_)) {
             return Err(closed());
         }
         if !matches!(self, Self::Recovery(_)) || !self.identity()?.matches(parent)? {

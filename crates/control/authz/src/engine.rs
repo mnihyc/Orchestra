@@ -15,6 +15,7 @@
 //! pages' references, and is then decided by the same frame.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use orch_access_contract::decisions::{self, Held, Standing, Through, Via};
 use orch_access_contract::pages::{
@@ -562,9 +563,10 @@ pub fn entry_of(row: &EntryRow) -> Result<Entry, Error> {
 }
 
 /// The rows and entries that are stored for some pages.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Store {
-    rows: HashMap<(PageRef, Profile, Permission), Row>,
+    // Frames on one read snapshot share stored rows until a frame filters its own entries.
+    rows: HashMap<(PageRef, Profile, Permission), Arc<Row>>,
     /// The keys of `rows` by page: a page's rows are found without reading every page's, so a list of thousands of
     /// documents is read in time proportional to it, not to its square.
     pages: HashMap<PageRef, Vec<(Profile, Permission)>>,
@@ -580,6 +582,18 @@ impl Store {
         pages: &[PageRef],
         permissions: &[Permission],
     ) -> Result<Self, Error> {
+        let cached = crate::read_facts::stored(conn, pages, permissions);
+        let (pages, permissions) = if let Some(read) = &cached {
+            (
+                read.missing_pages.as_slice(),
+                read.missing_permissions.as_slice(),
+            )
+        } else {
+            (pages, permissions)
+        };
+        if pages.is_empty() || permissions.is_empty() {
+            return Ok(cached.map(|read| read.rows).unwrap_or_default());
+        }
         let keys: Vec<PageKey> = pages.iter().map(|page| page.key()).collect();
         let words: Vec<String> = permissions
             .iter()
@@ -592,7 +606,43 @@ impl Store {
         for entry in access::entries(conn, &keys, &words).await? {
             store.put_entry(&entry)?;
         }
+        crate::read_facts::remember_stored(conn, pages, permissions, &store);
+        if let Some(mut read) = cached
+            && !read.rows.rows.is_empty()
+        {
+            read.rows.extend(store);
+            return Ok(read.rows);
+        }
         Ok(store)
+    }
+
+    /// A read's shared store supplies only the exact page/permission cells this frame requested.
+    pub(crate) fn selected(
+        &self,
+        pages: &[PageRef],
+        permissions: crate::read_facts::FetchedPermissions,
+    ) -> Self {
+        let mut selected = Self::default();
+        for page in pages {
+            if selected.pages.contains_key(page) {
+                continue;
+            }
+            for (profile, permission) in self.pages.get(page).into_iter().flatten() {
+                if permissions.contains(*permission)
+                    && let Some(row) = self.rows.get(&(*page, *profile, *permission))
+                {
+                    selected
+                        .rows
+                        .insert((*page, *profile, *permission), row.clone());
+                    selected
+                        .pages
+                        .entry(*page)
+                        .or_default()
+                        .push((*profile, *permission));
+                }
+            }
+        }
+        selected
     }
 
     fn page_of(kind: &str, id: Id, page: &str) -> Result<PageRef, Error> {
@@ -628,23 +678,24 @@ impl Store {
 
     /// The stored row `permission` / `profile` of `page`, made following when nothing was stored for it yet.
     fn row_mut(&mut self, page: PageRef, profile: Profile, permission: Permission) -> &mut Row {
-        match self.rows.entry((page, profile, permission)) {
+        let row = match self.rows.entry((page, profile, permission)) {
             std::collections::hash_map::Entry::Occupied(row) => row.into_mut(),
             std::collections::hash_map::Entry::Vacant(vacant) => {
                 self.pages
                     .entry(page)
                     .or_default()
                     .push((profile, permission));
-                vacant.insert(Row::following(permission, profile))
+                vacant.insert(Arc::new(Row::following(permission, profile)))
             }
-        }
+        };
+        Arc::make_mut(row)
     }
 
     /// The row `permission` / `profile` of `page`, where anything is stored
     /// for it.
     #[must_use]
     pub fn row(&self, page: PageRef, profile: Profile, permission: Permission) -> Option<&Row> {
-        self.rows.get(&(page, profile, permission))
+        self.rows.get(&(page, profile, permission)).map(Arc::as_ref)
     }
 
     /// Every stored row of `page`.
@@ -653,7 +704,7 @@ impl Store {
             .get(&page)
             .into_iter()
             .flatten()
-            .filter_map(move |(profile, permission)| self.rows.get(&(page, *profile, *permission)))
+            .filter_map(move |(profile, permission)| self.row(page, *profile, *permission))
     }
 
     /// The native page chain, independent of who happens to match its holders today.
@@ -689,11 +740,16 @@ impl Store {
         chain
     }
 
-    fn extend(&mut self, more: Self) {
-        self.rows.extend(more.rows);
+    pub(crate) fn extend(&mut self, more: Self) {
         for (page, keys) in more.pages {
-            self.pages.entry(page).or_default().extend(keys);
+            self.pages
+                .entry(page)
+                .or_default()
+                .extend(keys.into_iter().filter(|&(profile, permission)| {
+                    !self.rows.contains_key(&(page, profile, permission))
+                }));
         }
+        self.rows.extend(more.rows);
     }
 }
 
@@ -743,6 +799,7 @@ pub struct Frame<'p, S = Principal> {
     principal: &'p S,
     policy: Policy,
     graph: Graph,
+    acting_parents: HashMap<Id, Site>,
     store: Store,
     owners: HashMap<Id, Vec<Entry>>,
     roles: HashMap<Id, Option<roles::Held>>,
@@ -928,6 +985,28 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         graph.extend(conn, &roots).await?;
         let mut expanded = sites.to_vec();
         let mut seen: HashSet<_> = sites.iter().map(|site| (site.kind, site.id)).collect();
+        // A side is addressed and scoped as itself. Its parent has the access page
+        // for reading the conversation, driving it and answering its approvals.
+        let sides: Vec<_> = sites
+            .iter()
+            .filter(|site| site.kind == ObjectKind::Thread)
+            .filter_map(|site| {
+                let parent = graph.get(site.id)?.parent?;
+                (graph.get(parent)?.kind == NodeKind::Thread).then_some(site.id)
+            })
+            .collect();
+        let mut acting_parents = HashMap::new();
+        if !sides.is_empty() {
+            for (side, parent) in
+                orch_db::queries::threads::acting_side_parents(conn, &sides).await?
+            {
+                let parent = graph.site_of(parent).ok_or(Error::NotFound(parent))?;
+                if seen.insert((parent.kind, parent.id)) {
+                    expanded.push(parent.clone());
+                }
+                acting_parents.insert(side, parent);
+            }
+        }
         for root in roots {
             if let Some(site) = graph.site_of(root)
                 && seen.insert((site.kind, site.id))
@@ -972,28 +1051,31 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
                 .nodes()
                 .map(|node| PageRef::live(StoredKind::Node, node.id)),
         );
-        let mut wanted: Vec<Permission> = Vec::new();
-        let place_permissions = crate::nodes::every_permission([
-            ObjectKind::Org,
-            ObjectKind::Project,
-            ObjectKind::Topic,
-            ObjectKind::Thread,
-        ]);
-        let views: Vec<Permission> = sites
-            .iter()
-            .map(|site| view_permission(site.kind))
-            .collect();
-        let mut expanded_permissions = HashSet::new();
+        // Every frame needs the same place rows to evaluate holder and creator dependencies.
+        // Catalogue expansion is fixed; the selected pages and their entries belong to this read.
+        static PLACE_ROWS: std::sync::LazyLock<Vec<Permission>> = std::sync::LazyLock::new(|| {
+            let mut rows = Vec::new();
+            for permission in crate::nodes::every_permission([
+                ObjectKind::Org,
+                ObjectKind::Project,
+                ObjectKind::Topic,
+                ObjectKind::Thread,
+            ]) {
+                for level in std::iter::once(permission).chain(permission.held_through()) {
+                    if !rows.contains(&level) {
+                        rows.push(level);
+                    }
+                }
+            }
+            rows
+        });
+        let mut wanted = PLACE_ROWS.clone();
         for permission in permissions
             .iter()
-            .chain(place_permissions.iter())
-            .chain(views.iter())
+            .copied()
+            .chain(sites.iter().map(|site| view_permission(site.kind)))
         {
-            // Hundreds of inherited sites can request the same row; its covering levels are identical.
-            if !expanded_permissions.insert(*permission) {
-                continue;
-            }
-            for level in std::iter::once(*permission).chain(permission.held_through()) {
+            for level in std::iter::once(permission).chain(permission.held_through()) {
                 if !wanted.contains(&level) {
                     wanted.push(level);
                 }
@@ -1035,6 +1117,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
             principal,
             policy,
             graph,
+            acting_parents,
             store,
             owners,
             roles: HashMap::new(),
@@ -1052,7 +1135,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         };
         frame.creation_parents = frame.outside_creation_parents(&decision_sites);
         frame.resolve_audiences(&audience_sites, &group_sources, &role_sources);
-        frame.bound_outside_entries(conn, &decision_sites).await?;
+        let bounded = frame.bound_outside_entries(conn, &decision_sites).await?;
         let needs_ordinary = principal.private_admin()
             && (!audience_sites.is_empty()
                 || !group_sources.is_empty()
@@ -1105,7 +1188,8 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
                 }
             }
             frame.end_outside_creations();
-        } else {
+        } else if bounded || principal.private_admin() || frame.end_outside_creations() {
+            // The ordinary fixed point only needs to be rebuilt if its inputs changed.
             loop {
                 frame.audience_viewers.clear();
                 frame.audience_groups.clear();
@@ -1192,7 +1276,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         &mut self,
         conn: &mut Conn,
         sites: &[Site],
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let outside: Vec<Site> = sites
             .iter()
             .cloned()
@@ -1207,15 +1291,15 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
             })
             .collect();
         if outside.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         let bounds = crate::external::LifeBounds::load(conn).await?;
         let Some(tightest) = outside
             .iter()
             .filter_map(|site| bounds.at(&crate::external::way_of(site)))
-            .min_by_key(|bound| bound.days)
+            .min_by_key(|bound| bound.minutes)
         else {
-            return Ok(());
+            return Ok(false);
         };
         let mut groups = Vec::new();
         let mut places = Vec::new();
@@ -1260,7 +1344,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
             access::roots_of(conn, &places).await?.into_iter().collect()
         };
         self.outside_bounds = bounds;
-        Ok(())
+        Ok(true)
     }
 
     fn outside_entry_admitted(
@@ -1371,14 +1455,19 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     }
 
     fn end_outside_creations(&mut self) -> bool {
+        if self.creation_parents.is_empty() {
+            return false;
+        }
         let mut changed = false;
         for row in self.store.rows.values_mut() {
-            let before = row.entries.len();
-            row.entries.retain(|entry| {
-                !self.creation_parents.contains_key(&entry.id)
-                    || self.admitted_creations.contains(&entry.id)
-            });
-            changed |= row.entries.len() != before;
+            let excluded = |entry: &Entry| {
+                self.creation_parents.contains_key(&entry.id)
+                    && !self.admitted_creations.contains(&entry.id)
+            };
+            if row.entries.iter().any(excluded) {
+                Arc::make_mut(row).entries.retain(|entry| !excluded(entry));
+                changed = true;
+            }
         }
         changed
     }
@@ -1515,7 +1604,10 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
 
     fn ask_inspection(&self, site: &Site) -> Option<Site> {
         let boundary = self.ask_boundary(site)?;
-        if boundary.person == self.principal.user() || !self.ask_root_available(boundary) {
+        if !boundary.inspectable
+            || boundary.person == self.principal.user()
+            || !self.ask_root_available(boundary)
+        {
             return None;
         }
         let root = self.graph.site_of(boundary.root)?;
@@ -1984,10 +2076,30 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         self.account_ways(site, permission)
     }
 
+    fn acting_parent(&self, site: &Site) -> Option<&Site> {
+        if site.kind == ObjectKind::Thread {
+            self.acting_parents.get(&site.id)
+        } else {
+            None
+        }
+    }
+
+    fn acting_conversation_page(&self, site: &Site, permission: Permission) -> Option<&Site> {
+        match permission {
+            Permission::ThreadView | Permission::ThreadInteract | Permission::ThreadManage => {
+                self.acting_parent(site)
+            }
+            _ => None,
+        }
+    }
+
     /// The existing account decision, before endpoint credential narrowing. Only fixed
     /// internal dependencies of an independently admitted operation may use this factor.
     #[must_use]
     pub(crate) fn account_ways(&self, site: &Site, permission: Permission) -> Vec<Through> {
+        let site = self
+            .acting_conversation_page(site, permission)
+            .unwrap_or(site);
         if !self.ask_allows(site, permission) {
             return Vec::new();
         }
@@ -2017,6 +2129,9 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// read.
     #[must_use]
     pub fn effective(&self, site: &Site) -> Vec<Held> {
+        if self.acting_parent(site).is_some() {
+            return self.effective_for(site, &site.kind.permissions().collect::<Vec<_>>(), false);
+        }
         let mut held =
             decisions::effective(site.kind, &self.standing(site), site.is_archived(), |row| {
                 self.named(site, row)
@@ -2050,6 +2165,9 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// A hierarchy query chooses this projection only after checking that actual row and membership.
     #[must_use]
     pub fn effective_owned(&self, site: &Site) -> Vec<Held> {
+        if self.acting_parent(site).is_some() {
+            return self.effective(site);
+        }
         let mut standing = self.standing(site);
         standing.owner = true;
         let held = decisions::effective(site.kind, &standing, site.is_archived(), |row| {
@@ -2074,6 +2192,18 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
                     && (!site.is_archived() || permission.when_archived() != WhenArchived::Withheld)
             })
             .collect();
+        if self.acting_parent(site).is_some() {
+            return wanted
+                .into_iter()
+                .filter_map(|permission| {
+                    let through = self.account_ways(site, permission);
+                    (!through.is_empty()).then_some(Held {
+                        permission,
+                        through,
+                    })
+                })
+                .collect();
+        }
         let mut standing = self.standing(site);
         if owned {
             standing.owner = true;
@@ -2127,6 +2257,9 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
         {
             return false;
         }
+        if self.acting_conversation_page(site, permission).is_some() {
+            return !self.account_ways(site, permission).is_empty();
+        }
         if !decisions::holds(permission, standing, |_| Vec::new()).is_empty() {
             return true;
         }
@@ -2164,6 +2297,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// the View row to have been read.
     #[must_use]
     pub fn restricted(&self, site: &Site) -> bool {
+        let site = self.acting_parent(site).unwrap_or(site);
         let Some(root) = site.root else {
             return false;
         };
@@ -2179,6 +2313,7 @@ impl<'p, S: FrameSubject> Frame<'p, S> {
     /// and is passed over by whatever reaches what follows it. Needs the View row to have been read.
     #[must_use]
     pub fn restricted_below(&self, site: &Site, place: Id) -> bool {
+        let site = self.acting_parent(site).unwrap_or(site);
         site.kind
             .node()
             .and_then(|node| NodePermission::View.on(node))
@@ -2204,6 +2339,7 @@ pub const fn view_permission(kind: ObjectKind) -> Permission {
         ObjectKind::McpServer => Permission::McpView,
         ObjectKind::Mount => Permission::MountView,
         ObjectKind::Skill => Permission::SkillView,
+        ObjectKind::Pool => Permission::PoolView,
     }
 }
 

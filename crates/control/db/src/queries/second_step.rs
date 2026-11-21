@@ -32,12 +32,18 @@ pub async fn session_given_at(
 /// Whether any place, the system or an org, sets `auth.second_step` to `required`. Where none
 /// does, nobody's sign-in needs a second step and nothing more is read.
 pub async fn required_anywhere(conn: &mut Conn) -> Result<bool, DbError> {
+    if let Some(Some(required)) =
+        super::snapshot::with(conn, |rows| rows.second_step_required_anywhere)
+    {
+        return Ok(required);
+    }
     let (any,): (bool,) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM settings
                          WHERE key = 'auth.second_step' AND value = '\"required\"'::jsonb)",
     )
-    .fetch_one(conn)
+    .fetch_one(&mut *conn)
     .await?;
+    let _ = super::snapshot::with(conn, |rows| rows.second_step_required_anywhere = Some(any));
     Ok(any)
 }
 

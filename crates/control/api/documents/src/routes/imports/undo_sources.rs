@@ -58,6 +58,7 @@ impl native::Selected for Preview {
     type Query = ();
     type Value = Ready;
     type Reply = ImportUndoPlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &PREFLIGHT;
     fn select<'a>(
         ctx: &'a Ctx,

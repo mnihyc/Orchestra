@@ -1,0 +1,12 @@
+test -p orch-api-core --test everything_scale -- simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test everything_scale -- --skip simultaneous:: --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes --test retained_scopes --test threads_read --test usage_caps --test thread_display --test syncs --test kadmin_second_step
+test -p orch-api-core --test thread_history_pages --test thread_continuation_reads --test thread_continuation_search --test realtime_continuations
+test -p orch-api-base --lib -- simultaneous_replies_preserve_content_and_correlate_only_failed_panes
+test -p orch-api-core --test node_presentation --test document_readers
+test -p orch-db --lib --test participation_summaries --test usage_caps --test commit_epochs --test goal_queries
+test -p orch-authz --lib --test kept_holders --test external_lifetime --test outside_creation --test thread_viewer_groups
+test -p orch-engine --test caps --test caps_models --test thread_display_reads --test preflight
+test -p orch-engine --test call_recovery -- an_administrative_stop_is_not_a_failure_and_its_author_can_be_continued_explicitly
+clippy
+fmt
