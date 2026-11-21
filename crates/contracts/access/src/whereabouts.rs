@@ -9,9 +9,7 @@
 //! combine as every list option of an entry does.
 //!
 //! A host or a machine that is named covers every environment on it, those made later included.
-//! A kind of place that does not exist yet (a pool of environments, a pool of hosts) is one more
-//! [`WhereKind`] and one more case of [`WhereName::covers`]; what is stored for the kinds there
-//! are does not change.
+//! Pools describe current structural membership, independently of their selection policy or health.
 
 use orch_types::Id;
 use schemars::JsonSchema;
@@ -28,6 +26,10 @@ words! {
         Host = "host",
         /// A physical machine: every environment on it.
         Machine = "machine",
+        /// The live structural set of an environment pool.
+        EnvironmentPool = "environment_pool",
+        /// Every environment on a host in this live structural set.
+        HostPool = "host_pool",
     }
 }
 
@@ -44,8 +46,10 @@ pub struct WhereName {
 /// Where an environment is, as far as the names can tell: itself, the host it is on and the
 /// machine it is on. An environment that is not made yet has no identifier of its own, and its
 /// host or machine is where it is to be made.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Whereabouts {
+    /// Current native structural membership facts; these carry no permission.
+    pub pools: Vec<WhereName>,
     /// The environment, once there is one.
     pub environment: Option<Id>,
     /// The host it is on, where it is on one.
@@ -77,6 +81,7 @@ impl WhereName {
             WhereKind::Environment => at.environment,
             WhereKind::Host => at.host,
             WhereKind::Machine => at.machine,
+            WhereKind::EnvironmentPool | WhereKind::HostPool => return at.pools.contains(self),
         };
         found == Some(self.id)
     }
@@ -127,19 +132,21 @@ mod tests {
     fn a_host_or_a_machine_covers_every_environment_on_it_those_made_later_included() {
         let (host, machine) = (new_id(), new_id());
         let on_host = Whereabouts {
+            pools: Vec::new(),
             environment: Some(new_id()),
             host: Some(host),
             machine: Some(machine),
         };
         let later = Whereabouts {
             environment: Some(new_id()),
-            ..on_host
+            ..on_host.clone()
         };
         let to_be_made = Whereabouts {
             environment: None,
-            ..on_host
+            ..on_host.clone()
         };
         let elsewhere = Whereabouts {
+            pools: Vec::new(),
             environment: Some(new_id()),
             host: Some(new_id()),
             machine: Some(new_id()),
@@ -173,6 +180,7 @@ mod tests {
         assert!(!allows(
             Some(&gone),
             &Whereabouts {
+                pools: Vec::new(),
                 environment: Some(new_id()),
                 host: Some(new_id()),
                 machine: Some(new_id()),
@@ -184,6 +192,7 @@ mod tests {
     fn a_refusal_names_the_most_particular_place() {
         let (environment, host, machine) = (new_id(), new_id(), new_id());
         let all = Whereabouts {
+            pools: Vec::new(),
             environment: Some(environment),
             host: Some(host),
             machine: Some(machine),
@@ -191,12 +200,12 @@ mod tests {
         assert_eq!(all.name(), Some(name(WhereKind::Environment, environment)));
         let unmade = Whereabouts {
             environment: None,
-            ..all
+            ..all.clone()
         };
         assert_eq!(unmade.name(), Some(name(WhereKind::Host, host)));
         let bare = Whereabouts {
             host: None,
-            ..unmade
+            ..unmade.clone()
         };
         assert_eq!(bare.name(), Some(name(WhereKind::Machine, machine)));
         assert_eq!(Whereabouts::default().name(), None);
