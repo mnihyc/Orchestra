@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { groupPattern, GROUPS_MOST } from '@/features/models/patterns';
 import { groupFault } from '@/features/resources/providers/entry';
 import { AddLimit } from '@/features/resources/providers/Caps';
+import { PoolDialog } from '@/features/resources/pools/PoolDialog';
 import { GroupOptionsDialog } from '@/features/resources/providers/GroupOptions';
 import type { Provider, ProviderModel, ProviderRef } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
@@ -126,6 +127,7 @@ export function GroupsField({ groups, offered, onChange, error, disabled, maximu
 export function GroupStrip({ provider, models, manage, options, revision }: { provider: ProviderRef; models: readonly ProviderModel[]; manage: boolean; options?: Provider['model_group_options']; revision?: number }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<string | null>(null);
+  const [poolGroup, setPoolGroup] = useState<string | null>(null);
   const groups = groupsOf(models);
   // A provider with no model has nothing to put in a group; one the reader may not manage says nothing of groups that are not there.
   if (models.length === 0 || (groups.length === 0 && !manage)) return null;
@@ -143,14 +145,19 @@ export function GroupStrip({ provider, models, manage, options, revision }: { pr
                 <GroupChip name={group.name} />
                 <span className="text-sm text-text-muted">{t('models.groups.count', { count: group.models })}</span>
               </span>
+              <span className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="ghost" aria-label={t('pools.makeFrom', { name: group.name })} onClick={() => setPoolGroup(group.name)}>{t('pools.make')}</Button>
               {manage && <span className="flex flex-wrap items-center gap-2">
                 {revision !== undefined && <Button size="sm" variant="ghost" action="edit" onClick={() => setEditing(group.name)}>{t('models.groups.options')}</Button>}
                 <AddLimit provider={provider} models={[groupPattern(group.name)]} label={t('models.groups.limit')} />
               </span>}
+              </span>
             </li>
           ))}
         </ul>
       )}
+      {poolGroup !== null && <PoolDialog key={poolGroup} initial={{ kind: 'model', name: poolGroup,
+        rule: { type: 'provider_models', provider_id: provider.id, group: poolGroup } }} onClose={() => setPoolGroup(null)} />}
       {editing !== null && revision !== undefined && <GroupOptionsDialog key={editing} provider={provider} revision={revision} group={editing} options={options ?? {}} onClose={() => setEditing(null)} />}
     </section>
   );

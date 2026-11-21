@@ -3,7 +3,7 @@ import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Mount locations on one machine, with reported sizes, readable attachments and the ordinary guarded add/remove acts. */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ResourceChip, resourceChoice } from '@/features/resource-facts/ResourceFacts';
-import { Plus } from 'lucide-react';
+import { MoreHorizontal, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from '@tanstack/react-router';
@@ -21,6 +21,9 @@ import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
+import { IconButton } from '@/ui/IconButton';
+import { Menu, type MenuEntry } from '@/ui/Menu';
+import { CopyMountDataLoader } from './Copy';
 
 function AddHere({ machine, choices, onClose }: { machine: string; choices: readonly MachineMountChoice[]; onClose: () => void }) {
   const { t } = useTranslation();
@@ -68,12 +71,17 @@ function Here({ machine, name }: { machine: string; name: string }) {
   const query = useQuery(machineMountsQuery(machine));
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<MachineMount | null>(null);
+  const [copying, setCopying] = useState<MachineMount | null>(null);
   const [confirm, setConfirm] = useState('');
   const remove = useMutation({ mutationFn: async () => {
     if (removing === null) return;
     await removeMountLocation(removing.mount.id, machine, removing.kind === 'volume' ? confirm : undefined);
   }, onSuccess: () => setRemoving(null) });
   const data = query.isError ? undefined : query.data;
+  const entries = (row: MachineMount): MenuEntry[] => [
+    { id: 'copy-data', label: t('mountCopy.copy'), disabled: row.can_remove && row.source !== null ? false : t('mountCopy.noSource'), onSelect: () => setCopying(row) },
+    { id: 'remove', label: t('resourceDetails.mount.here.remove', { name: row.mount.name }), danger: true, disabled: row.can_remove ? false : t('resources.act.manageRequired'), onSelect: () => { setRemoving(row); setConfirm(''); remove.reset(); } },
+  ];
   const columns: Column<MachineMount>[] = [
     { id: 'mount', header: t('resourceDetails.mount.here.mount'), cell: (row) => <ResourceChip subject={{ kind: 'mount', mount: row.mount }} asChild hint={false}><Link to="/resources/mounts/$id" params={{ id: row.mount.id }}>{row.mount.name}</Link></ResourceChip> },
     { id: 'location', header: t('resourceDetails.mount.locations'), cell: (row) => <div className="flex min-w-0 flex-col gap-1">
@@ -86,14 +94,15 @@ function Here({ machine, name }: { machine: string; name: string }) {
     { id: 'environments', header: t('resourceDetails.mount.here.environments'), cell: (row) => row.environments.length === 0
       ? <span className="text-text-muted">{t('resourceDetails.mount.here.noEnvironments')}</span>
       : <ul>{row.environments.map((environment) => <li key={environment.id} className="flex flex-wrap gap-x-2"><ResourceChip subject={{ kind: 'environment', environment }} asChild hint={false}><Link to="/resources/environments/$id" params={{ id: environment.id }}>{environment.name}</Link></ResourceChip><span className="text-sm text-text-muted">{t(`environments.status.${environment.status}`)}</span></li>)}</ul> },
-    { id: 'remove', header: <span className="sr-only">{t('resourceDetails.remove')}</span>, cell: (row) => row.can_remove && <Button variant="danger-ghost" size="sm" onClick={() => { setRemoving(row); setConfirm(''); remove.reset(); }}>{t('resourceDetails.mount.here.remove', { name: row.mount.name })}</Button> },
+    { id: 'actions', header: t('operation.actions'), hideHeader: true, cell: (row) => <Menu label={row.mount.name} entries={entries(row)} trigger={<IconButton label={t('operation.actions')} icon={<MoreHorizontal aria-hidden />} />} /> },
   ];
   return <CompoundPickerScope data={data} screen="machine-mount-location">{<Section id={`mounts-here-${machine}`} title={t('resourceDetails.mount.here.title')} action={<Button variant="primary" icon={<Plus aria-hidden />} disabled={data === undefined || data.available.length === 0} onClick={() => setAdding(true)}>{t('resourceDetails.mount.here.add')}</Button>}>
     {data === undefined ? query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <SkeletonRows read={query} rows={3} />
       : data.locations.length === 0 ? <EmptyState compact title={t('resourceDetails.mount.here.none', { machine: name })} />
-      : <Table label={t('resourceDetails.mount.here.title')} columns={columns} rows={data.locations} rowKey={(row) => row.mount.id} />}
+      : <Table label={t('resourceDetails.mount.here.title')} columns={columns} rows={data.locations} rowKey={(row) => row.mount.id} rowMenu={{ label: (row) => row.mount.name, entries }} />}
     {data?.available.length === 0 && <EmptyState compact title={t('resourceDetails.mount.here.noChoices')} />}
     {adding && data !== undefined && <AddHere machine={machine} choices={data.available} onClose={() => setAdding(false)} />}
+    {copying !== null && <CopyMountDataLoader mountId={copying.mount.id} sourceMachine={machine} onClose={() => setCopying(null)} />}
     <Dialog open={removing !== null} onOpenChange={(open) => { if (!open && !remove.isPending) setRemoving(null); }} title={t('resourceDetails.mount.removeLocation')} dismissible={!remove.isPending} footer={<>
       <Button disabled={remove.isPending} onClick={() => setRemoving(null)}>{t('common.cancel')}</Button>
       <Button variant="danger" pending={remove.isPending} disabled={removing?.kind === 'volume' && confirm !== removing.mount.name} onClick={() => remove.mutate()}>{t('resourceDetails.remove')}</Button>

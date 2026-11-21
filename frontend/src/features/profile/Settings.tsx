@@ -1,4 +1,5 @@
 /** The person's own page settings, with recorded-admin privacy wording and a reader-shaped preview. */
+import { PathLink } from '@/shell/TrailLink';
 import { useIsMutating, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
@@ -71,7 +72,7 @@ function OwnPage({ username }: { username: string }) {
   const profile = useQuery(profileQuery(username));
   if (profile.isPending) return <SkeletonRows read={profile} rows={5} />;
   if (profile.isError) return <ErrorState error={profile.error} onRetry={() => void profile.refetch()} />;
-  return <><a className="text-accent-text hover:underline" href={`/u/${encodeURIComponent(username)}`}>{t('profile.page.open')}</a><EditPage initial={profile.data} /></>;
+  return <><PathLink className="text-accent-text hover:underline" href={`/u/${encodeURIComponent(username)}`}>{t('profile.page.open')}</PathLink><EditPage initial={profile.data} /></>;
 }
 
 export function ProfileSettingsPage() {

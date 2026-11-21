@@ -18,16 +18,19 @@ use orch_types::{Id, Time, new_id};
 use serde_json::json;
 
 fn ticket(signer: &TicketSigner, p: &ProviderRig, from: Id, lease: Id, thread: Id) -> String {
-    signer
-        .issue(&TicketRequest {
+    orch_testkit::doubles::link::session_ticket(
+        signer,
+        &TicketRequest {
             src: TicketSource::Machine(from),
             dst: p.rig.machine_id,
             service: Service::Llm { lease_id: lease },
             thread_id: Some(thread),
             tool_set: None,
             expires_at: Time::new(p.rig.clock.now() + chrono::Duration::hours(1)),
-        })
-        .unwrap()
+        },
+        None,
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -168,16 +171,19 @@ async fn an_agent_machine_that_cannot_reach_the_machine_with_the_key_tells_the_h
     let loopback = agent.connector.loopback();
     let grant = loopback.grant();
     // A ticket to a machine that is nowhere.
-    let nowhere = signer
-        .issue(&TicketRequest {
+    let nowhere = orch_testkit::doubles::link::session_ticket(
+        &signer,
+        &TicketRequest {
             src: TicketSource::Machine(agent.machine_id),
             dst: new_id(),
             service: Service::Llm { lease_id: new_id() },
             thread_id: Some(p.thread),
             tool_set: None,
             expires_at: Time::new(p.rig.clock.now() + chrono::Duration::hours(1)),
-        })
-        .unwrap();
+        },
+        None,
+    )
+    .unwrap();
     let binding = loopback.bind(
         grant.id,
         p.thread,

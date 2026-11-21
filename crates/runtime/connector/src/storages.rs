@@ -7,6 +7,7 @@ use orch_link_contract::events::NodeStorage;
 use orch_link_contract::policy::LocalPolicy;
 use orch_types::Id;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -16,15 +17,33 @@ struct Storage {
     default: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StorageUse {
+    Environment,
+    Mount { name: String },
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Kept {
     storage: String,
     directory: DirectoryBinding,
+    labels: BTreeMap<String, String>,
+    usage: StorageUse,
+}
+
+struct Allocation<'a> {
+    environment: Id,
+    role: &'a str,
+    generation: i64,
+    labels: BTreeMap<String, String>,
+    usage: StorageUse,
 }
 
 /// A directory made by the owned-data factory, with its existing proof retained for purge.
 #[derive(Debug, Clone)]
 pub struct OwnedData {
+    data_dir: PathBuf,
     record: PathBuf,
     /// The actual directory to show in the local uninstall plan.
     pub directory: DirectoryBinding,
@@ -56,6 +75,7 @@ pub fn owned_data(data_dir: &Path) -> Result<Vec<OwnedData>, CommandError> {
         )
         .map_err(|_| refused("an owned-data record is invalid"))?;
         result.push(OwnedData {
+            data_dir: data_dir.to_owned(),
             record: entry.path(),
             directory: kept.directory,
         });
@@ -76,7 +96,7 @@ pub fn remove_owned(policy: &LocalPolicy, owned: &OwnedData) -> Result<(), Comma
     }
     let path = Path::new(&owned.directory.path);
     if std::fs::symlink_metadata(path).is_ok() {
-        if crate::policy::inspect_environment_directory(policy, path)? != owned.directory {
+        if owned_binding(&owned.data_dir, policy, path)? != owned.directory {
             return Err(refused("the owned directory was replaced; it is kept"));
         }
         std::fs::remove_dir_all(path)
@@ -90,7 +110,100 @@ fn refused(message: impl Into<String>) -> CommandError {
     CommandError::new(ErrorCode::PolicyRootNotAllowed, message)
 }
 
-fn declared(_config: &ConnectorConfig, policy: &LocalPolicy) -> Result<Vec<Storage>, CommandError> {
+/// The connector already admits its private environment-data area for owned workspaces.
+pub(crate) const PRIVATE_DIRECTORY: &str = "environment-data";
+
+#[cfg(target_os = "linux")]
+fn private_storage(data_dir: &Path) -> Result<Storage, CommandError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+    let flags = OFlags::DIRECTORY | OFlags::PATH | OFlags::CLOEXEC;
+    let resolve = ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+    let parent = openat2(rustix::fs::CWD, data_dir, flags, Mode::empty(), resolve)
+        .map_err(|_| refused("the connector data directory cannot be opened"))?;
+    match mkdirat(&parent, PRIVATE_DIRECTORY, Mode::RWXU) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(_) => {
+            return Err(refused(
+                "the connector cannot create its private data storage",
+            ));
+        }
+    }
+    let held = openat2(&parent, PRIVATE_DIRECTORY, flags, Mode::empty(), resolve)
+        .map_err(|_| refused("the connector's private data storage must be a real directory"))?;
+    rustix::fs::accessat(
+        &held,
+        ".",
+        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+        rustix::fs::AtFlags::EACCESS,
+    )
+    .map_err(|_| refused("the connector's private data storage is not writable"))?;
+    Ok(Storage {
+        name: orch_driver_contract::volumes::DEFAULT_STORAGE.to_owned(),
+        path: data_dir.join(PRIVATE_DIRECTORY),
+        default: true,
+    })
+}
+
+/// Only local allocation or a matching kept record takes this path. Borrowed directories always use the owner's policy.
+fn owned_binding(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    path: &Path,
+) -> Result<DirectoryBinding, CommandError> {
+    let root = data_dir.join(PRIVATE_DIRECTORY);
+    if !path.starts_with(&root) {
+        return crate::policy::inspect_environment_directory(policy, path);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, fstat, openat2};
+        let flags = OFlags::DIRECTORY | OFlags::PATH | OFlags::CLOEXEC;
+        let resolve = ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+        let base = openat2(rustix::fs::CWD, &root, flags, Mode::empty(), resolve)
+            .map_err(|_| refused("the private data storage changed or cannot be opened"))?;
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| refused("the private directory is outside its storage"))?;
+        let held = openat2(
+            &base,
+            relative,
+            flags,
+            Mode::empty(),
+            resolve | ResolveFlags::BENEATH,
+        )
+        .map_err(|_| refused("the private directory changed or cannot be opened"))?;
+        let stat =
+            fstat(&held).map_err(|_| refused("the private directory cannot be identified"))?;
+        Ok(DirectoryBinding {
+            path: path.to_string_lossy().into_owned(),
+            device: Some(stat.st_dev),
+            inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                stat.st_ino,
+            )),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(refused(
+            "the connector cannot verify private directory ownership on this platform",
+        ))
+    }
+}
+
+fn declared(
+    data_dir: &Path,
+    _config: &ConnectorConfig,
+    policy: &LocalPolicy,
+) -> Result<Vec<Storage>, CommandError> {
+    if policy.environment_roots.is_empty() && policy.storages.is_empty() {
+        #[cfg(target_os = "linux")]
+        return private_storage(data_dir).map(|storage| vec![storage]);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = data_dir;
+            return Ok(Vec::new());
+        }
+    }
     let configured = if policy.storages.is_empty() {
         policy
             .environment_roots
@@ -137,8 +250,8 @@ fn declared(_config: &ConnectorConfig, policy: &LocalPolicy) -> Result<Vec<Stora
 
 /// Reports the same storage shape as a node, without exposing local paths to the server.
 #[must_use]
-pub fn facts(config: &ConnectorConfig, policy: &LocalPolicy) -> Vec<NodeStorage> {
-    declared(config, policy)
+pub fn facts(data_dir: &Path, config: &ConnectorConfig, policy: &LocalPolicy) -> Vec<NodeStorage> {
+    declared(data_dir, config, policy)
         .unwrap_or_default()
         .into_iter()
         .map(|storage| {
@@ -189,6 +302,194 @@ pub fn directory_generation(
     requested: Option<&str>,
     generation: i64,
 ) -> Result<PathBuf, CommandError> {
+    let labels = if role == "mount" {
+        BTreeMap::from([("orch.mount_id".into(), environment.to_string())])
+    } else {
+        BTreeMap::new()
+    };
+    allocate(
+        data_dir,
+        config,
+        policy,
+        requested,
+        Allocation {
+            environment,
+            role,
+            generation,
+            labels,
+            usage: if role == "mount" {
+                StorageUse::Mount {
+                    name: format!("orch-mount-{environment}"),
+                }
+            } else {
+                StorageUse::Environment
+            },
+        },
+    )
+}
+
+/// The full native name remains in its record; a derived UUID is only its filesystem key.
+fn mount_key(mount: Id, name: &str) -> Result<Id, CommandError> {
+    if !orch_link_contract::commands::is_mount_volume(mount, name) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory name belongs to another mount",
+        ));
+    }
+    if name == format!("orch-mount-{mount}") {
+        return Ok(mount);
+    }
+    let digest = orch_types::Hash::of(format!("directory-mount-volume:{mount}:{name}").as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Ok(Id::from_bytes(bytes))
+}
+
+/// Resolves the exact owned native location, independently of other locations of that mount.
+fn mount_record(
+    data_dir: &Path,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<(Id, Kept)>, CommandError> {
+    let key = mount_key(mount, name)?;
+    let record = data_dir
+        .join("storage-bindings")
+        .join(format!("{key}-mount.json"));
+    let kept: Kept = match std::fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| refused("the owned-data record cannot be read"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refused("the owned-data record cannot be opened")),
+    };
+    if requested.is_some_and(|name| name != kept.storage) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory keeps its recorded storage",
+        ));
+    }
+    if kept.usage != (StorageUse::Mount { name: name.into() })
+        || kept.labels.get("orch.mount_id") != Some(&mount.to_string())
+    {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native data record names another mount location",
+        ));
+    }
+    Ok(Some((key, kept)))
+}
+
+/// The original owned directory identity survives a moved or missing path while native consumers drain.
+pub fn recorded_mount_identity(
+    data_dir: &Path,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<(u64, orch_driver_contract::runtime::FileNumber)>, CommandError> {
+    let Some((_, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    kept.directory
+        .device
+        .zip(kept.directory.inode)
+        .map(Some)
+        .ok_or_else(|| refused("the owned mount directory has no native identity"))
+}
+
+/// Validates the exact cleanup owner before any data bytes are removed.
+pub fn mount_removal_binding(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<Option<DirectoryBinding>, CommandError> {
+    let Some((key, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    if &kept.labels != labels {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the existing directory belongs to another native data owner",
+        ));
+    }
+    if Path::new(&kept.directory.path).exists() {
+        recorded_directory(data_dir, policy, key, "mount")?;
+    }
+    Ok(Some(kept.directory))
+}
+
+/// Resolves the exact current owned native location and its original opened identity.
+pub fn recorded_mount_binding(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<DirectoryBinding>, CommandError> {
+    let Some((key, kept)) = mount_record(data_dir, mount, name, requested)? else {
+        return Ok(None);
+    };
+    if recorded_directory(data_dir, policy, key, "mount")?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(kept.directory))
+}
+
+/// The checked native location used by cleanup and transfer callers.
+pub fn recorded_mount_directory(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+) -> Result<Option<PathBuf>, CommandError> {
+    Ok(
+        recorded_mount_binding(data_dir, policy, mount, name, requested)?
+            .map(|binding| PathBuf::from(binding.path)),
+    )
+}
+
+/// A mount copy can reuse only the exact native ownership it originally created.
+pub fn mount_directory(
+    data_dir: &Path,
+    config: &ConnectorConfig,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<PathBuf, CommandError> {
+    allocate(
+        data_dir,
+        config,
+        policy,
+        requested,
+        Allocation {
+            environment: mount_key(mount, name)?,
+            role: "mount",
+            generation: 0,
+            labels: labels.clone(),
+            usage: StorageUse::Mount { name: name.into() },
+        },
+    )
+}
+
+fn allocate(
+    data_dir: &Path,
+    config: &ConnectorConfig,
+    policy: &LocalPolicy,
+    requested: Option<&str>,
+    allocation: Allocation<'_>,
+) -> Result<PathBuf, CommandError> {
+    let Allocation {
+        environment,
+        role,
+        generation,
+        labels,
+        usage,
+    } = allocation;
     if generation < 0 {
         return Err(refused("an owned-data generation is not negative"));
     }
@@ -207,15 +508,18 @@ pub fn directory_generation(
         Ok(bytes) => {
             let kept: Kept = serde_json::from_slice(&bytes)
                 .map_err(|_| refused("the kept data storage record cannot be read"))?;
+            if kept.labels != labels || kept.usage != usage {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the existing directory belongs to another native data owner",
+                ));
+            }
             if requested.is_some_and(|name| name != kept.storage) {
                 return Err(refused(
                     "existing data keeps its recorded storage; use an explicit move before choosing another",
                 ));
             }
-            let actual = crate::policy::inspect_environment_directory(
-                policy,
-                Path::new(&kept.directory.path),
-            )?;
+            let actual = owned_binding(data_dir, policy, Path::new(&kept.directory.path))?;
             if actual != kept.directory {
                 return Err(refused(
                     "the kept data directory changed identity; it is not replaced",
@@ -226,7 +530,7 @@ pub fn directory_generation(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused("the kept data storage record cannot be opened")),
     }
-    let storages = declared(config, policy)?;
+    let storages = declared(data_dir, config, policy)?;
     let storage = storages
         .iter()
         .find(|storage| requested.map_or(storage.default, |name| name == storage.name))
@@ -234,11 +538,13 @@ pub fn directory_generation(
             refused("the machine has no requested or default storage under its allowed roots")
         })?;
     let path = make(&storage.path, environment, role, generation)?;
-    let directory = crate::policy::inspect_environment_directory(policy, &path)?;
+    let directory = owned_binding(data_dir, policy, &path)?;
     crate::policy::writable_environment_directory(&path)?;
     let kept = Kept {
         storage: storage.name.clone(),
         directory,
+        labels,
+        usage,
     };
     std::fs::create_dir_all(&records)
         .map_err(|_| refused("the connector cannot create its storage records"))?;
@@ -327,8 +633,7 @@ pub fn recorded_directory(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(refused("the owned-data record cannot be opened")),
     };
-    let actual =
-        crate::policy::inspect_environment_directory(policy, Path::new(&kept.directory.path))?;
+    let actual = owned_binding(data_dir, policy, Path::new(&kept.directory.path))?;
     if actual != kept.directory {
         return Err(refused(
             "the owned data directory changed identity; it is not replaced",
@@ -345,6 +650,40 @@ pub fn remove_directory(
     role: &str,
 ) -> Result<(), CommandError> {
     remove_generation(data_dir, policy, id, role, 0)
+}
+
+/// A failed copy may remove only data with its exact original native labels.
+pub fn remove_mount_directory(
+    data_dir: &Path,
+    policy: &LocalPolicy,
+    mount: Id,
+    name: &str,
+    requested: Option<&str>,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), CommandError> {
+    let key = mount_key(mount, name)?;
+    let record = data_dir
+        .join("storage-bindings")
+        .join(format!("{key}-mount.json"));
+    let kept: Kept = match std::fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| refused("the owned-data record cannot be read"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(refused("the owned-data record cannot be opened")),
+    };
+    if requested.is_some_and(|name| name != kept.storage) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the native directory keeps its recorded storage",
+        ));
+    }
+    if &kept.labels != labels || kept.usage != (StorageUse::Mount { name: name.into() }) {
+        return Err(CommandError::new(
+            ErrorCode::Conflict,
+            "the existing directory belongs to another native data owner",
+        ));
+    }
+    remove_directory(data_dir, policy, key, "mount")
 }
 
 /// Removes only a recorded generation; missing records mean no owned data, never a guessed path.
@@ -374,7 +713,7 @@ pub fn remove_generation(
     };
     let path = Path::new(&kept.directory.path);
     if path.exists() {
-        if crate::policy::inspect_environment_directory(policy, path)? != kept.directory {
+        if owned_binding(data_dir, policy, path)? != kept.directory {
             return Err(refused("the data directory was replaced; it is not purged"));
         }
         std::fs::remove_dir_all(path)
@@ -388,6 +727,68 @@ pub fn remove_generation(
 #[cfg(target_os = "linux")]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fresh_connector_makes_and_retires_private_environment_data_without_sharing_a_directory() {
+        let data = tempfile::tempdir().unwrap();
+        let config = ConnectorConfig::default();
+        let policy = LocalPolicy::default();
+        let id = orch_types::new_id();
+        assert!(!facts(data.path(), &config, &policy).is_empty());
+        let workspace = directory(data.path(), &config, &policy, id, "workspace", None).unwrap();
+        let home = directory(data.path(), &config, &policy, id, "home", None).unwrap();
+        assert_ne!(workspace, home);
+        assert!(workspace.starts_with(data.path().join("environment-data")));
+        assert!(crate::policy::inspect_environment_directory(&policy, &workspace).is_err());
+        assert_eq!(
+            recorded_directory(data.path(), &policy, id, "workspace").unwrap(),
+            Some(workspace.clone())
+        );
+        assert_eq!(
+            directory(data.path(), &config, &policy, id, "workspace", None).unwrap(),
+            workspace
+        );
+        assert!(
+            directory(
+                data.path(),
+                &config,
+                &policy,
+                orch_types::new_id(),
+                "workspace",
+                Some("unknown")
+            )
+            .is_err()
+        );
+        remove_directory(data.path(), &policy, id, "workspace").unwrap();
+        assert!(!workspace.exists() && home.is_dir());
+        let owned = owned_data(data.path()).unwrap();
+        assert_eq!(owned.len(), 1);
+        remove_owned(&policy, &owned[0]).unwrap();
+        assert!(!home.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_environment_storage_never_follows_a_replaced_root_or_masks_a_broken_configured_storage()
+     {
+        let data = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let config = ConnectorConfig::default();
+        let policy = LocalPolicy::default();
+        let id = orch_types::new_id();
+        std::os::unix::fs::symlink(outside.path(), data.path().join("environment-data")).unwrap();
+        assert!(facts(data.path(), &config, &policy).is_empty());
+        assert!(directory(data.path(), &config, &policy, id, "home", None).is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        let other = tempfile::tempdir().unwrap();
+        let policy = LocalPolicy {
+            environment_roots: vec![other.path().join("absent").to_string_lossy().into_owned()],
+            ..policy
+        };
+        assert!(facts(other.path(), &config, &policy).is_empty());
+        assert!(directory(other.path(), &config, &policy, id, "home", None).is_err());
+    }
+
     #[test]
     fn a_move_generation_is_fresh_and_retry_keeps_it_without_replacing_an_earlier_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -474,7 +875,7 @@ mod tests {
             ..Default::default()
         };
         let id = orch_types::new_id();
-        assert_eq!(facts(&config, &policy)[0].name, "fast");
+        assert_eq!(facts(state.path(), &config, &policy)[0].name, "fast");
         let made = directory(
             state.path(),
             &config,
@@ -524,7 +925,7 @@ mod tests {
             ..Default::default()
         };
         let config = ConnectorConfig::default();
-        assert_eq!(facts(&config, &policy)[0].name, "default");
+        assert_eq!(facts(state.path(), &config, &policy)[0].name, "default");
         assert!(
             directory(
                 state.path(),
@@ -536,7 +937,10 @@ mod tests {
             )
             .is_err()
         );
-        assert!(facts(&config, &LocalPolicy::default()).is_empty());
+        assert_eq!(
+            facts(state.path(), &config, &LocalPolicy::default())[0].name,
+            "default"
+        );
     }
 
     #[test]
