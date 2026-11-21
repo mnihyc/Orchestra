@@ -7,6 +7,7 @@
  * every article, and the keys that are bound now. Everything in it is a part of the build: no request is
  * made, and no model is asked.
  */
+import { carryDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useViewLocation, useViewNavigate } from '@/features/workbench/pageContext';
 import { useMatches, useRouter } from '@tanstack/react-router';
 import { BookOpen, GraduationCap, Keyboard, Lightbulb, SearchX, SlidersHorizontal, Newspaper } from 'lucide-react';
@@ -102,10 +103,10 @@ function HelpDocument({ page = false, article: routed = null, heading: routedHea
   const setQuery = page ? setPageQuery : setHelpQuery;
   const ownPage = page;
   const shownPart = ownPage ? routedPart ?? initialPagePart : helpSection(part) ?? (about === undefined ? 'articles' : 'screen');
-  const selectPart = (next: Part) => {
+  const selectPart = carryDeviceChoice((next: Part) => {
     setPart(next);
     if (ownPage && next !== 'screen') void navigate({ href: `/help?part=${encodeURIComponent(next)}`, replace: true });
-  };
+  }, setPart);
   const dock = useMemo(() => createTutorialDock(), []);
 
   const wanted = page ? (pageQuery.trim() === '' ? routed : null) : state.article;

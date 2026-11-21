@@ -36,6 +36,29 @@ test('signing in comes back to the place last in, with the view it had, wherever
   await page.waitForURL(THREADS_VIEW);
 });
 
+test('signing in opens the saved conversation within a second of the login answer at 200 ms', async ({ page }) => {
+  const thread = ACME.mainThread;
+  await control('/landing', { place: { node_id: thread, route: `/thread/${thread}` } });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Network.enable');
+  await cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 200, downloadThroughput: -1, uploadThroughput: -1 });
+  const paths: string[] = [];
+  page.on('request', (request) => { paths.push(new URL(request.url()).pathname); });
+  await signInAnywhere(page);
+  const draw = await page.waitForFunction(() => {
+    const header = document.querySelector('[data-thread-header]');
+    const composer = [...document.querySelectorAll('textarea')].find((input) =>
+      input.getAttribute('aria-label') === 'Message to the agent' || [...input.labels].some((label) => label.textContent.trim() === 'Message to the agent'));
+    const login = performance.getEntriesByType('resource').find((entry) => new URL(entry.name).pathname === '/api/v1/auth/login');
+    if (!header?.getBoundingClientRect().height || !composer?.getBoundingClientRect().height || composer.disabled || login === undefined) return false;
+    return performance.now() - (login as PerformanceResourceTiming).responseEnd;
+  });
+  const elapsed = await draw.jsonValue();
+  expect(paths.filter((path) => path.endsWith('/me/landing'))).toHaveLength(1);
+  expect(paths.filter((path) => path === '/api/v1/me/bootstrap' || path.endsWith('/overview') || path === `/api/v1/threads/${thread}/opening`)).toEqual([]);
+  expect(elapsed).toBeLessThanOrEqual(1000);
+});
+
 test('a place that is gone, or can no longer be read, falls back to the org choice', async ({ page }) => {
   await control('/landing', { place: { node_id: '00000000-0000-4000-8000-ffffffffffff', route: '/topic/00000000-0000-4000-8000-ffffffffffff' } });
   await signInAnywhere(page);

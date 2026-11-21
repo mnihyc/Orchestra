@@ -7,7 +7,7 @@
 import type { ThreadIconFacts } from '@/ui/ThreadState';
 import type { LucideIcon } from 'lucide-react';
 import type { NodeRef, PersonalTarget } from '@/generated/api-types';
-import { useContext, useEffect, useMemo } from 'react';
+import { useContext, useEffect, useMemo, useRef } from 'react';
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -62,13 +62,15 @@ function resolvedHeading(held: Headings | null | undefined): ScreenHeading | nul
   if (route === null || route === undefined) return body ?? null;
   if (route.views?.ready === false || body?.target === undefined) return route;
   if (route.target?.kind !== body.target.kind || route.target.id !== body.target.id) return route;
-  return { ...route, section: route.section ?? body.section, trail: route.trail ?? body.trail };
+  const section = route.section ?? body.section, trail = route.trail ?? body.trail;
+  return section === route.section && trail === route.trail ? route : { ...route, section, trail };
 }
 const useHeading = create<Headings & { focused: string | null; byView: ReadonlyMap<string, Headings> }>(() => ({ heading: null, route: null, focused: null, byView: new Map() }));
 function report(owner: string | undefined, kind: keyof Headings, heading: ScreenHeading | null): void {
-  if (owner === undefined) { useHeading.setState({ [kind]: heading }); return; }
   const before = useHeading.getState();
+  if (owner === undefined) { if (before[kind] !== heading) useHeading.setState({ [kind]: heading }); return; }
   const held = before.byView.get(owner) ?? { heading: null, route: null };
+  if (held[kind] === heading) return;
   const byView = new Map(before.byView);
   byView.set(owner, { ...held, [kind]: heading });
   useHeading.setState({ byView });
@@ -80,25 +82,45 @@ export function forgetScreenHeading(owner: string): void {
 }
 
 
+/** Replacing the current heading publishes one update. Only leaving its lifetime clears a global heading. */
+function usePublishedHeading(owner: string | undefined, kind: keyof Headings, value: ScreenHeading, enabled: boolean, clearOnLeave: boolean) {
+  const published = useRef<ScreenHeading | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    published.current = value;
+    report(owner, kind, value);
+  }, [owner, kind, value, enabled, clearOnLeave]);
+  useEffect(() => {
+    if (!enabled || !clearOnLeave) return;
+    return () => {
+      if (useHeading.getState()[kind] === published.current) report(undefined, kind, null);
+    };
+  }, [enabled, clearOnLeave, kind, owner]);
+}
+
+/** The authorized path stays the same input for navigation when only a thread's display changes. */
+function useReportedPath(path: ScreenHeading['path']): ScreenHeading['path'] {
+  const encoded = path === undefined ? '' : JSON.stringify(path);
+  return useMemo(() => encoded === '' ? undefined : JSON.parse(encoded) as readonly NodeRef[], [encoded]);
+}
+
 /** Addressed resource identity belongs to the frame even when its Screen body is paused. */
 export function useRouteHeading(heading: ScreenHeading): void {
   const instance = useViewInstance();
   const owner = instance?.id;
   const { title, tabTitle, tabPending, icon, nodeId, leaf, target, section, trail } = heading;
   const presented = JSON.stringify(heading.thread ?? null);
-  const path = JSON.stringify(heading.path ?? null);
+  const path = useReportedPath(heading.path);
   const views = JSON.stringify(heading.views ?? null);
   const ancestry = trail === undefined ? '' : JSON.stringify(trail);
   const targetKind = target?.kind, targetId = target?.id;
   usePageTitle(useNodeLabel(nodeId, title), instance === null);
-  useEffect(() => {
-    const route: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, section,
+  const route = useMemo<ScreenHeading>(() => ({ thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, section,
       trail: ancestry === '' ? undefined : JSON.parse(ancestry) as readonly TrailPart[], ...(tabPending === undefined ? {} : { tabPending }),
-      path: path === 'null' ? undefined : JSON.parse(path) as ScreenHeading['path'], views: views === 'null' ? undefined : JSON.parse(views) as ScreenHeading['views'],
-      target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId } };
-    report(owner, 'route', route);
-    return () => { if (owner === undefined && useHeading.getState().route === route) report(owner, 'route', null); };
-  }, [title, tabTitle, tabPending, icon, nodeId, leaf, section, ancestry, presented, path, views, targetKind, targetId, owner]);
+      path, views: views === 'null' ? undefined : JSON.parse(views) as ScreenHeading['views'],
+      target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId } }),
+    [title, tabTitle, tabPending, icon, nodeId, leaf, section, ancestry, presented, path, views, targetKind, targetId]);
+  usePublishedHeading(owner, 'route', route, true, owner === undefined);
 }
 
 /** Says what the screen in view is, for as long as the calling component is in view. */
@@ -115,31 +137,25 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
   // A trail is made again by every draw of the screen; what it says is what counts, so it is compared by that.
   const said = trail === undefined ? '' : JSON.stringify(trail);
   const availability = views === undefined ? '' : JSON.stringify(views);
-  const authorized = path === undefined ? '' : JSON.stringify(path);
+  const authorized = useReportedPath(path);
   const presented = JSON.stringify(heading.thread ?? null);
-  useEffect(() => {
-    if (!enabled) return;
-    const spoken: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, section, leaf, ...(tabPending === undefined ? {} : { tabPending }), target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId }, path: authorized === '' ? undefined : JSON.parse(authorized) as readonly NodeRef[], views: availability === '' ? undefined : JSON.parse(availability) as ScreenHeading['views'], trail: said === '' ? undefined : (JSON.parse(said) as TrailPart[]) };
-    report(owner, 'heading', spoken);
-    return () => {
-      // Activity pauses hidden page effects. Its already-read identity still belongs to the frame;
-      // the shell clears it when the addressed route changes or the frame is left.
-      if (inWorkbench) return;
-      // Only what this screen said is taken back: the next screen may have spoken already.
-      if (useHeading.getState().heading === spoken) useHeading.setState({ heading: null });
-    };
-  }, [title, tabTitle, tabPending, icon, nodeId, section, said, leaf, availability, authorized, presented, enabled, targetKind, targetId, inWorkbench, owner]);
+  const spoken = useMemo<ScreenHeading>(() => ({ thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, section, leaf, ...(tabPending === undefined ? {} : { tabPending }), target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId }, path: authorized, views: availability === '' ? undefined : JSON.parse(availability) as ScreenHeading['views'], trail: said === '' ? undefined : (JSON.parse(said) as TrailPart[]) }),
+    [title, tabTitle, tabPending, icon, nodeId, section, said, leaf, availability, authorized, presented, targetKind, targetId]);
+  usePublishedHeading(owner, 'heading', spoken, enabled, !inWorkbench);
 }
 
 /** What the screen in view said of itself, or `null` while it has said nothing. */
-export function useCurrentHeading(): ScreenHeading | null {
+export function useCurrentHeading(enabled?: boolean): ScreenHeading | null;
+export function useCurrentHeading<T>(enabled: boolean, select: (heading: ScreenHeading) => T): T | null;
+export function useCurrentHeading<T>(enabled = true, select?: (heading: ScreenHeading) => T) {
   const instance = useViewInstance();
-  const held = useHeading(useShallow((state) => {
+  return useHeading(useShallow((state) => {
+    if (!enabled) return null;
     const owner = instance === null ? state.focused : instance.headingOwner;
-    const current = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
-    return { route: current?.route ?? null, heading: current?.heading ?? null };
+    const held = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
+    const heading = resolvedHeading(held);
+    return select === undefined || heading === null ? heading : select(heading);
   }));
-  return useMemo(() => resolvedHeading(held), [held]);
 }
 
 /** The current availability for non-React commands and view offers. */

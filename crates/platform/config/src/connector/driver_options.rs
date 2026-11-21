@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize, de::Error as _, ser::Error as _};
 use serde_json::Value as Json;
 
 fn object(value: Json) -> Result<Json, &'static str> {
-    let value = match value {
-        Json::String(text) => serde_json::from_str(&text)
-            .map_err(|_| "driver connection settings contain invalid JSON")?,
-        value => value,
+    let Json::String(text) = value else {
+        return Err("driver connection settings use JSON text in the machine file");
     };
+    let value: Json = serde_json::from_str(&text)
+        .map_err(|_| "driver connection settings contain invalid JSON")?;
     if value.is_object() {
         Ok(value)
     } else {
@@ -34,7 +34,7 @@ pub(super) fn serialize_drivers<S: serde::Serializer>(
     value.serialize(serializer)
 }
 
-/// Reads canonical JSON text and the earlier TOML tables without coercing their contents.
+/// Reads the canonical JSON text without coercing its contents.
 pub(super) fn deserialize_drivers<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<MachineDrivers, D::Error> {
@@ -107,8 +107,18 @@ mod tests {
     }
 
     #[test]
-    fn existing_driver_tables_keep_their_restrictive_rules_and_configuration() {
-        let read: ConnectorConfig = toml::from_str("[drivers]\nallowed=['cluster-test']\n[drivers.docker]\nimages=['allowed:1']\nbuilds=false\n[drivers.configurations.cluster-test]\nendpoint='local'\n").unwrap();
+    fn canonical_driver_sections_keep_their_restrictive_rules_and_json_configuration() {
+        let read: ConnectorConfig = toml::from_str(
+            r#"[drivers]
+allowed=['cluster-test']
+[drivers.images]
+images=['allowed:1']
+builds=false
+[drivers.configurations]
+cluster-test='{"endpoint":"local"}'
+"#,
+        )
+        .unwrap();
         assert_eq!(read.drivers.images.images, ["allowed:1"]);
         assert!(!read.drivers.images.builds);
         assert_eq!(
@@ -117,6 +127,16 @@ mod tests {
         );
         let next: ConnectorConfig = toml::from_str(&toml::to_string(&read).unwrap()).unwrap();
         assert_eq!(next.drivers, read.drivers);
+    }
+
+    #[test]
+    fn opaque_driver_values_use_only_the_json_text_written_by_the_machine_file() {
+        for text in [
+            "[drivers.configurations.cluster-test]\nendpoint='local'\n",
+            "[policy.values.drivers]\nallowed=['cluster-test']\n",
+        ] {
+            assert!(toml::from_str::<ConnectorConfig>(text).is_err(), "{text}");
+        }
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub fn mount(registry: &mut Registry) {
     port_entry::mount(registry);
     port_requests::mount(registry);
     trust::mount(registry);
+    landing::mount(registry);
 }
 
 #[path = "access.rs"]
@@ -225,3 +226,5 @@ pub mod users;
 
 #[path = "workspace.rs"]
 pub mod workspace;
+
+mod landing;
