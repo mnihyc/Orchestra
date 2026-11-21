@@ -167,7 +167,7 @@ test('nothing waits, in each tab', async ({ page }) => {
   await expect(page.getByText('You have asked for nothing').first()).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.getByRole('tab', { name: 'History' }).click();
-  await expect(page.getByText('Nothing was decided yet')).toBeVisible();
+  await expect(page.getByText('Nothing has been decided yet')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 

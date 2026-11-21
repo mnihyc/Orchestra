@@ -13,6 +13,8 @@ import type { ModelParameters, ParameterView, Rate, ServiceTier, SettingLock, Th
 
 export type ChoiceKind = 'speed' | 'access';
 export type Kind = ChoiceKind | 'context';
+/** The controls of the box that open a list of their own: the model, its effort, and the three choices of what it runs with. */
+export type ControlName = 'model' | 'effort' | Kind;
 
 /** What a parameter's definition says, cut down to what the control reads; anything else it holds is left alone. */
 export interface ParamDef {
@@ -139,7 +141,7 @@ const tiersOf = (model: ModelParameters): ServiceTier[] => model.service_tiers ?
  * from. `own` is the thread's own choices when they are known (what they are the object `agent.params`); without
  * it a value that the parameter shows is taken to be the thread's own where its source says the thread.
  */
-export function statesOf(parameters: ThreadParameters, own: Readonly<Record<string, unknown>> | null, t?: TFunction): State[] {
+export function statesOf(parameters: Pick<ThreadParameters, 'model' | 'parameters' | 'provider'>, own: Readonly<Record<string, unknown>> | null, t?: TFunction): State[] {
   const model = parameters.model.options.find((option) => option.model_name === parameters.model.value)?.parameters;
   if (model === undefined) return [];
   const states: State[] = [];
@@ -225,13 +227,11 @@ export function forceLabel(state: SpeedOrAccess): string | null {
 }
 
 /**
- * What is written as the thread's own choices once `state` is given `value`: the object without the member when the
- * value is what the model starts with; with the member as null where none of a speed or a program is chosen while the
- * model starts with one (the ordinary speed, no program); else with the value.
+ * An explicit choice masks an inherited value, including Standard/None and a value equal to the model's start.
+ * Following inheritance is the separate Reset action; a selection is never turned into a reset by equality.
  */
 export function withChoice(own: Readonly<Record<string, unknown>>, state: State, value: string | number | null): Record<string, unknown> {
   const { [state.key]: _gone, ...rest } = own;
-  if (value === state.start) return rest;
   if (value === null) return state.kind === 'context' ? rest : { ...rest, [state.key]: null };
   return { ...rest, [state.key]: value };
 }

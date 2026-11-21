@@ -19,14 +19,26 @@ const PATH_MAX_CHARS: usize = 4_096;
 const UNKNOWN_MEDIA_TYPE: &str = "application/octet-stream";
 
 /// A whole file already held by the store; its destination pins it in its own write transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct WorkspaceFile {
     pub(crate) name: String,
     pub(crate) size: i64,
     pub(crate) blob: Hash,
     pub(crate) media_type: String,
     pub(crate) is_text: bool,
+    /// Locally produced bytes keep their publication until the destination records its pin.
+    pub(crate) _publication: Option<orch_blob_contract::store::Stored>,
 }
+impl PartialEq for WorkspaceFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.size == other.size
+            && self.blob == other.blob
+            && self.media_type == other.media_type
+            && self.is_text == other.is_text
+    }
+}
+impl Eq for WorkspaceFile {}
 
 /// The same relative-path rules for documents, chats and messages to another thread.
 pub(crate) fn relative_file(path: &str) -> bool {
@@ -200,6 +212,7 @@ impl Engine {
             reader.machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: reader.environment,
                 mount: None,
                 path: relative.to_owned(),
@@ -225,6 +238,7 @@ impl Engine {
             reader.machine,
             SerialKey::None,
             &FsFetch {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: reader.environment,
                 mount: None,
                 path: relative.to_owned(),
@@ -251,15 +265,18 @@ impl Engine {
         {
             return Ok(Err(changed()));
         }
-        if store
-            .size(&fetched.hash)
+        let Some(publication) = store
+            .existing(&fetched.hash)
             .await
             .map_err(EngineError::unreadable)?
-            != Some(fetched.size)
-        {
+        else {
+            return Ok(Err(refused(given, Code::Closed, "workspace_file_store")));
+        };
+        if publication.size != fetched.size {
             return Ok(Err(refused(given, Code::Closed, "workspace_file_store")));
         }
         Ok(Ok(WorkspaceFile {
+            _publication: Some(publication),
             name: given.rsplit('/').next().unwrap_or(given).trim().to_owned(),
             blob: fetched.hash,
             size: fetched.size,
@@ -317,6 +334,7 @@ impl Engine {
             machine,
             SerialKey::None,
             &FsStat {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: within(&thread.workspace_dir, path),
@@ -345,6 +363,8 @@ impl Engine {
             machine,
             SerialKey::None,
             &orch_link_contract::commands::FsList {
+                prefix: None,
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: environment,
                 mount: None,
                 path: within(&thread.workspace_dir, path),

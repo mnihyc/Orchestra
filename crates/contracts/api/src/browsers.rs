@@ -87,9 +87,26 @@ crate::common::full_or_receipt! {
     }
 }
 
+/// Native eligibility and recorded retirement; a missing instant is never inferred from silence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InteractiveLifecycle {
+    /// Continuous permission-gated sockets have no fixed driving lease; admission tickets are separate.
+    pub driving_idle_expires_at: crate::workspace::JobWaitTime,
+    pub gate: Option<BrowsersOff>,
+    pub idle_close_eligible_at: crate::workspace::JobWaitTime,
+    /// Retained rows have no independent captured erasure deadline; their environment owns purge.
+    pub closed_entry_expires_at: crate::workspace::JobWaitTime,
+    pub retirement_reason: Option<String>,
+    pub idle_minutes: Option<i64>,
+    pub policy_source: Option<crate::settings::SettingScope>,
+    pub evaluated_at: Time,
+}
+
 /// A browser known to Orch in an environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Browser {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<InteractiveLifecycle>,
     /// Its identifier.
     pub id: Id,
     /// Where it runs.
@@ -142,6 +159,8 @@ pub enum BrowsersOff {
     MachinePolicy,
     /// The environment is unreachable.
     EnvironmentOffline,
+    /// Stop has been accepted for the current environment registration.
+    EnvironmentStopping,
 }
 
 /// The availability of one way to start a browser.
@@ -167,6 +186,9 @@ pub struct EnvironmentBrowsersLimit {
 /// Browsers and profiles with the gates, available programs and limits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentBrowsers {
+    /// Continue the same authorized state and search, in stable identity order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Id>,
     /// Why nothing is shown now, or null when on.
     pub off: Option<BrowsersOff>,
     /// What was found there.
@@ -177,7 +199,7 @@ pub struct EnvironmentBrowsers {
     pub profiles: Vec<BrowserProfile>,
     /// Where they lie, only for a holder of Manage.
     pub profiles_dir: Option<String>,
-    /// Live browsers by latest use, followed by those closed within a day.
+    /// One page of open browsers, or retained closed rows on explicit request.
     pub browsers: Vec<Browser>,
     /// The environment's limit.
     pub limit: EnvironmentBrowsersLimit,
@@ -196,6 +218,23 @@ pub struct EnvironmentBrowsersList {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentBrowserListQuery {
+    /// Retained closed rows instead of open work; this performs no discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    /// Literal case-insensitive displayed-name or note search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Continue this environment, state and search in descending identity order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Id>,
+    /// Preferred positive page size; there is no product maximum.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+
     /// Look before answering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<bool>,

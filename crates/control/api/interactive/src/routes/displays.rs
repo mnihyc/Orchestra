@@ -54,8 +54,6 @@ use orch_db::Conn;
 
 use orch_db::queries::displays as rows;
 
-use orch_engine::displays::CLOSED_LIST_KEPT;
-
 use orch_engine::displays::DEFAULT_MAX;
 
 use orch_engine::displays::DisplayFailure;
@@ -115,7 +113,7 @@ pub(crate) async fn current(
     principal: Option<&Principal>,
     environment: Id,
 ) -> ApiResult<EnvironmentDisplays> {
-    current_with_names(app, conn, principal, environment, None).await
+    current_with_names(app, conn, principal, environment, None, None, None).await
 }
 orch_api_base::__api_bind_c12234bdba!();
 
@@ -125,6 +123,8 @@ async fn current_with_names(
     principal: Option<&Principal>,
     environment: Id,
     names: Option<&NameBounds>,
+    query: Option<&EnvironmentDisplayListQuery>,
+    selected: Option<Id>,
 ) -> ApiResult<EnvironmentDisplays> {
     let site = rows::site(conn, environment)
         .await?
@@ -147,7 +147,39 @@ async fn current_with_names(
     .map_err(ApiError::internal)?
     .unwrap_or(DEFAULT_MAX);
     let count = rows::owned_count(conn, environment).await?;
-    let found = rows::list(conn, environment, app.clock.now() - CLOSED_LIST_KEPT).await?;
+    let query = query.cloned().unwrap_or_default();
+    let limit = i64::from(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+    );
+    if limit == 0 {
+        return Err(ApiError::invalid("limit", "choose a positive page size"));
+    }
+    let mut found = if let Some(id) = selected {
+        rows::get(conn, id)
+            .await?
+            .filter(|row| row.environment_id == environment)
+            .into_iter()
+            .collect()
+    } else {
+        rows::page(
+            conn,
+            environment,
+            query.closed.unwrap_or(false),
+            query.query.as_deref().unwrap_or_default(),
+            query.cursor,
+            limit + 1,
+        )
+        .await?
+    };
+    let next_cursor =
+        if selected.is_none() && i64::try_from(found.len()).unwrap_or(i64::MAX) > limit {
+            found.pop();
+            found.last().map(|row| row.id)
+        } else {
+            None
+        };
     let people: Vec<_> = found
         .iter()
         .filter_map(|r| r.opened_by)
@@ -199,6 +231,16 @@ async fn current_with_names(
         let driving = app.realtime.displays().driving(row.id, app.clock.now());
         let drivers = refusals::user_refs(conn, &driving).await?;
         displays.push(Display {
+            lifecycle: Some(orch_api_contract::browsers::InteractiveLifecycle {
+                driving_idle_expires_at: orch_api_contract::workspace::JobWaitTime::NotApplicable,
+                gate: off,
+                idle_close_eligible_at: orch_api_contract::workspace::JobWaitTime::NotApplicable,
+                closed_entry_expires_at: orch_api_contract::workspace::JobWaitTime::Unreported,
+                retirement_reason: row.close_reason.clone(),
+                idle_minutes: None,
+                policy_source: None,
+                evaluated_at: Time::new(app.clock.now()),
+            }),
             id: row.id,
             environment: env.clone(),
             name: row.name,
@@ -223,9 +265,17 @@ async fn current_with_names(
         });
     }
     Ok(EnvironmentDisplays {
+        next_cursor,
         off,
         support,
-        displays: if off.is_none() { displays } else { Vec::new() },
+        displays: if off.is_none() {
+            displays
+        } else {
+            displays
+                .into_iter()
+                .filter(|row| row.state == orch_api_contract::browsers::BrowserState::Closed)
+                .collect()
+        },
         limit: EnvironmentBrowsersLimit { open: count, max },
     })
 }
@@ -276,11 +326,11 @@ async fn list(
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
     require(&mut conn, &principal, id, Permission::VncView).await?;
-    if query.look == Some(true) {
+    if query.closed != Some(true) && query.look == Some(true) {
         let site = rows::site(&mut conn, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
-        if site.status == "running" && site.machine_online == Some(true) {
+        if !site.stopping && site.status == "running" && site.machine_online == Some(true) {
             drop(conn);
             ctx.app
                 .engine
@@ -293,7 +343,16 @@ async fn list(
     }
     let principal = authorization::principal(&ctx, &mut conn).await?;
     require(&mut conn, &principal, id, Permission::VncView).await?;
-    current(&ctx.app, &mut conn, Some(&principal), id).await
+    current_with_names(
+        &ctx.app,
+        &mut conn,
+        Some(&principal),
+        id,
+        None,
+        Some(&query),
+        None,
+    )
+    .await
 }
 
 fn action_context(mut ctx: Ctx, guard: &Guard) -> Ctx {
@@ -311,12 +370,20 @@ pub(super) async fn display_in(
     names: Option<&NameBounds>,
 ) -> ApiResult<Display> {
     require(conn, principal, environment, Permission::VncView).await?;
-    current_with_names(app, conn, Some(principal), environment, names)
-        .await?
-        .displays
-        .into_iter()
-        .find(|d| d.id == id)
-        .ok_or_else(ApiError::not_found)
+    current_with_names(
+        app,
+        conn,
+        Some(principal),
+        environment,
+        names,
+        None,
+        Some(id),
+    )
+    .await?
+    .displays
+    .into_iter()
+    .find(|d| d.id == id)
+    .ok_or_else(ApiError::not_found)
 }
 
 async fn open(
@@ -339,20 +406,53 @@ async fn open(
         crate::routes::workspace::door::beside(&mut tx, guard.principal(), environment, thread)
             .await?;
     }
-    let row = ctx
-        .app
-        .engine
-        .displays()
-        .open(OpenDisplay {
-            environment,
-            requester: Requester::Person(caller.clone()),
-            thread: query.thread,
-            name: body.name,
-            geometry: body.geometry,
-            note: None,
-            origin: crate::sign_in::origin(&ctx),
-        })
-        .await;
+    let displays = ctx.app.engine.displays();
+    let requester = Requester::Person(caller.clone());
+    let origin = crate::sign_in::origin(&ctx);
+    use orch_link_contract::display::DisplayTarget;
+    let source = match (body.attach, body.desktop.unwrap_or(false)) {
+        (Some(_), true) => return Err(ApiError::invalid("attach", "Select one display source")),
+        (None, true) => Some((DisplayTarget::Desktop, None)),
+        (Some(server), false) => Some((
+            DisplayTarget::Endpoint(format!("127.0.0.1:{}", server.port)),
+            server.password,
+        )),
+        (None, false) => None,
+    };
+    let row = match source {
+        Some((target, password)) => {
+            if body.geometry.is_some() || body.name.is_some() {
+                return Err(ApiError::invalid(
+                    "attach",
+                    "An attached display gets its name and geometry from its VNC server",
+                ));
+            }
+            displays
+                .adopt(orch_engine::displays::AdoptDisplay {
+                    environment,
+                    requester,
+                    thread: query.thread,
+                    target,
+                    password,
+                    note: None,
+                    origin,
+                })
+                .await
+        }
+        None => {
+            displays
+                .open(OpenDisplay {
+                    environment,
+                    requester,
+                    thread: query.thread,
+                    name: body.name,
+                    geometry: body.geometry,
+                    note: None,
+                    origin,
+                })
+                .await
+        }
+    };
     tx.commit().await.map_err(orch_db::DbError::from)?;
     match row {
         Ok(row) => super::interactive_creation::display_created(&ctx, &caller, &row).await,

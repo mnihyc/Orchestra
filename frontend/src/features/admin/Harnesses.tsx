@@ -137,8 +137,8 @@ function BuildsTable({ builds, title, catalogue, onChange }: { builds: readonly 
   });
 
   const status = (build: HarnessBuild) => <span className="flex min-w-0 flex-wrap items-center gap-2">
-    <BuildStatus build={build} name={title(build.kind)} catalogue={catalogue(build.kind)} />
-    {build.source !== 'release' && build.status !== 'checking' && <Button size="sm" variant="ghost" pending={check.isPending && check.variables.kind === build.kind && check.variables.version === build.version} onClick={() => check.mutate(build)}>{t('admin.harnesses.check')}</Button>}
+    <BuildStatus build={build} name={title(build.kind)} catalogue={catalogue(build.kind)} showOutcome />
+    {build.status !== 'checking' && <Button size="sm" variant="ghost" pending={check.isPending && check.variables.kind === build.kind && check.variables.version === build.version} onClick={() => check.mutate(build)}>{t('admin.harnesses.check')}</Button>}
   </span>;
   const defaultChoice = (build: HarnessBuild) => build.is_default
     ? <StatusTag tone="accent">{t('admin.harnesses.isDefault')}</StatusTag>
