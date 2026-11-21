@@ -25,4 +25,4 @@ Create a private group called Launch review under the Release topic. Add the rev
 
 Managers can add and remove members, decide requests, change the name, home and visibility, and manage agent posting. The last manager must hand management to someone else before giving it up. Home administrators retain the place's normal moderation and administrative reach.
 
-Moving a group requires the offered rights at its current and new homes. Sharing is still participation in that group: read the native access choices before adding people. See [link sharing](link-sharing.md) for a copied link's audience, and [resource groups](resource-groups.md) for organizing resource lists.
+Moving a group requires the permissions that are offered at its current and its new home. Sharing is still taking part in that group: read the choices of access before you add people. See [link sharing](link-sharing.md) for a copied link's audience, and [resource groups](resource-groups.md) for organizing resource lists.

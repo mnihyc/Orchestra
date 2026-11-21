@@ -1,4 +1,6 @@
 /** A person's place exceptions are editable here, with Default, Undo and one acknowledged request. */
+import type { NameSearch } from '@/api/search';
+import { pickerNamePage, namedPlace } from './picker-name-fixture';
 import { cleanup,screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
@@ -12,11 +14,11 @@ import { show } from './support';
 
 const reads=vi.hoisted(()=>vi.fn<(cursor:string|null)=>Promise<NotificationExceptionPage>>());
 const locator=vi.hoisted(()=>({read:vi.fn(),open:vi.fn()}));
-vi.mock('@/features/chat/open',()=>({useOpenPath:()=>locator.open}));
-vi.mock('@/api/search',()=>({namesQuery:({q}:{q:string})=>({queryKey:['notification-place-names',q],queryFn:()=>{locator.read(q);return Promise.resolve([{id:'topic',kind:'topic',name:'Login',path:[],href:'/topic/topic'}]);}})}));
+vi.mock('@/features/chat/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useOpenPath:()=>locator.open}));
+vi.mock('@/api/search',()=>({pickerNamesQuery:(s: NameSearch) => pickerNamePage(s, () => { locator.read(s.q); return [{...namedPlace('topic','topic','Login'), href:'/topic/topic'}]; })}));
 vi.mock('@/api/notificationExceptions',()=>({notificationExceptionsKey:['notification-exceptions'],setNotificationException:vi.fn(),
   notificationExceptionsQuery:(cursor:string|null)=>({queryKey:['notification-exceptions',cursor],queryFn:()=>reads(cursor)})}));
-vi.mock('@/features/navigation/places',()=>({PlaceLink:({place,children,className}:{place:NodeRef;children:ReactNode;className?:string})=><a href={'/place/'+place.id} className={className}>{children}</a>}));
+vi.mock('@/features/navigation/places',async (loadOriginal) => ({ ...await loadOriginal<object>(),PlaceLink:({place,children,className}:{place:NodeRef;children:ReactNode;className?:string})=><a href={'/place/'+place.id} className={className}>{children}</a>}));
 const root:NodeRef={id:'root',kind:'org',name:'Acme',redacted:false};
 const topic:NodeRef={id:'topic',kind:'topic',name:'Login',redacted:false};
 const initial:NotificationException={node:topic,path:[root],level:'off',default_level:'important',default_from:root};

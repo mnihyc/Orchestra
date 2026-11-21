@@ -7,6 +7,11 @@ import type { SettingDef as SettingWithText } from '@/generated/api-types';
 const STRUCTURED_FIELDS = { cpu_millis: 'access.options.cpu_millis', memory_mb: 'access.options.memory_mb', memory_swap_mb:'access.options.memory_swap_mb', blkio_weight:'access.options.blkio_weight', pids: 'access.options.pids', disk_gb: 'access.options.disk_gb' } as const;
 function knownField(name: string): name is keyof typeof STRUCTURED_FIELDS { return Object.hasOwn(STRUCTURED_FIELDS, name); }
 const RELATED_FIELDS = { meaning: 'related.fields.meaning', place: 'related.fields.place', references: 'related.fields.references', folder: 'related.fields.folder', topic: 'related.fields.topic', project: 'related.fields.project', org: 'related.fields.org' } as const;
+const CONNECTION_FIELDS = { recent_samples: 'connectionQuality.fields.recent_samples', usual_samples: 'connectionQuality.fields.usual_samples',
+  slow_increase_percent: 'connectionQuality.fields.slow_increase_percent', slow_extra_ms: 'connectionQuality.fields.slow_extra_ms' } as const;
+const EDGE_FIELDS = { session_cache_mib: 'edgeTransport.fields.session_cache_mib', session_timeout_secs: 'edgeTransport.fields.session_timeout_secs',
+  session_tickets: 'edgeTransport.fields.session_tickets', early_data: 'edgeTransport.fields.early_data', http2: 'edgeTransport.fields.http2', http3: 'edgeTransport.fields.http3',
+  alt_svc_secs: 'edgeTransport.fields.alt_svc_secs', reload_secs: 'edgeTransport.fields.reload_secs' } as const;
 function knownRelatedField(name: string): name is keyof typeof RELATED_FIELDS { return Object.hasOwn(RELATED_FIELDS, name); }
 
 const SEARCH_FIELDS = {
@@ -35,6 +40,8 @@ export function searchFieldName(name: string, t: TFunction): string | undefined 
 
 /** Built-in resource members have translated names; variables keep the names their author entered. */
 export function settingFieldName(name: string, key: string | undefined, t: TFunction): string {
+  if (key === 'edge.transport' && Object.hasOwn(EDGE_FIELDS, name)) return t(EDGE_FIELDS[name as keyof typeof EDGE_FIELDS]);
+  if (key === 'interface.connection_quality' && Object.hasOwn(CONNECTION_FIELDS, name)) return t(CONNECTION_FIELDS[name as keyof typeof CONNECTION_FIELDS]);
   if ((key === 'summary.targets' || key === 'auto.summarizer') && knownSummaryField(name)) return t(`summaryOptions.fields.${name}`);
   if ((key === 'related.weights' || key === 'related.place_scores') && knownRelatedField(name)) return t(RELATED_FIELDS[name]);
   if (key === 'search.word_tuning' || key === 'search.semantic.tuning' || key === 'search.semantic.embeddings') return searchFieldName(name, t) ?? name.replaceAll('_', ' ').replaceAll('.', ' ');

@@ -92,6 +92,7 @@ async fn report_sign_in(app: &TestApp, machine: Id, identity: &str) {
     let clock = app.clock.clone();
     let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Agent, Role::Provider]);
     let delivery = match receiver.on_ev(Ev {
+        native_opening_id: None,
         stream: "machine".to_owned(),
         seq: 1,
         at: clock.time(),
@@ -149,6 +150,7 @@ async fn a_sign_in_discovered_again_on_reconnect_keeps_one_provider_and_one_prof
     ] {
         let mut receiver = StreamReceiver::new(BTreeMap::new(), vec![Role::Agent, Role::Provider]);
         let delivery = match receiver.on_ev(Ev {
+            native_opening_id: None,
             stream: "machine".to_owned(),
             seq: 1,
             at: clock.time(),

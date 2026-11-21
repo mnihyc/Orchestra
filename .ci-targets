@@ -1,0 +1,11 @@
+fmt
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test bound
+test -p orch-api-core --test everything_scale -- restoring_the_team_members_session --nocapture --test-threads=1
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts tests/e2e/last-place.spec.ts tests/e2e/first-wave-edge.spec.ts
+web-e2e tests/e2e/configuration-read-availability.spec.ts tests/e2e/machine-native-tools.spec.ts tests/e2e/document-move.spec.ts tests/e2e/implicit-actions.spec.ts tests/e2e/finder-loading.spec.ts tests/e2e/program-versions.spec.ts tests/e2e/implicit-personal-settings.spec.ts tests/e2e/screen-review2.spec.ts tests/e2e/meta-admission.spec.ts tests/e2e/frame-review.spec.ts tests/performance/frame-budget.spec.ts tests/performance/tree-scale.spec.ts
+web-e2e tests/e2e/thread.spec.ts tests/e2e/measure-pages.spec.ts tests/e2e/workbench-grid.spec.ts --grep "a returning thread can use its shell worker|a folded opening fills|the shipped cold page fetches only its locale|a searchable exact-target locator|browser Back paints the retained provider"

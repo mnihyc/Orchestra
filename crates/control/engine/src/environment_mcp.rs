@@ -22,6 +22,7 @@ pub struct ImportRecord<'a> {
     pub scope: &'a Json,
     pub directory: Option<&'a str>,
     pub name: &'a str,
+    pub origin: Option<String>,
 }
 impl ImportRecord<'_> {
     pub fn spec(
@@ -30,12 +31,47 @@ impl ImportRecord<'_> {
         by: Id,
         at: orch_types::Time,
     ) -> Json {
-        serde_json::json!({"transport":reply.transport,"imported":{
+        let mut spec = serde_json::json!({"transport":reply.transport,"imported":{
             "source":self.source,"scope":self.scope,"directory":self.directory,
             "name":self.name,"digest":reply.digest,"definition_fingerprint":reply.definition_fingerprint,
             "tools":reply.tools,"at":at,"by":by
-        }})
+        }});
+        if let Some(origin) = self.origin {
+            spec["imported"]["origin"] = serde_json::json!(origin);
+        }
+        spec
     }
+}
+
+/// A public locator binds the actual native process without exposing its provider identity.
+#[must_use]
+pub fn discovery_origin(environment: Id, found: &Json) -> String {
+    let profile = found.get("profile").cloned().and_then(|value| {
+        serde_json::from_value::<orch_agent_contract::discovery::McpProfile>(value).ok()
+    });
+    let scope = match found["scope"].as_str() {
+        Some("directory" | "project") => "project",
+        _ => "user",
+    };
+    orch_types::Hash::of(
+        serde_json::json!([
+            environment,
+            profile.map(|profile| (profile.provider_id, profile.agent_id)),
+            found["source"],
+            scope,
+            found["directory"],
+            found["name"]
+        ])
+        .to_string()
+        .as_bytes(),
+    )
+    .to_string()
+}
+
+/// Private command routing produces the public opaque origin, never public provider identifiers.
+#[must_use]
+pub fn command_origin(command: &orch_link_contract::commands::McpImport) -> Option<String> {
+    command.environment_id.map(|environment| discovery_origin(environment, &serde_json::json!({"profile":command.profile,"source":command.source,"scope":command.scope,"directory":command.directory,"name":command.name})))
 }
 
 mod copy_command;
@@ -114,6 +150,11 @@ impl ImportSelection {
     /// Exact private command input, with its newly allocated native server identity.
     pub fn command(&self, server: Id) -> orch_link_contract::commands::McpImport {
         orch_link_contract::commands::McpImport {
+            profile: self
+                .offering
+                .get("profile")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
             expected_fingerprint: None,
             stored: None,
             transfer: None,
@@ -149,6 +190,7 @@ impl ImportSelection {
             scope: self.api_scope(),
             directory: self.directory(),
             name: self.name(),
+            origin: Some(discovery_origin(self.environment.id, &self.offering)),
         }
         .spec(reply, by, at)
     }
@@ -185,6 +227,19 @@ pub async fn select_import(
     directory: Option<String>,
     name: &str,
 ) -> Result<ImportSelection, Error> {
+    select_import_from(conn, environment, source, scope, directory, name, None).await
+}
+
+/// Selects one advertised native identity, including profiles whose global names coincide.
+pub async fn select_import_from(
+    conn: &mut Conn,
+    environment: Id,
+    source: &str,
+    scope: Json,
+    directory: Option<String>,
+    name: &str,
+    origin: Option<&str>,
+) -> Result<ImportSelection, Error> {
     let env = hosting::environment(conn, environment)
         .await?
         .ok_or(Error::NotFound)?;
@@ -220,20 +275,27 @@ pub async fn select_import(
             message: "a user's configuration has no workspace directory",
         });
     }
-    let offering = env
+    let mut offerings = env
         .facts
         .get("mcp_found")
         .and_then(Json::as_array)
-        .and_then(|found| {
-            found.iter().find(|found| {
-                found["source"] == source
-                    && found["scope"] == machine_scope
-                    && found["name"] == name
-                    && found["directory"].as_str() == directory.as_deref()
-            })
-        })
-        .cloned()
-        .ok_or(Error::NotFound)?;
+        .into_iter()
+        .flatten()
+        .filter(|found| {
+            found["source"] == source
+                && found["scope"] == machine_scope
+                && found["name"] == name
+                && found["directory"].as_str() == directory.as_deref()
+                && origin.is_none_or(|origin| discovery_origin(environment, found) == origin)
+        });
+    let offering = offerings.next().cloned().ok_or(Error::NotFound)?;
+    if offerings.next().is_some() {
+        return Err(Error::Invalid {
+            field: "origin",
+            message: "choose the native configuration entry to import",
+        });
+    }
+    drop(offerings);
     Ok(ImportSelection {
         environment: env,
         machine,

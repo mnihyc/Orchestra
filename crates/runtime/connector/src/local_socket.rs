@@ -288,6 +288,8 @@ impl CommandHandler for Recording {
 
 /// What the socket answers from.
 pub struct LocalState {
+    /// Shared primary-choice persistence and local override handling.
+    pub gateway_control: Arc<crate::gateway_control::Requests>,
     /// The physical supervisor's replacement request, absent on an unsupervised role host.
     pub identity_reload: Option<Arc<tokio::sync::Notify>>,
     /// The certificate this running link actually holds.
@@ -376,33 +378,10 @@ impl LocalState {
     }
 
     fn select_gateway(&self, choice: orch_link_contract::gateways::GatewayChoice) -> Reply {
-        use orch_config::loader::Validate as _;
-        let result = (|| -> Result<bool, String> {
-            let data = DataDir::open(&self.data_dir).map_err(|error| error.to_string())?;
-            let mut config = data.config(|_| None).map_err(|error| error.to_string())?;
-            let current = config.connector.gateway.clone();
-            if choice == current {
-                return Ok(false);
-            }
-            config.connector.gateway = choice.clone();
-            config.validate().map_err(|error| error.to_string())?;
-            if choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
-                && choice != current
-            {
-                let record = data.record().map_err(|error| error.to_string())?;
-                if !record
-                    .gateways
-                    .iter()
-                    .any(|gateway| Some(gateway.id.as_str()) == choice.gateway_id.as_deref())
-                {
-                    return Err("the selected gateway is no longer advertised".into());
-                }
-            }
-            data.update_config(|config| config.connector.gateway = choice.clone())
-                .map_err(|error| error.to_string())?;
-            self.link.select_gateway(choice);
-            Ok(true)
-        })();
+        let result = self
+            .gateway_control
+            .request_local(&choice)
+            .map(|change| change.changed);
         match result {
             Ok(true) => Reply::Done {
                 said: "Primary gateway choice saved; reconnecting.".into(),
@@ -410,7 +389,9 @@ impl LocalState {
             Ok(false) => Reply::Done {
                 said: "Primary gateway choice unchanged.".into(),
             },
-            Err(message) => Reply::Error { message },
+            Err(error) => Reply::Error {
+                message: error.detail,
+            },
         }
     }
 
@@ -466,6 +447,10 @@ impl LocalState {
             ),
             LinkStatus::Stopped => (false, None, "stopped".to_owned()),
         };
+        let storage = self.link.spool_status().borrow().clone();
+        let link = storage.reason().map_or(link.clone(), |reason| {
+            format!("{link}; {reason} ({} waiting)", storage.waiting_events)
+        });
         Status {
             connected,
             endpoint,
@@ -545,8 +530,10 @@ impl LocalState {
                 continue;
             }
             let root = environment.facts().workspace_root;
-            for found in role.imports().found(&[root]).await {
-                candidates.push((environment.id(), found));
+            for found in role.imports().found(std::slice::from_ref(&root)).await {
+                if let Some(found) = crate::mcp_import::in_workspace(found, Path::new(&root)) {
+                    candidates.push((environment.id(), found));
+                }
             }
         }
         let (environment, found) = match choose_import(candidates, name, from, place) {
@@ -554,6 +541,7 @@ impl LocalState {
             Err(message) => return Reply::Error { message },
         };
         let request = orch_link_contract::mcp_import::McpImportAsk {
+            profile: found.profile,
             request_id: orch_types::new_id(),
             environment_id: environment,
             source: found.source,
@@ -627,7 +615,15 @@ fn choose_import(
             && from.is_none_or(|from| found.source == from)
             && place.is_none_or(|place| found.directory.as_deref().unwrap_or("user") == place)
     }) {
-        if !choices.iter().any(|(_, previous)| previous == &found) {
+        if !choices.iter().any(
+            |(_, previous): &(Id, orch_agent_contract::discovery::McpFound)| {
+                let mut previous = previous.clone();
+                previous.profile = None;
+                let mut current = found.clone();
+                current.profile = None;
+                previous == current
+            },
+        ) {
             choices.push((environment, found));
         }
     }
