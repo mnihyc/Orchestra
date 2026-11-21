@@ -14,6 +14,8 @@ A="$(release_a)"
 TAG="$(release_tag "$A")"
 new_stack first-start 41200 "$A"
 trap 'finish' EXIT
+data_disk="$SMOKE_DIR/first-start/second disk"
+printf "ORCH_DATA_DIR='%s'\nORCH_POSTGRES_DATA_DIR='%s'\n" "$data_disk/server" "$data_disk/postgres" >> "$STACK/.env"
 
 step "a release that does not match its manifest is refused before anything is installed"
 DAMAGED="$SMOKE_DIR/first-start/damaged"
@@ -40,6 +42,15 @@ check "the facts of the machine were added to .env" grep -q '^ORCH_UID=' "$STACK
 for kind in server frontend cli; do
   check "$kind is installed as the release's payload" test -d "$STACK/runtime/$kind/current"
 done
+step "first start puts server files and PostgreSQL on the operator's chosen disk"
+check "PostgreSQL initialized the selected directory" test -s "$data_disk/postgres/PG_VERSION"
+compose exec -T api sh -c 'echo visible > /var/lib/orch/update-status/disk-check'
+check "the API writes on the selected disk" grep -qx visible "$data_disk/server/update-status/disk-check"
+check "the web edge serves the same update-status directory" compose exec -T frontend grep -qx visible /var/lib/orch-update-status/disk-check
+check "the updater finds an installed release on the selected disk" says 'installed already' update_sh "$TAG" --from "$A" --yes
+check "the default server directory was not created" test ! -e "$STACK/runtime/data"
+check "the default PostgreSQL directory was not created" test ! -e "$STACK/runtime/postgres/data"
+
 check "there is no previous release yet" test ! -e "$STACK/runtime/server/previous"
 check "a dump was taken before the stack started" test -n "$(dumps)"
 
@@ -60,7 +71,7 @@ check "the application's page is served" bash -c "curl -fsS '$EDGE/' | grep -qi 
 expect "the page is not kept by browsers" "no-store" "$(curl -sS -D - -o /dev/null "$EDGE/" | tr -d '\r' | sed -n 's/^[Cc]ache-[Cc]ontrol: *//p')"
 expect "an internal address is not served" "404" "$(curl -sS -o /dev/null -w '%{http_code}' "$EDGE/internal/anything")"
 SECURITY="$(curl -sS -D - -o /dev/null "$EDGE/" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ss]ecurity-[Pp]olicy: *//p')"
-case "$SECURITY" in *"script-src 'self' 'wasm-unsafe-eval'"*"connect-src 'self'"*) pass "the content policy is the one the application is built for" ;; *) fail "the content policy: $SECURITY" ;; esac
+case "$SECURITY" in *"script-src 'self' 'nonce-"*"' 'wasm-unsafe-eval'"*"connect-src 'self'"*) pass "the content policy is the one the application is built for" ;; *) fail "the content policy: $SECURITY" ;; esac
 
 step "the services report"
 check "orchctl doctor passes in the API's container" doctor --expect-version "${TAG#v}"
@@ -74,6 +85,18 @@ case "$COOKIES" in *orch_session=*HttpOnly*Secure*SameSite=Strict*) pass "signin
 if sign_in; then pass "signing in works through the edge"; else fail "signing in works through the edge"; fi
 refuses "a wrong password is refused" curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/auth/login" \
   -d "{\"login\":\"$ADMIN_NAME\",\"password\":\"not the password\"}"
+
+step "browser notifications after first sign-in"
+push_key_offered() {
+  edge_get /api/v1/meta | jq -e '.push_public_key | type == "string" and length > 0'
+}
+push_channel_offered() {
+  edge_get /api/v1/notification-channels -H "authorization: Bearer $TOKEN" |
+    jq -e '[.[] | select(.kind == "push" and .owner == "system")] |
+           length == 1 and .[0].enabled == true and .[0].route.enabled == false and .[0].route.needs == "device"'
+}
+check "the web edge offers a browser registration key" push_key_offered
+check "the first account can choose the system push channel and has no subscribed device" push_channel_offered
 
 step "the edge, tried from inside the stack as a browser and a machine would"
 # From the API's container the web edge is the service `frontend`, and the pinned endpoint
@@ -91,11 +114,23 @@ wait_for 180 "the node is online" bash -c "cd '$STACK' && docker compose exec -T
 wait_for 60 "orchctl doctor passes on the whole stack" ready "$TAG"
 expect "the node container stays up" "running" "$(compose ps --format '{{.State}}' node)"
 
+step "./update.sh doctor, once, from the host"
+DOCTOR_OUT="$(update_sh doctor 2>&1)" && DOCTOR_CODE=0 || DOCTOR_CODE=$?
+expect "update.sh doctor passes on a stack that is ready" 0 "$DOCTOR_CODE"
+case "$DOCTOR_OUT" in *"edge address: $EDGE (from ORCH_READY_URL in the environment)"*) pass "it names the address the edge check used, and where it came from" ;; *) fail "the edge address and its source: $DOCTOR_OUT" ;; esac
+case "$DOCTOR_OUT" in *"all 3 checks passed"*"doctor: every check passed"*) pass "it prints the lines of the edge check, and says every check passed" ;; *) fail "the edge lines: $DOCTOR_OUT" ;; esac
+check "it changed nothing: no transaction is open" test ! -e "$STACK/runtime/update/journal"
+
 step "when services are stopped, doctor fails and names them"
 compose stop worker gateway node > /dev/null 2>&1
 # A heartbeat is fresh for 45 s after the last one, so the first lines to fail are the ones that know at once.
 wait_for 150 "orchctl doctor fails on the worker, the gateway and the node, by name" doctor_fails_on worker gateway node
 refuses "and its exit status says so" doctor
+DOCTOR_OUT="$(update_sh doctor 2>&1)" && DOCTOR_CODE=0 || DOCTOR_CODE=$?
+check "update.sh doctor fails too while they are stopped" test "$DOCTOR_CODE" != 0
+for service in worker gateway node; do
+  check "update.sh doctor names the stopped $service" grep -q "^FAIL  $service " <<< "$DOCTOR_OUT"
+done
 compose start worker gateway node > /dev/null 2>&1
 wait_for 180 "orchctl doctor passes again when they are back" ready "$TAG"
 

@@ -912,11 +912,12 @@ pub async fn try_make(
         now,
         &principal,
         &Request {
+            identity: None,
             owner: world.ada,
             name: Some(name),
             home: world.topic,
             template: Some(template),
-            host: host.map(Some),
+            host: host.map(|host| Some(orch_provider_contract::pools::Target::host(host))),
             config,
         },
     )
@@ -976,6 +977,7 @@ pub async fn make_after(world: &World, template: Id, name: &str, statement: &str
         now,
         &principal,
         &Request {
+            identity: None,
             owner: world.ada,
             name: Some(name),
             home: world.topic,

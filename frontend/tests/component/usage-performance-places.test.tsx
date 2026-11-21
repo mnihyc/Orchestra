@@ -9,14 +9,15 @@ import { performanceOf, timingFixture } from '../doubles/performance';
 import { requestRow } from '../doubles/request-row';
 import { show } from './support';
 
-const fake = vi.hoisted(() => ({ answer: undefined as UsageAnalytics | undefined, navigate: vi.fn(), params: [] as unknown[], healthError: null as Error | null, healthCalls: 0, healthLoaded: true }));
+const fake = vi.hoisted(() => ({ answer: undefined as UsageAnalytics | undefined, navigate: vi.fn(), params: [] as unknown[], healthError: null as Error | null, healthCalls: 0, healthLoaded: true, providerView: true }));
+vi.mock('@/api/threads', async (original) => ({ ...await original<object>(), parametersQuery: () => ({ queryKey: ['status-parameters'], initialData: { provider: fake.providerView ? { id: requestRow().provider.id, access: { permissions: ['provider.view'] } } : null }, staleTime: Infinity, queryFn: () => Promise.resolve({ provider: null }) }) }));
 vi.mock('@/api/usage', () => ({ usageQuery: (params: unknown) => { fake.params.push(params); return { queryKey: ['performance-places', params], initialData: fake.answer, staleTime: Number.POSITIVE_INFINITY, queryFn: () => Promise.resolve(fake.answer) }; }, healthQuery: (providerId: string) => ({ queryKey: ['test-health', providerId], initialData: fake.healthLoaded ? fake.answer?.degradation ?? undefined : undefined, queryFn: (): Promise<UsageDegradation> => { fake.healthCalls += 1; if (fake.healthError !== null) return Promise.reject(fake.healthError); const health = fake.answer?.degradation; if (health === undefined || health === null) return Promise.reject(new Error('the fixture supplies health')); return Promise.resolve(health); } }) }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => fake.navigate }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => fake.navigate }));
 
 function Hint() { const hint = useChoicePerformance({ topic_id: requestRow().topic.id, binding: { provider: requestRow().provider } }); return <output>{hint('Swift', 'high', 'fast', null)}</output>; }
 
 beforeEach(() => {
-  fake.navigate.mockClear();fake.params=[];fake.healthError=null;fake.healthCalls=0;fake.healthLoaded=true;
+  fake.navigate.mockClear();fake.params=[];fake.healthError=null;fake.healthCalls=0;fake.healthLoaded=true;fake.providerView=true;
   const performance = { ...performanceOf([timingFixture()]), requests: 20, speed_samples: 20, first_token_samples: 20 };
   fake.answer = { scope: 'me', depth: 'own', from: '2026-10-09', to: '2026-10-15', bucket: 'day', totals: { turns: 1, credits: '0', estimated_credits: '0', unrated_tokens: 0, tokens: requestRow().tokens, performance }, me: null, breakdowns: [], series: [], comparison: [{ model: 'Swift', effort: 'high', tier: 'fast', program: null, performance }], degradation: { since: '2026-10-15T04:00:00Z', recent: performance, baseline: performance, errors: false, first_output: false } };
 });
@@ -40,7 +41,7 @@ it('opens provider failures from a degraded-only status part', async () => {
   if (health === undefined || health === null) throw new Error('the fixture includes provider health');
   health.errors = true; health.recent = { ...health.recent, requests: 10, errors: { provider_busy: 2 } };
   const provider = requestRow().provider;
-  show(<ProviderDegradedPart thread={{ binding: { provider } }} />);
+  show(<ProviderDegradedPart thread={{ id: 'thread', binding: { provider } }} />);
   const part = await screen.findByRole('button', { name: /Team models: 20.0% errors/ });
   await userEvent.setup().click(part);
   const destination: unknown = fake.navigate.mock.lastCall?.[0];
@@ -48,13 +49,13 @@ it('opens provider failures from a degraded-only status part', async () => {
 });
 
 it('has no status part while the provider is healthy', () => {
-  show(<ProviderDegradedPart thread={{ binding: { provider: requestRow().provider } }} />);
+  show(<ProviderDegradedPart thread={{ id: 'thread', binding: { provider: requestRow().provider } }} />);
   expect(screen.queryByRole('button')).not.toBeInTheDocument();
 });
 
 it('does not fetch provider health merely to draw a status bar before its panel opens', async () => {
   fake.healthLoaded = false;
-  show(<ProviderDegradedPart thread={{ binding: { provider: requestRow().provider } }} />);
+  show(<ProviderDegradedPart thread={{ id: 'thread', binding: { provider: requestRow().provider } }} />);
   await act(async () => { await Promise.resolve(); });
   expect(fake.healthCalls).toBe(0); expect(fake.params).toEqual([]);
   expect(screen.queryByRole('button')).not.toBeInTheDocument();
@@ -64,7 +65,7 @@ it('stops health polling after the server refuses provider access', async () => 
   vi.useFakeTimers();
   try {
     fake.healthError = new ApiError({ type: 'orch:error:authz.denied', code: 'authz.denied', title: 'Forbidden', status: 403, detail: 'Provider access is required.', request_id: 'request-1' }, null);
-    function OpenPanel() { useProviderHealth(requestRow().provider.id); return <ProviderDegradedPart thread={{ binding: { provider: requestRow().provider } }} />; }
+    function OpenPanel() { useProviderHealth(requestRow().provider.id, true); return <ProviderDegradedPart thread={{ id: 'thread', binding: { provider: requestRow().provider } }} />; }
     show(<OpenPanel />);
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(fake.healthCalls).toBe(1);
@@ -73,4 +74,20 @@ it('stops health polling after the server refuses provider access', async () => 
     expect(fake.params).toEqual([]);
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
   } finally { vi.useRealTimers(); }
+});
+
+it('does not ask for provider health when the thread reports no provider View', async () => {
+  fake.healthLoaded = false;
+  function OpenPanel() { useProviderHealth(requestRow().provider.id, false); return null; }
+  show(<OpenPanel />);
+  await act(async () => { await Promise.resolve(); });
+  expect(fake.healthCalls).toBe(0);
+});
+
+it('hides cached provider degradation when the parameters no longer report provider View', () => {
+  const health = fake.answer?.degradation;
+  if (health === undefined || health === null) throw new Error('the fixture supplies health');
+  health.errors = true; fake.providerView = false;
+  show(<ProviderDegradedPart thread={{ id: 'thread', binding: { provider: requestRow().provider } }} />);
+  expect(screen.queryByRole('button')).not.toBeInTheDocument();
 });

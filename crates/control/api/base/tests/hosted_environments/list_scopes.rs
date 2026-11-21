@@ -5,7 +5,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::Listed;
 use orch_api_contract::environment::{EnvironmentHolding, EnvironmentList, EnvironmentListQuery};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity;
 use orch_types::{Json, new_id};
@@ -69,7 +69,7 @@ async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -919,6 +919,37 @@ mod retained {
     }
 
     #[tokio::test]
+    async fn kept_environment_search_finds_a_later_name_before_the_page_limit() {
+        let s = Scene::new().await;
+        keep(&s).await;
+        let ordinary = page(
+            &s,
+            &s.team.c.admin.token,
+            s.team.topic,
+            &NodeDeletedEnvironmentListQuery::default(),
+        )
+        .await;
+        let wanted = ordinary.items.last().unwrap();
+        let reply = s
+            .world
+            .app
+            .call(NodeDeletedEnvironmentList, &[&s.team.topic])
+            .token(&s.team.c.admin.token)
+            .query(&json!({"q": wanted.environment.name,"limit":1}))
+            .send_bytes()
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&reply.raw)
+        );
+        let selected: Page<DeletedEnvironment> = serde_json::from_slice(&reply.raw).unwrap();
+        assert_eq!(selected.items, vec![wanted.clone()]);
+        assert!(selected.next_cursor.is_none());
+    }
+
+    #[tokio::test]
     async fn kept_list_keeps_under_cursor_and_current_key_scope_on_each_page() {
         let s = Scene::new().await;
         keep(&s).await;
@@ -929,6 +960,7 @@ mod retained {
         )
         .await;
         let query = NodeDeletedEnvironmentListQuery {
+            q: None,
             under: Some(true),
             limit: Some(1),
             cursor: None,

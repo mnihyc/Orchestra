@@ -267,7 +267,11 @@ pub(crate) async fn name_host_choices(
         crate::routes::resources::view::addresses_with_names(conn, &host_ids, bounds).await?;
     let owners: Vec<Id> = hosts.iter().filter_map(|place| place.owner).collect();
     let people = refusals::user_refs(conn, &owners).await?;
+    let room = orch_db::queries::placement_room::hosts(conn, &host_ids).await?;
+    let counts = orch_db::queries::placement_room::running_threads(conn, &host_ids).await?;
     for place in hosts {
+        place.place.room = room.get(&place.place.host.id).copied();
+        place.place.running_threads = Some(counts.get(&place.place.host.id).copied().unwrap_or(0));
         place.place.host.address = addresses
             .get(&place.place.host.id)
             .cloned()
@@ -395,6 +399,7 @@ pub(crate) fn place_of(view: Environment) -> PlaceEnvironment {
         }
     }
     PlaceEnvironment {
+        room: None,
         grouping: orch_api_contract::resource_groups::ResourceGrouping {
             home: Some(view.home.clone()),
             home_path: Vec::new(),

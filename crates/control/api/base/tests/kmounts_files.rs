@@ -194,6 +194,80 @@ async fn directory_choices_on_a_machine_without_a_host_return_its_roots_and_unre
 }
 
 #[tokio::test]
+async fn directory_choices_reach_a_registration_holder_but_not_a_machine_viewer_without_use() {
+    use orch_db::queries::resources::access_fixtures;
+    let world = World::new().await;
+    let people = company(&world).await;
+    let machine = access_fixtures::insert_persons_machine(
+        &mut *world.conn().await,
+        people.admin.id(),
+        "Shared directory machine",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+        .bind(machine)
+        .bind(json!({"policy":{"environment.roots":["/srv/shared"]}}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.view",
+        people.stranger.id(),
+    )
+    .await;
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+    let entry = name_person(
+        &world,
+        "machine",
+        machine,
+        "machine.use",
+        people.stranger.id(),
+    )
+    .await;
+    let roots = world
+        .app
+        .call(MachineEnvironmentDataGet, &[&machine])
+        .token(&people.stranger.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(roots.roots.len(), 1);
+    assert_eq!(roots.roots[0].path, "/srv/shared");
+    assert!(roots.roots[0].uses.is_empty());
+    sqlx::query("UPDATE permission_entries SET removed_at=$2 WHERE id=$1")
+        .bind(entry)
+        .bind(world.now())
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(MachineEnvironmentDataGet, &[&machine])
+            .token(&people.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
 async fn a_machines_mounts_are_scoped_to_that_machine_and_its_owner_and_only_offer_manageable_additions()
  {
     use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
@@ -1343,3 +1417,138 @@ async fn data_a_copy_displaced_is_listed_until_whoever_may_remove_that_location_
 
 #[path = "kmounts_files/location_scopes.rs"]
 mod location_scopes;
+
+#[tokio::test]
+async fn mount_locations_and_additions_each_search_before_their_own_page() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let machine =
+        fixtures::insert_persons_machine(&mut *world.conn().await, c.viewer.id(), "Paging laptop")
+            .await
+            .unwrap();
+    for index in 0..13 {
+        let mount = named_mount(&world, &c.viewer, c.acme, &format!("located-{index:02}")).await;
+        let mut conn = world.conn().await;
+        rows::set_location(
+            &mut conn,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        named_mount(&world, &c.viewer, c.acme, &format!("available-{index:02}")).await;
+    }
+    for collection in [
+        MachineMountCollection::Locations,
+        MachineMountCollection::Available,
+    ] {
+        let q = if collection == MachineMountCollection::Locations {
+            "located-12"
+        } else {
+            "available-12"
+        };
+        let result = world
+            .app
+            .call(MachineMountList, &[&machine])
+            .token(&c.viewer.token)
+            .query(&MachineMountListQuery {
+                collection: Some(collection),
+                q: Some(q.into()),
+                limit: Some(3),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        if collection == MachineMountCollection::Locations {
+            assert_eq!(result.locations[0].mount.name, q);
+            assert_eq!(result.locations.len(), 1);
+        } else {
+            assert_eq!(result.available[0].mount.name, q);
+            assert_eq!(result.available.len(), 1);
+        }
+        let mut cursor = None;
+        let mut count = 0;
+        loop {
+            let page = world
+                .app
+                .call(MachineMountList, &[&machine])
+                .token(&c.viewer.token)
+                .query(&MachineMountListQuery {
+                    collection: Some(collection),
+                    limit: Some(3),
+                    cursor,
+                    ..Default::default()
+                })
+                .send()
+                .await
+                .ok();
+            count += if collection == MachineMountCollection::Locations {
+                page.locations.len()
+            } else {
+                page.available.len()
+            };
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(count, 13);
+    }
+}
+
+#[tokio::test]
+async fn a_mounts_later_location_is_found_by_its_visible_machine_before_paging() {
+    use orch_db::queries::resources::{access_fixtures as fixtures, mounts as rows};
+    let world = World::new().await;
+    let c = company(&world).await;
+    let mount = named_mount(&world, &c.viewer, c.acme, "location-catalogue").await;
+    for index in 0..13 {
+        let machine = fixtures::insert_persons_machine(
+            &mut *world.conn().await,
+            c.viewer.id(),
+            &format!("Destination {index:02}"),
+        )
+        .await
+        .unwrap();
+        rows::set_location(
+            &mut *world.conn().await,
+            &rows::LocationRow {
+                mount_id: mount.base.id,
+                machine_id: machine,
+                host_id: None,
+                host_name: None,
+                kind: "path".into(),
+                source: format!("/srv/{index}"),
+                storage: None,
+                data_kind: None,
+                created_by: c.viewer.id(),
+                created_at: world.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let page = world
+        .app
+        .call(MountGet, &[&mount.base.id])
+        .token(&c.viewer.token)
+        .query(&json!({"collection":"locations","q":"Destination 12","limit":1}))
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.locations.len(), 1);
+    assert_eq!(page.locations[0].machine.name, "Destination 12");
+}

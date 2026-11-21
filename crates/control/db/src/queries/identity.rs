@@ -96,8 +96,6 @@ pub struct UserRow {
     pub density: String,
     /// The org that is its own.
     pub personal_org_id: Option<Id>,
-    /// The sequence of its own feed.
-    pub inbox_seq: i64,
     /// Who created it, where somebody did.
     pub created_by: Option<Id>,
     /// When it was created.
@@ -541,7 +539,9 @@ pub async fn confirm_current_email(
 
 /// Notes that `user` was seen at `at`.
 pub async fn touch_last_seen(conn: &mut Conn, user: Id, at: DateTime<Utc>) -> Result<(), DbError> {
-    sqlx::query("UPDATE users SET last_seen_at = $2 WHERE id = $1")
+    // Presence never waits on a person's own credential/profile write. Their next use records it.
+    sqlx::query("WITH available AS (SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE SKIP LOCKED)
+                 UPDATE users SET last_seen_at=GREATEST(last_seen_at,$2) WHERE id IN(SELECT id FROM available)")
         .bind(user)
         .bind(at)
         .execute(conn)
@@ -769,6 +769,37 @@ pub struct SessionRow {
 
 const SESSION_COLUMNS: &str = "id, user_id, as_admin, user_agent, host(ip) AS ip, created_at, last_used_at, expires_at, revoked_at";
 
+/// An exact retained credential match, never authority to continue a session.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SessionProof {
+    pub user_id: Id,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Observes only the cookie presented by this request, including its retained ending facts.
+pub async fn session_proof_by_refresh_hash(
+    conn: &mut Conn,
+    hash: &[u8],
+) -> Result<Option<SessionProof>, DbError> {
+    Ok(
+        sqlx::query_as("SELECT user_id,expires_at,revoked_at FROM sessions WHERE refresh_hash=$1")
+            .bind(hash)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Failed bearer authentication may report a retained session end, not access-token expiry alone.
+/// The ordinary successful authentication path needs no additional fact read.
+pub async fn session_proof_by_access_hash(
+    conn: &mut Conn,
+    hash: &[u8],
+) -> Result<Option<SessionProof>, DbError> {
+    Ok(sqlx::query_as("SELECT s.user_id,s.expires_at,s.revoked_at FROM access_tokens a JOIN sessions s ON s.id=a.session_id WHERE a.token_hash=$1")
+        .bind(hash).fetch_optional(conn).await?)
+}
+
 /// Reads only the selected live browser session's administrator switch.
 pub async fn session_admin_mode(
     conn: &mut Conn,
@@ -898,17 +929,58 @@ pub async fn slide_session(
     now: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 ) -> Result<(), DbError> {
-    sqlx::query("UPDATE sessions SET last_used_at = $2, expires_at = $3 WHERE id = $1")
+    sqlx::query("UPDATE sessions SET last_used_at = GREATEST(last_used_at,$2), expires_at = GREATEST(expires_at,$3) WHERE id = $1")
         .bind(session)
         .bind(now)
         .bind(expires_at)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("DELETE FROM access_tokens WHERE session_id = $1 AND expires_at <= $2")
-        .bind(session)
-        .bind(now)
-        .execute(conn)
-        .await?;
+    drop_expired_access_tokens(conn, session, now).await?;
+    Ok(())
+}
+
+/// Renews one still-live session, ordered against that session's revocation and expiry.
+/// Account eligibility is sampled in the same statement without locking profile or Inbox writes.
+pub async fn renew_session(
+    conn: &mut Conn,
+    session: Id,
+    now: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    let renewed = sqlx::query(
+        "UPDATE sessions s SET last_used_at=GREATEST(s.last_used_at,$2),expires_at=GREATEST(s.expires_at,$3)
+          FROM users u WHERE s.id=$1 AND u.id=s.user_id AND u.status='active'
+            AND s.revoked_at IS NULL AND s.expires_at>$2",
+    )
+    .bind(session)
+    .bind(now)
+    .bind(expires_at)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        == 1;
+    if renewed {
+        drop_expired_access_tokens(conn, session, now).await?;
+    }
+    Ok(renewed)
+}
+
+/// An expired token still held by an admitted action is collected on a later renewal or upkeep.
+async fn drop_expired_access_tokens(
+    conn: &mut Conn,
+    session: Id,
+    now: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "WITH expired AS MATERIALIZED (
+        SELECT token_hash FROM access_tokens WHERE session_id=$1 AND expires_at<=$2
+        FOR UPDATE SKIP LOCKED
+    ) DELETE FROM access_tokens a USING expired e WHERE a.token_hash=e.token_hash",
+    )
+    .bind(session)
+    .bind(now)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -951,13 +1023,16 @@ pub async fn session_inventory(
     now: DateTime<Utc>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<SessionListed>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
-    Ok(sqlx::query_as("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
+    let named = super::search::matching_sql("concat_ws(' ',user_agent,host(ip))", "$6");
+    let patterns = super::search::Query::parse(search).like_patterns();
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT id,user_id,user_agent,host(ip) AS ip,created_at,last_used_at,expires_at FROM sessions
         WHERE user_id=$1 AND revoked_at IS NULL AND expires_at>$2
         AND ($3::timestamptz IS NULL OR created_at<$3 OR (created_at=$3 AND id>$4))
-        ORDER BY created_at DESC,id LIMIT $5")
-        .bind(user).bind(now).bind(at).bind(id).bind(limit).fetch_all(conn).await?)
+        AND ({named}) ORDER BY created_at DESC,id LIMIT $5")))
+        .bind(user).bind(now).bind(at).bind(id).bind(limit).bind(patterns).fetch_all(conn).await?)
 }
 /// Refresh the exact previously emitted live sessions, never a replacement page.
 pub async fn session_inventory_selected(
@@ -1090,6 +1165,28 @@ pub struct AccessRow {
     pub user_id: Id,
 }
 
+/// One committed sample of the bearer, its session and the current account.
+#[derive(sqlx::FromRow)]
+pub struct BrowserSession {
+    pub session_id: Id,
+    pub as_admin: bool,
+    pub credential_expires_at: DateTime<Utc>,
+    #[sqlx(flatten)]
+    pub user: UserRow,
+}
+
+/// The caller checks the earlier deadline against its clock after any acquisition wait.
+pub async fn browser_session(
+    conn: &mut Conn,
+    hash: &[u8],
+) -> Result<Option<BrowserSession>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT u.*, s.id AS session_id, s.as_admin, LEAST(a.expires_at,s.expires_at) AS credential_expires_at
+         FROM access_tokens a JOIN sessions s ON s.id=a.session_id JOIN users u ON u.id=s.user_id
+         WHERE a.token_hash=$1 AND s.revoked_at IS NULL"
+    ).bind(hash).fetch_optional(conn).await?)
+}
+
 /// The session behind the access token whose hash is `token_hash`, where
 /// the token has not expired and the session is neither expired nor
 /// revoked at `now`.
@@ -1126,10 +1223,11 @@ pub struct ApiTokenRow {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// The API token whose hash is `token_hash`, where it is neither revoked
+/// The API token whose identity and hash both match, where it is neither revoked
 /// nor expired at `now`. Its last use is noted when another action is not using it.
-pub async fn api_token_by_hash(
+pub async fn api_token_by_identity(
     conn: &mut Conn,
+    key_id: Id,
     token_hash: &[u8],
     now: DateTime<Utc>,
 ) -> Result<Option<ApiTokenRow>, DbError> {
@@ -1141,7 +1239,7 @@ pub async fn api_token_by_hash(
             UPDATE api_tokens SET last_used_at = $2
             WHERE id IN (
                 SELECT id FROM api_tokens
-                WHERE token_hash = $1 AND revoked_at IS NULL
+                WHERE id=$3 AND token_hash = $1 AND revoked_at IS NULL
                   AND (expires_at IS NULL OR expires_at > $2)
                 FOR NO KEY UPDATE SKIP LOCKED
             ) RETURNING id, user_id, scopes, operation_scope, node_id, expires_at
@@ -1149,12 +1247,13 @@ pub async fn api_token_by_hash(
          SELECT * FROM touched
          UNION ALL
          SELECT id, user_id, scopes, operation_scope, node_id, expires_at FROM api_tokens
-         WHERE token_hash = $1 AND revoked_at IS NULL
+         WHERE id=$3 AND token_hash = $1 AND revoked_at IS NULL
            AND (expires_at IS NULL OR expires_at > $2)
            AND NOT EXISTS (SELECT 1 FROM touched)",
     )
     .bind(token_hash)
     .bind(now)
+    .bind(key_id)
     .fetch_optional(conn)
     .await?)
 }
@@ -1303,19 +1402,23 @@ pub async fn api_token_inventory(
     owner: Option<Id>,
     after: Option<(DateTime<Utc>, Id)>,
     limit: i64,
+    search: &str,
 ) -> Result<Vec<ApiTokenInventory>, DbError> {
     let (at, id) = after.map_or((None, None), |(at, id)| (Some(at), Some(id)));
+    let named = super::search::matching_sql("t.name", "$5");
+    let patterns = super::search::Query::parse(search).like_patterns();
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {API_TOKEN_COLUMNS}, u.kind AS owner_kind, u.service_org_id AS owner_org
          FROM api_tokens t JOIN users u ON u.id=t.user_id LEFT JOIN nodes n ON n.id=t.node_id
          WHERE t.revoked_at IS NULL AND ($1::uuid IS NULL OR t.user_id=$1)
            AND ($2::timestamptz IS NULL OR t.created_at<$2 OR (t.created_at=$2 AND t.id>$3))
-         ORDER BY t.created_at DESC,t.id LIMIT $4"
+         AND ({named}) ORDER BY t.created_at DESC,t.id LIMIT $4"
     )))
     .bind(owner)
     .bind(at)
     .bind(id)
     .bind(limit)
+    .bind(patterns)
     .fetch_all(conn)
     .await?)
 }
@@ -2054,8 +2157,8 @@ pub struct NewInboxRow<'a> {
 /// was given in their feed.
 pub async fn add_inbox_row(conn: &mut Conn, row: &NewInboxRow<'_>) -> Result<Option<i64>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
-        "UPDATE users SET inbox_seq = inbox_seq + 1
-          WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
+        "UPDATE user_inboxes SET inbox_seq = inbox_seq + 1
+          WHERE user_id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)
       RETURNING inbox_seq",
     )
     .bind(row.user_id)
@@ -2167,6 +2270,20 @@ pub async fn email_code_sign_in_set_somewhere(conn: &mut Conn) -> Result<bool, D
 }
 
 /// What the interface of `user` remembers for them on every device, by key.
+pub async fn interface_value(
+    conn: &mut Conn,
+    user: Id,
+    key: &str,
+) -> Result<Option<Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT value FROM user_state WHERE user_id=$1 AND key=$2")
+            .bind(user)
+            .bind(key)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
 pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, Json)>, DbError> {
     Ok(
         sqlx::query_as("SELECT key, value FROM user_state WHERE user_id = $1 ORDER BY key")
@@ -2174,6 +2291,34 @@ pub async fn interface_state(conn: &mut Conn, user: Id) -> Result<Vec<(String, J
             .fetch_all(conn)
             .await?,
     )
+}
+
+/// The caller's own model choices, newest first; no other person's history is joined.
+pub async fn recent_models(conn: &mut Conn, user: Id) -> Result<Vec<(Id, String)>, DbError> {
+    Ok(sqlx::query_as("SELECT provider_id, model_name FROM user_model_recents WHERE user_id=$1 ORDER BY position DESC")
+        .bind(user).fetch_all(conn).await?)
+}
+
+/// Each selection updates only its own identity; concurrent devices retain both choices.
+pub async fn note_model_choice(
+    conn: &mut Conn,
+    user: Id,
+    provider: Id,
+    model: &str,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query("INSERT INTO user_model_recents(user_id,provider_id,model_name,used_at) VALUES($1,$2,$3,$4)
+        ON CONFLICT(user_id,provider_id,model_name) DO UPDATE SET position=DEFAULT,used_at=EXCLUDED.used_at")
+        .bind(user).bind(provider).bind(model).bind(at).execute(&mut *conn).await?;
+    crate::idempotency::creation::observe_with(
+        conn,
+        Some(user),
+        "recent_activity",
+        provider,
+        serde_json::json!({"kind":"model","model_name":model}),
+    )
+    .await?;
+    Ok(())
 }
 
 /// A served page carries its last-place fields without overwriting concurrent sidebar choices.
@@ -2213,6 +2358,33 @@ pub async fn put_interface_state(
     .bind(at)
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// Promotes one private picker key under the preference row's lock. Other kinds survive concurrent writes.
+pub async fn note_picker_choice(
+    conn: &mut Conn,
+    user: Id,
+    kind: &str,
+    key: &str,
+    count: i64,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO user_state (user_id,key,value,updated_at)
+         VALUES ($1,'picker_recents',jsonb_build_object($2::text,
+             CASE WHEN $4::bigint = 0 THEN '[]'::jsonb ELSE jsonb_build_array($3::text) END),$5)
+         ON CONFLICT (user_id,key) DO UPDATE SET value = jsonb_set(
+             user_state.value, ARRAY[$2::text],
+             COALESCE((SELECT jsonb_agg(recent.choice ORDER BY recent.position) FROM (
+                 SELECT choice, min(position) AS position FROM (
+                     SELECT to_jsonb($3::text) AS choice, 0::bigint AS position
+                     UNION ALL
+                     SELECT choice, position FROM jsonb_array_elements(
+                         COALESCE(user_state.value->$2::text,'[]'::jsonb)) WITH ORDINALITY AS old(choice,position)
+                 ) candidates GROUP BY choice ORDER BY min(position) LIMIT $4
+             ) recent), '[]'::jsonb)), updated_at=EXCLUDED.updated_at",
+    ).bind(user).bind(kind).bind(key).bind(count).bind(at).execute(conn).await?;
     Ok(())
 }
 
@@ -2288,6 +2460,8 @@ pub struct UserSearchRow {
     /// The ordinary public identity projection.
     #[sqlx(flatten)]
     pub user: UserBrief,
+    /// Membership of the explicit selected org, computed with this native result.
+    pub in_org: bool,
     /// The actual owning org of a service identity.
     pub service_org_id: Option<Id>,
 }
@@ -2302,12 +2476,56 @@ pub async fn search_user_rows(
     limit: i64,
     after: Option<(&str, Id)>,
 ) -> Result<Vec<UserSearchRow>, DbError> {
+    search_user_page_rows(
+        conn,
+        &UserSearchPage {
+            caller,
+            text,
+            org,
+            limit,
+            after: after.map(|(name, id)| (i64::MAX, name, id)),
+            recent: &[],
+            include_external: false,
+        },
+    )
+    .await
+}
+
+/// One native account-name page, including this caller's already captured recent identifiers.
+pub struct UserSearchPage<'a> {
+    /// The actor whose shared organizations are searched.
+    pub caller: Id,
+    /// Literal name words or an exact public username/address.
+    pub text: &'a str,
+    /// Optional admitted org.
+    pub org: Option<Id>,
+    /// Also retain the original public/shared-org search outside an explicit org.
+    pub include_external: bool,
+    /// Native batch size.
+    pub limit: i64,
+    /// Last native rank, username and identifier.
+    pub after: Option<(i64, &'a str, Id)>,
+    /// Newest-first private keys; empty leaves ordinary native ordering.
+    pub recent: &'a [Id],
+}
+
+/// Scope filtering still follows this original account projection before its result page fills.
+pub async fn search_user_page_rows(
+    conn: &mut Conn,
+    ask: &UserSearchPage<'_>,
+) -> Result<Vec<UserSearchRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT u.id, u.kind, u.username, u.display_name, u.avatar_color, u.service_org_id
-           FROM users u
+        "WITH picked AS MATERIALIZED (
+            SELECT id,min(position) AS rank FROM unnest($7::uuid[]) WITH ORDINALITY recent(id,position) GROUP BY id
+         ) SELECT u.id, u.kind, u.username, u.display_name, u.avatar_color, u.service_org_id,
+                  ($3::uuid IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM org_members m JOIN nodes d ON d.id=m.domain_id
+                     WHERE m.user_id=u.id AND $3=ANY(d.path))) AS in_org
+           FROM users u LEFT JOIN picked p ON p.id=u.id
           WHERE u.status = 'active'
-            AND (($3::uuid IS NULL
+            AND ((($3::uuid IS NULL OR $9::boolean)
                   AND (u.username = lower($2) OR lower(u.email) = lower($2)
+                       OR ($2 = '' AND u.id=ANY($7::uuid[]))
                        OR (EXISTS (SELECT 1 FROM org_members a JOIN org_members b ON a.org_id = b.org_id
                                     WHERE a.user_id = u.id AND b.user_id = $1)
                            AND (starts_with(u.username, lower($2))
@@ -2319,17 +2537,20 @@ pub async fn search_user_rows(
                           OR strpos(lower(u.display_name), lower($2)) > 0
                           OR lower(u.email) = lower($2))))
             AND ($5::text IS NULL OR
-                 (-((u.username=lower($2))::int),u.username,u.id) >
-                 (-((($5::text)=lower($2))::int),$5::text,$6::uuid))
-          ORDER BY (u.username = lower($2)) DESC, u.username, u.id
+                 (COALESCE(p.rank,9223372036854775807),-((u.username=lower($2))::int),u.username,u.id) >
+                 ($8::bigint,-((($5::text)=lower($2))::int),$5::text,$6::uuid))
+          ORDER BY COALESCE(p.rank,9223372036854775807), (u.username = lower($2)) DESC, u.username, u.id
           LIMIT $4",
     )
-    .bind(caller)
-    .bind(text)
-    .bind(org)
-    .bind(limit)
-    .bind(after.map(|(name, _)| name))
-    .bind(after.map(|(_, id)| id))
+    .bind(ask.caller)
+    .bind(ask.text)
+    .bind(ask.org)
+    .bind(ask.limit)
+    .bind(ask.after.map(|(_,name,_)|name))
+    .bind(ask.after.map(|(_,_,id)|id))
+    .bind(ask.recent)
+    .bind(ask.after.map(|(rank,_,_)|rank))
+    .bind(ask.include_external)
     .fetch_all(conn)
     .await?)
 }
@@ -2778,10 +2999,10 @@ pub mod testing {
     /// An API token of `user` that never expires and may do all its user may.
     pub async fn insert_api_token(
         conn: &mut Conn,
+        id: Id,
         user: Id,
         token_hash: &[u8],
     ) -> Result<Id, DbError> {
-        let id = orch_types::new_id();
         sqlx::query(
             "INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1, $2, 'test', $3)",
         )
@@ -3444,11 +3665,12 @@ pub struct WaysIn {
 
 /// The ways `user` signs in, with their row locked (see [`WaysIn`]).
 pub async fn lock_ways_in(conn: &mut Conn, user: Id) -> Result<WaysIn, DbError> {
-    let password: Option<bool> =
-        sqlx::query_scalar("SELECT password_hash IS NOT NULL FROM users WHERE id = $1 FOR UPDATE")
-            .bind(user)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let password: Option<bool> = sqlx::query_scalar(
+        "SELECT password_hash IS NOT NULL FROM users WHERE id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(user)
+    .fetch_optional(&mut *conn)
+    .await?;
     let providers: Vec<Id> = sqlx::query_scalar(
         "SELECT identity_provider_id FROM user_identities WHERE user_id = $1 ORDER BY linked_at",
     )
@@ -3791,7 +4013,7 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
-        let found = api_token_by_hash(&mut conn, b"h", now)
+        let found = api_token_by_identity(&mut conn, token, b"h", now)
             .await
             .unwrap()
             .unwrap();
@@ -3800,7 +4022,7 @@ mod tests {
             (token, ada, vec!["*".to_owned()])
         );
         assert_eq!(
-            api_token_by_hash(&mut conn, b"h", now + Duration::days(2))
+            api_token_by_identity(&mut conn, token, b"h", now + Duration::days(2))
                 .await
                 .unwrap(),
             None
@@ -3810,7 +4032,12 @@ mod tests {
             .execute(&mut *conn)
             .await
             .unwrap();
-        assert_eq!(api_token_by_hash(&mut conn, b"h", now).await.unwrap(), None);
+        assert_eq!(
+            api_token_by_identity(&mut conn, token, b"h", now)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -4591,7 +4818,7 @@ mod tests {
         };
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), Some(1));
         assert_eq!(add_inbox_row(&mut conn, &row).await.unwrap(), None);
-        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM users WHERE id = $1")
+        let seq: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id = $1")
             .bind(ada)
             .fetch_one(&mut *conn)
             .await
