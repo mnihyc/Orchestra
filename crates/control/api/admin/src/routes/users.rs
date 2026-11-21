@@ -50,8 +50,6 @@ use crate::sign_in::throttle;
 
 use chrono::DateTime;
 
-use chrono::Duration;
-
 use chrono::Utc;
 
 use orch_access_contract::audit::AuditAction;
@@ -110,7 +108,7 @@ use orch_api_contract::users::InvitationPreviewOrg;
 
 use orch_api_contract::users::InvitationPreviewWhat;
 
-use orch_api_contract::users::USER_SEARCH_MAX_RESULTS;
+use orch_api_contract::users::USER_SEARCH_DEFAULT_RESULTS;
 
 use orch_api_contract::users::USER_SEARCH_MIN_CHARS;
 
@@ -214,7 +212,11 @@ orch_api_base::__api_bind_43faf5f5b7!();
 
 /// People whose name starts or holds what is asked among those who share an
 /// org with the caller, and by an exact username or address anywhere.
-async fn user_search(ctx: Ctx, query: UserSearchQuery, (): ()) -> ApiResult<Vec<UserRef>> {
+async fn user_search(
+    ctx: Ctx,
+    query: UserSearchQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::users::UserSearchReply> {
     crate::key_operations::native::selected_read::<search::Accounts>(ctx, query, ()).await
 }
 
@@ -370,8 +372,8 @@ async fn permitted_chat(
 struct Policies {
     forms: Vec<String>,
     forms_scope: Option<NodeRef>,
-    default_hours: i64,
-    max_hours: i64,
+    default_minutes: i64,
+    max_minutes: i64,
     max_uses: i64,
 }
 
@@ -399,8 +401,8 @@ async fn policies_at(conn: &mut Conn, place: Place) -> ApiResult<Policies> {
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .unwrap_or_default(),
         forms_scope: scope,
-        default_hours: number(conn, keys::INVITATIONS_DEFAULT_HOURS).await?,
-        max_hours: number(conn, keys::INVITATIONS_MAX_HOURS).await?,
+        default_minutes: number(conn, keys::INVITATIONS_DEFAULT_MINUTES).await?,
+        max_minutes: number(conn, keys::INVITATIONS_MAX_MINUTES).await?,
         max_uses: number(conn, keys::INVITATIONS_MAX_USES).await?,
     })
 }
@@ -642,11 +644,11 @@ async fn invitation_create(
                 uses
             }
         };
-        let hours = body.expires_in_hours.unwrap_or(policies.default_hours);
-        if hours < 1 || hours > policies.max_hours {
+        let minutes = body.expires_in_minutes.unwrap_or(policies.default_minutes.min(policies.max_minutes));
+        if minutes < 1 || minutes > policies.max_minutes {
             return Err(invalid(
-                "expires_in_hours",
-                &format!("must be from 1 to {}", policies.max_hours),
+                "expires_in_minutes",
+                &format!("must be from 1 to {}", policies.max_minutes),
             ));
         }
         let (role, rows): (Option<String>, Vec<String>) = match body.kind {
@@ -713,9 +715,18 @@ async fn invitation_create(
         };
         let token = new_token(INVITATION_TOKEN_PREFIX);
         let id = new_id();
-        let expires_at = Duration::try_hours(hours)
-            .and_then(|life| ctx.now.checked_add_signed(life))
-            .ok_or_else(|| invalid("expires_in_hours", "is outside the supported clock range"))?;
+        let expires_at = match Time::new(ctx.now).checked_add_minutes(minutes) {
+            Some(end) => end,
+            None if body.expires_in_minutes.is_none() => Time::maximum(),
+            None => {
+                return Err(invalid(
+                    "expires_in_minutes",
+                    "is outside the supported clock range",
+                ));
+            }
+        }
+        .to_minute()
+        .get();
         let issuer_origin = invitation_operation::capture(&ctx, principal)?;
         identity::create_invitation(
             &mut tx,
@@ -729,7 +740,7 @@ async fn invitation_create(
                 role: role.as_deref(),
                 permissions: &rows,
                 email: email.as_deref(),
-                max_uses: i32::try_from(max_uses).unwrap_or(i32::MAX),
+                max_uses: i32::try_from(max_uses).map_err(|_| invalid("max_uses", "is outside the supported integer range"))?,
                 note: &note,
                 expires_at,
                 by: user,
@@ -739,7 +750,8 @@ async fn invitation_create(
             },
         )
         .await?;
-        let url = mail::link(&ctx.app.config, "invite", &token);
+        let addresses = crate::public_addresses::read(&ctx.app, &mut tx).await?;
+        let url = mail::link(&addresses.addresses.public_url, "invite", &token);
         if let Some(address) = &email
             && let Some(invitee) = identity::user_by_confirmed_email(&mut tx, address).await?
         {
@@ -939,11 +951,49 @@ async fn invitation_list(
     ctx: Ctx,
     query: InvitationListQuery,
     (): (),
-) -> ApiResult<Vec<Invitation>> {
-    crate::key_operations::snapshot_read::run(ctx, move |ctx| {
+) -> ApiResult<orch_api_contract::common::Page<Invitation>> {
+    let source = format!(
+        "invitations:{}:{:?}:{}",
+        ctx.user()?.id(),
+        query.org_id,
+        query.active.unwrap_or(false)
+    );
+    let page = query.collection();
+    let active = query.active.unwrap_or(false);
+    let now = ctx.now;
+    let rows = crate::key_operations::snapshot_read::run(ctx, move |ctx| {
         invitation_list_snapshot(ctx, query.clone())
     })
-    .await
+    .await?;
+    let rows = rows
+        .into_iter()
+        .filter(|row| {
+            !active || !row.revoked && row.uses < row.max_uses && row.expires_at.get() > now
+        })
+        .collect();
+    orch_api_base::collection::snapshot(
+        &page,
+        &source,
+        rows,
+        |row: &Invitation| (row.created_at, row.id),
+        |row| {
+            format!(
+                "{} {} {} {} {}",
+                row.email.as_deref().unwrap_or(""),
+                row.note,
+                row.created_by.display_name,
+                row.org
+                    .as_ref()
+                    .and_then(|value| value.name.as_deref())
+                    .unwrap_or(""),
+                row.node
+                    .as_ref()
+                    .and_then(|value| value.name.as_deref())
+                    .unwrap_or("")
+            )
+        },
+        true,
+    )
 }
 
 async fn invitation_list_snapshot(

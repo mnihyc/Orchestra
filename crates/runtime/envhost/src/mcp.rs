@@ -406,6 +406,7 @@ impl McpServers {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .map(|found| EnvironmentFactsMcp {
+                profile: found.profile,
                 name: found.name.clone(),
                 source: found.source.clone(),
                 scope: wire_word(&found.scope),
@@ -829,6 +830,7 @@ mod tests {
 
     fn request(server_id: Id) -> McpImport {
         McpImport {
+            profile: None,
             expected_fingerprint: None,
             stored: None,
             transfer: None,

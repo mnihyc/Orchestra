@@ -561,8 +561,15 @@ impl Engine {
         let affected = resources::ending_threads(conn, object.id).await?;
         if !affected.is_empty() {
             let mut unit = crate::unit::Unit::new(conn, at.get());
-            self.settle_in(&mut unit, &affected, Some(by), "disabled", false)
-                .await?;
+            self.settle_in(
+                &mut unit,
+                &affected,
+                Some(by),
+                "disabled",
+                orch_api_contract::threads::InputCancellationCause::SourceUnavailable,
+                false,
+            )
+            .await?;
             for id in &affected {
                 let seq = unit.stamp(*id).await?;
                 let reason = match fact.kind.as_str() {
@@ -739,7 +746,8 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let runtimes:Vec<(Id,Id)>=sqlx::query_as("SELECT r.id,h.machine_id FROM runtimes r JOIN hosts h ON h.id=r.host_id
             WHERE r.successor_of IS NULL AND r.state NOT IN ('stopped','retired','removed')
-                AND (($2 AND r.host_id=$1) OR (NOT $2 AND (r.environment_id=$1 OR r.provider_id=$1))) ORDER BY r.id")
+                AND r.disabled_stop_command_id IS NULL
+                AND (($2 AND r.host_id=$1) OR (NOT $2 AND (r.environment_id=$1 OR r.provider_id=$1))) ORDER BY r.id FOR UPDATE OF r")
             .bind(resource).bind(host).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         for (runtime, machine) in runtimes {
             let pending: bool = sqlx::query_scalar(
@@ -755,9 +763,9 @@ impl Engine {
             }
             let body: NodeRuntimeStop =
                 serde_json::from_value(json!({"runtime_id":runtime,"reason":"stop"}))?;
-            persist(conn, at, machine, SerialKey::Runtime(runtime), &body).await?;
-            sqlx::query("UPDATE runtimes SET state='stopping',state_detail='Its resource was disabled',updated_at=$2 WHERE id=$1")
-                .bind(runtime).bind(at.get()).execute(&mut *conn).await.map_err(DbError::from)?;
+            let id = persist(conn, at, machine, SerialKey::Runtime(runtime), &body).await?;
+            sqlx::query("UPDATE runtimes SET state='stopping',state_detail='Its resource was disabled',updated_at=$2,disabled_stop_command_id=$3 WHERE id=$1")
+                .bind(runtime).bind(at.get()).bind(id).execute(&mut *conn).await.map_err(DbError::from)?;
         }
         Ok(())
     }
@@ -765,10 +773,36 @@ impl Engine {
     /// Keeps a committed disabled-unit intention going through an offline node or a failed stop.
     pub(crate) async fn reconcile_disabled_units(&self) -> Result<(), EngineError> {
         let mut tx = self.inner.db.begin().await?;
+        // The gateway can commit its reply between sweeps or while this process is down.
+        // Consume only the command saved by this disable and leave every later control alone.
+        sqlx::query(
+            "WITH receipts AS (
+                SELECT c.id,c.state,c.error->>'detail' AS detail,
+                    (c.state='failed' AND c.error->>'code'='not_found'
+                     OR c.state='succeeded' AND c.result->>'outcome'='absent') IS TRUE AS missing
+                FROM runtimes r JOIN commands c ON c.id=r.disabled_stop_command_id
+                WHERE r.state='stopping' AND c.state IN ('succeeded','failed','expired','cancelled')
+                ORDER BY c.updated_at,c.id LIMIT $1
+             )
+             UPDATE runtimes r SET disabled_stop_command_id=NULL,updated_at=$2,
+                state=CASE WHEN c.state='succeeded' OR c.missing THEN 'stopped' ELSE r.state END,
+                loss_missing=r.loss_missing OR c.missing,
+                state_detail=CASE WHEN c.state='succeeded' OR c.missing THEN NULL
+                    WHEN c.state='expired' THEN 'Disabled; the host did not take the command to stop it in time'
+                    WHEN c.detail IS NOT NULL THEN 'Disabled; the host has not confirmed its stop: ' || c.detail
+                    ELSE 'Disabled; the host has not confirmed its stop' END
+             FROM receipts c WHERE r.disabled_stop_command_id=c.id AND r.state='stopping'",
+        )
+        .bind(self.inner.config.sweep_batch)
+        .bind(self.inner.clock.now())
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::from)?;
         let due:Vec<(Id,bool)>=sqlx::query_as("SELECT CASE WHEN h.disabled THEN h.id ELSE COALESCE(r.environment_id,r.provider_id) END,h.disabled
             FROM runtimes r JOIN hosts h ON h.id=r.host_id JOIN machines m ON m.id=h.machine_id
             LEFT JOIN environments e ON e.id=r.environment_id LEFT JOIN providers p ON p.id=r.provider_id
-            WHERE r.successor_of IS NULL AND r.state NOT IN ('stopped','retired','removed') AND m.online
+            WHERE r.successor_of IS NULL AND r.disabled_stop_command_id IS NULL
+                AND r.state NOT IN ('stopped','retired','removed') AND m.online
                 AND (h.disabled OR e.status='disabled' OR p.status='disabled')
                 AND NOT EXISTS(SELECT 1 FROM commands c WHERE c.kind='node.runtime.stop' AND c.body->>'runtime_id'=r.id::text
                     AND (c.state IN ('queued','sent','accepted') OR c.updated_at>$1))
@@ -840,40 +874,6 @@ impl Engine {
             return Ok(false);
         }
         Ok(true)
-    }
-
-    pub(crate) async fn finish_disabled_unit_stop(
-        &self,
-        conn: &mut Conn,
-        command: &orch_db::queries::link::CommandRow,
-        outcome: &crate::commands::Outcome,
-    ) -> Result<(), EngineError> {
-        if command.kind != "node.runtime.stop" {
-            return Ok(());
-        }
-        let Some(runtime) = command
-            .body
-            .get("runtime_id")
-            .and_then(Json::as_str)
-            .and_then(|id| id.parse::<Id>().ok())
-        else {
-            return Ok(());
-        };
-        match outcome {
-            crate::commands::Outcome::Succeeded(_) => {
-                sqlx::query("UPDATE runtimes r SET state='stopped',state_detail=NULL,updated_at=$2
-                    WHERE r.id=$1 AND r.state NOT IN ('retired','removed') AND (r.state='stopping' OR EXISTS(SELECT 1 FROM hosts h
-                        LEFT JOIN environments e ON e.id=r.environment_id LEFT JOIN providers p ON p.id=r.provider_id
-                        WHERE h.id=r.host_id AND (h.disabled OR e.status='disabled' OR p.status='disabled')))")
-                    .bind(runtime).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from)?;
-            }
-            _ => {
-                sqlx::query("UPDATE runtimes SET state_detail='Disabled; the host has not confirmed its stop',updated_at=$2
-                    WHERE id=$1 AND state NOT IN ('stopped','retired','removed')")
-                    .bind(runtime).bind(self.inner.clock.now()).execute(&mut *conn).await.map_err(DbError::from)?;
-            }
-        }
-        Ok(())
     }
 
     /// Selects the native saved resources against their actual current kind/home and prospective live nodes.
@@ -992,13 +992,10 @@ async fn persist<B: orch_link_contract::commands::CommandBody>(
     machine: Id,
     key: SerialKey,
     body: &B,
-) -> Result<(), EngineError> {
-    crate::archive::persist(
-        conn,
-        at.get(),
-        Outgoing::new(orch_types::new_id(), machine, key, body)?,
-    )
-    .await
+) -> Result<Id, EngineError> {
+    let id = orch_types::new_id();
+    crate::archive::persist(conn, at.get(), Outgoing::new(id, machine, key, body)?).await?;
+    Ok(id)
 }
 
 async fn cancel_resource_jobs(

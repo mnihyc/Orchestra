@@ -17,7 +17,7 @@ use orch_api_contract::resources::{
     ProviderModelSuggestionAccept, ProviderModelSuggestionList, ProviderModelUpdate,
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::{access, identity, link};
@@ -126,9 +126,9 @@ impl Scene {
     }
 
     async fn key_for(&self, user: Id, provider: Id, allow: Json) -> Key {
-        let secret = new_token(API_TOKEN_PREFIX);
-        let hash = token_hash(&secret);
         let id = new_id();
+        let secret = new_api_token(id);
+        let hash = token_hash(&secret);
         identity::create_api_token_scoped(
             &mut *self.world.conn().await,
             &identity::NewApiToken {
@@ -512,26 +512,26 @@ async fn the_same_model_operations_with_read_return_their_existing_full_shapes()
     assert_eq!(accepted["provider"]["models"].as_array().unwrap().len(), 2);
     let added = &accepted["added"][0];
     assert_eq!(added["enabled"], true);
-    assert_eq!(added["parameters"]["offered"]["context_max"], 8192);
+    let parameters = &added["parameters"];
+    let offered = &parameters["offered"];
     assert_eq!(
-        added["parameters"]["offered"]["access_programs"],
-        json!(["preview"])
-    );
-    assert_eq!(
-        added["parameters"]["offered"]["service_tiers"],
+        offered["service_tiers"],
         json!([{"id":"fast","label":"Fast"}])
     );
-    for member in [
-        "service_tiers",
-        "default_service_tier",
-        "access_programs",
-        "default_access_program",
-        "context_max",
-        "default_context",
-    ] {
+    assert_eq!(offered["access_programs"], json!(["preview"]));
+    assert_eq!(offered["context_max"], 8192);
+    for member in ["service_tiers", "access_programs", "context_max"] {
+        assert_eq!(
+            parameters[member], offered[member],
+            "the organization's default enables the reported {member} on acceptance"
+        );
+    }
+    assert_eq!(parameters["context_window"], 4096);
+    assert_eq!(parameters["default_context"], 4096);
+    for member in ["default_service_tier", "default_access_program"] {
         assert!(
-            added["parameters"].get(member).is_none_or(Json::is_null),
-            "discovery cannot enable the offered {member}"
+            parameters.get(member).is_none_or(Json::is_null),
+            "a suggestion does not choose the thread's {member}"
         );
     }
 }
@@ -551,8 +551,9 @@ async fn model_list_and_empty_delete_keep_their_existing_key_boundary() {
         .send_bytes()
         .await;
     let listed = body(&reply, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert_eq!(listed[0]["id"], json!(local));
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.get("next_cursor"), Some(&Json::Null));
+    assert_eq!(listed["items"][0]["id"], json!(local));
     let outside = scene
         .world
         .app
@@ -725,8 +726,9 @@ async fn suggestion_list_keeps_its_same_path_manage_only_positive() {
     )
     .await;
     let listed = body(&reply, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert_eq!(listed[0]["model_name"], "scope-private-offer");
+    assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed.get("next_cursor"), Some(&Json::Null));
+    assert_eq!(listed["items"][0]["model_name"], "scope-private-offer");
     assert!(scene.models(scene.provider).await.is_empty());
 }
 
