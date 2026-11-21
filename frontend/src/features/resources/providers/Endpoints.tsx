@@ -7,6 +7,7 @@
  * unless the org allows it, and then says that the key will travel unencrypted. A secret header's value
  * is written once and never shown again: the drafts keep its name and what was typed this time.
  */
+import { DeviceChoiceWriterException, DeviceExpansionFacts } from '@/ui/DeviceChoiceFacts';
 import type { TFunction } from 'i18next';
 import { Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -219,7 +220,7 @@ export function EndpointsEditor({ value, onChange, protocols, httpAllowed, error
               onChange={(request_options) => change(row.id, { options: { ...row.options, request_options } })} />}
             {ordinaryFields.length > 0 && (
               <details className="group" open={advanced || Object.keys(optionErrors).length>0} onToggle={(event) => { if (event.currentTarget.open !== advanced) chooseAdvanced(event.currentTarget.open); }}>
-                <summary className="cursor-default rounded-md text-sm font-medium text-accent-text select-none hover:underline">{t('resources.endpoint.advanced')}</summary>
+                <summary className="cursor-default rounded-md text-sm font-medium text-accent-text select-none hover:underline">{t('resources.endpoint.advanced')}<DeviceChoiceWriterException writer={chooseAdvanced} /></summary><DeviceExpansionFacts writer={chooseAdvanced} open={advanced || Object.keys(optionErrors).length > 0} />
                 <FieldForm className="pt-3" fields={ordinaryFields} values={row.options} errors={optionErrors} helpFor={(field) => <DeclaredHint term={field.label} help={field.help} />} onChange={(name, next) => change(row.id, { options: { ...row.options, [name]: next } })} />
               </details>
             )}

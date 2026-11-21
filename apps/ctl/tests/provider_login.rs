@@ -40,6 +40,7 @@ async fn a_piped_access_token_signs_in_and_is_in_no_argument_output_or_control_j
     s.rig.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(
             orch_link_contract::commands::AgentStartResult {
+                home: None,
                 reused: false,
                 harness_version: "1.0.0".to_owned(),
                 descriptor: serde_json::from_value(reported.clone()).unwrap(),
@@ -143,12 +144,11 @@ async fn a_piped_access_token_signs_in_and_is_in_no_argument_output_or_control_j
             .await
             .unwrap();
     });
-    let api = orch_api_core::middleware::authentication::new_token(
-        orch_api_core::middleware::authentication::API_TOKEN_PREFIX,
-    );
+    let api_id = new_id();
+    let api = orch_api_core::middleware::authentication::new_api_token(api_id);
     let hash = orch_api_core::middleware::authentication::token_hash(&api);
     let mut conn = s.rig.db.acquire().await.unwrap();
-    orch_db::queries::identity::testing::insert_api_token(&mut conn, s.ada.id(), &hash)
+    orch_db::queries::identity::testing::insert_api_token(&mut conn, api_id, s.ada.id(), &hash)
         .await
         .unwrap();
     // The command reads the provider's placement before starting its managed sign-in.

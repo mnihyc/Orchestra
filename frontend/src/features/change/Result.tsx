@@ -12,17 +12,19 @@ import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { checksOf } from '@/features/change/Progress';
+import { JobFacts } from '@/features/change/JobFacts';
 import { i18n } from '@/i18n';
 import type { Job } from '@/generated/api-types';
 import { errorText } from '@/ui/errorText';
 import { StateLine } from '@/ui/StateLine';
 
 /** The reason a job failed, in words of the page; the server's own sentence stands where there are none for its code. */
-export function reasonWords(job: Job, t: TFunction, minutes: number): string {
+export function reasonWords(job: Job, t: TFunction, minutes: number | null): string {
   const error = job.error;
   if (error === null) return job.state === 'failed' ? t('ui.error.operationFailed') : '';
   const own = `change.failure.${error.code}`;
   const fallback = errorText(error, t, { locale: i18n.resolvedLanguage ?? 'en' }).message;
+  if (minutes === null && error.code === 'wait_timeout') return fallback;
   return t(own, { defaultValue: fallback, minutes, message: error.code === 'binding_incompatible' ? error.message : fallback });
 }
 
@@ -33,7 +35,7 @@ export interface ResultProps {
   /** What the failure leaves out of "as it was": "The turn that was running was stopped, as you asked." */
   stoppedTurn: boolean;
   /** Minutes the wait for a turn was given, for the sentence of a wait that ran out. */
-  waited: number;
+  waited: number | null;
   /** What is "as it was": "This thread", "Main", "Team Pro". */
   subject: string;
   children?: ReactNode;
@@ -46,7 +48,7 @@ export function Result({ job, done, stoppedTurn, waited, subject, children }: Re
     return (
       <div className="flex flex-col gap-3" data-job-result="succeeded">
         <p className="flex items-start gap-2 text-base text-text">
-          <CircleCheck className="mt-0.5 size-4 shrink-0 text-success" aria-hidden /> <span>{done}</span>
+          <CircleCheck className="mt-0.5 size-4 shrink-0 text-success" aria-hidden /> <span>{done}</span><JobFacts job={job} />
         </p>
         {checks.length > 0 && (
           <p className="text-sm text-text-muted">
@@ -61,7 +63,7 @@ export function Result({ job, done, stoppedTurn, waited, subject, children }: Re
     return (
       <div className="flex flex-col gap-3" data-job-result="cancelled">
         <p className="flex items-start gap-2 text-lg font-semibold text-text">
-          <Undo2 className="mt-1 shrink-0 text-text-muted" aria-hidden /> {t('change.result.cancelled')}
+          <Undo2 className="mt-1 shrink-0 text-text-muted" aria-hidden /> {t('change.result.cancelled')}<JobFacts job={job} />
         </p>
         <p className="text-base text-text">{t('change.result.undone', { subject })}</p>
         {stoppedTurn && <p className="text-sm text-text-muted">{t('change.result.turnStopped')}</p>}
@@ -71,11 +73,11 @@ export function Result({ job, done, stoppedTurn, waited, subject, children }: Re
   const error = job.error;
   return (
     <div className="flex flex-col gap-3" data-job-result="failed">
-      <StateLine role="alert" tone="danger" message={<>
+      <div className="flex min-w-0 items-start gap-1"><div className="min-w-0 flex-1"><StateLine role="alert" tone="danger" message={<>
         <span data-failure-code={error?.code}>{reasonWords(job, t, waited)}</span>{' '}
         <span>{error?.undone === false ? t('change.result.notUndone') : t('change.result.undone', { subject })}</span>
         {stoppedTurn && error?.undone !== false && <span>{' '}{t('change.result.turnStopped')}</span>}
-      </>} />
+      </>} /></div><JobFacts job={job} /></div>
     </div>
   );
 }

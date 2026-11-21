@@ -803,6 +803,7 @@ async fn upload_in_pieces(room: &Room, by: &Who, name: &str, bytes: &[u8]) -> Ha
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: name.to_owned(),
             media_type: None,
@@ -829,6 +830,8 @@ async fn upload_in_pieces(room: &Room, by: &Who, name: &str, bytes: &[u8]) -> Ha
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
         .blob
 }
 
