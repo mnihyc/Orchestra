@@ -26,6 +26,7 @@ use orch_settings_contract::registry;
 
 use orch_settings_contract::registry::Scope;
 
+use orch_settings_contract::provenance::SourceScope;
 use orch_settings_contract::registry::keys;
 
 use orch_types::Json;
@@ -43,16 +44,32 @@ pub(super) async fn load(
     let mut result = DisplaySettings {
         mounts: HashSet::new(),
         idle_minutes: HashMap::new(),
+        background_work: HashSet::new(),
+        removed_keep_days: HashMap::new(),
+        default_removed: HashSet::new(),
     };
     if environments.is_empty() {
         return Ok(result);
     }
+    let environment_ids: Vec<_> = environments.iter().map(|row| row.id).collect();
+    result.background_work =
+        orch_engine::environments::environments_with_background_work(conn, &environment_ids)
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .collect();
+    let scratch: HashSet<_> =
+        orch_db::queries::environments::retained::scratch_among(conn, &environment_ids)
+            .await?
+            .into_iter()
+            .collect();
     let homes: Vec<_> = environments.iter().map(|row| row.home_node_id).collect();
     let nodes = hierarchy::with_ancestors(conn, &homes).await?;
     let nodes: HashMap<_, _> = nodes.into_iter().map(|node| (node.id, node)).collect();
     let keys = [
         keys::ENV_MOUNTS.to_owned(),
         keys::ENV_IDLE_STOP_MINUTES.to_owned(),
+        keys::ENV_REMOVED_KEEP_DAYS.to_owned(),
     ];
     let ids: Vec<_> = nodes.keys().copied().collect();
     let rows = Rows::new(settings::rows_on_chain(conn, &ids, Some(&keys)).await?);
@@ -60,6 +77,8 @@ pub(super) async fn load(
         .ok_or_else(|| ApiError::internal("mount settings are not registered"))?;
     let idle = registry::get(&keys[1])
         .ok_or_else(|| ApiError::internal("idle-stop settings are not registered"))?;
+    let retention = registry::get(&keys[2])
+        .ok_or_else(|| ApiError::internal("removal retention is not registered"))?;
     for environment in environments {
         let home = nodes
             .get(&environment.home_node_id)
@@ -101,6 +120,18 @@ pub(super) async fn load(
             .and_then(Json::as_i64)
             .unwrap_or_default();
         result.idle_minutes.insert(environment.id, minutes);
+        let policy = resolve_key(retention, &stack, None);
+        let days = if scratch.contains(&environment.id)
+            || orch_db::queries::environments::temporary::mode(&environment.config).is_some()
+        {
+            Some(0)
+        } else {
+            if policy.source.scope == SourceScope::Default {
+                result.default_removed.insert(environment.id);
+            }
+            policy.value.as_ref().and_then(Json::as_i64)
+        };
+        result.removed_keep_days.insert(environment.id, days);
     }
     Ok(result)
 }

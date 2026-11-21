@@ -136,9 +136,11 @@ async fn native_recorded() -> (Cluster, Id) {
             site.machine,
             &SerialKey::Environment(site.environment),
             &FsRecord {
+                access: orch_link_contract::commands::FsAccess::roots(),
                 environment_id: site.environment,
                 snapshot_id: id,
                 directory: "web".into(),
+                wait_for_indexing: true,
                 kind: RecordKind::Turn,
                 record_days: registry::get(settings::WORKSPACE_RECORD_DAYS)
                     .unwrap()
