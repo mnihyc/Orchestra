@@ -25,7 +25,7 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::hosting::{Enrollment, EnrollmentAsk, HostServices, HostingError, ToolBuild};
 use crate::ids;
-use crate::jobs::provision::{CONNECTOR_TOOL, SpecInputs, image_key, runtime_spec};
+use crate::jobs::provision::{CONNECTOR_TOOL, SpecInputs, UNIT_VARIABLE, image_key, runtime_spec};
 use crate::jobs::runner::{Done, Failure, INTERNAL, Job, Phase, Phased, Stop, Undone};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -51,6 +51,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 mod creator_authority;
+mod placement_pool;
 pub use creator_authority::CreatorCommand;
 pub use creator_authority::copy_checkpoint as copied_creator_checkpoint;
 pub use creator_authority::creator_principal;
@@ -65,6 +66,43 @@ pub use creator_authority::{
     command_authorized as creator_command_authorized,
     command_current_callers as creator_command_current_callers,
 };
+pub use placement_pool::Command as PlacementCommand;
+pub(super) use placement_pool::decorate as decorate_placement;
+pub use placement_pool::preview as preview_pool;
+
+/// The actual retained native choice is conjunctive with its current requester and lending bounds.
+pub async fn current_pool_placement(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    row: &JobRow,
+    host: Id,
+) -> Result<bool, EngineError> {
+    let Some(provider) = row.provider_id else {
+        return Ok(false);
+    };
+    let Some(provider) = rows::state(conn, provider)
+        .await?
+        .filter(|provider| provider.deleted_at.is_none())
+    else {
+        return Ok(false);
+    };
+    let Some(runtime) = rows::live_runtime(conn, provider.id)
+        .await?
+        .filter(|runtime| runtime.host_id == host)
+    else {
+        return Ok(false);
+    };
+    let Some(mut template) = host_rows::template(conn, runtime.template_id)
+        .await?
+        .filter(|template| template.enabled && template.deleted_at.is_none())
+    else {
+        return Ok(false);
+    };
+    if let Some(definition) = row.plan.pointer("/provider_recovery/definition") {
+        template.spec = definition.clone();
+    }
+    placement_pool::current(conn, principal, &provider, &template, row, host).await
+}
 
 /// How many hex digits of the runtime's identifier a unit's name holds: the last ones, since the first
 /// twelve of an identifier are the moment it was made in and two runtimes made together share them.
@@ -233,6 +271,7 @@ pub fn provider_runtime_spec(provider: Id, inputs: &SpecInputs<'_>) -> Json {
     if let Some(env) = inputs.spec.get("env") {
         spec["env"] = env.clone();
     }
+    spec["env"][UNIT_VARIABLE] = json!(inputs.runtime);
     spec["labels"]["orch.kind"] = json!("provider");
     spec["labels"]["orch.provider_id"] = json!(provider);
     spec
@@ -274,6 +313,8 @@ fn hosting_stop(error: &HostingError) -> Stop {
 /// A host a provider's runtime could be made on, with what it was judged by.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
+    /// The actual scheduler inputs before this choice; absent when no calculation was recorded.
+    pub calculation: Option<orch_api_contract::environment::PlacementCalculation>,
     /// The host's row.
     pub host: HostState,
     /// The memory it declares free, in mebibytes.
@@ -338,9 +379,47 @@ async fn candidates_for(
     named: Option<Id>,
     principal: &Principal,
 ) -> Result<Vec<Candidate>, EngineError> {
-    let (may_use, template_allowed) = if principal.caller().admitted_operation()
-        == Some("ProviderCreate")
-    {
+    candidates_scoped(conn, provider, template, named, principal, None).await
+}
+
+async fn candidates_scoped(
+    conn: &mut orch_db::Conn,
+    provider: &State,
+    template: &TemplateState,
+    named: Option<Id>,
+    principal: &Principal,
+    pool: Option<orch_authz::pools::Selection<'_>>,
+) -> Result<Vec<Candidate>, EngineError> {
+    let (may_use, template_allowed) = if let Some(pool) = pool {
+        let hosts = match pool.leaf {
+            orch_provider_contract::pools::Leaf::Host { id } => vec![*id],
+            _ => vec![],
+        };
+        let template_allowed = if matches!(
+            principal.caller().admitted_operation(),
+            Some("ProviderCreate" | "ProviderDuplicate" | "ProviderMoveOut")
+        ) {
+            resources::provider_creation_template_use(conn, principal, provider.id, template.id)
+                .await?
+        } else {
+            resources::check(
+                conn,
+                principal,
+                ObjectRef {
+                    kind: ResourceKind::Template.into(),
+                    id: template.id,
+                },
+                Permission::TemplateUse,
+                Policy::default(),
+            )
+            .await?
+            .is_allowed()
+        };
+        (hosts, template_allowed)
+    } else if matches!(
+        principal.caller().admitted_operation(),
+        Some("ProviderCreate" | "ProviderDuplicate" | "ProviderMoveOut")
+    ) {
         (
             resources::provider_creation_hosts(conn, principal, provider.id, HOSTS_MAX).await?,
             resources::provider_creation_template_use(conn, principal, provider.id, template.id)
@@ -494,6 +573,28 @@ async fn candidates_for(
             lacks.push("it declares less free memory than the runtime needs");
         }
         found.push(Candidate {
+            calculation: Some(crate::places::capture_calculation(
+                crate::places::CalculationInput {
+                    host: &host,
+                    template,
+                    runtime: runtime_class.as_deref(),
+                    needs: &needs,
+                    need_sources: crate::places::need_sources(
+                        &template.spec,
+                        own_needs.as_ref(),
+                        Some(&limits),
+                    ),
+                    declared: declared.clone(),
+                    applied: declared.clone(),
+                    full_percent,
+                    when_full: if blocks {
+                        orch_api_contract::environment::WhenFull::Block
+                    } else {
+                        orch_api_contract::environment::WhenFull::Warn
+                    },
+                    now: principal.now().get(),
+                },
+            )),
             free_memory_mb: (capacity_memory - declared.memory_mb).max(0),
             host,
             full,
@@ -508,6 +609,85 @@ async fn candidates_for(
             .then_with(|| a.host.id.cmp(&b.host.id))
     });
     Ok(found)
+}
+
+async fn placement_bounds(
+    conn: &mut orch_db::Conn,
+    principal: &Principal,
+    provider: &State,
+    template: &TemplateState,
+    host: Id,
+    pool: Option<orch_authz::pools::Selection<'_>>,
+) -> Result<Option<orch_authz::environments::Created>, EngineError> {
+    let own: Option<Json> = setting(
+        conn,
+        SettingsPlace::Provider(provider.id),
+        keys::RUNTIME_RESOURCES,
+    )
+    .await?;
+    let limits = crate::places::limits_of(&template.spec, own.as_ref());
+    let storage: Option<Json> = setting(
+        conn,
+        SettingsPlace::Provider(provider.id),
+        keys::RUNTIME_STORAGE,
+    )
+    .await?;
+    let wants = orch_authz::environments::Wants {
+        resources: orch_access_contract::permissions::ResourceLimits {
+            cpu_millis: limits.get("cpu_millis").and_then(Json::as_i64),
+            memory_mb: limits.get("memory_mb").and_then(Json::as_i64),
+            pids: limits.get("pids").and_then(Json::as_i64),
+            disk_gb: limits.get("disk_gb").and_then(Json::as_i64),
+        },
+        capabilities: texts(template.spec.get("base_capabilities")),
+        source: Some(crate::places::source_of(&template.spec).into()),
+        storage: storage
+            .as_ref()
+            .and_then(|value| value.get(STATE_VOLUME))
+            .and_then(Json::as_str)
+            .map(str::to_owned),
+    };
+    let path = pool.map_or(&[][..], |pool| pool.path);
+    let policies =
+        crate::access::resource_policies_for_choice(conn, &[host, template.id], path).await?;
+    let ask = orch_authz::environments::NewEnvironment {
+        home: provider.home_id,
+        place: orch_authz::environments::Place::Host {
+            host,
+            template: template.id,
+            wants,
+        },
+        mounts: vec![],
+    };
+    if let Some(selected) = pool
+        && principal.user() != provider.owner_id
+        && !orch_authz::environments::provider_owner_host_creation_in_pool(
+            conn,
+            provider.id,
+            &ask,
+            &policies,
+            selected,
+            principal.now(),
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    Ok(
+        match orch_authz::environments::provider_host_creation(
+            conn,
+            principal,
+            provider.id,
+            &ask,
+            &policies,
+            pool,
+        )
+        .await?
+        {
+            orch_authz::environments::Creating::Allowed(created) => Some(*created),
+            _ => None,
+        },
+    )
 }
 
 /// Chooses the host: the one named, which must be usable, else the usable one that has room before
@@ -597,6 +777,10 @@ impl ProviderProvision {
     }
 
     async fn placed(&self, job: &Job) -> Result<Placed, Stop> {
+        self.placed_for(job, false).await
+    }
+
+    async fn placed_for(&self, job: &Job, creating: bool) -> Result<Placed, Stop> {
         let plan = job.plan().await?;
         let mut conn = self
             .engine
@@ -615,12 +799,22 @@ impl ProviderProvision {
             .and_then(|id| id.parse::<Id>().ok());
         let runtime = match planned {
             Some(id) => env_rows::runtime(&mut conn, id).await?,
+            None if plan.get("runtime").is_some() => None,
             None => rows::live_runtime(&mut conn, provider.id).await?,
         }
         .ok_or_else(|| failed("runtime_gone", "the provider has no unit to work on"))?;
         let host = host_rows::host(&mut conn, runtime.host_id)
             .await?
             .ok_or_else(|| failed("no_host", "the host the unit is on is gone"))?;
+        super::runtime_commands::placement(
+            &mut conn,
+            job.id(),
+            runtime.id,
+            runtime.host_id,
+            host.machine_id,
+            creating,
+        )
+        .await?;
         if host.disabled || provider.status == "disabled" {
             return Err(failed(
                 "provider_unavailable",
@@ -709,43 +903,77 @@ impl ProviderProvision {
         if let Some(recipe) = &recovery {
             template.spec = recipe.definition.clone();
         }
-        let mut named: Option<Id> = setting(
+        let configured: Option<orch_provider_contract::pools::Target> = setting(
             &mut tx,
             SettingsPlace::Provider(provider.id),
             keys::RUNTIME_HOST_ID,
         )
         .await
         .map_err(EngineError::from)?;
-        if let Some(recipe) = &recovery {
-            named = Some(recipe.host);
-        }
+        let target = recovery
+            .as_ref()
+            .map(|recipe| recipe.host.clone())
+            .or(configured);
+        let named = target
+            .as_ref()
+            .and_then(orch_provider_contract::pools::Target::single_host);
         let owner = orch_db::queries::jobs::job(&mut tx, job.id())
             .await?
             .ok_or_else(|| failed("provider_gone", "the provider job disappeared"))?;
-        let listed = if crate::jobs::lifecycle_commands::environment::present(&owner) {
-            let checked = crate::jobs::lifecycle_commands::environment::current(
-                &mut tx,
-                &owner,
-                self.engine.inner.clock.as_ref(),
-                self.engine.inner.access.as_ref(),
-                named,
+        let lifecycle = if crate::jobs::lifecycle_commands::environment::present(&owner) {
+            Some(
+                crate::jobs::lifecycle_commands::environment::current(
+                    &mut tx,
+                    &owner,
+                    self.engine.inner.clock.as_ref(),
+                    self.engine.inner.access.as_ref(),
+                    named,
+                )
+                .await?,
             )
-            .await?;
-            let listed =
-                candidates_for(&mut tx, &provider, &template, named, &checked.principal).await?;
-            checked.check(self.engine.inner.clock.as_ref())?;
-            listed
+        } else {
+            None
+        };
+        let principal = if let Some(checked) = &lifecycle {
+            checked.principal.clone()
         } else {
             match creator_authority::principal(&mut tx, &owner, self.engine.inner.clock.as_ref())
                 .await
                 .map_err(creator_authority::stop)?
             {
-                Some(principal) => {
-                    candidates_for(&mut tx, &provider, &template, named, &principal).await?
+                Some(principal) => principal,
+                None => {
+                    Principal::load(&mut tx, Caller::session(provider.owner_id), Time::new(now))
+                        .await
+                        .map_err(EngineError::from)?
                 }
-                None => candidates(&mut tx, &provider, &template, named, now).await?,
             }
         };
+        let selected =
+            if let Some(target @ orch_provider_contract::pools::Target::Pool { .. }) = &target {
+                Some(
+                    placement_pool::select(
+                        &mut tx,
+                        &principal,
+                        &provider,
+                        &template,
+                        &owner,
+                        target,
+                        previous.as_ref().map(|runtime| runtime.host_id),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+        let listed = if let Some(selected) = &selected {
+            vec![selected.candidate.clone()]
+        } else {
+            candidates_for(&mut tx, &provider, &template, named, &principal).await?
+        };
+        if let Some(checked) = &lifecycle {
+            checked.check(self.engine.inner.clock.as_ref())?;
+        }
         let (host, warnings): (HostState, Vec<&str>) = match &previous {
             Some(old) => {
                 let candidate = listed
@@ -764,6 +992,45 @@ impl ProviderProvision {
                 (chosen.host.clone(), warnings_of(chosen))
             }
         };
+        let created = match selected {
+            Some(selected) => Some(selected.created),
+            None if previous.is_none() => {
+                placement_bounds(&mut tx, &principal, &provider, &template, host.id, None).await?
+            }
+            None => None,
+        };
+        if previous.is_none() && created.is_none() {
+            return Err(failed(
+                "no_host",
+                "the current host/template allowances do not admit this provider unit",
+            ));
+        }
+        if let Some(created) = &created {
+            if !orch_authz::environments::reserve_capacity(&mut tx, created)
+                .await
+                .map_err(EngineError::from)?
+            {
+                return Err(failed(
+                    "no_capacity",
+                    "the selected host or pool entry has no remaining unit capacity",
+                ));
+            }
+            let mut entries = created.pool_entries.clone();
+            entries.extend(created.host.as_ref().and_then(|(entry, _)| *entry));
+            orch_db::queries::environments::record_provider_creation_entries(
+                &mut tx,
+                provider.id,
+                &entries,
+            )
+            .await?;
+        }
+        if matches!(
+            target,
+            Some(orch_provider_contract::pools::Target::Pool { .. })
+        ) && recovery.is_none()
+        {
+            orch_db::queries::jobs::merge_plan(&mut tx,owner.id,&json!({"pool_choice":owner.id,"retained_host":previous.as_ref().map(|runtime|runtime.host_id)}),now).await?;
+        }
         // A unit that failed is taken away before its successor is made, so that two never run at once.
         let fresh = previous.is_none();
         if let Some(old) = &previous {
@@ -848,10 +1115,12 @@ impl ProviderProvision {
         }
         let (runtime_id, name) =
             made.ok_or_else(|| failed(INTERNAL, "no free name for the unit was found"))?;
+        super::runtime_commands::capture(&mut tx, job.id(), runtime_id).await?;
         orch_db::queries::jobs::merge_plan(
             &mut tx,
             job.id(),
             &json!({
+                "calculation": listed.iter().find(|candidate|candidate.host.id==host.id).and_then(|candidate|candidate.calculation.as_ref()),
                 "host": host.id,
                 "host_name": host.name,
                 "runtime": runtime_id,
@@ -1003,7 +1272,7 @@ impl ProviderProvision {
     // ------------------------------------------------------------ create, start
 
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
-        let placed = self.placed(job).await?;
+        let placed = self.placed_for(job, true).await?;
         let plan = job.plan().await?;
         let services = self.services()?;
         let enrollment: Enrollment = match plan.get("enrollment") {
@@ -1205,9 +1474,30 @@ impl ProviderProvision {
             &NodeRuntimeCreate(serde_json::from_value(spec).map_err(EngineError::from)?),
         )
         .map_err(body_stop)?;
-        if let Err(stop) = job.command(made).await {
-            return Err(explain_creation(&plan, &placed, stop));
-        }
+        let (original, made) = super::runtime_commands::prepare_create(
+            &self.engine,
+            job.id(),
+            placed.runtime.id,
+            made,
+        )
+        .await?;
+        let created_command = made.id;
+        let created_result = job
+            .command(made)
+            .await
+            .map_err(|stop| explain_creation(&plan, &placed, stop))?;
+        let created_source = match original.as_ref() {
+            Some(original) => Some(
+                super::runtime_commands::created(
+                    &self.engine,
+                    original,
+                    created_command,
+                    &created_result,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         job.progress(0.5, Some("starting the unit")).await?;
         let started = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"create"]),
@@ -1218,9 +1508,28 @@ impl ProviderProvision {
             },
         )
         .map_err(body_stop)?;
-        job.command(started)
+        let started = match (original.as_ref(), created_source) {
+            (Some(original), Some(source)) => {
+                super::runtime_commands::prepare_start(&self.engine, original, source, started)
+                    .await?
+            }
+            _ => started,
+        };
+        let start_command = started.id;
+        let start_result = job
+            .command(started)
             .await
             .map_err(|stop| explain_creation(&plan, &placed, stop))?;
+        if let (Some(original), Some(source)) = (original.as_ref(), created_source) {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                source,
+                start_command,
+                &start_result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1265,23 +1574,15 @@ impl ProviderProvision {
                 .await?;
             }
         }
-        let mut conn = self
-            .engine
-            .inner
-            .db
-            .acquire()
-            .await
-            .map_err(EngineError::from)?;
-        env_rows::set_runtime_state(
-            &mut conn,
+        let original = super::runtime_commands::starting(
+            &self.engine,
+            job.id(),
             placed.runtime.id,
-            &[runtime_state::STOPPED, runtime_state::FAILED],
-            runtime_state::CREATING,
-            None,
+            placed.host.id,
+            placed.host.machine_id,
             job.now(),
         )
         .await?;
-        drop(conn);
         let command = Outgoing::new(
             ids::derived("node.runtime.start", &[job.id().as_bytes(), b"start"]),
             placed.host.machine_id,
@@ -1291,9 +1592,33 @@ impl ProviderProvision {
             },
         )
         .map_err(body_stop)?;
-        job.command(command)
+        let command = match original.as_ref() {
+            Some(original) => {
+                super::runtime_commands::prepare_start(
+                    &self.engine,
+                    original,
+                    original.source(),
+                    command,
+                )
+                .await?
+            }
+            None => command,
+        };
+        let id = command.id;
+        let result = job
+            .command(command)
             .await
             .map_err(|stop| explain_creation(&json!({}), &placed, stop))?;
+        if let Some(original) = original.as_ref() {
+            super::runtime_commands::started(
+                &self.engine,
+                original,
+                original.source(),
+                id,
+                &result,
+            )
+            .await?;
+        }
         Ok(Done::Finished)
     }
 
@@ -1334,10 +1659,15 @@ impl ProviderProvision {
             }
             let waited = began.elapsed();
             if waited >= allowed {
+                let seen = match online {
+                    None => "it has not enrolled as a machine of this unit",
+                    Some(_) => "it enrolled and is not online",
+                };
                 return Err(failed(
                     "enroll_timeout",
                     format!(
-                        "the connector in the unit did not come online within {} seconds",
+                        "the connector in the unit {} did not come online within {} seconds ({seen}); the log of the unit on its host says why",
+                        placed.runtime.unit_name,
                         allowed.as_secs()
                     ),
                 ));
@@ -1456,6 +1786,15 @@ impl ProviderProvision {
             .await?
             .filter(|state| state.deleted_at.is_none())
             .ok_or_else(|| failed("provider_gone", "the provider was deleted"))?;
+        super::runtime_commands::placement(
+            &mut tx,
+            job.id(),
+            placed.runtime.id,
+            placed.runtime.host_id,
+            placed.host.machine_id,
+            false,
+        )
+        .await?;
         env_rows::set_runtime_state(
             &mut tx,
             placed.runtime.id,
@@ -1685,7 +2024,7 @@ impl ProviderProvision {
         };
         if let Err(error) = self
             .engine
-            .runtime_failed(self.provider, &detail, job.now())
+            .runtime_failed(self.provider, Some(&detail), job.now())
             .await
         {
             tracing::warn!(%error, provider = %self.provider, "a sign-in that waited for a runtime that was not made could not be forgotten");
@@ -1792,7 +2131,15 @@ impl Phased for ProviderProvision {
             Box::pin(crate::provider_recovery::guard(job, &recipe)).await?;
         }
 
-        match phase {
+        let unit = current
+            .plan
+            .get("runtime")
+            .and_then(Json::as_str)
+            .unwrap_or("-")
+            .to_owned();
+        let mode = self.mode.word();
+        tracing::info!(provider = %self.provider, job = %job.id(), runtime = %unit, mode, phase, "provider runtime: a step begins");
+        let outcome = match phase {
             "schedule" => Box::pin(self.schedule(job)).await,
             "image" => Box::pin(self.image(job)).await,
             "volumes" => Box::pin(self.volumes(job)).await,
@@ -1808,10 +2155,68 @@ impl Phased for ProviderProvision {
                 INTERNAL,
                 format!("a provider's provisioning has no phase {other}"),
             )),
+        };
+        // The step that makes the unit is the one that learns its identifier: what it came to names the unit.
+        let unit = job
+            .plan()
+            .await
+            .ok()
+            .and_then(|plan| {
+                plan.get("runtime")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or(unit);
+        match &outcome {
+            Ok(Done::Finished) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), runtime = %unit, mode, phase, "provider runtime: a step is done");
+            }
+            Ok(Done::Skipped(why)) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), runtime = %unit, mode, phase, %why, "provider runtime: a step was skipped");
+            }
+            Err(Stop::Failed(failure)) => {
+                tracing::warn!(provider = %self.provider, job = %job.id(), runtime = %unit, mode, phase, code = %failure.code, reason = %failure.message, "provider runtime: a step failed");
+            }
+            Err(Stop::Cancelled) => {
+                tracing::info!(provider = %self.provider, job = %job.id(), runtime = %unit, mode, phase, "provider runtime: a step was cancelled");
+            }
+            Err(Stop::Lost) => {}
         }
+        outcome
     }
 
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
+        let unit = job
+            .plan()
+            .await
+            .ok()
+            .and_then(|plan| {
+                plan.get("runtime")
+                    .and_then(Json::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "-".to_owned());
+        match why {
+            Stop::Failed(failure) => {
+                tracing::warn!(provider = %self.provider, job = %job.id(), runtime = %unit, mode = self.mode.word(), code = %failure.code, reason = %failure.message, "provider runtime: the job failed and is undone");
+            }
+            Stop::Cancelled => {
+                tracing::info!(provider = %self.provider, job = %job.id(), runtime = %unit, mode = self.mode.word(), "provider runtime: the job was cancelled and is undone");
+            }
+            Stop::Lost => {}
+        }
+        if let Ok(plan) = job.plan().await
+            && let Some(runtime) = plan
+                .get("runtime")
+                .and_then(Json::as_str)
+                .and_then(|id| id.parse::<Id>().ok())
+        {
+            match super::runtime_commands::undo_current(&self.engine, job.id(), runtime).await {
+                Ok(true) => {},
+                Ok(false) => return Undone::Partly("The original native unit or control changed; its unit and data were left unchanged.".into()),
+                Err(error) => return Undone::Deferred(format!("The original native unit could not be confirmed before cleanup: {error:?}")),
+            }
+        }
         if let Err(error) = creator_authority::copy_audit(job).await {
             tracing::warn!(job=%job.id(),?error,"a completed owner credential copy could not be audited before its compensation");
         }
@@ -1851,6 +2256,7 @@ impl Phased for ProviderProvision {
             "runtime": plan.get("runtime"),
             "host": plan.get("host"),
             "warnings": plan.get("warnings"),
+            "calculation": plan.get("calculation"),
         }))
     }
 }
@@ -1915,9 +2321,9 @@ impl ProviderRemoval {
     }
 }
 
-#[async_trait]
-impl Phased for ProviderRemoval {
-    async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+impl ProviderRemoval {
+    /// One step of the removal; `Phased::run` says what it came to.
+    async fn step(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         let failure = |error: CommandsError| failed(INTERNAL, error.to_string());
         match phase {
             "stop" => {
@@ -2063,6 +2469,30 @@ impl Phased for ProviderRemoval {
             )),
         }
     }
+}
+
+#[async_trait]
+impl Phased for ProviderRemoval {
+    async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), volumes = self.volumes, phase, "provider runtime: a step of its removal begins");
+        let outcome = self.step(job, phase).await;
+        match &outcome {
+            Ok(Done::Finished) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, "provider runtime: a step of its removal is done");
+            }
+            Ok(Done::Skipped(why)) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, %why, "provider runtime: a step of its removal was skipped");
+            }
+            Err(Stop::Failed(failure)) => {
+                tracing::warn!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, code = %failure.code, reason = %failure.message, "provider runtime: a step of its removal failed");
+            }
+            Err(Stop::Cancelled) => {
+                tracing::info!(provider = %self.provider, runtime = %self.runtime, job = %job.id(), phase, "provider runtime: a step of its removal was cancelled");
+            }
+            Err(Stop::Lost) => {}
+        }
+        outcome
+    }
 
     /// A removal is not undone: what it took away stays away. What a failure does is date the next
     /// attempt, after a pause that grows, and say why on the runtime.
@@ -2183,6 +2613,11 @@ mod tests {
         assert_eq!(spec["mounts"], json!([]));
         assert_eq!(spec["env"]["REGION"], "east");
         assert_eq!(
+            spec["env"]["ORCH_RUNTIME_ID"],
+            json!(runtime),
+            "the connector in the unit tells its own machine state from an earlier unit's by this"
+        );
+        assert_eq!(
             spec["env"]["SERVICE_TOKEN"],
             json!({"$secret":enrollment.secret})
         );
@@ -2257,7 +2692,9 @@ mod tests {
         lacks: &[&'static str],
     ) -> Candidate {
         Candidate {
+            calculation: None,
             host: HostState {
+                capacity_at: None,
                 lost_at: None,
                 id: new_id(),
                 machine_id: new_id(),

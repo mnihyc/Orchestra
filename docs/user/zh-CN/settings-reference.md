@@ -3,7 +3,9 @@ group: settings
 screens: [/help, /thread/$threadId, /resources/providers/$id]
 keywords: [reference, settings, options, states, errors, 参考, 设置, 选项, 状态, 错误]
 heading_id.条目: entries
+heading_id.提供方操作默认值: provider-operation-defaults
 summary: 每个设置可以在哪里设定，以及它改变什么。
+heading_id.资源池: resource-pools
 ---
 
 # 设置参考
@@ -16,78 +18,90 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 
 | 参考标识 | 含义 |
 | --- | --- |
+| `setting:agents.harness_fetch_timeout_secs` | **程序下载时限** — 下载并校验指定代理构建的额外秒数，默认 1800 秒，与主机工具准备时限一致；已安装的本地程序沿用普通启动时限。 |
+| `setting:mount.copy_review_secs` | **复制方案有效期** — 可在系统或组织设置的正整数秒数，默认为 900 秒（15 分钟）。除时钟表示范围外没有固定上限；已接受的任务保留原方案。 |
+| `setting:mount.delete_data_fate` | **删除挂载时的数据去向** — 默认保留，也可在有权限时预选立即清除。每次删除仍会展示实际可选去向，销毁由 Orch 管理的数据须输入挂载名称。借用的现有目录始终保留。 |
+| `setting:server.update_prepare_timeout_secs` | **服务器更新准备时间** — 默认 60 秒，供随服务端安装的节点准备固定主机更新器。须为正数，除原生时钟表示范围外没有固定上限。发布获取、就绪检查及回滚仍由 update.sh 管理。 |
+| `setting:public_address.prepare_timeout_secs` | **地址准备等待时间** — 默认等待 60 秒，以完成受管证书及前端进程验证和所有候选来源地址验证。必须为正数，除时钟表示范围外没有固定上限；失败时保留生效版本。 |
+| `setting:public_address.probe_interval_ms` | **地址探测间隔** — 证书版本载入期间，两次新的浏览器访问探测默认间隔 250 毫秒；必须为正数，没有固定上限。 |
+| `setting:gateways.primary_change_timeout_secs` | **网关更改等待时间** — 等待保存主网关选择及其持久原生回执的时间，包含重新连接；默认 30 秒，必须为正数，除时钟表示范围外没有固定上限。 |
 | `setting:calls.rules` | **调用恢复** — 模型调用失败时按顺序重试、继续、故障转移或等待的规则。 |
 | `setting:calls.repeat_limit` | **重复次数** — 重复时间窗口内同类故障允许自动恢复的次数；零表示不自动恢复。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:calls.repeat_window` | **重复时间窗口** — 用于停止反复恢复的滚动时间窗口。 |
-| `setting:calls.notify_on_stop` | **停止时通知** — 重复保护停止恢复时向线程所有者发送一条通知。 |
+| `setting:calls.notify_on_stop` | **停止时通知** — 重复保护停止恢复时向会话所有者发送一条通知。 |
 | `setting:calls.return` | **故障转移后** — 下一轮时在原选择恢复可用后切回，或继续使用候选项。 |
 | `setting:agent.model` | **模型** — 这些会话使用的模型，请填写提供方给出的模型 ID。 |
-| `setting:agent.effort` | **思考程度** — 在模型支持时，选择它在一次运行中投入的思考程度。 |
+| `setting:agent.effort` | **推理强度** — 在模型支持时，选择它在一次运行中投入的推理强度。 |
 | `setting:agent.params` | **智能体参数** — 按参数名称设置智能体适配器声明的参数值。 |
-| `setting:agent.features` | **代理功能** — 按功能选择要启用的可选代理功能。 |
-| `setting:agent.instructions` | **常驻指令** — 每次会话都会提供给代理的常驻指令。 |
-| `setting:agent.memory` | **智能体笔记** — 代理是否在会话之间保留笔记：使用任何可用方式、仅由代理程序自行保存，或不保留。 |
-| `setting:agents.harness_versions` | **代理程序版本** — 选择新建或更新单元所用的代理程序版本，沿项目继承，环境可自行覆盖。智能体配置的固定版本优先；修改此项不会替换正在运行的单元。 |
+| `setting:agent.features` | **代理功能** — 在各程序声明的初始功能状态上叠加明确选择；false 会关闭对应功能。共享默认值为空，开关会显示程序初始状态及覆盖来源。 |
+| `setting:agent.instructions` | **常驻指令** — 每次会话都会提供给智能体的常驻指令。 |
+| `setting:agent.memory` | **智能体笔记** — 智能体是否在会话之间保留笔记：使用任何可用方式、仅由智能体程序自行保存，或不保留。 |
+| `setting:agents.harness_versions` | **智能体程序版本** — 选择新建或更新环境时各智能体程序所用的版本，沿项目继承，环境可自行覆盖。智能体配置的固定版本优先；修改此项不会更改正在运行的环境。 |
 | `option:agents.harness_versions.*.use` | 程序版本的选用策略。 |
 | `option:agents.harness_versions.*.version` | 选定的确切程序版本。 |
 | `setting:agents.harness_channel_hours` | **发布检查间隔** — 有位置请求较新构建时读取发布渠道的频率；0 表示不定时读取。 |
 | `setting:agents.harness_interface_timeout_secs` | **接口检查超时** — 构建输出其接口信息最多可用的时间。 |
-| `setting:agents.harness_case_timeout_secs` | **兼容性用例超时** — 每项原生兼容性用例使用脚本模型运行时最多可用的时间。 |
-| `setting:agents.harness_conformance_timeout_secs` | **兼容性检查超时** — 在独立单元中运行整套原生兼容性检查最多可用的时间。 |
+| `setting:agents.harness_case_timeout_secs` | **兼容性用例超时** — 每项智能体程序兼容性测试使用脚本模型运行时最多可用的时间。 |
+| `setting:agents.harness_conformance_timeout_secs` | **兼容性检查超时** — 单独运行整套智能体程序兼容性检查最多可用的时间。 |
 | `setting:agents.harness_trust_mirror` | **信任镜像校验和** — 允许发布镜像自行提供程序校验和。这些版本会标为镜像校验和，而不是厂商校验和。 |
 | `setting:agents.harness_mirror` | **发布镜像** — 在此服务器无法访问厂商时，提供厂商发布文件的服务器。 |
-| `setting:agents.prompt_cache_ttl` | **提示缓存时长** — 为代理程序的主对话指定缓存时长。不设置时使用程序自身的默认值；不支持此控制的程序会忽略它。 |
-| `setting:agents.subagents_at_once` | **同时运行的子智能体** — 代理程序可同时运行的子代理数量。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
-| `setting:agents.subagent_depth` | **子智能体层数** — 子代理可启动的层数；1 表示不能再嵌套。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
-| `setting:agents.skills` | **技能** — 按技能指定此处线程的智能体可使用哪些技能：关闭、最新版本或固定版本；下级位置可以更改或关闭继承的技能。 |
-| `setting:agents.personal_skills` | **个人技能** — 线程的智能体是否也能使用发起该线程的人自己的技能。 下级可以关闭此权限，不能推翻上级的禁止。 |
-| `setting:thread.cwd` | **起始目录** — 代理在此线程目录中启动的位置，填写相对路径。 |
-| `setting:thread.side_threads` | **旁支线程** — 是否可以从此处的线程发起旁支线程。 下级可以关闭此权限，不能推翻上级的禁止。 |
-| `setting:thread.side_max` | **同时打开的旁支线程** — 同一个线程最多可以同时打开多少个旁支线程。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:thread.side_idle_hours` | **旁支线程空闲时间** — 打开的旁支线程多少小时没有新一轮工作后关闭。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:thread.inputs_without_use` | **无使用权的写入者** — 可以在此写入、但不能使用该线程的模型或其环境的人发给智能体的消息如何处理。 下级只能选择更严格的选项。 严格程度依次为：`allowed` → `held` → `refused`，最后一项最严格。 |
+| `setting:agents.prompt_cache_ttl` | **提示缓存时长** — 为智能体程序的主对话指定缓存时长。不设置时使用程序自身的默认值；不支持此控制的程序会忽略它。 |
+| `setting:agents.web_action_wait_secs` | **网页操作等待时间** — 关闭尚未报告结束的原生 Codex 网页操作行，并说明原因。默认 120 秒，沿所在位置的设置继承，没有固定上限。轮次继续运行，之后真正到达的结束事件仍可更新同一行。会话重新打开时生效。 |
+| `setting:agents.native_result_wait_ms` | **原生结果等待时间** — 为声明了保留证据读取等待的程序提供系统默认值 2000 毫秒。程序配置可在引擎的中断等待窗口内选择其他值。读取超时保留操作已报告的结果，未证实用量保持未知，其他会话继续运行。程序重新启动时生效。 |
+| `setting:agents.native_result_buffer_bytes` | **原生结果缓冲区** — 会话读取可选证据时，按顺序保留后续原生输入的系统默认值，默认为 8 MiB。程序配置可选择其他大小，包括零。缓冲区满时，只将可选读取结束为未验证；所有输入继续处理。程序重新启动时生效。 |
+| `setting:agents.subagents_at_once` | **同时运行的子智能体** — 智能体程序可同时运行的子智能体数量。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
+| `setting:agents.subagent_depth` | **子智能体层数** — 子智能体可启动的层数；1 表示不能再嵌套。此处及上级位置中的最小值生效；不支持的控件会说明无法适用的原因。 |
+| `setting:agents.skills` | **技能** — 按技能指定此处会话的智能体可使用哪些技能：关闭、最新版本或固定版本；下级位置可以更改或关闭继承的技能。 |
+| `setting:agents.personal_skills` | **个人技能** — 会话的智能体是否也能使用发起该会话的人自己的技能。 下级可以关闭此权限，不能推翻上级的禁止。 |
+| `setting:thread.cwd` | **起始目录** — 智能体在此会话目录中启动的位置，填写相对路径。 |
+| `setting:thread.side_threads` | **旁路会话** — 是否可以从此处的会话发起旁路会话。 下级可以关闭此权限，不能推翻上级的禁止。 |
+| `setting:thread.side_max` | **同时打开的旁路会话** — 同一个会话最多可以同时打开多少个旁路会话。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:thread.side_idle_hours` | **旁路会话空闲时间** — 打开的旁路会话多少小时没有新一轮工作后关闭。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:thread.inputs_without_use` | **无使用权的写入者** — 可以在此写入、但无权使用该会话所用模型或环境的人，向智能体发送的消息会如何处理。 下级只能选择更严格的选项。 严格程度依次为：`allowed` → `held` → `refused`，最后一项最严格。 |
 | `setting:thread.switch_history` | **切换时的历史** — 切换或分叉时，除非计划另有选择，默认带上多少对话。 |
 | `setting:thread.switch_carry_share` | **延续的上下文** — 切换时可以用延续的对话占用新模型上下文窗口的比例。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:thread.native_fork_check_bytes` | **原生分支检查大小** — 对话最多占多大空间时，才会拿程序自己保存的对话记录来核对某一轮次处的分支，从而由程序自己完成分支。更长的对话改为带入放得下的最近轮次。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:thread.native_fork_check_bytes` | **内置分叉检查大小** — 对话最多占多大空间时，才会拿程序自己保存的对话记录来核对某一轮次处的分叉，从而由程序自己完成分叉。更长的对话改为带入放得下的最近轮次。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:thread.read_turn_bytes` | **单轮读取大小** — Orch 把某一轮读入对话摘要或目标检查时，该轮消息完整写出后最多可占的大小；更大的一轮只标明其位置，不读取其中任何内容。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:thread.plan_first` | **先规划** — 会话的第一条消息是否默认打开输入框的计划开关。审批模式保持不变。 |
 | `setting:thread.plan_answered_by` | **谁来回应计划** — 谁可以对智能体提出的计划选择继续执行或继续规划。 下级只能选择更严格的选项。 严格程度依次为：`writers` → `managers`，最后一项最严格。 |
+| `setting:thread.silent_after_secs` | **无进展提示** — 运行中的智能体在没有工具运行时，多少秒没有任何新内容后，状态行才会说明已经多久没有新进展。 |
 | `setting:thread.goal.max_turns` | **目标轮数** — 目标在此最多可用的轮数；0 表示不限。目标可设定更低的自身限额，不能提高上级位置的上限。下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:thread.goal.max_minutes` | **目标分钟数** — 目标在此最多可处于进行状态的分钟数；0 表示不限。每轮之间检查，不会打断正在进行的一轮。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:thread.goal.max_credits` | **目标额度** — 目标在此最多可用的额度，写作小数；0 表示不限。用量上限照常有效。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:approval.mode` | **审批方式** — 代理在执行操作前需要请求同意的条件。 |
+| `setting:thread.goal.max_credits` | **目标点数** — 目标在此最多可用的点数，写作小数；0 表示不限。用量上限照常有效。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:approval.mode` | **审批模式** — 智能体程序在执行操作前如何请求同意：询问、按需询问、自动审查（由它自己的审查模型决定）或跳过提示（不再询问）。 |
 | `setting:approval.allowed_modes` | **可选审批模式** — 此处允许选择哪些审批模式。 |
-| `setting:sandbox.mode` | **工具权限** — 代理程序允许命令做什么：读取文件、修改工作区文件，或使用环境允许的全部功能。 |
-| `setting:agent.messages` | **给智能体的说明** — 按消息类别替换 Orch 自己发送给智能体的说明文字。 |
+| `setting:sandbox.mode` | **工具权限** — 智能体程序允许命令做什么：读取文件、修改工作区文件，或使用环境允许的全部功能。 |
+| `setting:agent.messages` | **给智能体的说明** — 按消息类别替换 Orch 自己发送给智能体的说明文字。 `turn_pool_access_changed` 说明上一轮因实时资源池权限变化而停止，不会假称某个人评判并终止了任务。 |
 | `setting:models.allowed` | **允许的模型** — 填写在此处允许使用的模型名称模式。 |
-| `setting:services.allowed` | **允许的服务** — 指定此处允许使用的已启用供应商服务名称模式；设置列表的每一层范围都必须允许该服务。 |
+| `setting:services.allowed` | **允许的服务** — 指定此处允许使用的已启用提供方服务名称模式；每个设置了列表的位置都必须包含该服务。 |
 | `setting:providers.allowed` | **允许的提供者** — 用提供者的 Orch 地址匹配规则限制选择；每个设置了列表的位置都必须允许此处工作所用的提供者。 |
+| `setting:models.add_switches_on` | **添加时开启的内容** — “上下文、速度和访问计划”（`all`）开启报告的上下文大小、速度和访问计划；“强度和上下文”（`basic`）开启上下文大小；“只有它自己说明的”（`nothing`）保留模型自身的窗口和推理强度。网页搜索、缓存时长、推理模式、容量档位和请求选项需要单独配置。更大的上下文仍由每个线程选择。 |
 | `setting:collab.attribution` | **署名** — Orch 编写的输入、停止、拒绝和转发说明是否点名：自动在第二个人的话实际送达后署名、始终署名，或永不署名。永不署名时写作某人或审批人，仍保留来源、时间和备注；聊天和文档中的作者署名不变。 |
-| `setting:collab.default_delivery` | **消息发送方式** — 线程忙碌时，消息排队、送入当前运行，或中断后优先发送。 |
+| `setting:collab.default_delivery` | **消息发送方式** — 会话忙碌时，默认将输入排队到下一轮或送入当前运行；发送者可针对这次输入另作选择。 |
 | `setting:composer.paste_inline_context_share` | **消息中的粘贴文本** — 粘贴文本默认占用剩余上下文的比例。0 表示始终作为文件，100 表示始终放入消息。发送者可以逐次选择。 |
-| `setting:env.thread_default` | **新线程** — 选择新线程加入继承得到的默认环境，还是创建自己的环境。 |
-| `setting:env.default_id` | **默认环境** — 新线程共享环境且未另选时使用的环境。创建者必须能管理该环境。清除本级选择后继承上级。 |
+| `setting:env.thread_default` | **新会话** — 选择新会话加入继承得到的默认环境，还是创建自己的环境。 |
+| `setting:env.default_id` | **默认环境** — 新会话共享环境且未另选时使用的环境。创建者必须能管理该环境。清除本级选择后继承上级。 |
 | `setting:env.update` | **环境更新** — 环境落后于当前配置时，是等待有人更新，还是在每次启动时更新。 |
 | `setting:env.template_id` | **环境模板** — 用于创建托管环境的模板。 |
-| `setting:env.host_id` | **环境宿主机** — 用于创建托管环境的宿主机；未指定时选择可用空间最多的宿主机。 |
-| `setting:env.runtime` | **运行时** — 选择主机提供的运行时。留空时使用模板的默认运行时。 |
-| `setting:environments.runtimes` | **运行时规则** — 按名称允许、禁止或要求运行时。* 代表未单独指定的全部运行时。 |
+| `setting:env.host_id` | **环境宿主机** — 创建新环境时选择的宿主机或宿主机池；未设置时选择可用空间最多的宿主机。已有环境保留已准入的宿主机。 |
+| `setting:env.runtime` | **容器容器运行时** — 选择主机提供的容器容器容器运行时。留空时使用模板的默认容器容器容器运行时。 |
+| `setting:environments.runtimes` | **容器容器运行时规则** — 按名称允许、禁止或要求容器运行时。* 代表未单独指定的全部容器运行时。 |
 | `setting:env.storage` | **环境存储** — 用于新建工作区、主目录和连接器状态数据的命名机器存储。已有数据保留记录的位置。 |
-| `option:env.storage.workspace` | 工作文件的存储。 |
-| `option:env.storage.home` | 代理主目录的存储。 |
+| `option:env.storage.workspace` | 工作区文件的存储位置。 |
+| `option:env.storage.home` | 智能体主目录的存储。 |
 | `option:env.storage.state` | 已记录文件状态的存储。 |
-| `setting:env.data_sources` | **工作区与主目录** — 分别选择由 Orch 创建，或使用此机器 environment.roots 允许的已有目录。已有目录保留所有者和权限，不受卷容量限制，也不会在清除环境时删除。 |
-| `option:env.data_sources.workspace` | 工作文件的存储。 |
+| `setting:env.data_sources` | **工作区与主目录** — 工作区和主目录各自的位置：由 Orch 创建，或使用此机器所有者允许的已有目录。已有目录保留所有者和权限，不受卷容量限制，也不会在清除环境时删除。 |
+| `option:env.data_sources.workspace` | 工作区文件的数据来源。 |
 | `option:env.data_sources.workspace.kind` | 声明的数据源或内容类型。 |
 | `option:env.data_sources.workspace.path` | 此设置所属机器上的路径。 |
-| `option:env.data_sources.home` | 代理主目录的存储。 |
+| `option:env.data_sources.home` | 智能体主目录的存储。 |
 | `option:env.data_sources.home.kind` | 声明的数据源或内容类型。 |
 | `option:env.data_sources.home.path` | 此设置所属机器上的路径。 |
-| `setting:env.after_up` | **启动后命令** — 每次托管环境启动后，在运行单元内执行的具名程序及参数。空值移除继承的同名设置；命令失败会阻止启动完成。 |
+| `setting:env.after_up` | **启动后命令** — 每次托管环境启动后，在环境内执行的具名命令及其参数。空值移除继承的同名命令；命令失败会使启动无法完成。 |
 | `option:env.after_up.*.command` | 直接运行的程序及参数，不经过命令解释器。 |
 | `option:env.after_up.*.timeout_secs` | 命令的超时时间，单位为秒。 |
 | `setting:env.mounts` | **环境挂载** — 工作区旁的挂载：按挂载原设置、停用、只读，或只读并单独保留环境自己的修改。 |
-| `setting:env.resources` | **环境上限** — 替代模板的运行单元资源上限，包括处理器、内存、进程和磁盘。 |
+| `setting:env.resources` | **环境上限** — 替代模板的环境资源上限，包括处理器、内存、进程和磁盘。 |
 | `option:env.resources.cpu_millis` | CPU 配额，以千分之一个 CPU 为单位。 |
 | `option:env.resources.memory_mb` | 内存配额，单位为 MiB。 |
 | `option:env.resources.memory_swap_mb` | 内存与交换空间的合计配额，单位为 MiB。 |
@@ -101,32 +115,44 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:env.idle_stop_minutes` | **空闲后停止** — 托管环境无活动多少分钟后停止；零表示永不自动停止。 |
 | `setting:env.variables` | **环境变量** — 按名称提供给环境的变量。 |
 | `setting:env.secret_names` | **环境机密名称** — 提供给环境的机密名称列表。 |
-| `setting:network.allowed_hosts` | **允许访问的主机** — 受限运行单元可访问的其他主机的精确名称。各层列表取交集；空列表只允许 Orch 自身的传输。 |
+| `setting:network.allowed_hosts` | **允许访问的主机** — 受限环境可访问的其他主机的精确名称。各层列表取交集；空列表只允许 Orch 自身的连接。 |
 | `setting:mcp.enabled` | **启用的 MCP 服务器** — 按服务器指定启用哪些 MCP 服务器；下级位置可以关闭继承的服务器。 |
-| `setting:exec.version_overrides` | **任意代理版本** — 环境管理者允许与任意代理版本配合使用的机器程序路径和版本。路径或版本改变后需要重新批准。 |
+| `setting:exec.version_overrides` | **任意智能体程序版本** — 环境管理者允许与任意智能体版本的智能体程序配合使用的机器程序路径和版本。路径或版本改变后需要重新批准。 |
 | `option:exec.version_overrides.*.path` | 此设置所属机器上的路径。 |
 | `option:exec.version_overrides.*.version` | 选定的确切程序版本。 |
 | `option:exec.version_overrides.*.by` | 记录的操作者；在导航设置中则表示排序方式。 |
 | `option:exec.version_overrides.*.at` | 记录此决定的时间。 |
-| `setting:exec.offers` | **提供的执行方式** — 与提供方一起运行的代理如何在此环境中运行工具，以及尝试这些方式的顺序。 |
+| `setting:exec.offers` | **提供的执行方式** — 与提供方一起运行的智能体如何在此环境中运行工具，以及尝试这些方式的顺序。 |
 | `setting:exec.orch_tools` | **Orch 自身的工具** — 是否向在此环境工作的智能体提供 Orch 自身的工具。 |
-| `setting:orch_tools.enabled` | **Orch 工具** — 允许提供给代理的 Orch 工具。 |
+| `setting:orch_tools.enabled` | **Orch 工具** — 允许提供给智能体的 Orch 工具。 |
 | `setting:orch_tools.owner_reads` | **个人读取工具** — 默认关闭。允许会话使用所有者当前的读取权限，共享后仍保持启用。受众提示条显示谁可查看或操作，并说明个人读取内容对他们可见。共享先前结果前仍需知情确认。 |
-| `setting:orch_tools.calls_per_minute` | **每分钟工具调用** — 一个线程的智能体每分钟最多调用多少次 Orch 工具。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:orch_tools.search_query_chars` | **共享搜索查询预算** — 向本线程智能体公布并供共享搜索使用的查询字符预算。默认为 1000，可调大以支持更长的查询。 |
-| `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本线程智能体公布并供共享搜索使用的结果预算。默认为 200；达到字节或时间预算时仍提供续查游标。 |
-| `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本线程智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
-| `setting:threads.offline_deadline` | **离线回合期限** — 机器离线达到这个秒数后结束当前回合；不设置则一直等待。每次离线沿用它开始时的设置。 |
-| `setting:threads.background_wake` | **后台唤醒** — 后台任务或子代理结束时唤醒代理。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。 |
+| `setting:orch_tools.calls_per_minute` | **每分钟工具调用** — 一个会话的智能体每分钟最多调用多少次 Orch 工具。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:orch_tools.read_bytes` | **共享读取字节数** — 共享读取或工具回复的默认 UTF-8 字节数；请求可选择其他正数字节窗口。 |
+| `setting:orch_tools.list_depth` | **共享列表深度** — 共享列表的默认层级；续读保留其余条目。 |
+| `setting:orch_tools.list_rows` | **共享列表行数** — 共享列表每页的默认行数；请求可选择其他正数窗口。 |
+| `setting:orch_tools.search_query_chars` | **共享搜索查询预算** — 向本会话智能体公布并供共享搜索使用的查询字符预算。默认为 1000，可调大以支持更长的查询。 |
+| `setting:orch_tools.search_results` | **共享搜索结果预算** — 向本会话智能体公布并供共享搜索使用的结果预算。默认为 200；搜索仍受字节和时间预算限制，达到限制时可以继续查询。 |
+| `setting:orch_tools.search_context` | **共享搜索上下文预算** — 向本会话智能体公布并供共享搜索摘要使用的前后行数预算。默认为 5，可调大以查看更广的上下文。 |
+| `setting:threads.opening_items` | **会话首屏条目** — 首次打开会话时读取的时间线条目数，须为正数，默认 40。请求可明确指定其他初始窗口，较早内容仍可通过游标继续读取。 |
+| `setting:threads.offline_deadline` | **离线轮次期限** — 机器离线达到这个秒数后结束当前轮次；不设置则一直等待。每次离线沿用它开始时的设置。 |
+| `setting:threads.start_acceptance_seconds` | **启动接收等待时间** — 等待原生程序接收已接纳启动的秒数。零表示立即到期；每次启动保留当时的截止时间。 默认 60 秒，不另加上限。 |
+| `setting:threads.start_confirmation_seconds` | **原生启动等待时间** — 最迟可能接收时间之后等待原生启动事件的秒数。零表示不再额外等待；更改适用于之后接纳的启动。 默认 60 秒，不另加上限。 |
+| `setting:threads.start_event_grace_seconds` | **启动事件接收宽限时间** — 此会话的原生事件仍在接收时额外等待的秒数。零表示不再宽限；每次启动保留当时的额度。 默认 600 秒，不另加上限。 |
+| `setting:threads.output_capture_bytes` | **保留命令输出** — 每份原生文本输出保留的字节数（含内联末尾），默认 67108864（64 MiB）。较大输出保留精确的末尾字节，并显示未保留的原始字节区间。适用于下次原生会话。 |
+| `setting:threads.background_snapshot_seconds` | **命令列表保留时间** — 原生命令快照和已审阅结束目标的空闲保留秒数，默认 30。读取下一页会续期；过期的读取会在确认前自动重新开始。 |
+| `setting:threads.background_page_items` | **原生命令列表分页** — 每页期望的原生命令数量，默认 200。完整列表没有行数上限，所有分页均会传输。 |
+| `setting:threads.background_page_bytes` | **原生命令分页字节数** — 每页期望的字节数，默认 131072。单条完整命令可以超过此目标；协商的传输限制仍然生效。 |
+| `setting:threads.background_preview_bytes` | **命令预览字节数** — 每条命令的预览字节数，默认 4096。较长的预览会明确标记截断，所有命令身份仍可访问。 |
+| `setting:threads.background_wake` | **后台唤醒** — 后台任务或子智能体结束时唤醒智能体。关闭后，Codex 的结果随下一次输入送达；Claude Code 不提供后台任务，命令在前台运行。变更在下次会话生效。 |
 | `setting:threads.agent_access` | **智能体访问权限** — 创建会话时显示的初始范围及各区域权限。创建者确认自己可以授予的权限。仅适用于新会话，不改写已有授权。 |
-| `option:threads.agent_access.where` | 代理权限贡献所适用的区域。 |
+| `option:threads.agent_access.where` | 智能体权限贡献所适用的区域。 |
 | `option:threads.agent_access.parts` | 选定区域中各部分的权限。 |
 | `option:threads.agent_access.parts.chat` | 讨论区的权限。 |
 | `option:threads.agent_access.parts.documents` | 文档权限。 |
-| `option:threads.agent_access.parts.timeline` | 线程历史的权限。 |
-| `option:threads.agent_access.parts.thread_fork` | 派生线程的权限。 |
-| `option:threads.agent_access.parts.thread_archive` | 归档线程的权限。 |
-| `setting:threads.let_viewers_in` | **允许会话查看者进入环境** — 新建会话时，是否默认允许其查看者使用环境。创建者确认该选择；更改此默认值本身不会授予任何权限。 |
+| `option:threads.agent_access.parts.timeline` | 会话历史的权限。 |
+| `option:threads.agent_access.parts.thread_fork` | 派生会话的权限。 |
+| `option:threads.agent_access.parts.thread_archive` | 归档会话的权限。 |
+| `setting:threads.let_viewers_in` | **查看者可以打开环境** — 新建会话时，是否默认允许查看者阅读文件、终端和显示画面，不授予使用或修改权限。创建者确认该选择；更改此默认值本身不会授予任何权限。 |
 | `setting:broadcast.chat_messages_per_hour` | **智能体每小时聊天消息** — 同一来源在滚动一小时内向所有聊天成功发送的消息数量；零表示禁止发送。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:sharing.snapshot_max_bytes` | **最大分享副本** — 单次请求可分享给智能体的最大副本大小，以字节计。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:export.max_bytes` | **最大导出文件** — 此处内容单次导出的最大文件大小，以字节计。超过上限时不开始导出，并说明实际大小。 下级只能降低此上限，不能取消上级设定的限制。 |
@@ -134,16 +160,32 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:export.keep_hours` | **导出保留时间** — 完成的导出保留多少小时供发起人下载，然后移除。 |
 | `setting:import.max_bytes` | **导入大小限额** — 单次导入允许的展开后字节数。未设置时沿用此位置的导出大小限额。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:import.max_items` | **导入项目限额** — 单次导入允许的对象数量。未设置时沿用此位置的导出项目限额。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:workspace.ignore` | **忽略的路径** — 工作区索引不包含的路径模式。 |
-| `setting:workspace.index` | **工作区索引** — 是否为整个工作区建立索引以便离线使用，还是只在环境在线时列出文件。 |
-| `setting:source.repository_url` | **源代码仓库** — 仅在线程目录尚不存在时准备的仓库；已有目录保留自己的文件。 |
+| `setting:workspace.ignore` | **忽略的路径** — 按 gitignore 写法填写、要在工作区中隐藏的路径模式：它们不会出现在文件列表、搜索、目录树列表和轮次文件记录中，也不能通过 Orch 读取或写入。这是为了隐藏想隐藏的内容，不是为了提速：大型目录不需要这份列表。 |
+| `setting:workspace.index` | **工作区索引** — 是否为整个工作区建立索引以便离线使用，还是只在环境在线时列出文件。无论目录树多大，在线的工作区都按目录逐层从其机器上列出。 |
+| `setting:workspace.index_entries` | **缓存文件条目** — 增量工作集中保留的路径元数据条目数；更大的目录仍可实时浏览和搜索。 |
+| `setting:workspace.index_scan_secs` | **索引时间片** — 首次索引使用的秒数；之后保留增量覆盖并继续实时读取。 |
+| `setting:workspace.ignore_max_bytes` | **排除规则解析** — 解析单个本地排除规则文件时允许读取的字节数；无法应用时会说明来源，并且不会暴露覆盖情况未知的内容。 |
+| `setting:workspace.ignore_cache_bytes` | **排除规则缓存** — 已解析排除规则的源文本和记录元数据缓存字节数；需要时会重新读取较旧的规则。 |
+| `setting:workspace.directory_idle_secs` | **文件夹续读空闲时间** — 未使用的文件夹观测保留的秒数；文件夹未变化时会自动续读。 |
+| `setting:workspace.directory_slots` | **文件夹观测** — 单台机器上保留的文件夹观测数量；接纳新读取前会先淘汰未使用的观测。 |
+| `setting:workspace.directory_cache_bytes` | **文件读取缓存** — 目录元数据和实时文件续读缓冲区共用的工作字节数；已有工作会计入用量，直到实际结束。 |
+| `setting:workspace.directory_builds` | **文件夹元数据读取** — 单台机器上同时进行的文件夹元数据构建数；等待的读取会保留其位置。 |
+| `setting:workspace.directory_page_bytes` | **文件夹分页字节数** — 单个文件夹页面默认返回的元数据字节数；其余条目可继续读取。 |
+| `setting:workspace.directory_entries` | **文件夹行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.search_results` | **文件搜索行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.archive_results` | **归档行数** — 每页默认行数；请求可选择其他大小，续读保留其余结果。 |
+| `setting:workspace.search_slice_secs` | **文件搜索时间片** — 单个文件搜索页面使用的秒数；续读会继续其余搜索。 |
+| `setting:workspace.git_diff_bytes` | **差异读取字节数** — 单次差异读取的默认字节数；其余所选差异可继续读取。 |
+| `setting:source.clone_idle_secs` | **克隆空闲时限** — 克隆在指定秒数内未取得传输进展时停止，可以重试。 |
+| `setting:source.repository_url` | **源代码仓库** — 仅在会话目录尚不存在时准备的仓库；已有目录保留自己的文件。 |
 | `setting:source.branch` | **源代码分支** — 准备哪个分支；未指定时使用仓库公布的默认分支。 |
-| `setting:source.secret_name` | **源代码读取机密** — 现有 HTTPS Git 读取机密的名称；其值仅密封发送给准备命令。 |
+| `setting:source.secret_name` | **源代码读取机密** — 用于通过 HTTPS 读取仓库的现有机密的名称；其值只提供给准备仓库的命令。 |
 | `setting:workspace.record_days` | **工作轮次文件保留时间** — 在环境中保留完整轮次文件和恢复撤销文件的天数；零表示关闭记录。 |
 | `setting:workspace.record_max_bytes` | **最大记录目录** — 允许进行完整状态记录的文件和链接总字节数；更大的目录使用逐文件撤销。 |
-| `setting:broadcast.delivery` | **公告送达方式** — 公告如何送达正在运行的线程：中断、在当前轮次中引导，或等待下一轮。 |
+| `setting:workspace.record_wait_secs` | **等待轮次文件** — 轮次开始前等待整体记录的秒数。内置默认值不等待首次索引；主动设置等待时间也会等待索引。整体记录尚未就绪时，仍可逐个还原更改的文件。 |
+| `setting:broadcast.delivery` | **公告送达方式** — 公告如何送达正在运行的会话：中断、在当前轮次中引导，或等待下一轮。 |
 | `setting:broadcast.fallback` | **无法引导时** — 公告原本需要引导当前轮次，但智能体不支持引导时采用的替代方式。 |
-| `setting:broadcast.wake_idle` | **允许唤醒空闲线程** — 此处是否允许发送者唤醒空闲线程，出厂开启。每条公告或线程消息单独选择唤醒，省略时为 false。 |
+| `setting:broadcast.wake_idle` | **允许唤醒空闲会话** — 此处是否允许发送者唤醒空闲会话，出厂开启。每条公告或会话消息单独选择唤醒，省略时为 false。 |
 | `setting:broadcast.agent_options` | **智能体可选的公告选项** — 智能体可为一条公告覆盖的投递方式，不含唤醒；每次发送单独选择唤醒。 下级可以移除允许的选项，不能加入上级排除的选项。 |
 | `setting:terminal.enabled` | **终端** — 是否允许打开交互终端。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:terminal.record` | **保留终端最后输出** — 终端关闭时，是否在环境历史中保留最后的输出。 |
@@ -154,7 +196,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:ports.enabled` | **端口访问** — 已有环境入口权限的人是否可通过 Orch 访问归属该环境的 TCP 和 UDP 端口。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:ports.max_open` | **扩大开放的端口数** — 有扩大访问范围或待审批访问范围的不同端口数量上限；零仍保留已有入口的自身访问。 |
 | `setting:ports.link_max_secs` | **端口链接有效期** — 端口链接从创建起的最长有效时间，包括后来更改到期时间的情况。 |
-| `setting:requests.expiry_hours` | **智能体请求等待期限** — 智能体发起的边界审批请求最长可以等待多久；请求的端口链接若更早到期，也会结束该请求。 |
+| `setting:requests.expiry_minutes` | **智能体请求等待期限** — 智能体发起的边界审批请求最长可以等待多久；请求的端口链接若更早到期，也会结束该请求。 |
 | `setting:browser.preset` | **浏览器启动方式** — 没有另行选择时如何启动浏览器：无窗口无显示桌面，或在 Orch 为其打开的显示桌面中显示窗口。 |
 | `setting:browser.args` | **浏览器启动参数** — 添加到浏览器启动命令的参数；不能在此设置 Orch 自行提供的参数、配置文件目录或控制地址。 |
 | `setting:browser.viewport` | **浏览器窗口大小** — 新浏览器窗口的宽和高，从 320×240 到 3840×2160。 |
@@ -164,44 +206,46 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:vnc.geometry` | **显示桌面大小** — Orch 打开的显示桌面的宽和高，从 320×240 到 3840×2160。 |
 | `setting:vnc.max_per_environment` | **每个环境的显示桌面数** — 一个环境内最多同时运行多少个由 Orch 打开的显示桌面。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:env.idle_warning_minutes` | **空闲停止提醒** — 在环境因空闲停止前多少分钟发送提醒；零表示不提醒。 |
-| `setting:env.removed_keep_days` | **移除后保留文件** — 移除运行单元后保留其自有文件的天数，受系统保留期限约束；0 表示可立即永久移除。 |
-| `setting:env.unused_remove_days` | **未使用时移除环境** — 从模板创建的环境连续多少天没有线程使用后安排移除；零表示永不自动移除。 |
-| `setting:env.lifetime` | **保留期限** — 长期保留、空闲超时后删除，或创建它的线程归档后也删除。只删除自有文件。 |
+| `setting:env.removed_keep_days` | **移除后保留文件** — 移除环境后保留其自有文件的天数，受系统保留期限约束；0 表示可立即永久移除。 |
+| `setting:env.unused_remove_days` | **未使用时移除环境** — 从模板创建的环境连续多少天没有会话使用后安排移除；零表示永不自动移除。 |
+| `setting:env.lifetime` | **保留期限** — 长期保留、空闲超时后删除，或创建它的会话归档后也删除。只删除自有文件。 |
 | `setting:env.temporary_idle_hours` | **临时环境空闲时限** — 临时环境连续空闲多少小时后删除环境及其自有文件。所有者会有一小时用于保留或导出。 |
 | `setting:env.recycle_idle_minutes` | **回收的空闲时间** — 回收对话框默认采用的空闲时间，以分钟计；0 表示不设最低空闲时间。 |
-| `setting:hosts.full_percent` | **宿主机满载阈值** — 运行内容声明所需内存达到宿主机内存的多少比例时，将宿主机视为已满。 |
-| `setting:hosts.when_full` | **宿主机已满时** — 在已满宿主机上创建或迁入环境时，仅提醒，还是提前拒绝。 |
-| `setting:runtime.idle_stop_minutes` | **运行时空闲停止** — 默认值 0 会让托管提供方的运行时持续运行。正数表示在没有会话或租约后，空闲这些分钟便停止。定时读取会保持其停止状态，直到轮次、登录、启动、刷新或凭据续期再次启动它。 |
-| `setting:runtime.template_id` | **运行时模板** — 用于创建托管提供者运行时的提供者模板。 |
-| `setting:runtime.host_id` | **运行时宿主机** — 用于创建托管提供者运行时的宿主机；未指定时选择可用空间最多的宿主机。 |
-| `setting:runtime.resources` | **运行时上限** — 在模板基础上设置处理器、内存、进程和磁盘上限。驱动会报告能够强制执行的上限。 |
+| `setting:hosts.full_percent` | **主机满载阈值** — 运行内容声明所需内存达到主机内存的多少比例时，将主机视为已满。 |
+| `setting:hosts.when_full` | **主机已满时** — 在已满主机上创建或迁入环境时，仅提醒，还是提前拒绝。 |
+| `setting:runtime.idle_stop_minutes` | **托管提供方空闲停止** — 默认值 0 会让托管提供方持续运行。正数表示在没有会话或运行中的轮次后，空闲这些分钟便停止。定时读取会保持其停止状态，直到轮次、登录、启动、刷新或凭据续期再次启动它。 |
+| `setting:runtime.template_id` | **托管提供方模板** — 用于创建托管提供者运行时的提供者模板。 |
+| `setting:runtime.host_id` | **运行时宿主机** — 创建新提供者运行时时选择的宿主机或宿主机池；未设置时选择可用空间最多的宿主机。已有卷保留在已准入的宿主机上。 |
+| `setting:runtime.resources` | **托管提供方上限** — 在模板基础上设置处理器、内存、进程和磁盘上限。驱动会报告能够强制执行的上限。 |
+| `setting:delegation.background_headroom_percent` | **后台套餐预留比例** — 为其他工作保留的订阅套餐百分比。零表示关闭。启用后，当适用窗口的剩余额度不高于预留比例，或缺少当前观测数据时，自动生成的标题、标签和资源摘要将等待。系统会按提供方观测周期重新检查同一请求。个人刷新和已获准执行的工作继续使用原有额度。 |
+| `setting:delegation.session_idle_secs` | **上下文空闲时长** — 默认在空闲 300 秒后关闭委派程序的私有会话；零表示工作结束后立即关闭。保留助手线程的历史和提供方独立的运行时策略，不影响正在运行或后续独立的工作。 |
 | `option:runtime.resources.cpu_millis` | CPU 配额，以千分之一个 CPU 为单位。 |
 | `option:runtime.resources.memory_mb` | 内存配额，单位为 MiB。 |
 | `option:runtime.resources.memory_swap_mb` | 内存与交换空间的合计配额，单位为 MiB。 |
 | `option:runtime.resources.blkio_weight` | 块设备输入输出调度的相对权重。 |
 | `option:runtime.resources.pids` | 进程数量上限。 |
 | `option:runtime.resources.disk_gb` | 磁盘配额，单位为 GiB。 |
-| `setting:runtime.storage` | **运行时存储** — 用于新建提供方主目录和连接器状态数据的命名机器存储。已有数据保留记录的位置。提供方运行时没有工作区。 |
-| `option:runtime.storage.workspace` | 工作文件的存储。 |
-| `option:runtime.storage.home` | 代理主目录的存储。 |
+| `setting:runtime.storage` | **托管提供方存储** — 用于新建提供方主目录和连接器状态数据的命名机器存储。已有数据保留记录的位置。托管提供方没有工作区。 |
+| `option:runtime.storage.workspace` | 工作区文件的存储位置。 |
+| `option:runtime.storage.home` | 智能体主目录的存储。 |
 | `option:runtime.storage.state` | 已记录文件状态的存储。 |
-| `setting:runtime.home` | **代理主目录** — 选择由 Orch 创建的主目录，或此机器允许使用的已有目录。未设置时保留配置的选择或代理程序的默认目录及其中已有的登录。已有目录保留所有者、权限和文件；删除运行实例也不会删除这些目录。 |
+| `setting:runtime.home` | **智能体主目录** — 选择由 Orch 创建的主目录，或此机器允许使用的已有目录。未设置时保留配置的选择或智能体程序的默认目录及其中已有的登录。已有目录保留所有者、权限和文件；删除托管提供方也不会删除这些目录。 |
 | `option:runtime.home.kind` | 声明的数据源或内容类型。 |
 | `option:runtime.home.path` | 此设置所属机器上的路径。 |
-| `setting:runtime.needs` | **运行时所需资源** — 托管提供者运行时声明需要的处理器、内存和磁盘，用于选择运行位置。 |
+| `setting:runtime.needs` | **托管提供方所需资源** — 托管提供方声明需要的处理器、内存和磁盘，用于选择运行位置。 |
 | `option:runtime.needs.memory_mb` | 内存配额，单位为 MiB。 |
 | `option:runtime.needs.cpu_millis` | CPU 配额，以千分之一个 CPU 为单位。 |
 | `option:runtime.needs.disk_gb` | 磁盘配额，单位为 GiB。 |
-| `setting:runtime.after_up` | **运行时启动后命令** — 每次运行实例启动或连接后，在机器允许时执行的具名程序及参数。只有提供方的所有者可以在提供方自身修改这些命令。 |
+| `setting:runtime.after_up` | **托管提供方启动后命令** — 每次托管提供方启动或连接后，在其机器允许时执行的具名命令及参数。只有提供方的所有者可以在提供方上修改这些命令。 |
 | `option:runtime.after_up.*.command` | 直接运行的程序及参数，不经过命令解释器。 |
 | `option:runtime.after_up.*.timeout_secs` | 命令的超时时间，单位为秒。 |
-| `setting:runtime.variables` | **运行时变量** — 运行实例下次启动或连接时，这些变量覆盖模板及智能体配置中的同名变量。 |
-| `setting:runtime.secret_names` | **运行时机密名称** — 覆盖智能体配置变量的提供方机密名称。值密封给运行实例所在机器，单独写入，永不返回。 |
-| `setting:runtime.update` | **运行时更新** — 运行时落后于当前配置时，是等待有人更新，还是在每次启动时更新。 |
+| `setting:runtime.variables` | **托管提供方变量** — 托管提供方下次启动或连接时，这些变量覆盖模板及智能体配置中的同名变量。 |
+| `setting:runtime.secret_names` | **托管提供方机密名称** — 覆盖智能体配置变量的提供方机密名称。每个值只供提供方所在机器读取，单独填写，之后不再显示。 |
+| `setting:runtime.update` | **托管提供方更新** — 托管提供方落后于当前配置时，是等待有人更新，还是在每次启动时更新。 |
 | `setting:runtime.renew_days` | **凭据续期** — 登录凭据剩余有效期少于这些天时续期；若到期日未知，则按距离上次续期的天数续期。零表示关闭自动续期。 |
-| `setting:providers.facts_idle_minutes` | **空闲时读取事实的间隔** — 绑定线程近期没有工作时，按此间隔读取提供方事实。默认 60 分钟，至少 1 分钟。 |
-| `setting:providers.facts_active_minutes` | **活跃时读取事实的间隔** — 绑定线程正在运行、近期工作过或等待已耗尽的套餐恢复时，按此间隔读取提供方事实。默认 5 分钟，至少 1 分钟。 |
-| `setting:providers.facts_recent_minutes` | **提供方近期活动时长** — 绑定线程的轮次结束后，在这些分钟内继续按活跃间隔读取提供方事实。默认 15 分钟，至少 1 分钟。 |
+| `setting:providers.facts_idle_minutes` | **空闲时读取事实的间隔** — 绑定会话近期没有工作时，按此间隔读取提供方事实。默认 60 分钟，至少 1 分钟。 |
+| `setting:providers.facts_active_minutes` | **活跃时读取事实的间隔** — 绑定会话正在运行、近期工作过或等待已耗尽的套餐恢复时，按此间隔读取提供方事实。默认 5 分钟，至少 1 分钟。 |
+| `setting:providers.facts_recent_minutes` | **提供方近期活动时长** — 绑定会话的轮次结束后，在这些分钟内继续按活跃间隔读取提供方事实。默认 15 分钟，至少 1 分钟。 |
 | `setting:providers.facts_refused_minutes` | **凭据被拒时读取事实的间隔** — 凭据被拒时，按此间隔读取提供方事实，以发现外部修复。默认 5 分钟，至少 1 分钟。 |
 | `setting:providers.presets` | **提供者预设** — 添加提供者时可按名称选择的现成 API 上游配置；下级位置可以添加、替换或隐藏预设。 |
 | `option:providers.presets.*.note` | 与此规则一起记录的说明。 |
@@ -214,25 +258,25 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:providers.presets.*.model` | 选定的模型。 |
 | `option:providers.presets.*.dimensions` | 此索引的向量维数。 |
 | `setting:providers.allow_http_upstreams` | **允许不加密的上游** — 是否允许不经过 TLS 访问 API 端点，例如私有网络中的模型服务器。 下级可以关闭此权限，不能推翻上级的禁止。 |
-| `setting:providers.expiry_notice_days` | **凭据到期提醒** — 提供者所用令牌到期前多少天提醒其管理者；零表示仅在到期后提醒。 |
-| `setting:providers.subscription_harnesses` | **允许的订阅类型** — 此处允许将哪些代理程序的订阅添加为提供方。 |
-| `setting:providers.subscription_sharing` | **可分享的订阅类型** — 允许哪些代理程序的订阅供所有者以外的人使用。 |
+| `setting:providers.expiry_notice_days` | **凭据到期提醒** — 提供方所用令牌到期前多少天提醒其管理者；0 表示仅在到期后提醒。提供方可覆盖所属位置的值；删除覆盖后重新沿用所属位置的值。 |
+| `setting:providers.subscription_harnesses` | **允许的订阅类型** — 此处允许将哪些智能体程序的订阅添加为提供方。 |
+| `setting:providers.subscription_sharing` | **可分享的订阅类型** — 允许哪些智能体程序的订阅供所有者以外的人使用。 |
 | `setting:resources.created_by_members` | **成员可创建的资源** — 普通成员可在组织中为自己创建哪些类型的资源。 |
 | `setting:skills.max_bytes` | **技能大小** — 一个技能版本的所有文件合计最多可占用的字节数。 |
 | `setting:skills.max_files` | **技能文件数** — 一个技能版本最多可包含的文件数。 |
-| `setting:notify.subagents` | **子智能体通知** — 线程的某个子智能体完成、失败或被停止时，是否像轮次结束时一样通知关注该线程的人。 |
+| `setting:notify.subagents` | **子智能体通知** — 会话的某个子智能体完成、失败或被停止时，是否像轮次结束时一样通知关注该会话的人。 |
 | `setting:message.body_max_chars` | **消息长度** — 管理员消息可包含的字符数；系统或组织可修改默认值。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:notify.operations` | **操作通知** — 操作中的“通知”默认在阻断工作时勾选、始终勾选或始终不勾选。操作者确认选择；接收者仍按自己的通知选项接收。 |
-| `setting:broadcast.rate_per_hour` | **每小时公告数** — 一个线程的智能体在滚动一小时内最多发送多少条公告；默认 12，零表示不允许发送。线程消息单独计数。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:broadcast.thread_messages_per_hour` | **每小时线程消息数** — 一个发送线程的智能体在滚动一小时内最多向单个线程发送多少条消息；默认 60，零表示不允许发送。系统、组织、项目或话题可替换继承值，但须遵守锁定。公告单独计数。 |
+| `setting:notify.operations` | **操作通知** — 操作中的“通知”默认在阻断工作时勾选、始终勾选或始终不勾选。操作者确认选择；接收者仍按自己的通知选项接收。默认从不勾选。 |
+| `setting:broadcast.rate_per_hour` | **每小时公告数** — 一个会话的智能体在滚动一小时内最多发送多少条公告；默认 12，零表示不允许发送。会话消息单独计数。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:broadcast.thread_messages_per_hour` | **每小时会话消息数** — 一个发送会话的智能体在滚动一小时内最多向单个会话发送多少条消息；默认 60，零表示不允许发送。系统、组织、项目或话题可替换继承值，但须遵守锁定。公告单独计数。 |
 | `setting:capability.recreate_grace_secs` | **重建等待时间** — 重建在中断运行中的工作轮次前，允许它们完成的等待秒数；0 表示立即中断。 |
-| `setting:access.request_expiry_days` | **访问请求有效期** — 无人决定的访问请求多少天后到期。 |
+| `setting:access.request_expiry_minutes` | **访问请求有效期** — 无人决定的访问请求多少分钟后到期。 |
 | `setting:access.max_pending_requests` | **待处理访问请求数** — 一个人最多可以有多少个等待决定的访问请求。 |
 | `setting:access.quick_grant_durations` | **快捷授权时长** — 一键授予访问权限的可选时长：正整数天数后加 d，或用 always 表示永久。 下级可以移除允许的选项，不能加入上级排除的选项。 |
 | `setting:nodes.new_color` | **新位置颜色** — 新位置采用所属类型的图标颜色，还是从十二种颜色中随机选择。 |
 | `setting:tags.max_per_place` | **位置标签数** — 一个位置最多可以具有多少个标签；0 表示不允许标签。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:agent.default_provider_id` | **新线程的提供方** — 新线程首先使用的提供方，填写其标识。 |
-| `setting:agent.default_agent_id` | **新线程的代理配置** — 新线程首先使用的代理配置，填写其标识。 |
+| `setting:agent.default_provider_id` | **新会话的提供方** — 新会话首先使用的提供方，填写其标识。 |
+| `setting:agent.default_agent_id` | **新会话的智能体配置** — 新会话首先使用的智能体配置，填写其标识。 |
 | `setting:templates.restricted_drivers` | **受限模板驱动** — 哪些驱动的模板只能由系统管理员定义。 |
 | `setting:switch.batch_parallel` | **批量并行数** — 一个批次中最多同时进行多少次切换、迁移或更新。 |
 | `setting:switch.batch_threads` | **每批对话数** — 一批操作可规划的对话数；需要更大的切换批次时可调整此默认值。 |
@@ -246,14 +290,28 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:switch.wait_minutes` | **等待轮次完成** — 等待运行中的轮次结束多少分钟后放弃，并保持原状；0 表示不等待。 |
 | `setting:switch.verify_timeout_secs` | **健康检查时限** — 新运行位置的检查最多可以进行多少秒，超过后回滚全部更改。 |
 | `setting:switch.keep_previous` | **保留原运行位置** — 是否保留切换或迁移前的运行位置，而不是安排移除。 |
-| `setting:binding.prefer` | **运行方式的顺序** — 优先按此顺序尝试代理运行方式，其他支持的方式随后尝试。 |
-| `setting:binding.allowed` | **允许的运行方式** — 控制代理可在哪里运行，以及能否与环境共享登录信息。 |
+| `setting:binding.prefer` | **运行方式的顺序** — 优先按此顺序尝试智能体运行方式，其他支持的方式随后尝试。 |
+| `setting:binding.allowed` | **允许的运行方式** — 控制智能体可在哪里运行，以及能否与环境共享登录信息。 |
 | `setting:credential.refresh_margin_secs` | **共享凭据续期提前量** — 共享的凭据副本剩余有效期少于这些秒时续期。 |
-| `setting:auto.title` | **自动标题** — 自动标题的来源：不生成、使用首条输入、使用代理提供的标题，或生成摘要。 |
+| `setting:credential.refresh_min_interval_secs` | **凭据续期间隔** — 系统默认值为 30 秒，仅控制即将到期的共享副本自动续期之间的间隔；0 表示不设间隔。执行程序请求新副本时，当前发放结束后即处理，不受此间隔限制。原始登录仍由提供方保管。 |
+| `setting:auto.title` | **自动标题** — 自动标题的来源：不生成、使用首条输入、使用智能体提供的标题，或生成摘要。 |
 | `setting:auto.tags` | **自动标签** — 摘要器是否为位置设置标签。 |
 | `setting:summary.handoff_input_share` | **摘要输入比例** — 交接、分叉或目标核对发送给摘要模型的对话最多占其上下文窗口的比例：先发最新的轮次，更早的只发一行索引。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:auto.summarizer` | **摘要器** — 使用哪个摘要器及其配置。 |
+| `setting:auto.summarizer` | **摘要器** — 摘要器及模型的词元额度。目标字符数另行设置。 |
+| `option:auto.summarizer.backend` | 完整的模型后端选择，包含执行路由、账号模型供给和适配器引用；重新读取不会更换路由或账单来源。 |
+| `option:auto.summarizer.backend.route` | 模型生成器选定的已安装执行路由；路由不可用时说明原因，不自动替换。 |
+| `option:auto.summarizer.backend.offering` | 选定的账号及其模型标识。 |
+| `option:auto.summarizer.backend.offering.provider` | 选定的提供方标识；仍须满足通常的使用权限和共享规则。 |
+| `option:auto.summarizer.backend.offering.offering` | 选定提供方中的模型路由名称。 |
+| `option:auto.summarizer.backend.config` | 适配器拥有的引用，必要时包含经允许的程序执行位置；不包含凭据或来源权限。 |
 | `option:auto.summarizer.kind` | 声明的数据源或内容类型。 |
+| `option:auto.summarizer.params` | 模型摘要器的提供方请求选项。明确选择的推理强度会保留，仍受当前模型和权限约束。 |
+| `option:auto.summarizer.answer_max_output_tokens` | 模型摘要器为段落、描述、标签和交接保留的答案词元，默认 1,024，与目标字符数和额外推理空间分开。 |
+| `option:auto.summarizer.title_max_output_tokens` | 模型摘要器为标题保留的答案词元，默认 120，与标题的 80 字符目标和额外推理空间分开。 |
+| `option:auto.summarizer.goal_max_output_tokens` | 模型摘要器为目标判断及理由保留的答案词元，默认 512。保留任意正数选择，不另设最低额度。 |
+| `option:auto.summarizer.reasoning_tokens` | 模型摘要器为已知会推理或推理信息未记录的模型额外预留的输出空间，默认 2,000 词元；零表示不额外预留。只有明确报告不支持推理时才取消这份预留。 |
+| `option:auto.summarizer.context_tokens` | 模型摘要器的输入词元，包括指令和包装，默认 32,000；受模型窗口减去实际字段完整输出预留后的空间约束。 |
+| `option:auto.summarizer.prompts` | 模型摘要器按字段替换的指令。省略或设为 null 时保留该字段自带的提示词。 |
 | `setting:auto.triggers` | **自动更新的条件** — 何时重新生成自动标题、标签和摘要。 |
 | `option:auto.triggers.on` | 触发此自动操作的事件。 |
 | `option:auto.triggers.min_interval_secs` | 自动运行之间的最短间隔，单位为秒。 |
@@ -263,11 +321,11 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:capability.policy.*.approver_scope` | 由哪个区域提供审批人。 |
 | `setting:sharing.allow_external` | **所有者可分享给外部人员** — 允许此处内容的所有者在权限页中添加组织树以外的人。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:sharing.allow_copy_out` | **复制到其他组织** — 是否允许把此处的对象复制或移动到其他组织。默认开启。下级可以关闭此权限，不能推翻上级的禁止；导出和在目标位置创建仍需各自的权限。 |
-| `setting:sharing.external_max_days` | **外部访问有效期** — 点名外部人员的访问条目从写入或续期起最多可以有效多少天。 |
+| `setting:sharing.external_max_minutes` | **外部访问有效期** — 点名外部人员的访问条目从写入或续期起最多可以有效多少分钟。 |
 | `setting:sharing.allow_holders` | **权限持有人可分享** — 不拥有对象也不管理权限页的人，是否可在自己已有权限范围内分享：添加权限持有人、授予位置角色或分享给智能体。关闭时，仅所有者和权限页管理者可分享。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:sharing.on_link` | **发送时共享查看权限** — 此处发送链接时的默认查看权限共享选项。每个人也可以在个人设置中关闭。 |
 | `setting:usage.rates` | **价格表** — 按模型 ID 匹配规则设置使用价格，以点数计。 |
-| `option:usage.rates.*.web_search_per_call` | 每次成功网页搜索的点数。 |
+| `option:usage.rates.*.web_search_per_call` | 每次成功网络搜索的点数。 |
 | `option:usage.rates.*.input_per_mtok` | 每百万输入词元的点数。 |
 | `option:usage.rates.*.cached_input_per_mtok` | 每百万缓存输入词元的点数。 |
 | `option:usage.rates.*.output_per_mtok` | 每百万输出词元的点数。 |
@@ -302,7 +360,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:files.preview_bytes` | **预览大小** — 单张静态缩略图或文本摘要的编码字节数上限。 |
 | `setting:files.preview_cache_bytes` | **预览缓存** — 派生预览的缓存字节数，优先清除较早的预览；设为零则不缓存。 |
 | `setting:files.viewer_bytes` | **媒体查看器文件大小** — 浏览器查看器可读取的图片、PDF、音频或视频原文件大小上限。 |
-| `setting:files.native_image_bytes` | **原生图片输入大小** — 可直接发送给模型的图片大小上限；更大的图片通过路径交付，设为零则始终使用路径。 |
+| `setting:files.native_image_bytes` | **直接发送的图片大小** — 可直接发送给模型的图片大小上限；更大的图片通过路径交付，设为零则始终使用路径。 |
 | `setting:docs.enabled` | **创建文档** — 是否允许在此处节点旁创建新文档。 下级可以关闭此权限，不能推翻上级的禁止。 |
 | `setting:docs.templates` | **文档起始内容** — 在此处创建文档时可选择的、当前可读的普通文档。作为模板不授予来源访问权或创建权限。 |
 | `setting:docs.max_bytes` | **文档大小** — 此处单个文档最多可包含的文本大小。 下级只能降低此上限，不能取消上级设定的限制。 |
@@ -316,9 +374,11 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:documents.links.occurrences` | **每个来源的提及数** — “被引用”中每个来源在“显示更多”之前列出的提及数。 |
 | `setting:documents.links.line_chars` | **提及行长度** — “被引用”中每处提及周围显示的字符数。 |
 | `setting:documents.links.mentions_counted` | **统计的提及数** — 单个来源中统计到多少处对该文档的提及，再显示为“以上”。 |
-| `setting:documents.links.access_checks` | **链接权限检查数** — “被引用”每页检查阅读权限的来源数。被大量引用的文档会用游标继续。 |
+| `setting:documents.links.access_checks` | **链接权限检查数** — “被引用”每页检查阅读权限的来源数。被大量引用的文档会在后续页中继续。 |
 | `setting:documents.links.graph_nodes` | **关系图节点数** — “链接”关系图最多绘制的节点数。 |
+| `setting:documents.readme_blocks` | **README 预览** — 位置的 README 预览显示的顶层块数，同时保留其子块。遇到更早的分页符时结束预览；“打开文档”始终可查看完整页面。 |
 | `setting:chat.attachment_max_bytes` | **聊天附件大小** — 单条聊天消息所附单个文件的最大字节数。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:search.text_chars` | **对话搜索文本** — 每条对话记录脱敏后索引的字符数。更改适用于新文本及重新构建的索引；不索引原始调用、输出、隐藏推理、子线程以及无法读取脱敏所需信息的文本。 |
 | `setting:search.word_recent_candidates` | **近期文本样本** — 探查文本索引前抽样的近期记录数。 |
 | `setting:search.word_candidates` | **文字候选数** — 每个索引字段在权限检查和排序前提取的候选数。 |
 | `setting:search.word_probe_candidates` | **文字索引采样** — 转为按时间扫描前，采样的索引匹配数。 |
@@ -331,6 +391,7 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:search.word_tuning.tiers.heading` | 章节标题文字或其排序权重。 |
 | `option:search.word_tuning.tiers.body` | 正文文字或其排序权重。 |
 | `setting:search.page_size` | **每页条数** — 点击显示更多前展示的结果数。 |
+| `setting:navigation.tree_page_size` | **层级每页条数** — 层级分支每页默认读取的条数，初始为 50。调用方可以请求更大的页面；这是默认值，不是上限。 |
 | `setting:search.reorder_window_secs` | **排序窗口** — 新结果可以调整首屏顺序的持续时间。 |
 | `setting:search.meaning_pause_ms` | **输入停顿** — 输入停顿多久后请求嵌入，单位为毫秒。 |
 | `setting:search.cursor_entries` | **保留的搜索** — 为每位读者保留的搜索续读位置。 |
@@ -372,50 +433,109 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:search.semantic.tuning.iterative_scan` | 向量扫描如何继续查找更多候选。 |
 | `option:search.semantic.tuning.query_wait_secs` | 查询等待相应索引工作的时间，单位为秒。 |
 | `setting:retention.archive_idle_days` | **归档空闲话题** — 话题无活动多少天后自动归档；零表示永不自动归档。 |
-| `setting:retention.delete_archived_days` | **删除已归档节点** — 节点归档多少天后删除；零表示永不自动删除。 |
-| `setting:retention.agent_history_idle_days` | **代理历史保留天数** — 线程多少天没有运行轮次后移除代理程序自己的历史；0 表示不自动移除。 |
+| `setting:retention.delete_archived_days` | **删除已归档位置** — 节点归档多少天后删除；零表示永不自动删除。 |
+| `setting:retention.agent_history_idle_days` | **智能体历史保留天数** — 会话多少天没有运行轮次后移除智能体程序自己的历史；0 表示不自动移除。 |
 | `setting:retention.inbox_days` | **收件箱保留时长** — 通知在个人收件箱中保留多少天后删除，无论是否已读。 |
-| `setting:redaction.mask_secrets` | **遮盖机密** — 是否在保存的文字中遮盖曾提供给线程的机密值。 下级可以要求此保护，不能关闭上级要求的保护。 |
+| `setting:redaction.mask_secrets` | **遮盖机密** — 是否在保存的文字中遮盖曾提供给会话的机密值。 下级可以要求此保护，不能关闭上级要求的保护。 |
 | `setting:redaction.patterns` | **额外遮盖规则** — 需要在保存文字中遮盖的其他匹配规则，每个规则具有名称。 |
 | `option:redaction.patterns.*.name` | 声明项目的可读名称。 |
 | `option:redaction.patterns.*.regex` | 此规则使用的正则表达式。 |
 | `setting:diagnostics.retention_days` | **诊断保留时间** — 诊断信息保留多少天。 |
-| `setting:orgs.personal_enabled` | **创建个人组织** — 为新账号创建个人组织。关闭此选项会保留已有组织；用户仍可加入团队和接收共享文档。 |
+| `setting:diagnostics.frame_bytes` | **完整协议帧** — 每帧完整保留的已脱敏协议字节数，默认 65536。更大的帧保留大小记录和配置的开头；0 不保留完整帧。实际捕获额度保存在相应的判定记录中。 |
+| `setting:diagnostics.frame_head_bytes` | **协议帧开头** — 超大帧保留开头的已脱敏字节数，默认 4096。0 只保留大小记录。 |
+| `setting:diagnostics.frames_per_segment` | **协议帧保留数量** — 每个原生会话保留的最新协议帧数量，默认 20000。0 关闭捕获。正文清理后仍保留省略数量和原因；较早记录缺少的信息仍显示“尚未报告”。 |
+| `setting:database.retry_attempts` | **数据库重试次数** — 每轮恢复中对暂时性故障的重试次数，默认为 8；0 表示不立即重试。数据和程序限制拒绝不会被重复尝试。 |
+| `setting:database.retry_initial_ms` | **数据库重试间隔** — 暂时性数据库故障的初始重试间隔，单位为毫秒，默认为 100。在有次数限制的一轮恢复中逐步加倍。 |
+| `setting:database.recovery_secs` | **数据库恢复周期** — 一轮恢复结束后的等待时间和汇总故障次数的日志间隔，默认为 60 秒。待处理工作仍被保留；等待前释放事务。 |
+| `setting:orgs.personal_enabled` | **创建个人组织** — 为新账号创建个人组织。关闭此选项会保留已有组织；人们仍可加入组织并接收共享文档。 |
 | `setting:orgs.personal_closed` | **个人组织不接纳成员** — 是否将个人组织创建为仅容纳其本人的组织。 |
 | `setting:orgs.personal_flat` | **个人组织不嵌套组织** — 是否将个人组织创建为不包含子组织的组织。 |
 | `setting:orgs.created_by` | **谁可以创建组织** — 谁可以创建团队组织：所有已登录用户、仅系统管理员，或获系统管理员邀请的用户（每次邀请仅使用一次）。个人组织的创建由独立策略控制。 |
-| `setting:navigation.order` | **树的顺序** — 对遵循组织自身顺序的人，组织的树按此显示：按某人的安排、最新在前、最近更改在前，或按名称。 |
+| `setting:navigation.order` | **树的顺序** — 对遵循组织自身顺序的人，组织的树按此显示：按某人的安排、最新在前、最近更改在前，或按名称。组织的所有者或管理员可按自己看到的顺序保存。 |
 | `option:navigation.order.by` | 记录的操作者；在导航设置中则表示排序方式。 |
 | `option:navigation.order.custom` | 为各父级明确指定的导航顺序。 |
 | `setting:registration.mode` | **注册方式** — 允许谁注册：无人、持邀请的人，或能访问此系统的任何人。 |
 | `setting:org.terms` | **加入者须接受的条款** — 加入此组织或接受其位置、聊天的访客邀请前需接受的 Markdown 条款。先显示根组织的条款，再显示各级下属组织的条款。空文本不添加条款；修改后不会要求现有成员再次接受。 |
 | `setting:invitations.forms` | **邀请方式** — 此组织树内可创建的邀请形式。 下级可以移除允许的选项，不能加入上级排除的选项。 |
-| `setting:invitations.default_hours` | **邀请有效时间** — 邀请人未另作选择时，邀请默认有效多少小时。 |
-| `setting:invitations.max_hours` | **邀请的最长有效时间** — 邀请最多可以有效多少小时。 下级只能降低此上限，不能取消上级设定的限制。 |
+| `setting:invitations.default_minutes` | **邀请有效时间** — 邀请人未另作选择时，邀请默认有效多少分钟。 |
+| `setting:invitations.max_minutes` | **邀请的最长有效时间** — 邀请最多可以有效多少分钟。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:invitations.max_uses` | **共享链接的使用次数** — 一个共享邀请链接最多可以邀请多少人。 下级只能降低此上限，不能取消上级设定的限制。 |
 | `setting:mail.shared` | **共享邮件服务器** — 没有独立邮件服务器的根组织是否通过系统邮件服务器发送邮件。 |
-| `setting:api.idempotency_window` | **创建重试保留时间** — 创建请求的键保留已接受对象标识的小时数；0 表示不保留。可按需要延长，24 小时是默认值。 |
+| `setting:api.idempotency_window` | **创建重试保留时间** — Orch 记住创建请求的小时数；在此期间重复发送同一请求会返回第一次的结果，而不会再创建一个；0 表示不记住。默认 24 小时，可调高。 |
+| `setting:api.read_repeats` | **重复读取次数** — 读取的内容在回答过程中发生变化时，不拒绝而是重新读取的次数；0 表示不重复。 |
+| `setting:interface.kept_closed_tabs` | **保留最近关闭的标签页** — 默认保留最近关闭的十个视图、重新打开记录及其显示状态；打开的视图始终保留状态。零仅保留最近一项的重新打开位置，不保留已关闭视图的内容或显示状态。可在界面设置中选择其他数量。 |
+| `setting:interface.recent_models` | **最近使用的模型** — 每个人的模型选择器默认在“最近使用”分组显示五个适用模型。可设置任意非负数量；零隐藏分组，但保留服务器上的个人历史。不适用或用途不同的条目不占分组名额。 |
+| `setting:interface.progress_delay_ms` | **加载提示延迟** — 默认在读取开始二百毫秒后才显示加载图标。零表示立即显示。整个等待期间，控件都会防止重复操作。 |
+| `setting:interface.catch_up_above_items` | **自动近况摘要阈值** — 默认在未读条目超过 20 项时显示自动摘要卡片。可在界面设置中选择其他非负数；零表示任意非空未读范围。新消息分隔线的详情显示当前值及其来源。低于阈值仍可手动查看近况摘要，打开详情不会发起摘要请求。 |
+| `setting:interface.read_freshness_ms` | **读取新鲜度** — 返回视图时，目录、搜索、报表和状态的默认新鲜时间分别为 60000、15000、60000 和 5000 毫秒。零表示每次返回都重新验证。版本目录在本页面中一直保留。 |
+| `option:interface.read_freshness_ms.directory` | 目录内容和共享路径列表的新鲜时间，单位为毫秒。 |
+| `option:interface.read_freshness_ms.lookup` | 重复查找名称和人员时的新鲜时间，单位为毫秒。 |
+| `option:interface.read_freshness_ms.report` | 报表与公开安装信息的新鲜时间，单位为毫秒。 |
+| `option:interface.read_freshness_ms.status` | 实时健康和使用状态的新鲜时间，单位为毫秒。 |
+| `setting:edge.transport` | **HTTPS 传输** — 内置 HTTPS 入口的默认值；保存后平滑重新加载。外部 TLS 入口仍使用其自身设置。 |
+| `option:edge.transport.session_cache_mib` | 共享 TLS 会话缓存，单位 MiB，默认 16；0 关闭缓存。正整数 MiB 满足 nginx 共享内存的表示要求；无固定上限。 |
+| `option:edge.transport.session_timeout_secs` | 会话恢复有效期，单位秒，必须为正，默认 86400。缓存会话与票据均采用此值。 |
+| `option:edge.transport.session_tickets` | TLS 会话票据，默认开启。共享缓存开启时，nginx 在工作进程间轮换票据密钥；设置不暴露私有票据密钥。 |
+| `option:edge.transport.early_data` | TLS 提前数据，默认开启，适用于安全读取。每个提前写入在认证或业务操作产生效果前返回 425，握手后可重试。 |
+| `option:edge.transport.http2` | 内置 TLS 地址的 HTTP/2 协商，默认开启。 |
+| `option:edge.transport.http3` | 在 HTTP/2 旁启用基于 QUIC 的 HTTP/3，默认开启。HTTPS 覆盖文件在同一端口发布 TCP 与 UDP；外部防火墙也须允许 UDP。 |
+| `option:edge.transport.alt_svc_secs` | HTTP/3 通告有效期，单位秒，默认 86400；0 表示立即失效。关闭 HTTP/3 会清除先前通告。 |
+| `option:edge.transport.reload_secs` | 本地证书或策略文件检查以及发布失败后重试的间隔，必须为正，默认 1 秒。空闲检查不读取数据库，也不发起网络请求。 |
+| `setting:interface.connection_quality` | **连接变慢告警** — 将本人的近期中位耗时与此前的常态中位耗时比较。默认取近期 3 次应答、此前 20 次应答，增幅阈值为 100%，额外耗时阈值为 200 毫秒。两个阈值均被超过才提示；稳定的 700 毫秒连接属于常态。样本数和阈值均无固定上限。 |
+| `option:interface.connection_quality.recent_samples` | 计算当前中位耗时的近期 ping 应答数，必须为正。身份验证耗时不作为 ping 样本。 |
+| `option:interface.connection_quality.usual_samples` | 计算本人常态耗时的此前应答数，必须为正。持续的线路变化会逐渐成为新常态；切换用户后重新学习。 |
+| `option:interface.connection_quality.slow_increase_percent` | 相对常态所需的耗时增幅百分比，可为零。零表示无相对增幅门槛，额外耗时门槛仍然适用。 |
+| `option:interface.connection_quality.slow_extra_ms` | 比常态多出的耗时门槛，单位为毫秒，可为零。零表示无噪声余量门槛，百分比门槛仍然适用。 |
 | `setting:release.check_days` | **检查新版发布** — 对管理员配置的发布来源进行只读检查的间隔天数；零表示关闭。检查不发送安装统计，也不安装任何内容。 |
 | `setting:cleanup.release_keep_count` | **保留未使用的发布** — 每次更新后，各载荷保留的未使用发布数量；0 表示全部保留。当前和上一个发布始终保留。 |
 | `setting:cleanup.unused_keep_days` | **清理未使用的缓存** — 没有使用者的镜像和工具版本保留多少天；0 表示关闭自动清理。数据遵循各自的保留期限。 |
+| `setting:tunnels.control_timeout_ms` | **工具准入等待时间** — 每次打开或恢复通道时，默认等待 5000 毫秒确认当前物理会话及工具成员。须为正数，除原生时钟表示范围外没有固定上限；超时将拒绝该通道。 |
 | `setting:backup.warn_days` | **数据库备份提醒** — 最近一次成功的仅数据库备份超过这些天时提醒；失败的备份尝试不会更新成功时间。 |
 | `setting:registration.email_verification` | **验证邮箱** — 用户是否必须验证邮箱后才能登录。 |
 | `setting:auth.local_login` | **密码登录** — 系统管理员以外的人是否可通过密码或邮件验证码登录。 |
 | `setting:auth.email_code` | **邮件验证码** — 发送到已验证邮箱的验证码可用于哪些登录方式。 下级可以移除允许的选项，不能加入上级排除的选项。 |
 | `setting:auth.second_step` | **第二重验证** — 此组织中的人是否必须设置并提供第二重身份证明才能工作。 下级只能选择更严格的选项。 严格程度依次为：`optional` → `required`，最后一项最严格。 |
+| `setting:human_check.provider` | **人机验证** — 由哪个服务要求人们证明自己不是程序：无、hCaptcha 或 Google Cloud Fraud Defense（reCAPTCHA）。选择“无”时，任何页面都不会从外部加载内容，也不会发送任何信息。 |
+| `setting:human_check.site_key` | **网站密钥** — 服务组件的公开密钥，登录和注册页面会显示该组件。 |
+| `setting:human_check.project_id` | **Google Cloud 项目** — 持有 reCAPTCHA 密钥的 Google Cloud 项目标识；只有 CreateAssessment 会用到。 |
+| `setting:human_check.verification` | **reCAPTCHA 的询问方式** — SiteVerify 使用 Google 控制台给出的网站密钥和私钥，现在创建的密钥仍可使用；CreateAssessment 使用 Google Cloud 项目和限定为 reCAPTCHA 的 API 密钥，是 Google 推荐的方式。hCaptcha 只有一种方式。 |
+| `setting:human_check.mode` | **组件** — hCaptcha 的显示方式：复选框，或在后台运行、仅在存疑时提问。Google Cloud Fraud Defense（reCAPTCHA）始终在后台运行，这里的设置对它不起作用。 |
+| `setting:human_check.acts` | **验证范围** — 需要验证的操作：登录（每次尝试，包括第二步）、请求登录码、注册、请求密码重置链接，以及再次请求确认链接。 |
+| `setting:human_check.min_score` | **最低分数** — Google Cloud Fraud Defense（reCAPTCHA）通过所需的最低分数，以百分之一计；50 是 Google 自己的起点。没有结算账户时，Google 只会给出 10、30、70 或 90。不使用 hCaptcha 的分数。 |
+| `setting:human_check.when_unreachable` | **无法连接时** — 服务无法询问时，是放行并记录事件，还是拒绝直到可以询问。默认放行：表单是唯一的入口，服务中断不应把所有人挡在门外，尝试次数的限制仍然有效。 |
+| `setting:human_check.alternate_host` | **使用 recaptcha.net** — 从 www.recaptcha.net 加载 Google Cloud Fraud Defense（reCAPTCHA），供无法访问 www.google.com 的人使用。hCaptcha 没有备用地址。 |
+| `setting:human_check.timeout_secs` | **等待服务** — 对服务的一次调用最多可以花多久，超过则视为无法连接。五秒足够服务通常的响应，也不会让人在表单前久等。 |
+| `setting:human_check.page_wait_secs` | **页面的等待** — 登录页面最多等待服务组件给出令牌多久，超过则提示无法连接该服务。二十秒是服务器等待时间的四倍，为需要人来解答的挑战留出余地。 |
+| `setting:human_check.address_limit` | **每个地址的验证次数** — 同一个地址在下面的时间窗口内最多可以让本服务器发起多少次验证。三十次与同一地址错误尝试的上限一致，使任何人都不能让本服务器无休止地调用服务。 |
+| `setting:human_check.address_window_minutes` | **地址验证的时间窗口** — 一次验证计入其地址的时长：十五分钟，与同一地址错误尝试的窗口一致。 |
+| `setting:human_check.look_secs` | **查看的间隔** — 服务器查看网站入口的策略、以及服务是否应答之后，记住所见的时间，到时再看一次。默认一分钟：几分钟内改好的入口能被跟上，页面说组件无法加载时，也最多每分钟询问一次服务。 |
 | `setting:tokens.max_days` | **令牌最长有效期** — 此处接受的 API 令牌从创建到到期的最长总有效时间。 |
 | `setting:system.banner` | **系统横幅** — 向所有人显示的消息，包括其级别和结束时间。 |
 | `option:system.banner.text` | 此规则携带的文字。 |
 | `option:system.banner.level` | 请求的权限级别。 |
 | `option:system.banner.until` | 此规则停止适用的时间。 |
 | `setting:outbound.allowed_private_hosts` | **可访问的私网主机** — 组织或个人的通知渠道或目标可以访问哪些私有地址上的主机。 |
+| `setting:storage.transfer_initial_piece_bytes` | **首个传输分片** — 尚未测得线路速率时，每个初始小型带宽探测分片的字节数。 |
+| `setting:storage.transfer_initial_requests` | **传输探测请求** — 在共享请求数和字节上限内，用并行的小分片测量带宽，避免把建连耗时算作数据传输时间。 |
+| `setting:storage.transfer_min_piece_bytes` | **最小传输分片** — 普通文件分片的最小字节数；最后一片可更小。 |
+| `setting:storage.transfer_max_piece_bytes` | **最大传输分片** — 单个文件分片的最大字节数。未完成的上传保留创建时采用的策略。 |
+| `setting:storage.transfer_target_window_ms` | **传输数据时长** — 共享窗口的目标数据时长，再加上测得的往返时间余量。 |
+| `setting:storage.transfer_window_rtts` | **传输提前往返数** — 在字节上限内，提前保持在途数据所覆盖的往返次数。 |
+| `setting:storage.transfer_max_window_bytes` | **传输窗口** — 同一发送者的并行文件共享的最大在途字节数。 |
+| `setting:storage.transfer_requests` | **传输请求数** — 文件共享的并行分片请求数。默认五个，为 HTTP/1.1 的其他操作留出一个连接。 |
 | `setting:storage.max_blob_bytes` | **系统单个文件上限** — Orch 保存的单个文件的最大字节数。 |
+| `setting:storage.machine_upload_idle_secs` | **机器传输保留期限** — 未完成的机器传输在多久没有收到分片后可被清理。每次传输保留接收首个分片时采用的期限。 |
 | `setting:storage.env_cache_quota_bytes` | **环境文件缓存** — 每个环境最多保留多少字节的文件内容缓存。 下级只能降低此上限，不能取消上级设定的限制。 |
-| `setting:agents.page_fetch` | **网页抓取** — 未设置时保留程序默认行为。关闭不提供此能力；原生使用已声明的网页读取工具；服务使用明确选择的抓取后端。它与网页搜索分别设置。 |
-| `setting:agents.image_generation` | **图像生成** — 未设置时遵循程序默认值。“原生”使用受支持的原生图像工具，“关闭”禁用它，“服务”使用明确选择的后端并关闭原生生成。默认值不是锁定，也不会自动选择付费服务。 |
+| `setting:storage.relay_transfers` | **文件中转** — 默认为中转：浏览器文件内容只经过内存，机器之间传递的副本在传输结束时删除。离线文件需从保留的快照读取，文件清单仍保留。选择缓存后，已打开的版本按文件缓存大小保留。系统、组织或项目中最近一级的选择生效，管理员可在系统层锁定。 |
+| `setting:storage.upload_session_hours` | **上传空闲保留期限** — 默认无进展 24 小时后到期。已接收的上传进展会续期；这不是整个文件传输时长的上限。 |
+| `setting:storage.relay_concurrency` | **文件中转并发数** — 默认为同时进行 32 项传输，更多传输等待内存，不限制文件大小或总数。在系统层设置。 |
+| `setting:storage.relay_idle_secs` | **文件中转无进度等待** — 默认为 120 秒没有进展后暂停传输，机器上已确认的上传前缀仍可续传。在系统层设置。 |
+| `setting:storage.relay_retry_ms` | **文件中转重试间隔** — 在无进度等待期内遇到临时传输故障时，默认每隔 250 毫秒重试。在系统层设置。 |
+| `setting:agents.page_fetch` | **网页抓取** — 未设置时保留程序默认行为。关闭不提供此能力；原生使用已声明的网页读取工具；服务使用明确选择的抓取后端。它与网络搜索分别设置。 |
+| `setting:agents.image_generation` | **图片生成** — 未设置时遵循程序默认值。“原生”使用受支持的原生图片工具，“关闭”禁用它，“服务”使用明确选择的后端并关闭原生生成。默认值不是锁定，也不会自动选择付费服务。 |
 | `setting:gateways.tunnel_strategy` | **隧道网关** — 新连接按双方有效往返时延的总和选择网关，也可固定使用执行端网关。已有隧道沿用建立时的方案。 |
-| `setting:threads.agent_schedules` | **智能体定时任务** — 允许智能体为本线程安排可见的后续输入。默认关闭；每次运行仍须通过当前权限和提供方额度检查。 |
-| `setting:agents.image_generation_backend` | **图像生成后端** — 选择确切的图像路由和已启用的提供方项目。此选择沿作用域继承到线程，并遵守上级锁定。未设置时不选择付费服务；运行时仍检查提供方的当前使用权限和限额。 |
+| `setting:threads.agent_schedules` | **智能体定时任务** — 允许智能体为本会话安排可见的后续输入。默认关闭；每次运行仍须通过当前权限和提供方额度检查。 |
+| `setting:agents.image_generation_backend` | **图片生成后端** — 选择确切的图片路由和已启用的提供方项目。此选择沿作用域继承到会话，并遵守上级锁定。未设置时不选择付费服务；运行时仍检查提供方的当前使用权限和限额。 |
 | `option:agents.image_generation_backend.capabilities` | 按能力名称保存的明确后端选择。值为 null 时仅清除该能力的服务后端；缺少条目时只使用保留的默认值。能力的运行模式仍单独选择。 |
 | `option:agents.image_generation_backend.capabilities.*.route` | 此能力声明的路由，包括程序提供的委派会话。路由必须支持当前能力；填写另一能力的路由不能启用它。 |
 | `option:agents.image_generation_backend.capabilities.*.offering` | 此条目选择的确切提供方及已启用模型或服务。每个能力保留自己的选择，并在使用时检查当前权限。 |
@@ -423,12 +543,12 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:agents.image_generation_backend.capabilities.*.offering.offering` | 所选模型或服务在提供方中的名称。委派时，它指定助手使用的模型；不会自动选择登录或模型。 |
 | `option:agents.image_generation_backend.capabilities.*.config` | 只填写该路由文档说明的附加引用，否则保持为空。此值不存放凭据，也不能授予权限或增加使用额度。 |
 | `option:agents.image_generation_backend.default` | 未明确覆盖的能力使用的保留后端值。修改一个能力时，其他能力仍使用此值。未设置默认值不会选择付费服务。 |
-| `option:agents.image_generation_backend.route` | 已声明的图像路由，例如使用图像接口的 image_generation.service-api、使用托管模型工具的 image_generation.service-model，或使用符合条件的原生程序助手的 image_generation.delegation。不可用的路由保持不可用，不会自动改用另一提供方。 |
+| `option:agents.image_generation_backend.route` | 已声明的图片路由，例如使用图片接口的 image_generation.service-api、使用托管模型工具的 image_generation.service-model，或使用符合条件的原生程序助手的 image_generation.delegation。不可用的路由保持不可用，不会自动改用另一提供方。 |
 | `option:agents.image_generation_backend.offering` | 此路由使用的确切提供方及模型或服务。仅当路由不需要项目时才省略；选择项目本身不会授予访问权限。 |
-| `option:agents.image_generation_backend.offering.provider` | 本次图像调用所属的提供方账户，可与对话提供方不同。驱动线程的人必须具有其当前使用权限，所选项目还必须符合适用的允许列表。 |
-| `option:agents.image_generation_backend.offering.offering` | 路由要求的已启用图像服务、托管工具模型或原生助手模型在提供方中的名称。请选择确切项目，不使用账户默认项目或按价格推断的后备项目。 |
+| `option:agents.image_generation_backend.offering.provider` | 本次图片调用所属的提供方账户，可与对话提供方不同。驱动会话的人必须具有其当前使用权限，所选项目还必须符合适用的允许列表。 |
+| `option:agents.image_generation_backend.offering.offering` | 路由要求的已启用图片服务、托管工具模型或原生助手模型在提供方中的名称。请选择确切项目，不使用账户默认项目或按价格推断的后备项目。 |
 | `option:agents.image_generation_backend.config` | 所选路由理解的附加引用。除非路由说明需要，否则保持为空；不要在此填写提供方凭据。此对象不能授予使用权限、绕过限额或替代当前来源授权。 |
-| `setting:agents.web_search_backend` | **网页搜索后端** — 选择已启用的提供方及原生搜索模型，或该提供方的搜索和抓取服务。未设置时不会自动启用付费服务。 |
+| `setting:agents.web_search_backend` | **网络搜索后端** — 选择已启用的提供方及内置搜索的模型，或该提供方的搜索和抓取服务。未设置时不会自动启用付费服务。 |
 | `option:agents.web_search_backend.route` | 确切的搜索或页面读取路由，由已启用模型、提供方服务或受支持的委派会话执行；不会推断另一提供方。 |
 | `option:agents.web_search_backend.offering` | 此路由使用的提供方及已启用模型或服务。搜索和页面读取可以通过各自的能力条目选择不同项目。 |
 | `option:agents.web_search_backend.offering.provider` | 提供本次搜索或页面读取操作的账户；运行时会检查其当前使用权限、共享策略和限额。 |
@@ -445,13 +565,17 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `setting:threads.agent_schedule_runs` | **智能体定时任务次数** — 重复定时任务的默认运行次数。智能体可以明确指定其他正数；这是默认值，不是上限。 |
 | `setting:summary.targets` | **摘要目标** — 按目标设置自动刷新、触发时机及输入输出默认值，默认关闭，仍受摘要器选择和共享用量限额约束。帮助和搜索结果使用人工编写或已有的摘要。 |
 | `setting:summary.follow_interval_secs` | **摘要跟踪间隔** — 摘要可运行或正在运行时的免费读取间隔；尚未到期的任务等待实际到期时间。默认 5 秒。 |
+| `setting:summary.read_repeats` | **摘要重新读取次数** — 首次调用模型前免费重新读取来源、重建提示词的次数，每个循环默认 3 次；0 表示不重复。调用模型后来源变化不会自动发起付费重试。 |
 | `setting:summary.read_batch_size` | **摘要读取批量大小** — 一个搜索摘要窗口读取的不同来源数量，其余来源继续读取后续窗口。默认 100。 |
+| `setting:summary.retry_ceiling_secs` | **摘要重试间隔上限** — 自动标题或标签生成失败后的最长退避间隔。是否允许再次调用模型仍由调用规则决定。 默认 3600，须为正数。 |
+| `setting:summary.goal_turn_items` | **目标辅助模型轮次条目数** — 独立检查目标时读取该轮的最多条目数；超出的轮次整轮省略，仍保留条件和证据。 默认 2000，须为正数。 |
+| `setting:summary.goal_reason_chars` | **目标辅助模型原因字符数** — 保留独立辅助模型说明的最多字符数，与模型的输出词元额度分开计算。 默认 600，须为正数。 |
 | `option:agents.web_search_backend.kind` | 选择由模型或接口服务提供搜索的后端。 |
 | `option:agents.web_search_backend.provider_id` | 选定搜索供给所属的已启用提供方。 |
 | `option:agents.web_search_backend.model_name` | 使用模型后端时，选定提供方上的原生搜索模型。 |
 | `option:agents.web_search_backend.search_service` | 使用接口后端时，选定提供方声明的搜索服务。 |
 | `option:agents.web_search_backend.fetch_service` | 选定提供方上可选的已声明网页抓取服务。 |
-| `option:summary.targets.thread` | 线程摘要选项。 |
+| `option:summary.targets.thread` | 会话摘要选项。 |
 | `option:summary.targets.thread.automatic` | 允许此目标自动刷新。默认关闭；手动刷新是独立操作。 |
 | `option:summary.targets.thread.on` | 可以触发自动刷新的事件。省略时采用目标的常规事件；空列表关闭事件触发。 |
 | `option:summary.targets.thread.min_interval_secs` | 自动刷新的最短间隔，单位为秒；零表示不额外限制间隔。 |
@@ -483,16 +607,60 @@ summary: 每个设置可以在哪里设定，以及它改变什么。
 | `option:summary.targets.chat_title.output_chars` | 输出字符预算，必须为正数；不会覆盖提供方限制或用量限额。 |
 | `option:summary.targets.help` | 人工编写的帮助摘要没有模型生成选项。 |
 | `option:summary.targets.search_results` | 已有的搜索结果摘要没有模型生成选项。 |
-| `setting:ask.models` | **问一问模型列表** — 配置允许的 API 模型标识；子级只能缩小并保留父级顺序，首个可用项为默认。各级均未配置或有效列表为空时阻止提问。 |
+| `setting:ask.models` | **问一问模型列表** — 按顺序配置对话后端和模型。子组织可缩小范围。首个可用条目为默认模型。列表未设置或为空时，无法提问。 |
 | `setting:ask.paid_by` | **Ask 的费用承担方** — 由提问者或写入本设置的人付费。用量始终归属于提问者。 |
 | `setting:ask.retention_days` | **Ask 历史保留时间** — 最后一条消息后多少天永久删除历史，且须符合会话根组织规定的最短和最长保留时间。 |
 | `setting:ask.retention_min_days` | **Ask 最短保留时间** — 会话根组织的管理员规定的最短历史保留时间。 下级只能提高此下限。 |
 | `setting:ask.retention_max_days` | **Ask 最长保留时间** — 会话根组织的管理员允许的最长历史保留时间。 |
 | `setting:ask.max_steps` | **Ask 每轮模型步骤数** — 每个问题允许的模型步骤数，达到后请提问者选择继续。 |
-| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数，也会在安排对话上下文前预留。系统和组织设置中的最小值生效。 |
-| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口。设置后仅对 Ask 取较小值，仍需留足输出和工具结果空间。系统和组织设置中的最小值生效。 |
+| `setting:ask.max_output_tokens` | **Ask 回答令牌数** — 每次 Ask 模型请求允许的最大输出令牌数。请求按窗口减去此值来安排，且回答最多占窗口的一半。系统和组织设置中的最小值生效。 |
+| `setting:ask.context_tokens` | **Ask 上下文令牌数** — 未设置时使用所选模型的上下文窗口；未记录窗口的模型不会被当作小窗口。设置后仅对 Ask 取较小值。窗口不超过回答令牌数两倍时，回答占其一半。系统和组织设置中的最小值生效。 |
 | `setting:ask.max_tools` | **Ask 每轮读取操作数** — 每个问题允许的读取操作数，达到后请提问者缩小问题范围。 |
-| `setting:ask.tool_bytes` | **Ask 单个来源大小** — 交给模型的单次读取结果的最大字节数，并提供指向完整来源的标准链接。 |
-| `setting:ask.turn_tool_bytes` | **Ask 每轮来源总量** — 回答一个问题时提供给模型的读取结果总字节数。 |
+| `setting:ask.docs_hits` | **Ask 每次搜索的指南页数** — Ask 每次搜索帮助时交给模型的指南页面数上限；中英文同时匹配时交替给出。 |
+| `setting:ask.docs_excerpt_tokens` | **Ask 指南摘录大小** — Ask 搜索帮助时交给模型的单个指南页面的最大令牌数，并附上该页面的链接。 |
+| `setting:ask.max_operations` | **Ask 每次搜索的操作数** — Ask 每次搜索读取目录时返回的读取操作数上限。 |
+| `setting:ask.max_links` | **Ask 每个来源的链接数** — Ask 在一次读取中保留的标准来源链接数上限。 |
 | `setting:providers.model_groups_max` | **模型分组数** — 每个模型可加入的分组数，默认 8 个，可提高。设为 0 时不允许新加入分组，已有分组不变。 |
 | `option:usage.rates.*.web_fetch_per_call` | 每次成功网页抓取调用的点数。 |
+| `setting:providers.translation` | **模型格式转换** — 允许所选 Responses / Messages 转换，默认允许。下级位置可禁止，不能推翻上级的禁止。 |
+| `setting:providers.translation_output_tokens` | **转换时的默认输出量** — 转换请求和模型均未提供输出额度时的默认值，为 4,096 词元；可在系统或组织中调整。 |
+| `setting:providers.relay_concurrency` | **同时进行的公开模型调用** — 同时进行的公开模型内存交换数，默认为 32。后续调用先排队，再缓存请求正文。 |
+| `setting:providers.relay_request_bytes` | **公开模型请求大小** — 单个公开模型请求可缓存的字节数，默认为 16 MiB，可提高。 |
+| `setting:providers.relay_idle_secs` | **公开模型转发静默时间** — 响应片段等待读取者的最长秒数，默认为 300 秒。 |
+| `setting:providers.relay_retry_ms` | **公开模型转发重试间隔** — 在已记录的静默额度内重试临时原生交换故障前的等待毫秒数，默认为 250。 |
+
+
+### 提供方操作默认值
+
+| Reference | 含义 |
+| --- | --- |
+| `setting:runtime.retry_after_secs` | **运行位置重试间隔** — 创建失败后模型请求再次尝试前的秒数；启动可立即重试。默认 300 秒，零表示无需等待。 |
+| `setting:providers.upstream_head_secs` | **上游响应头期限** — 等待模型响应头或完整非流式响应的秒数，默认为 600 秒。 |
+| `setting:providers.upstream_idle_secs` | **上游静默期限** — 模型响应连续静默这些秒后按中断结束，默认为 300 秒。 |
+| `setting:providers.upstream_whole_bytes` | **完整模型响应大小** — 完整模型响应、发现页、标准化后的完整模型列表或生成结果可保留的字节数，默认 16 MiB，可调高。 |
+
+
+<a id="resource-pools"></a>
+
+## 资源池
+
+| 设置键 | 默认值 | 作用 |
+| --- | --- | --- |
+| `setting:pools.member_priority` | `0` | 默认优先级；优先选择数值较低的层级。 |
+| `setting:pools.member_weight` | `"1"` | 正十进制权重；相同权重对应相同份额。 |
+| `setting:pools.max_depth` | `3` | 嵌套层数，最外层计为一层；`0` 禁止选择资源池。 |
+| `setting:pools.read_batch_size` | `100` | 每次读取的行数；更多成员仍可继续分页读取。 |
+
+默认值从系统、组织和项目继承到资源池。资源池自身的值遵循其归属位置及锁定规则，不会替代请求工作的访问权限、预算或调用恢复规则。
+
+
+| 参考标识 | 默认值 | 含义 |
+| --- | --- | --- |
+| `setting:pools.load_ceiling_percent` | `90` | 实测比例的选择上限；零表示关闭，不改变原生容量，也不施加主机全局限制。 |
+| `setting:pools.load_ceiling_count` | `0` | 实测线程或进程数的选择上限；零表示关闭，数量不作百分比解释。 |
+| `setting:pools.cooldown_minutes` | `60` | 符合条件的原生证据出现后的暂停分钟数；零不增加计时等待，仍遵守供应商的等待。 |
+| `setting:pools.failures_before_cooldown` | `1` | 资源池失败窗口内触发冷却的有效失败数；不计本地权限及策略拒绝。 |
+| `setting:pools.failure_window_secs` | `300` | 统计触发阈值的原生失败时间窗口，单位为秒。 |
+| `setting:pools.recovery_trials` | `1` | 每个失败范围允许的并发原生恢复尝试数，绑定到实际命令或轮次回执。 |
+| `setting:pools.attempts` | `null` | 向调用恢复提供的自动追加成员尝试次数；未设置时每个可用成员最多一次，零表示不追加。仍遵守显式调用规则和更严格的限制。 |
+| `setting:pools.choice_detail_days` | `30` | 选择和跳过明细的保留天数；零表示永久保留。必要的原生回执和有效健康事实不受影响。 |
