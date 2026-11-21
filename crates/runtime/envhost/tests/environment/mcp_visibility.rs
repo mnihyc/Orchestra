@@ -16,6 +16,7 @@ async fn a_missing_imported_command_announces_unavailable_facts_even_when_start_
     rig.host
         .mcp_import(
             &McpImport {
+                profile: None,
                 expected_fingerprint: Some(definition.definition_fingerprint()),
                 stored: None,
                 transfer: None,
@@ -151,6 +152,7 @@ async fn an_imported_private_copy_authenticates_http_initialize_notifications_an
         .host
         .mcp_import(
             &McpImport {
+                profile: None,
                 expected_fingerprint: Some(definition.definition_fingerprint()),
                 stored: None,
                 transfer: None,

@@ -253,6 +253,8 @@ pub enum TerminalNotAllowedReason {
     MachinePolicy,
     /// The environment is not reachable.
     EnvironmentOffline,
+    /// Stop has been accepted for the current environment registration.
+    EnvironmentStopping,
 }
 
 crate::common::full_or_receipt! {

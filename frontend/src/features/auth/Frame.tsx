@@ -16,6 +16,7 @@ import { useAppearance } from '@/lib/appearance';
 import { usePageTitle } from '@/lib/title';
 import { Mark } from '@/shell/Mark';
 import { Banner } from '@/ui/Banner';
+import { PublicAddressNotice } from '@/shell/PublicAddressNotice';
 import { cx } from '@/ui/cx';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 
@@ -35,6 +36,7 @@ export function AuthFrame({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-dvh flex-col bg-bg-inset">
+      <PublicAddressNotice meta={meta} />
       {banner && <Banner tone={banner.level}>{banner.text}</Banner>}
       <main className="flex flex-1 flex-col items-center justify-center px-4 py-6">
         <div className="flex w-full max-w-form flex-col gap-6">
