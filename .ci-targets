@@ -1,0 +1,1 @@
+test -p orch-api-core --test admin_person_credentials

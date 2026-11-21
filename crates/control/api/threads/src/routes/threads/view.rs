@@ -190,6 +190,7 @@ fn isolation_of(
     let metered = path.map(|path| metering(path, usage_tokens));
     let enforced = path.map(model_enforcement);
     Isolation {
+        translation: None,
         kind: parts.arrangement,
         harness_runs_in,
         executor: parts.executor.clone(),
@@ -281,6 +282,8 @@ async fn input_access(
             .provider_use(
                 conn,
                 &ProviderUse {
+                    pool: None,
+                    purpose: orch_access_contract::permissions::UsagePurpose::Turn,
                     person: principal.user(),
                     node: thread,
                     provider,
@@ -341,7 +344,7 @@ async fn input_access(
 /// rows of its four doors, which are the environment's and on no thread's page. Nothing for a
 /// thread that has no environment, or whose environment is gone. Whether the caller manages it,
 /// which is what deciding where the thread runs takes, is among them.
-async fn held_on_environment(
+pub(super) async fn held_on_environment(
     conn: &mut Conn,
     principal: &Principal,
     environment: Option<Id>,
@@ -390,15 +393,29 @@ async fn sides_of(conn: &mut Conn, thread: Id) -> ApiResult<ThreadSides> {
         .unwrap_or_default();
     let open = rows::open_side_threads(conn, thread).await?;
     // How an aside here would read, as the harness of the thread's binding verified it; or why none can.
-    let agent = orch_db::queries::threads::thread(conn, thread)
-        .await?
-        .and_then(|row| row.agent_id);
+    let bound = orch_db::queries::threads::thread(conn, thread).await?;
+    let acting = bound.as_ref().is_some_and(acting_side_available);
+    let agent = bound.and_then(|row| row.agent_id);
     let aside = match agent {
         Some(agent) => orch_engine::side_threads::aside_of(conn, agent)
             .await
             .map_err(ApiError::internal)?,
         None => Err("the thread is bound to no agent yet".to_owned()),
     };
+    Ok(side_view(open, max, allowed, acting, aside))
+}
+
+fn acting_side_available(row: &orch_db::queries::threads::ThreadRow) -> bool {
+    row.agent_id.is_some() && row.provider_id.is_some() && row.environment_id.is_some()
+}
+
+fn side_view(
+    open: i64,
+    max: i64,
+    allowed: bool,
+    acting: bool,
+    aside: Result<(orch_agent_contract::descriptor::SideReading, bool), String>,
+) -> ThreadSides {
     let (mode, reason) = match aside {
         Ok((reading, _)) => (
             serde_json::from_value(serde_json::Value::String(
@@ -409,13 +426,14 @@ async fn sides_of(conn: &mut Conn, thread: Id) -> ApiResult<ThreadSides> {
         ),
         Err(why) => (None, Some(why)),
     };
-    Ok(ThreadSides {
+    ThreadSides {
+        acting,
         open,
         max,
         allowed,
         mode,
         reason,
-    })
+    }
 }
 
 /// The thread whose base is `base`, as `principal` sees it.
@@ -437,12 +455,130 @@ pub(crate) async fn thread_with_name_sources(
     now: DateTime<Utc>,
     name_sources: Option<&std::collections::BTreeSet<Id>>,
 ) -> ApiResult<Thread> {
+    let parts = thread_parts(
+        conn,
+        base.id,
+        Some(principal.user()),
+        orch_types::Time::new(now),
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(ApiError::not_found)?;
+    thread_with_parts(conn, principal, base, now, name_sources, parts, None).await
+}
+
+struct ThreadPageFacts {
+    environments: std::collections::BTreeMap<Id, Vec<String>>,
+    sides: std::collections::BTreeMap<Id, ThreadSides>,
+}
+
+/// A node page uses the complete native renderer, with shared setting reads,
+/// environment permissions and side facts captured only for this request and caller.
+pub(crate) async fn threads_with_name_sources(
+    conn: &mut Conn,
+    principal: &Principal,
+    bases: Vec<NodeBase<ThreadKind>>,
+    now: DateTime<Utc>,
+    name_sources: Option<&std::collections::BTreeSet<Id>>,
+) -> ApiResult<Vec<Thread>> {
+    let ids = bases.iter().map(|base| base.id).collect::<Vec<_>>();
+    let mut parts = orch_engine::views::thread_parts_many(
+        conn,
+        &ids,
+        Some(principal.user()),
+        orch_types::Time::new(now),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let mut page = ThreadPageFacts {
+        environments: std::collections::BTreeMap::new(),
+        sides: std::collections::BTreeMap::new(),
+    };
+    let environments = parts
+        .iter()
+        .filter(|(id, _)| !orch_db::queries::trace::retained_read(**id))
+        .filter_map(|(_, part)| {
+            part.facts
+                .environment
+                .as_ref()
+                .map(|environment| environment.id)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for environment in environments {
+        page.environments.insert(
+            environment,
+            held_on_environment(conn, principal, Some(environment)).await?,
+        );
+    }
+    let parents = parts
+        .iter()
+        .filter_map(|(id, part)| part.facts.side_of.is_none().then_some(*id))
+        .collect::<Vec<_>>();
+    let allowed = orch_settings::get_at_nodes::<bool>(conn, &parents, keys::THREAD_SIDE_THREADS)
+        .await
+        .map_err(ApiError::internal)?;
+    let maxima = orch_settings::get_at_nodes::<i64>(conn, &parents, keys::THREAD_SIDE_MAX)
+        .await
+        .map_err(ApiError::internal)?;
+    let open = rows::open_side_threads_many(conn, &parents)
+        .await?
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let agents = parents
+        .iter()
+        .filter_map(|id| parts.get(id).and_then(|part| part.row.agent_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut asides = std::collections::BTreeMap::new();
+    for agent in agents {
+        asides.insert(
+            agent,
+            orch_engine::side_threads::aside_of(conn, agent)
+                .await
+                .map_err(ApiError::internal)?,
+        );
+    }
+    for id in parents {
+        let part = parts.get(&id).ok_or_else(ApiError::not_found)?;
+        let aside = match part.row.agent_id {
+            Some(agent) => asides
+                .get(&agent)
+                .cloned()
+                .ok_or_else(|| ApiError::internal("the side capability was not captured"))?,
+            None => Err("the thread is bound to no agent yet".to_owned()),
+        };
+        page.sides.insert(
+            id,
+            side_view(
+                open.get(&id).copied().unwrap_or_default(),
+                maxima.get(&id).copied().flatten().unwrap_or_default(),
+                allowed.get(&id).copied().flatten().unwrap_or(true),
+                acting_side_available(&part.row),
+                aside,
+            ),
+        );
+    }
+    let mut result = Vec::with_capacity(bases.len());
+    for base in bases {
+        let part = parts.remove(&base.id).ok_or_else(ApiError::not_found)?;
+        result.push(
+            thread_with_parts(conn, principal, base, now, name_sources, part, Some(&page)).await?,
+        );
+    }
+    Ok(result)
+}
+orch_api_base::__api_bind_a108d28ec4!();
+
+async fn thread_with_parts(
+    conn: &mut Conn,
+    principal: &Principal,
+    base: NodeBase<ThreadKind>,
+    now: DateTime<Utc>,
+    name_sources: Option<&std::collections::BTreeSet<Id>>,
+    parts: ThreadParts,
+    page: Option<&ThreadPageFacts>,
+) -> ApiResult<Thread> {
     let id = base.id;
     let inspecting = orch_db::queries::trace::retained_read(id);
-    let parts = thread_parts(conn, id, Some(principal.user()), orch_types::Time::new(now))
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)?;
     let environment = parts
         .facts
         .environment
@@ -459,6 +595,22 @@ pub(crate) async fn thread_with_name_sources(
                 orch_tools_of(conn, id, environment, binding).await?
             };
             Some(ThreadBinding {
+                call_route: if inspecting {
+                    None
+                } else {
+                    orch_engine::calls::thread_call_route(conn, id, now)
+                        .await
+                        .map_err(ApiError::internal)?
+                        .map(Box::new)
+                },
+                configuration_application: if inspecting {
+                    None
+                } else {
+                    orch_engine::configuration_application::of_thread(conn, id, binding.segment)
+                        .await
+                        .map_err(ApiError::internal)?
+                },
+                sandbox_resolution: binding.sandbox_resolution.clone(),
                 program: crate::routes::admin::catalogue::reported_program(conn, id).await?,
                 agent: binding.agent.clone(),
                 provider: binding.provider.clone(),
@@ -505,6 +657,13 @@ pub(crate) async fn thread_with_name_sources(
     };
     let environment_permissions = if inspecting {
         Vec::new()
+    } else if let Some(page) = page {
+        match environment {
+            Some(id) => page.environments.get(&id).cloned().ok_or_else(|| {
+                ApiError::internal("the thread's environment permissions are missing")
+            })?,
+            None => Vec::new(),
+        }
     } else {
         held_on_environment(conn, principal, environment).await?
     };
@@ -534,7 +693,14 @@ pub(crate) async fn thread_with_name_sources(
         place,
     };
     let sides = if parts.facts.side_of.is_none() {
-        let mut sides = sides_of(conn, id).await?;
+        let mut sides = match page {
+            Some(page) => page
+                .sides
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| ApiError::internal("the thread's side facts are missing"))?,
+            None => sides_of(conn, id).await?,
+        };
         sides.allowed &= !inspecting;
         Some(sides)
     } else {
@@ -564,8 +730,8 @@ pub(crate) async fn thread_with_name_sources(
                     .is_some_and(orch_engine::sessions::is_sandbox_refusal)
         })
         && let Some(environment) = facts.environment.clone()
-        && let Some(row) = rows::thread(conn, id).await?
     {
+        let row = &parts.row;
         let readiness = crate::sandbox_readiness::environment(
             conn,
             principal,
@@ -590,7 +756,8 @@ pub(crate) async fn thread_with_name_sources(
     let mut base = base;
     let background = if inspecting {
         None
-    } else if let Some(row) = rows::thread(conn, id).await? {
+    } else {
+        let row = &parts.row;
         let interact = parts
             .binding
             .as_ref()
@@ -607,19 +774,36 @@ pub(crate) async fn thread_with_name_sources(
             .await
             .is_ok_and(|decision| decision.is_allowed());
         Some(
-            orch_engine::background_wake::status(conn, &row, &[], interact)
+            orch_engine::background_wake::status(conn, row, &[], interact)
                 .await
                 .map_err(ApiError::engine)?,
         )
-    } else {
-        None
     };
     for reference in &mut base.path {
         if reference.id == facts.id {
             reference.thread_display = Some(Box::new(facts.display.clone()));
         }
     }
+    let environment_preparation = if inspecting {
+        None
+    } else if let Some(environment) = &facts.environment {
+        orch_engine::environment_preparation::of_thread(conn, id, environment.id)
+            .await
+            .map_err(ApiError::internal)?
+            .map(
+                |stage| orch_api_contract::threads::ThreadEnvironmentPreparation {
+                    kind: stage.kind,
+                    environment: environment.clone(),
+                    actual_job: stage.actual_job,
+                    actual_command: stage.actual_command,
+                    observed_at: stage.observed_at,
+                },
+            )
+    } else {
+        None
+    };
     Ok(Thread {
+        environment_preparation,
         program: facts.program,
         program_model: facts.program_model,
         background,
@@ -633,6 +817,9 @@ pub(crate) async fn thread_with_name_sources(
         sides,
         side_reading: facts.side_reading,
         starting_step: facts.starting_step,
+        starting_since: facts.starting_since,
+        starting_work: facts.starting_work,
+        stopping: facts.stopping,
         blocked: facts.blocked,
         queue: facts.queue,
         binding,

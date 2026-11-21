@@ -145,6 +145,7 @@ pub struct ConnectorBuilder {
     installation: Option<orch_api_contract::machine_programs::MachineInstallation>,
     provider_sources: Arc<crate::sources::Programs>,
     builtin_sources: Arc<orch_provider_contract::builtins::BuiltinSources>,
+    build_cache: Option<Arc<dyn crate::builds::BuildCache>>,
 }
 
 impl ConnectorBuilder {
@@ -164,6 +165,7 @@ impl ConnectorBuilder {
             installation: None,
             provider_sources: Arc::new(crate::sources::Programs::default()),
             builtin_sources: Arc::default(),
+            build_cache: None,
         }
     }
 
@@ -198,6 +200,13 @@ impl ConnectorBuilder {
         table: Arc<orch_provider_contract::builtins::BuiltinSources>,
     ) -> Self {
         self.builtin_sources = table;
+        self
+    }
+
+    /// Uses the physical program's verified cache for requested harness builds.
+    #[must_use]
+    pub fn build_cache(mut self, cache: Arc<dyn crate::builds::BuildCache>) -> Self {
+        self.build_cache = Some(cache);
         self
     }
 
@@ -319,6 +328,7 @@ impl DataDirectoryFacts {
 
 /// A connector that runs.
 pub struct Connector {
+    room: Option<Arc<Mutex<crate::facts::RoomSampler>>>,
     data_directory: Arc<DataDirectoryFacts>,
     identity_reload: Arc<tokio::sync::Notify>,
     role_changes: Arc<crate::role_changes::Requests>,
@@ -378,6 +388,7 @@ impl Connector {
             installation,
             provider_sources,
             builtin_sources,
+            build_cache,
         } = builder;
         let data = DataDir::open(&params.data_dir)?;
         // Nothing a command left in the cache outlives a run: the commands themselves do not.
@@ -463,7 +474,9 @@ impl Connector {
             Some(directory) if params.managed => {
                 crate::builds::installed(directory, &params.adapters)
             }
-            _ => Vec::new(),
+            _ => build_cache
+                .as_ref()
+                .map_or_else(Vec::new, |cache| cache.installed(&params.adapters)),
         };
         let services = Arc::new(Services {
             link: link.clone(),
@@ -483,6 +496,7 @@ impl Connector {
             keys: Arc::new(Keys::new(params.identity.key.duplicate()?)),
             config: params.config.clone(),
             tools_dir: params.tools_dir.clone(),
+            build_cache,
             installed,
             tunnels: Arc::clone(&tunnels),
             port_publisher,
@@ -551,6 +565,9 @@ impl Connector {
             supervised_roles && !params.managed && !node,
         ));
         let facts_role_changes = Arc::clone(&role_changes);
+        let room =
+            (!params.managed).then(|| Arc::new(Mutex::new(crate::facts::RoomSampler::new())));
+        let facts_room = room.clone();
         let host = Host::detect();
         let facts_roles = roles.clone();
         let facts_policy = Arc::clone(&policy);
@@ -600,6 +617,11 @@ impl Connector {
                 facts_link.rates(),
                 facts_link.clock_offset_ms(),
             );
+            facts.room = facts_room.as_ref().map(|room| {
+                room.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .sample(facts_services.clock.as_ref(), facts.clock_offset_ms)
+            });
             facts_services.local_harnesses.apply(&mut facts);
             facts.gateway = Some(facts_link.gateway_status());
             facts.programs = facts_programs
@@ -611,6 +633,7 @@ impl Connector {
             facts
         });
         let mut dispatcher = Dispatcher::new(Arc::clone(&policy), Arc::clone(&facts_now));
+        dispatcher.clock(Arc::clone(&services.clock));
         dispatcher.local_harnesses(
             Arc::clone(&services.local_harnesses),
             Arc::clone(&services.publisher),
@@ -741,6 +764,7 @@ impl Connector {
         }
 
         let connector = Self {
+            room,
             data_directory,
             identity_reload,
             role_changes,
@@ -836,6 +860,11 @@ impl Connector {
             self.link.rates(),
             self.link.clock_offset_ms(),
         );
+        facts.room = self.room.as_ref().map(|room| {
+            room.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sample(self.services.clock.as_ref(), facts.clock_offset_ms)
+        });
         self.services.local_harnesses.apply(&mut facts);
         facts.gateway = Some(self.link.gateway_status());
         facts.role_management = Some(self.role_changes.capability(&self.services.policy));
@@ -898,10 +927,13 @@ async fn report_facts(
     let mut program_changes = discovery.changes();
     let mut gateway_reports = link.gateway_changes();
     let mut directory_changes = data_directory.changes.subscribe();
-    let mut ticker = tokio::time::interval(FACTS_EVERY);
+    // The connection publishes immediately. The first periodic report can also measure CPU
+    // usage since startup, after the OS counter has had time to advance.
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + sysinfo::MINIMUM_CPU_UPDATE_INTERVAL,
+        FACTS_EVERY,
+    );
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // The first tick is at once: the facts are reported when the connector starts, whether or not a
-    // session stands yet; the spool keeps them for it.
     loop {
         tokio::select! {
             () = stop.cancelled() => return,

@@ -5,6 +5,7 @@
  * revoked one by one. Whoever manages the members makes and removes them; removing one ends its tokens
  * and the roles and entries that named it, and the dialog says so before it asks.
  */
+import { CopyId } from '@/ui/CopyId';
 import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
 import { Bot, KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
@@ -110,6 +111,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
   const list = useQuery(serviceTokensQuery(id));
   const [making, setMaking] = useState(returned !== null);
   const [made, setMade] = useState<TokenCreateResponse | null>(null);
+  const [revoking, setRevoking] = useState<ApiTokenInfo | null>(null);
   const [madeName, setMadeName] = useState('');
   const [reviewing, setReviewing] = useState<ApiTokenInfo | null>(null);
   const make = useMutation({
@@ -179,8 +181,9 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
                   <span className="ml-3 text-sm text-text-muted">{t('tokens.madeOn', { time: formatDateTime(token.created_at, format) })}</span>
                 </span>
                 <span className="text-sm text-text-muted">{token.last_used_at === null ? t('tokens.neverUsed') : <RelativeTime at={token.last_used_at} />}</span>
+                <CopyId value={token.id} />
                 <Button size="sm" variant="ghost" onClick={() => setReviewing(token)}>{t('operationKeys.review')}</Button>
-                <Button size="sm" variant="danger-ghost" pending={revoke.isPending && revoke.variables === token.id} onClick={() => revoke.mutate(token.id)} aria-label={t('tokens.revokeTitle', { name: token.name })}>
+                <Button size="sm" variant="danger-ghost" pending={revoke.isPending && revoke.variables === token.id} onClick={() => { revoke.reset(); setRevoking(token); }} aria-label={t('tokens.revokeTitle', { name: token.name })}>
                   {t('tokens.revoke')}
                 </Button>
               </li>
@@ -188,6 +191,22 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
           </ul>
         )}
       </div>
+      {revoking !== null && <ConfirmDialog
+        open
+        onOpenChange={(open) => !open && setRevoking(null)}
+        title={t('tokens.revokeTitle', { name: revoking.name })}
+        confirmLabel={t('tokens.revokeConfirm', { name: revoking.name })}
+        danger
+        pending={revoke.isPending}
+        error={revoke.error}
+        onConfirm={() => revoke.mutate(revoking.id, { onSuccess: () => {
+          if (made !== null && ('info' in made ? made.info.id : made.token_id) === revoking.id) setMade(null);
+          toast({ tone: 'success', title: t('tokens.revoked', { name: revoking.name }) });
+          setRevoking(null);
+        } })}
+      >
+        {t('tokens.revokeBody')}
+      </ConfirmDialog>}
       {reviewing !== null && <Dialog open onOpenChange={(open) => !open && setReviewing(null)} title={t('operationKeys.reviewTitle', { name: reviewing.name })} size="lg" footer={<Button onClick={() => setReviewing(null)}>{t('common.close')}</Button>}><KeyScopeReview token={reviewing} /></Dialog>}
     </Dialog>
   );
@@ -228,6 +247,7 @@ function OrgTokens({ org }: { org: Org }) {
                   <span className="flex flex-wrap items-center gap-2">
                     <UserChip user={token.user} size={24} />
                     <span className="font-medium wrap-anywhere text-text">{token.name}</span>
+                    <CopyId value={token.id} />
                     {token.refused_here && <Badge tone="danger">{t('settings.orgTokens.refusedHere')}</Badge>}
                     {!token.lifetime_allowed && <Badge tone="warning">{t('settings.orgTokens.tooLong')}</Badge>}
                   </span>
