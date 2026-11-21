@@ -7,6 +7,8 @@ CREATE TABLE input_schedules (
     name text NOT NULL,
     target jsonb NOT NULL,
     content jsonb NOT NULL,
+    plan boolean NOT NULL,
+    delivery text NOT NULL,
     native_action jsonb,
     definition_authority jsonb,
     timing jsonb NOT NULL,
@@ -18,6 +20,7 @@ CREATE TABLE input_schedules (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
     CONSTRAINT input_schedules_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
+    CONSTRAINT input_schedules_delivery_check CHECK (delivery IN ('queue','steer','interrupt')),
     CONSTRAINT input_schedules_state_check CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'finished'::text, 'deleted'::text]))),
     CONSTRAINT input_schedules_pkey PRIMARY KEY (id),
     CONSTRAINT input_schedules_author_id_fkey FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -31,16 +34,22 @@ CREATE INDEX thread_display_schedules_idx ON input_schedules USING btree (((targ
 CREATE INDEX input_schedules_agent_thread_idx ON input_schedules (topic_id, ((target->>'thread_id')), id)
     WHERE deleted_at IS NULL AND target->>'kind'='thread' AND definition_authority->>'kind'='agent';
 
+CREATE SEQUENCE raw_event_changes;
 CREATE TABLE raw_events (
     segment_id uuid NOT NULL,
     n bigint NOT NULL,
     at timestamp with time zone NOT NULL,
     direction text NOT NULL,
     payload bytea NOT NULL,
+    capture_reported boolean DEFAULT false NOT NULL,
+    change_id bigint NOT NULL DEFAULT nextval('raw_event_changes'),
     CONSTRAINT raw_events_direction_check CHECK ((direction = ANY (ARRAY['to_harness'::text, 'from_harness'::text]))),
     CONSTRAINT raw_events_pkey PRIMARY KEY (segment_id, n, at)
 )
 PARTITION BY RANGE (at);
+CREATE INDEX raw_events_changes ON raw_events(segment_id,change_id);
+
+CREATE INDEX raw_events_unreported_bounds_idx ON raw_events (segment_id, n) WHERE NOT capture_reported;
 
 CREATE TABLE thread_tool_calls (
     answer_id uuid NOT NULL,
@@ -153,9 +162,15 @@ CREATE TABLE segments (
     tool_set text,
     credential_path text NOT NULL,
     raw_last_n bigint DEFAULT 0 NOT NULL,
+    raw_text_gap boolean DEFAULT false NOT NULL,
+    sandbox_resolution jsonb,
     native_session_ref text,
     background_wake boolean,
     session_configuration jsonb,
+    session_outcome jsonb,
+    orch_tools_offer jsonb,
+    configuration_application jsonb,
+    session_hints jsonb,
     started_by uuid,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     ended_at timestamp with time zone,
@@ -177,6 +192,7 @@ CREATE TABLE segments (
     agent_history_claimed_at timestamp with time zone,
     agent_history_error text,
     agent_history_recovery jsonb,
+    agent_history_policy jsonb,
     agent_history_measure_revision bigint DEFAULT 0 NOT NULL,
     agent_history_measured_revision bigint DEFAULT 0 NOT NULL,
     CONSTRAINT segments_agent_history_bytes_check CHECK ((agent_history_bytes >= 0)),
@@ -193,6 +209,20 @@ CREATE TABLE segments (
     CONSTRAINT segments_machine_fk FOREIGN KEY (machine_id) REFERENCES machines(id),
     CONSTRAINT segments_started_by_fkey FOREIGN KEY (started_by) REFERENCES users(id)
 );
+
+-- Small retained-frame counters let whole-month cleanup preserve provenance without reading protocol bodies.
+CREATE TABLE raw_capture_state (
+    segment_id uuid PRIMARY KEY REFERENCES segments(id) ON DELETE CASCADE,
+    capture jsonb NOT NULL CHECK (jsonb_typeof(capture) = 'object')
+);
+
+CREATE TABLE raw_capture_months (
+    segment_id uuid NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    month_start timestamp with time zone NOT NULL,
+    retained bigint NOT NULL CHECK (retained >= 0),
+    PRIMARY KEY (segment_id, month_start)
+);
+CREATE INDEX raw_capture_months_expiry_idx ON raw_capture_months (month_start, segment_id) WHERE retained > 0;
 
 CREATE FUNCTION public.orch_pending_notice_lane(s public.segments) RETURNS bytea
     LANGUAGE sql STABLE STRICT
@@ -263,6 +293,8 @@ CREATE TABLE approvals (
     requester_thread_id uuid,
     title text NOT NULL,
     request jsonb NOT NULL,
+    native_request bytea,
+    native_decision bytea,
     required_permission text NOT NULL,
     approver_node_id uuid,
     approver_scope text,
@@ -271,6 +303,10 @@ CREATE TABLE approvals (
     decided_by uuid,
     decided_at timestamp with time zone,
     decision jsonb,
+    decision_settlement jsonb,
+    decision_delivered_at timestamp with time zone,
+    decision_delivery jsonb,
+    decision_delivery_sync boolean DEFAULT false NOT NULL,
     expires_at timestamp with time zone,
     requested_expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -285,6 +321,16 @@ CREATE TABLE approvals (
     CONSTRAINT approvals_requester_user_id_fkey FOREIGN KEY (requester_user_id) REFERENCES users(id)
 );
 
+CREATE INDEX approvals_settlement_due_idx ON approvals (thread_id, decided_at, id) WHERE decision_settlement IS NOT NULL;
+
+CREATE INDEX approvals_delivery_due_idx ON approvals (thread_id, decided_at, id)
+    WHERE kind='harness' AND state IN ('approved','answered','denied') AND decision_delivered_at IS NULL
+      AND thread_id IS NOT NULL AND native_ref IS NOT NULL AND decision IS NOT NULL;
+
+CREATE INDEX approvals_delivery_oldest_idx ON approvals (decided_at, id)
+    WHERE kind='harness' AND state IN ('approved','answered','denied') AND decision_delivered_at IS NULL
+      AND thread_id IS NOT NULL AND native_ref IS NOT NULL AND decision IS NOT NULL;
+
 CREATE INDEX approvals_agent_history_waiting_idx ON approvals USING btree (thread_id) WHERE (state = ANY (ARRAY['pending'::text, 'approved'::text]));
 
 CREATE INDEX approvals_item_idx ON approvals USING btree (item_id) WHERE (item_id IS NOT NULL);
@@ -296,6 +342,7 @@ CREATE UNIQUE INDEX approvals_one_open_chat_join ON approvals USING btree (objec
 CREATE UNIQUE INDEX approvals_one_open_source ON approvals USING btree (kind, object_id) WHERE ((state = 'pending'::text) AND (kind = ANY (ARRAY['plan'::text, 'input'::text])));
 
 CREATE INDEX approvals_pending_idx ON approvals USING btree (kind, node_id) WHERE (state = 'pending'::text);
+CREATE INDEX approvals_delivery_publication_idx ON approvals(thread_id,decided_at,id) WHERE decision_delivery_sync;
 
 CREATE INDEX approvals_thread_pending_idx ON approvals USING btree (thread_id) WHERE (state = 'pending'::text);
 
@@ -332,6 +379,7 @@ CREATE TABLE input_schedule_runs (
     input_id uuid,
     turn_id uuid,
     reason text,
+    outcome jsonb,
     topic_seq bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     started_at timestamp with time zone,
@@ -342,6 +390,8 @@ CREATE TABLE input_schedule_runs (
 );
 
 CREATE TABLE items (
+    text_replacements bigint NOT NULL DEFAULT 0 CHECK (text_replacements >= 0),
+    storage_gap jsonb,
     id uuid NOT NULL,
     thread_id uuid NOT NULL,
     segment_id uuid NOT NULL,
@@ -390,6 +440,43 @@ CREATE INDEX items_execution_history_idx ON items USING btree (thread_id) WHERE 
 
 CREATE UNIQUE INDEX items_native_key ON items USING btree (segment_id, native_ref) WHERE (native_ref IS NOT NULL);
 
+-- Stream cursors and their displayed stretches commit together; full item rows are coalesced later.
+CREATE TABLE item_output_inline_source (
+    item_id uuid PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    data bytea NOT NULL
+);
+
+CREATE TABLE item_stream_parts (
+    item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    -- Provenance can outlive a purged session while its aliased item remains.
+    source_segment uuid NOT NULL,
+    field text NOT NULL CHECK (field IN ('text','summary','output')),
+    part_offset bigint NOT NULL CHECK (part_offset >= 0),
+    part_len bigint NOT NULL CHECK (part_len > 0),
+    data bytea NOT NULL,
+    captured_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    PRIMARY KEY (item_id, field, part_offset)
+);
+CREATE INDEX item_stream_parts_due_idx ON item_stream_parts (captured_at, item_id);
+
+-- Unfinished masking context is private ciphertext, never ordinary timeline text.
+CREATE TABLE item_redaction_holds (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    field text NOT NULL CHECK (field IN ('text','summary','output')),
+    part_offset bigint NOT NULL CHECK (part_offset >= 0),
+    part_len bigint NOT NULL CHECK (part_len >= 0),
+    data bytea NOT NULL,
+    source_segment uuid NOT NULL
+);
+CREATE INDEX item_redaction_holds_item_idx ON item_redaction_holds (item_id, field, id);
+
+-- In-flight items retain their as-captured protection; rules contain private values and are encrypted.
+CREATE TABLE item_capture_masks (
+    item_id uuid PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    rules bytea NOT NULL
+);
+
 CREATE INDEX items_parent_item_idx ON items USING btree (parent_item_id) WHERE (parent_item_id IS NOT NULL);
 
 CREATE INDEX items_pinned_idx ON items USING btree (thread_id, pinned_at) WHERE (pinned_at IS NOT NULL);
@@ -408,6 +495,18 @@ CREATE INDEX items_resource_stop_idx ON items USING btree (((payload #>> '{data,
 
 CREATE INDEX items_search_idx ON items USING gin (thread_id, search_text gin_trgm_ops) WHERE (search_text IS NOT NULL);
 
+-- Message and child lists seek their own records without scanning command or output bodies.
+CREATE INDEX items_person_message_page_idx ON items (thread_id, continuation_id, seq_created DESC)
+    WHERE kind='user_message' AND stream='main' AND payload->>'source'='user';
+CREATE INDEX items_subagent_page_idx ON items (thread_id, continuation_id, seq_created DESC)
+    WHERE kind='tool_call' AND payload #>> '{tool,kind}'='subagent';
+CREATE INDEX items_agent_answer_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='agent_message' AND stream='main';
+CREATE INDEX items_agent_final_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='agent_message' AND stream='main' AND payload->>'phase'='final';
+CREATE INDEX items_file_change_turn_idx ON items (thread_id, turn_id, continuation_id, seq_created DESC)
+    WHERE kind='tool_call' AND payload #>> '{tool,kind}'='file_change';
+
 CREATE INDEX items_segment_marker_idx ON items USING btree (segment_id, ((payload ->> 'marker'::text)), seq_created) WHERE (kind = 'marker'::text);
 
 CREATE INDEX items_thread_created_idx ON items USING btree (thread_id, seq_created);
@@ -417,6 +516,10 @@ CREATE INDEX items_background_running_idx ON items (thread_id, segment_id)
 WHERE kind = 'tool_call'
   AND payload @? '$.background_tasks.*.task.state ? (@ == "running")';
 
+CREATE INDEX items_background_lost_idx ON items (thread_id, segment_id)
+WHERE kind = 'tool_call'
+  AND payload @? '$.background_tasks.*.task.state ? (@ == "lost")';
+
 CREATE INDEX items_background_native_wait_idx ON items (thread_id)
 WHERE kind = 'tool_call'
   AND payload @? '$.background_tasks.*.awaiting_native_wake ? (@ == true)';
@@ -424,6 +527,10 @@ WHERE kind = 'tool_call'
 CREATE INDEX items_thread_native_idx ON items USING btree (thread_id, native_ref) WHERE (native_ref IS NOT NULL);
 
 CREATE INDEX items_thread_stream_created_idx ON items USING btree (thread_id, stream, seq_created);
+
+-- Reading the last answer skips intervening work, child streams and unfinished messages.
+CREATE INDEX items_last_completed_main_message_idx ON items(thread_id,seq_created DESC,id DESC)
+WHERE kind='agent_message' AND status='completed' AND stream='main';
 
 CREATE INDEX items_thread_updated_idx ON items USING btree (thread_id, seq_updated);
 
@@ -489,7 +596,145 @@ CREATE INDEX model_inputs_node_seq_idx ON model_inputs USING btree (node_id, seq
 
 CREATE INDEX model_inputs_segment_idx ON model_inputs USING btree (segment_id, purpose, seq_created);
 
+-- Context estimates keep per-source contributions so streaming replacements subtract their old share.
+CREATE TABLE context_estimates (
+    segment_id uuid PRIMARY KEY REFERENCES segments(id) ON DELETE CASCADE,
+    family jsonb,
+    since bigint NOT NULL DEFAULT 0,
+    totals jsonb NOT NULL
+);
+
+CREATE TABLE workspace_start_file_blobs (
+    job_id uuid NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    thread_id uuid NOT NULL,
+    path text NOT NULL,
+    blob bytea NOT NULL REFERENCES blobs(hash),
+    PRIMARY KEY(job_id,thread_id,path)
+);
+CREATE TRIGGER workspace_start_file_blob_pin AFTER INSERT OR DELETE ON workspace_start_file_blobs
+    FOR EACH ROW EXECUTE FUNCTION thread_history_blob_pin();
+
+CREATE TABLE context_estimate_contributions (
+    segment_id uuid NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    source text NOT NULL CHECK (source IN ('item','input')),
+    id uuid NOT NULL,
+    value jsonb NOT NULL,
+    PRIMARY KEY (segment_id,source,id)
+);
+
+CREATE TABLE context_estimate_dirty (
+    segment_id uuid NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    source text NOT NULL CHECK (source IN ('item','input','refresh')),
+    id uuid NOT NULL,
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+    PRIMARY KEY (segment_id,source,id)
+);
+
+CREATE FUNCTION orch_context_item_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'item' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE n.id END
+            FROM context_new_items n JOIN segments s ON s.id=n.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            WHERE n.kind IN ('agent_message','tool_call','user_message') AND n.stream='main' AND NOT n.before_orch
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    ELSIF TG_OP='DELETE' THEN
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'item' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE o.id END
+            FROM context_old_items o JOIN segments s ON s.id=o.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            WHERE o.kind IN ('agent_message','tool_call','user_message') AND o.stream='main' AND NOT o.before_orch
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    ELSE
+        WITH changed AS (
+            SELECT o.id AS old_id,o.segment_id AS old_segment_id,
+                o.kind IN ('agent_message','tool_call','user_message') AND o.stream='main' AND NOT o.before_orch AS old_eligible,
+                n.id AS new_id,n.segment_id AS new_segment_id,
+                n.kind IN ('agent_message','tool_call','user_message') AND n.stream='main' AND NOT n.before_orch AS new_eligible
+            FROM context_old_items o FULL JOIN context_new_items n ON n.id=o.id
+            WHERE ROW(o.segment_id,o.seq_created,o.kind,o.stream,o.before_orch,o.payload)
+                IS DISTINCT FROM ROW(n.segment_id,n.seq_created,n.kind,n.stream,n.before_orch,n.payload)
+        ), sources AS (
+            SELECT old_segment_id AS segment_id,old_id AS id FROM changed WHERE old_eligible
+            UNION ALL
+            SELECT new_segment_id,new_id FROM changed WHERE new_eligible
+        )
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'item' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE c.id END
+            FROM sources c JOIN segments s ON s.id=c.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+-- Each write invalidates a source once, even when a whole history shares one cold refresh record.
+CREATE TRIGGER context_items_inserted AFTER INSERT ON items
+    REFERENCING NEW TABLE AS context_new_items FOR EACH STATEMENT EXECUTE FUNCTION orch_context_item_changed();
+CREATE TRIGGER context_items_deleted AFTER DELETE ON items
+    REFERENCING OLD TABLE AS context_old_items FOR EACH STATEMENT EXECUTE FUNCTION orch_context_item_changed();
+CREATE TRIGGER context_items_updated AFTER UPDATE ON items
+    REFERENCING OLD TABLE AS context_old_items NEW TABLE AS context_new_items
+    FOR EACH STATEMENT EXECUTE FUNCTION orch_context_item_changed();
+
+CREATE FUNCTION orch_context_input_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'input' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE n.id END
+            FROM context_new_inputs n JOIN segments s ON s.id=n.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            WHERE n.purpose='input' AND n.state<>'failed'
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    ELSIF TG_OP='DELETE' THEN
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'input' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE o.id END
+            FROM context_old_inputs o JOIN segments s ON s.id=o.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            WHERE o.purpose='input' AND o.state<>'failed'
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    ELSE
+        WITH changed AS (
+            SELECT o.id AS old_id,o.segment_id AS old_segment_id,
+                o.purpose='input' AND o.state<>'failed' AS old_eligible,
+                n.id AS new_id,n.segment_id AS new_segment_id,
+                n.purpose='input' AND n.state<>'failed' AS new_eligible
+            FROM context_old_inputs o FULL JOIN context_new_inputs n ON n.id=o.id
+            WHERE ROW(o.segment_id,o.seq_created,o.purpose,o.state,o.blocks)
+                IS DISTINCT FROM ROW(n.segment_id,n.seq_created,n.purpose,n.state,n.blocks)
+        ), sources AS (
+            SELECT old_segment_id AS segment_id,old_id AS id FROM changed WHERE old_eligible
+            UNION ALL
+            SELECT new_segment_id,new_id FROM changed WHERE new_eligible
+        )
+        INSERT INTO context_estimate_dirty(segment_id,source,id)
+            SELECT DISTINCT s.id,CASE WHEN e.segment_id IS NULL THEN 'refresh' ELSE 'input' END,
+                CASE WHEN e.segment_id IS NULL THEN s.id ELSE c.id END
+            FROM sources c JOIN segments s ON s.id=c.segment_id
+            LEFT JOIN context_estimates e ON e.segment_id=s.id
+            ON CONFLICT (segment_id,source,id) DO UPDATE SET revision=context_estimate_dirty.revision+1;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER context_inputs_inserted AFTER INSERT ON model_inputs
+    REFERENCING NEW TABLE AS context_new_inputs FOR EACH STATEMENT EXECUTE FUNCTION orch_context_input_changed();
+CREATE TRIGGER context_inputs_deleted AFTER DELETE ON model_inputs
+    REFERENCING OLD TABLE AS context_old_inputs FOR EACH STATEMENT EXECUTE FUNCTION orch_context_input_changed();
+CREATE TRIGGER context_inputs_updated AFTER UPDATE ON model_inputs
+    REFERENCING OLD TABLE AS context_old_inputs NEW TABLE AS context_new_inputs
+    FOR EACH STATEMENT EXECUTE FUNCTION orch_context_input_changed();
+
 CREATE TABLE threads (
+    native_opening_epoch bigint DEFAULT 0 NOT NULL,
     program text CHECK (program IS NULL OR program = 'orch'),
     program_root_org_id uuid REFERENCES nodes(id),
     ask_root_org_id uuid REFERENCES nodes(id) ON DELETE CASCADE,
@@ -515,6 +760,9 @@ CREATE TABLE threads (
     blocked_reason text,
     blocked_detail text,
     starting_step text,
+    starting_step_at timestamp with time zone,
+    starting_command text,
+    starting_behind text,
     agent_id uuid,
     provider_id uuid,
     arrangement text,
@@ -540,14 +788,15 @@ CREATE TABLE threads (
     CONSTRAINT threads_builtin_program_check CHECK (program IS NULL OR (agent_id IS NULL AND environment_id IS NULL AND program_root_org_id IS NOT NULL)),
     CONSTRAINT threads_ask_program_check CHECK (ask_root_org_id IS NULL OR (program IS NOT NULL AND program='orch')),
     CONSTRAINT threads_arrangement_check CHECK ((arrangement = ANY (ARRAY['separated'::text, 'key_separated'::text, 'credential_shared'::text, 'handed_over'::text, 'together'::text, 'control_plane'::text]))),
-    CONSTRAINT threads_blocked_reason_check CHECK ((blocked_reason = ANY (ARRAY['unbound'::text, 'agent_offline'::text, 'agent_disabled'::text, 'provider_unavailable'::text, 'provider_exhausted'::text, 'environment_unavailable'::text, 'binding_invalid'::text, 'provider_not_allowed'::text, 'model_not_set'::text, 'model_not_allowed'::text, 'quota_exceeded'::text, 'attachments'::text, 'workspace_trust'::text, 'switching'::text, 'error'::text]))),
+    CONSTRAINT threads_blocked_reason_check CHECK ((blocked_reason = ANY (ARRAY['unbound'::text, 'agent_offline'::text, 'agent_disabled'::text, 'provider_unavailable'::text, 'provider_exhausted'::text, 'environment_unavailable'::text, 'binding_invalid'::text, 'provider_not_allowed'::text, 'model_not_set'::text, 'model_not_allowed'::text, 'quota_exceeded'::text, 'attachments'::text, 'workspace_trust'::text, 'source_failed'::text, 'switching'::text, 'error'::text]))),
     CONSTRAINT threads_check CHECK (((state = 'blocked'::text) = (blocked_reason IS NOT NULL))),
     CONSTRAINT threads_check1 CHECK (((starting_step IS NULL) OR (state = 'starting'::text))),
     CONSTRAINT threads_check2 CHECK (((side_of IS NULL) OR (side_of <> node_id))),
     CONSTRAINT threads_execution_revision_check CHECK ((execution_revision > 0)),
     CONSTRAINT threads_pending_notice_preview_bounded CHECK (((jsonb_typeof(pending_notices) = 'array'::text) AND (jsonb_array_length(pending_notices) <= 64))),
-    CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
-    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_side_reading_check CHECK ((side_reading = ANY (ARRAY['acting'::text, 'read_only'::text, 'approval_gated'::text, 'no_tools'::text]))),
+    CONSTRAINT threads_starting_step_check CHECK ((starting_step = ANY (ARRAY['environment'::text, 'source'::text, 'provider'::text, 'harness'::text, 'credential'::text, 'session'::text, 'recording'::text, 'files'::text, 'turn'::text]))),
+    CONSTRAINT threads_starting_work_check CHECK (starting_step IS NOT NULL OR (starting_step_at IS NULL AND starting_command IS NULL AND starting_behind IS NULL)),
     CONSTRAINT threads_state_check CHECK ((state = ANY (ARRAY['idle'::text, 'starting'::text, 'running'::text, 'waiting_approval'::text, 'blocked'::text]))),
     CONSTRAINT threads_pkey PRIMARY KEY (node_id),
     CONSTRAINT threads_agent_fk FOREIGN KEY (agent_id) REFERENCES agents(id),
@@ -558,10 +807,29 @@ CREATE TABLE threads (
     CONSTRAINT threads_side_of_fkey FOREIGN KEY (side_of) REFERENCES threads(node_id) ON DELETE CASCADE,
     CONSTRAINT threads_topic_id_fkey FOREIGN KEY (topic_id) REFERENCES nodes(id)
 );
+-- When a starting thread's step began, kept by the database for every writer: a step that changes starts its
+-- clock again and forgets the command and the wait noted for the step before; no step, nothing noted.
+CREATE FUNCTION orch_thread_starting_step() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.starting_step IS NULL THEN
+        NEW.starting_step_at := NULL;
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    ELSIF OLD.starting_step IS DISTINCT FROM NEW.starting_step THEN
+        NEW.starting_step_at := now();
+        NEW.starting_command := NULL;
+        NEW.starting_behind := NULL;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER threads_starting_step BEFORE UPDATE OF starting_step ON threads FOR EACH ROW EXECUTE FUNCTION orch_thread_starting_step();
 
 CREATE INDEX thread_display_topic_page_idx ON threads USING btree (topic_id, node_id);
 
 CREATE INDEX threads_summary_source_idx ON threads (node_id) WHERE side_of IS NULL;
+
+CREATE INDEX threads_navigation_activity_idx ON threads (topic_id,last_activity_at DESC,node_id) WHERE last_activity_at IS NOT NULL;
 
 CREATE INDEX threads_summary_activity_idx ON threads (last_activity_at DESC, node_id DESC)
     WHERE side_of IS NULL AND last_activity_at IS NOT NULL;
@@ -809,11 +1077,11 @@ CREATE TABLE thread_goal_reports (
     outcome text,
     checked_by text,
     reason text,
-    attempts integer DEFAULT 0 NOT NULL,
+    helper jsonb CHECK (helper IS NULL OR jsonb_typeof(helper) = 'object'),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     decided_at timestamp with time zone,
-    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'agent'::text]))),
-    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text]))),
+    CONSTRAINT thread_goal_reports_checked_by_check CHECK ((checked_by = ANY (ARRAY['helper'::text, 'person'::text]))),
+    CONSTRAINT thread_goal_reports_outcome_check CHECK ((outcome = ANY (ARRAY['noted'::text, 'met'::text, 'not_yet'::text, 'blocked'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goal_reports_status_check CHECK ((status = ANY (ARRAY['working'::text, 'met'::text, 'blocked'::text]))),
     CONSTRAINT thread_goal_reports_pkey PRIMARY KEY (id),
     CONSTRAINT thread_goal_reports_thread_id_fkey FOREIGN KEY (thread_id) REFERENCES threads(node_id) ON DELETE CASCADE
@@ -856,7 +1124,7 @@ CREATE TABLE thread_goals (
     CONSTRAINT thread_goals_max_minutes_check CHECK (((max_minutes IS NULL) OR (max_minutes >= 0))),
     CONSTRAINT thread_goals_max_turns_check CHECK (((max_turns IS NULL) OR (max_turns >= 0))),
     CONSTRAINT thread_goals_objective_check CHECK ((btrim(objective) <> ''::text)),
-    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text]))),
+    CONSTRAINT thread_goals_reason_check CHECK ((reason = ANY (ARRAY['person'::text, 'interrupted'::text, 'blocked'::text, 'failed'::text, 'turns'::text, 'minutes'::text, 'credits'::text, 'access'::text, 'archived'::text, 'unchecked'::text]))),
     CONSTRAINT thread_goals_retry_attempts_check CHECK ((retry_attempts >= 0)),
     CONSTRAINT thread_goals_status_check CHECK ((status = ANY (ARRAY['active'::text, 'paused'::text, 'met'::text, 'stopped'::text, 'cleared'::text]))),
     CONSTRAINT thread_goals_pkey PRIMARY KEY (id),
@@ -1097,16 +1365,21 @@ CREATE TABLE thread_input_blob_refs (
 );
 
 CREATE TABLE thread_inputs (
+    text_replacements bigint NOT NULL DEFAULT 0 CHECK (text_replacements >= 0),
     id uuid NOT NULL,
     thread_id uuid NOT NULL,
     author_id uuid,
     source text NOT NULL,
+    native_image_delivery jsonb,
+    native_image_delivery_command uuid,
     content jsonb NOT NULL,
     native_action jsonb,
     native_action_info jsonb,
     delivery text NOT NULL,
     state text DEFAULT 'pending'::text NOT NULL,
     state_detail text,
+    cancellation jsonb,
+    delivery_resolution jsonb,
     attachment_issues jsonb DEFAULT '[]'::jsonb NOT NULL,
     queue_held boolean DEFAULT false NOT NULL,
     named boolean DEFAULT false NOT NULL,
@@ -1176,6 +1449,9 @@ CREATE INDEX inputs_agent_history_waiting_idx ON thread_inputs USING btree (thre
 CREATE INDEX inputs_continuation_pending_idx ON thread_inputs USING btree (thread_id, continuation_id, "position") WHERE (state = 'pending'::text);
 
 CREATE INDEX inputs_continuation_updated_idx ON thread_inputs USING btree (thread_id, continuation_id, seq_updated);
+
+CREATE INDEX inputs_retained_history_idx ON thread_inputs (thread_id, continuation_id, seq_created, id)
+    WHERE source='user' AND state='cancelled';
 
 CREATE INDEX inputs_custody_waiting_idx ON thread_inputs USING btree (thread_id, continuation_id, created_at) INCLUDE (id) WHERE ((state = 'pending'::text) AND (NOT queue_held));
 
@@ -1327,6 +1603,14 @@ CREATE TABLE thread_reads (
 
 CREATE TRIGGER thread_read_continuation BEFORE INSERT ON thread_reads FOR EACH ROW EXECUTE FUNCTION thread_read_continuation();
 
+CREATE TABLE thread_queue_eligibility (
+    thread_id uuid PRIMARY KEY REFERENCES threads(node_id) ON DELETE CASCADE,
+    basis text NOT NULL,
+    queue_revision bigint NOT NULL,
+    state_seq bigint NOT NULL,
+    result jsonb NOT NULL
+);
+
 CREATE TABLE turns (
     id uuid NOT NULL,
     thread_id uuid NOT NULL,
@@ -1338,21 +1622,32 @@ CREATE TABLE turns (
     before_snapshot_id uuid,
     end_manifest_blob bytea,
     files_work_pending boolean DEFAULT false NOT NULL,
-    files_end_manifest jsonb,
+    files_changed integer CHECK (files_changed >= 0),
+    files_changed_paths jsonb,
+    files_changed_complete boolean,
+    recording_notice text,
+    recording_indexing jsonb,
     files_end_due boolean DEFAULT false NOT NULL,
+    files_end_sealed boolean DEFAULT false NOT NULL,
     model text NOT NULL,
     effort text,
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
     lease_id uuid,
     native_turn_ref text,
+    native_opening_id uuid,
+    native_model_nonce uuid,
     native_end_confirmed boolean DEFAULT false NOT NULL,
     owner_read_results bigint DEFAULT 0 NOT NULL CHECK (owner_read_results >= 0),
     command_cleanup jsonb,
+    sandbox_resolution jsonb,
     interrupt_cause text,
     offline_since timestamp with time zone,
     offline_machine_id uuid,
     offline_after_secs bigint,
+    offline_episode jsonb,
+    start_wait jsonb,
     interrupted_by uuid,
+    interrupted_at timestamp with time zone,
     background_wake_held boolean NOT NULL DEFAULT false,
     background_overlap boolean NOT NULL DEFAULT false,
     background_charge_to uuid REFERENCES users(id) ON DELETE SET NULL,
@@ -1377,8 +1672,12 @@ CREATE TABLE turns (
     skill_versions uuid[],
     plan boolean DEFAULT false NOT NULL,
     resource_delivery jsonb,
+    resource_opening_id uuid,
     pending_notice_positions bigint[],
-    CONSTRAINT turns_interrupt_cause_check CHECK (((interrupt_cause = ANY (ARRAY['person'::text, 'usage_limit'::text, 'environment_change'::text, 'topic_setting'::text])) OR (interrupt_cause = ANY ('{resource_disabled,machine_offline}'::text[])))),
+    CONSTRAINT turns_interrupt_cause_check CHECK (interrupt_cause IN (
+        'person', 'usage_limit', 'environment_change', 'topic_setting',
+        'resource_disabled', 'machine_offline', 'pool_access_changed'
+    )),
     CONSTRAINT turns_offline_deadline_check CHECK ((offline_since IS NULL) = (offline_machine_id IS NULL) AND (offline_after_secs IS NULL OR (offline_since IS NOT NULL AND offline_after_secs >= 0))),
     CONSTRAINT turns_pending_notice_positions_check CHECK (((pending_notice_positions IS NULL) OR (cardinality(pending_notice_positions) <= 64))),
     CONSTRAINT turns_phase_check CHECK ((phase = ANY (ARRAY['working'::text, 'compacting'::text, 'retrying'::text]))),
@@ -1429,6 +1728,35 @@ CREATE INDEX turns_unconfirmed_native_idx ON turns USING btree (thread_id, segme
 CREATE TRIGGER turns_continuation_owner BEFORE INSERT OR UPDATE OF continuation_id, thread_id, segment_id, input_id ON turns FOR EACH ROW EXECUTE FUNCTION thread_continuation_owner();
 
 CREATE TRIGGER turns_provider_trial_ended AFTER UPDATE OF state ON turns FOR EACH ROW WHEN ((new.state <> ALL (ARRAY['starting'::text, 'running'::text]))) EXECUTE FUNCTION provider_trial_ended();
+
+-- Acceptance is an enduring fact, separate from applying it and finishing its cancellation work.
+-- No reference or shared target key lets a thread writer delay another person's acknowledgement.
+CREATE TABLE thread_stops (
+    id uuid NOT NULL,
+    thread_id uuid NOT NULL,
+    turn_id uuid,
+    input_id uuid NOT NULL,
+    continuation_id uuid NOT NULL,
+    requested_by uuid NOT NULL,
+    requested_at timestamp with time zone NOT NULL,
+    applied_at timestamp with time zone,
+    cancel_preparation boolean NOT NULL DEFAULT false,
+    work_done_at timestamp with time zone,
+    CONSTRAINT thread_stops_pkey PRIMARY KEY (id)
+);
+
+-- Only admission and post-commit work update this counter; no thread-row transaction owns it.
+CREATE TABLE thread_stop_states (
+    thread_id uuid NOT NULL PRIMARY KEY,
+    version bigint NOT NULL,
+    requested_at timestamp with time zone NOT NULL
+);
+
+CREATE INDEX thread_stops_target_idx ON thread_stops USING btree (thread_id, input_id, requested_at, id);
+CREATE INDEX thread_stops_pending_idx ON thread_stops USING btree (thread_id, requested_at, id)
+    WHERE work_done_at IS NULL;
+CREATE INDEX thread_stops_apply_idx ON thread_stops USING btree (thread_id, requested_at, id)
+    WHERE applied_at IS NULL;
 
 ALTER TABLE approvals ADD CONSTRAINT approvals_turn_id_fkey FOREIGN KEY (turn_id) REFERENCES turns(id);
 
@@ -1510,6 +1838,14 @@ CREATE TABLE thread_history_cut_row_counts (
     max_ordinal integer NOT NULL,
     PRIMARY KEY(cut_id,kind)
 );
+CREATE TABLE thread_history_cut_turn_bytes (
+    cut_id uuid NOT NULL REFERENCES thread_history_cuts(id) ON DELETE CASCADE,
+    turn_id uuid NOT NULL,
+    payload_bytes bigint NOT NULL CHECK(payload_bytes>=0),
+    first_seq bigint NOT NULL,
+    last_seq bigint NOT NULL CHECK(last_seq>=first_seq),
+    PRIMARY KEY(cut_id,turn_id)
+);
 SELECT thread_history_keep_cut_counts(id) FROM thread_history_cuts;
 
 -- Ask is a thread kind. Events and calls retain only its delivery and inference journal.
@@ -1529,8 +1865,11 @@ CREATE TABLE ask_calls (
     root_org_id uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     person_id uuid NOT NULL REFERENCES users(id),
     provider_id uuid NOT NULL REFERENCES providers(id),
-    machine_id uuid NOT NULL REFERENCES machines(id),
+    machine_id uuid REFERENCES machines(id),
     request jsonb NOT NULL,
+    delegated_program jsonb CHECK (delegated_program IS NULL OR (machine_id IS NULL AND jsonb_typeof(delegated_program)='object')),
+    delegated_result jsonb CHECK (delegated_result IS NULL OR (delegated_program IS NOT NULL AND jsonb_typeof(delegated_result)='object')),
+    CHECK (machine_id IS NOT NULL OR (jsonb_typeof(request->'backend')='object') IS TRUE),
     text_offset bigint DEFAULT 0 NOT NULL CHECK (text_offset >= 0),
     created_at timestamptz NOT NULL,
     settled boolean DEFAULT false NOT NULL
@@ -1561,3 +1900,420 @@ BEGIN
 END
 $$;
 CREATE TRIGGER ask_files_release AFTER DELETE ON ask_files FOR EACH ROW EXECUTE FUNCTION orch_release_ask_file();
+
+
+-- Physical admission exists before the logical history segment is published.
+CREATE TABLE native_opening_sources (
+    opening_id uuid PRIMARY KEY,
+    thread_id uuid NOT NULL REFERENCES threads(node_id) ON DELETE CASCADE,
+    segment_id uuid NOT NULL,
+    machine_id uuid NOT NULL,
+    opening_epoch bigint NOT NULL,
+    UNIQUE(thread_id,opening_epoch)
+);
+CREATE TABLE native_session_states (
+    id uuid PRIMARY KEY,
+    thread_id uuid NOT NULL REFERENCES threads(node_id) ON DELETE CASCADE,
+    machine_id uuid,
+    environment_id uuid,
+    env_generation integer NOT NULL,
+    provider_id uuid,
+    agent_id uuid,
+    executor text,
+    tool_set text,
+    ended_at timestamptz,
+    delivered_resources jsonb
+);
+CREATE INDEX native_session_thread ON native_session_states(thread_id,id);
+
+CREATE FUNCTION orch_attach_native_session() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE physical native_session_states%ROWTYPE;
+BEGIN
+    SELECT * INTO physical FROM native_session_states WHERE id=NEW.id FOR UPDATE;
+    IF FOUND THEN
+        IF physical.thread_id IS DISTINCT FROM NEW.thread_id
+          OR physical.environment_id IS DISTINCT FROM NEW.environment_id
+          OR physical.env_generation IS DISTINCT FROM NEW.env_generation
+          OR physical.provider_id IS DISTINCT FROM NEW.provider_id
+          OR physical.agent_id IS DISTINCT FROM NEW.agent_id
+          OR physical.executor IS DISTINCT FROM NEW.executor
+          OR physical.tool_set IS DISTINCT FROM NEW.tool_set
+          OR (NEW.machine_id IS NOT NULL AND physical.machine_id IS DISTINCT FROM NEW.machine_id) THEN
+            RAISE EXCEPTION 'The prepared native session belongs to another binding'
+              USING ERRCODE='23514',CONSTRAINT='native_session_address';
+        END IF;
+        NEW.machine_id:=physical.machine_id;
+        NEW.delivered_resources:=physical.delivered_resources;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER attach_native_session BEFORE INSERT ON segments FOR EACH ROW EXECUTE FUNCTION orch_attach_native_session();
+
+-- Tool membership is factual session state. A restored policy never restores a withdrawn nonce.
+CREATE FUNCTION orch_tool_revision(facts jsonb) RETURNS bigint LANGUAGE sql IMMUTABLE AS $$
+    SELECT GREATEST(COALESCE((facts->>'admitted_revision')::bigint,0),
+                    COALESCE((facts->>'revision')::bigint,0),
+                    COALESCE((facts#>>'{tool_admission,revision}')::bigint,0))+1
+$$;
+CREATE FUNCTION orch_tool_close(facts jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_set(jsonb_set(facts,'{tool_admission,live}','false'),
+                     '{tool_admission,revision}',to_jsonb(orch_tool_revision(facts)))
+           ||jsonb_build_object('admitted_revision',orch_tool_revision(facts))
+$$;
+CREATE FUNCTION orch_tool_withdraw(facts jsonb, members text[]) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
+    SELECT jsonb_set(jsonb_set(facts,'{tool_admission,members}',
+                       (facts#>'{tool_admission,members}')-members),
+                     '{tool_admission,revision}',to_jsonb(orch_tool_revision(facts)))
+           ||jsonb_build_object('admitted_revision',orch_tool_revision(facts))
+$$;
+CREATE INDEX native_session_tool_members_idx ON native_session_states USING gin ((delivered_resources#>'{tool_admission,members}'))
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+CREATE INDEX native_session_tool_environment_idx ON native_session_states(environment_id,id)
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+CREATE INDEX native_session_tool_provider_idx ON native_session_states(provider_id,id)
+    WHERE delivered_resources#>>'{tool_admission,live}'='true';
+
+-- A new opening cannot retain a nonce that was attempted during the original Stop.
+CREATE FUNCTION orch_tool_stop_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS(SELECT 1 FROM runtime_withdrawals w
+              WHERE w.environment_id=NEW.environment_id OR w.provider_id=NEW.provider_id) THEN
+        NEW.delivered_resources:=orch_tool_close(NEW.delivered_resources);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_stop_admission BEFORE INSERT OR UPDATE OF delivered_resources,environment_id,provider_id ON native_session_states
+    FOR EACH ROW WHEN (NEW.delivered_resources#>>'{tool_admission,live}'='true')
+    EXECUTE FUNCTION orch_tool_stop_admission();
+
+-- The existing revision feed closes open channels as soon as the exact Stop is accepted.
+CREATE FUNCTION orch_tool_runtime_stopping() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF EXISTS(SELECT 1 FROM runtime_withdrawals WHERE runtime_id=NEW.id) THEN
+        IF NEW.kind='environment' THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE environment_id=NEW.environment_id AND env_generation=(NEW.native_stop#>>'{registration,resource,environment_generation}')::integer
+                AND delivered_resources#>>'{tool_admission,live}'='true';
+        ELSE
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE provider_id=NEW.provider_id AND delivered_resources#>>'{tool_admission,live}'='true';
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_runtime_stopping AFTER UPDATE OF native_stop,native_control_intent,native_control_revision,native_incarnation,host_id,machine_id,generation,kind,environment_id,provider_id,successor_of,state ON runtimes
+    FOR EACH ROW WHEN (NEW.native_stop IS NOT NULL)
+    EXECUTE FUNCTION orch_tool_runtime_stopping();
+
+CREATE FUNCTION orch_tool_session_notify() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE segments SET delivered_resources=NEW.delivered_resources
+      WHERE id=NEW.id AND thread_id=NEW.thread_id
+        AND delivered_resources IS DISTINCT FROM NEW.delivered_resources;
+    IF OLD.delivered_resources->'tool_admission' IS DISTINCT FROM NEW.delivered_resources->'tool_admission' THEN
+        PERFORM pg_notify('orch_tool_session',NEW.id::text);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_session_notify AFTER UPDATE OF delivered_resources ON native_session_states FOR EACH ROW
+    WHEN (OLD.delivered_resources IS DISTINCT FROM NEW.delivered_resources)
+    EXECUTE FUNCTION orch_tool_session_notify();
+
+CREATE FUNCTION orch_tool_segment_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.ended_at IS DISTINCT FROM OLD.ended_at OR NEW.environment_id IS DISTINCT FROM OLD.environment_id
+         OR NEW.env_generation IS DISTINCT FROM OLD.env_generation OR NEW.machine_id IS DISTINCT FROM OLD.machine_id
+         OR NEW.provider_id IS DISTINCT FROM OLD.provider_id OR NEW.agent_id IS DISTINCT FROM OLD.agent_id
+         OR NEW.executor IS DISTINCT FROM OLD.executor OR NEW.tool_set IS DISTINCT FROM OLD.tool_set) THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources),
+            ended_at=NEW.ended_at,environment_id=NEW.environment_id,env_generation=NEW.env_generation,
+            machine_id=NEW.machine_id,provider_id=NEW.provider_id,agent_id=NEW.agent_id,
+            executor=NEW.executor,tool_set=NEW.tool_set
+          WHERE id=OLD.id AND thread_id=OLD.thread_id
+            AND (ended_at,environment_id,env_generation,machine_id,provider_id,agent_id,executor,tool_set)
+              IS DISTINCT FROM (NEW.ended_at,NEW.environment_id,NEW.env_generation,NEW.machine_id,
+                                NEW.provider_id,NEW.agent_id,NEW.executor,NEW.tool_set);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_segment_changed AFTER UPDATE OF ended_at,environment_id,env_generation,machine_id,provider_id,agent_id,executor,tool_set ON segments
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_segment_changed();
+
+CREATE FUNCTION orch_tool_thread_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.current_segment_id IS DISTINCT FROM OLD.current_segment_id OR NEW.environment_id IS DISTINCT FROM OLD.environment_id
+       OR NEW.provider_id IS DISTINCT FROM OLD.provider_id OR NEW.agent_id IS DISTINCT FROM OLD.agent_id THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+          WHERE thread_id=OLD.node_id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND (id IS DISTINCT FROM NEW.current_segment_id OR environment_id IS DISTINCT FROM NEW.environment_id
+              OR provider_id IS DISTINCT FROM NEW.provider_id OR agent_id IS DISTINCT FROM NEW.agent_id);
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_thread_changed AFTER UPDATE OF current_segment_id,environment_id,provider_id,agent_id ON threads
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_thread_changed();
+
+CREATE FUNCTION orch_tool_server_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE member text;
+BEGIN
+    IF (NEW.name,NEW.spec,NEW.machine_id,NEW.environment_id,NEW.enabled,NEW.deleted_at,NEW.home_id,NEW.owner_id)
+       IS DISTINCT FROM (OLD.name,OLD.spec,OLD.machine_id,OLD.environment_id,OLD.enabled,OLD.deleted_at,OLD.home_id,OLD.owner_id) THEN
+        member:='mcp:'||OLD.id;
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY[member])
+          WHERE delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}')?member;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_server_changed AFTER UPDATE OF name,spec,machine_id,environment_id,enabled,deleted_at,home_id,owner_id ON mcp_servers
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_server_changed();
+
+CREATE FUNCTION orch_tool_map_changes(old_map jsonb,new_map jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(array_agg('mcp:'||key),'{}'::text[]) FROM (
+        SELECT jsonb_object_keys(COALESCE(old_map,'{}')) AS key
+        UNION SELECT jsonb_object_keys(COALESCE(new_map,'{}')) AS key
+    ) keys WHERE old_map->key IS DISTINCT FROM new_map->key
+$$;
+CREATE FUNCTION orch_tool_mcp_members(facts jsonb) RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(array_agg(key),'{}'::text[])
+      FROM jsonb_object_keys(facts#>'{tool_admission,members}') key WHERE key LIKE 'mcp:%'
+$$;
+
+CREATE FUNCTION orch_tool_environment_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed text[]; policy_changed boolean;
+BEGIN
+    IF NEW.generation IS DISTINCT FROM OLD.generation OR NEW.machine_id IS DISTINCT FROM OLD.machine_id
+       OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.lost_at IS DISTINCT FROM OLD.lost_at
+       OR (NEW.status IS DISTINCT FROM OLD.status AND NEW.status IN ('stopped','disabled','removed','lost','recreating','moving','failed')) THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+          WHERE environment_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+    ELSE
+        policy_changed:=NEW.home_node_id IS DISTINCT FROM OLD.home_node_id OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+                       OR NEW.template_id IS DISTINCT FROM OLD.template_id OR NEW.granted_capabilities IS DISTINCT FROM OLD.granted_capabilities;
+        changed:=orch_tool_map_changes(OLD.config->'mcp.enabled',NEW.config->'mcp.enabled');
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,
+                    CASE WHEN policy_changed THEN orch_tool_mcp_members(delivered_resources) ELSE changed END)
+          WHERE environment_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}') ?| CASE WHEN policy_changed THEN orch_tool_mcp_members(delivered_resources) ELSE changed END;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_environment_changed AFTER UPDATE OF generation,machine_id,deleted_at,lost_at,status,home_node_id,owner_id,template_id,granted_capabilities,config ON environments
+    FOR EACH ROW EXECUTE FUNCTION orch_tool_environment_changed();
+
+CREATE FUNCTION orch_tool_settings_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE before_value jsonb; after_value jsonb; changed text[]; place uuid; whole_policy boolean; setting_key text;
+BEGIN
+    IF TG_OP<>'INSERT' THEN before_value:=OLD.value; place:=OLD.node_id; setting_key:=OLD.key; END IF;
+    IF TG_OP<>'DELETE' THEN after_value:=NEW.value; place:=NEW.node_id; setting_key:=NEW.key; END IF;
+    IF setting_key='tunnels.control_timeout_ms' THEN
+        PERFORM pg_notify('orch_tool_session','control');
+    ELSIF setting_key='mcp.enabled' THEN
+        whole_policy:=(TG_OP='UPDATE' AND NEW.locked IS DISTINCT FROM OLD.locked)
+            OR (TG_OP='INSERT' AND NEW.locked) OR (TG_OP='DELETE' AND OLD.locked);
+        changed:=orch_tool_map_changes(before_value,after_value);
+        UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,
+                    CASE WHEN whole_policy THEN orch_tool_mcp_members(s.delivered_resources) ELSE changed END)
+          FROM environments e JOIN nodes n ON n.id=e.home_node_id
+          WHERE s.environment_id=e.id AND (place IS NULL OR place=ANY(n.path))
+            AND s.delivered_resources#>>'{tool_admission,live}'='true'
+            AND (s.delivered_resources#>'{tool_admission,members}') ?| CASE WHEN whole_policy THEN orch_tool_mcp_members(s.delivered_resources) ELSE changed END;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END
+$$;
+CREATE TRIGGER tool_settings_changed AFTER INSERT OR UPDATE OR DELETE ON settings FOR EACH ROW EXECUTE FUNCTION orch_tool_settings_changed();
+
+CREATE FUNCTION orch_tool_resource_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_TABLE_NAME='agents' THEN
+        IF NEW.disabled AND NOT OLD.disabled OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE agent_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+        END IF;
+    ELSIF TG_TABLE_NAME='providers' THEN
+        IF NEW.status='disabled' AND OLD.status<>'disabled' OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE provider_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true';
+        ELSE
+            IF NEW.machine_id IS DISTINCT FROM OLD.machine_id THEN
+                UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+                  WHERE provider_id=OLD.id AND machine_id=OLD.machine_id AND delivered_resources#>>'{tool_admission,live}'='true';
+            END IF;
+            IF NEW.key_machine_id IS DISTINCT FROM OLD.key_machine_id THEN
+                UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY['llm'])
+                  WHERE provider_id=OLD.id AND delivered_resources#>>'{tool_admission,live}'='true'
+                    AND (delivered_resources#>'{tool_admission,members}')?'llm';
+            END IF;
+        END IF;
+    ELSIF TG_TABLE_NAME='machines' THEN
+        IF NEW.status IS DISTINCT FROM OLD.status OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.lost_at IS DISTINCT FROM OLD.lost_at THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+              WHERE (machine_id=OLD.id OR environment_id IN (SELECT id FROM environments WHERE machine_id=OLD.id))
+                AND delivered_resources#>>'{tool_admission,live}'='true';
+            UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,
+                ARRAY(SELECT key FROM jsonb_each(s.delivered_resources#>'{tool_admission,members}') member
+                       WHERE member.value#>>'{binding,ticket,$ticket,dst}'=OLD.id::text))
+              WHERE s.delivered_resources#>>'{tool_admission,live}'='true'
+                AND EXISTS(SELECT 1 FROM jsonb_each(s.delivered_resources#>'{tool_admission,members}') member
+                            WHERE member.value#>>'{binding,ticket,$ticket,dst}'=OLD.id::text);
+        ELSIF (NEW.facts->'policy'->'mcp.add',NEW.facts->'policy'->'mcp.import') IS DISTINCT FROM
+              (OLD.facts->'policy'->'mcp.add',OLD.facts->'policy'->'mcp.import') THEN
+            UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,orch_tool_mcp_members(delivered_resources))
+              WHERE environment_id IN (SELECT id FROM environments WHERE machine_id=OLD.id)
+                AND delivered_resources#>>'{tool_admission,live}'='true' AND cardinality(orch_tool_mcp_members(delivered_resources))>0;
+        END IF;
+    ELSIF TG_TABLE_NAME='nodes' THEN
+        IF NEW.deleted_at IS DISTINCT FROM OLD.deleted_at OR NEW.archived_at IS DISTINCT FROM OLD.archived_at THEN
+            UPDATE native_session_states s SET delivered_resources=orch_tool_close(s.delivered_resources)
+              FROM nodes n WHERE s.thread_id=n.id AND OLD.id=ANY(n.path) AND s.delivered_resources#>>'{tool_admission,live}'='true';
+        ELSIF NEW.path IS DISTINCT FROM OLD.path THEN
+            UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,orch_tool_mcp_members(s.delivered_resources))
+              FROM environments e JOIN nodes n ON n.id=e.home_node_id
+              WHERE s.environment_id=e.id AND OLD.id=ANY(n.path)
+                AND s.delivered_resources#>>'{tool_admission,live}'='true' AND cardinality(orch_tool_mcp_members(s.delivered_resources))>0;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_agent_changed AFTER UPDATE OF disabled,deleted_at ON agents FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_provider_changed AFTER UPDATE OF status,deleted_at,machine_id,key_machine_id ON providers FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_machine_changed AFTER UPDATE OF status,deleted_at,lost_at,facts ON machines FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+CREATE TRIGGER tool_node_changed AFTER UPDATE OF deleted_at,archived_at,path ON nodes FOR EACH ROW EXECUTE FUNCTION orch_tool_resource_changed();
+
+CREATE FUNCTION orch_tool_template_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed text[];
+BEGIN
+    IF NEW.spec->'mcp_server_ids' IS DISTINCT FROM OLD.spec->'mcp_server_ids' THEN
+        SELECT COALESCE(array_agg('mcp:'||id),'{}'::text[]) INTO changed FROM (
+            (SELECT jsonb_array_elements_text(COALESCE(OLD.spec->'mcp_server_ids','[]')) id
+             EXCEPT SELECT jsonb_array_elements_text(COALESCE(NEW.spec->'mcp_server_ids','[]')))
+            UNION
+            (SELECT jsonb_array_elements_text(COALESCE(NEW.spec->'mcp_server_ids','[]'))
+             EXCEPT SELECT jsonb_array_elements_text(COALESCE(OLD.spec->'mcp_server_ids','[]')))
+        ) ids;
+        UPDATE native_session_states s SET delivered_resources=orch_tool_withdraw(s.delivered_resources,changed)
+          FROM environments e WHERE s.environment_id=e.id AND e.template_id=OLD.id
+            AND s.delivered_resources#>>'{tool_admission,live}'='true'
+            AND (s.delivered_resources#>'{tool_admission,members}') ?| changed;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_template_changed AFTER UPDATE OF spec ON env_templates FOR EACH ROW EXECUTE FUNCTION orch_tool_template_changed();
+
+CREATE FUNCTION orch_tool_lease_closed() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.closed_at IS NOT NULL AND OLD.closed_at IS NULL THEN
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY['llm'])
+          WHERE thread_id=OLD.thread_id AND delivered_resources#>>'{tool_admission,live}'='true'
+            AND delivered_resources#>>'{tool_admission,members,llm,binding,ticket,$ticket,service}'='llm/'||OLD.id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER tool_lease_closed AFTER UPDATE OF closed_at ON leases FOR EACH ROW EXECUTE FUNCTION orch_tool_lease_closed();
+
+CREATE FUNCTION orch_tool_session_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.delivered_resources->'tool_admission' IS NOT NULL THEN
+        PERFORM pg_notify('orch_tool_session',jsonb_build_object(
+            'machine_id',OLD.delivered_resources#>>'{tool_admission,machine_id}',
+            'thread_id',OLD.thread_id,'segment_id',OLD.id,'opening_id',OLD.delivered_resources#>>'{tool_admission,opening_id}','opening_epoch',(OLD.delivered_resources#>>'{tool_admission,opening_epoch}')::bigint,
+            'revision',orch_tool_revision(OLD.delivered_resources),'live',false,'members','[]'::jsonb)::text);
+    END IF;
+    RETURN OLD;
+END
+$$;
+CREATE TRIGGER tool_session_deleted BEFORE DELETE ON native_session_states FOR EACH ROW EXECUTE FUNCTION orch_tool_session_deleted();
+CREATE FUNCTION orch_tool_segment_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE native_session_states SET delivered_resources=orch_tool_close(delivered_resources)
+      WHERE id=OLD.id AND thread_id=OLD.thread_id;
+    RETURN OLD;
+END
+$$;
+CREATE TRIGGER tool_segment_deleted AFTER DELETE ON segments FOR EACH ROW EXECUTE FUNCTION orch_tool_segment_deleted();
+
+CREATE INDEX native_session_tool_source ON native_session_states ((delivered_resources#>>'{tool_admission,machine_id}'))
+    WHERE delivered_resources->'tool_admission' IS NOT NULL;
+
+CREATE FUNCTION orch_tool_offering_lost() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE member text;
+BEGIN
+    IF (TG_OP='DELETE' OR (NEW.state IS DISTINCT FROM OLD.state AND NEW.state<>'ready'))
+       AND EXISTS(SELECT 1 FROM mcp_servers WHERE id=OLD.server_id AND machine_id=OLD.machine_id) THEN
+        member:='mcp:'||OLD.server_id;
+        UPDATE native_session_states SET delivered_resources=orch_tool_withdraw(delivered_resources,ARRAY[member])
+          WHERE delivered_resources#>>'{tool_admission,live}'='true'
+            AND (delivered_resources#>'{tool_admission,members}')?member;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+END
+$$;
+CREATE TRIGGER tool_offering_lost AFTER UPDATE OF state OR DELETE ON mcp_server_offerings FOR EACH ROW EXECUTE FUNCTION orch_tool_offering_lost();
+
+
+-- Bounded capture metadata pages and their frozen references use these exact keys.
+CREATE INDEX segments_history_metadata_idx ON segments(thread_id,id);
+CREATE INDEX segments_history_metadata_text_idx ON segments(thread_id,(id::text));
+CREATE INDEX inputs_history_metadata_idx ON thread_inputs(thread_id,id);
+CREATE INDEX inputs_history_metadata_text_idx ON thread_inputs(thread_id,(id::text)) WHERE state='delivered';
+CREATE INDEX approvals_history_metadata_text_idx ON approvals((id::text));
+CREATE INDEX history_cut_turn_input_idx ON thread_history_cut_rows(cut_id,(body->>'input_id')) WHERE kind='turn';
+CREATE INDEX history_cut_turn_segment_idx ON thread_history_cut_rows(cut_id,(body->>'segment_id')) WHERE kind='turn';
+-- A turn's current net diff replaces its component edits in compact history facts.
+CREATE INDEX items_turn_diff_snapshot_idx ON public.items (turn_id, segment_id, seq_updated DESC)
+    WHERE kind='marker' AND stream='main' AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='turn_diff';
+
+-- Current program connection states are read independently of conversation pages.
+CREATE INDEX items_mcp_connection_snapshot_idx ON items (segment_id, (payload #>> '{data,subject}'), seq_updated DESC, id DESC)
+    WHERE kind='marker' AND stream='main' AND NOT before_orch AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='mcp_startup' AND payload #>> '{data,subject}' IS NOT NULL;
+
+-- An opening replaces prior connection evidence even when it has no servers.
+CREATE INDEX items_mcp_configuration_snapshot_idx ON items (segment_id, seq_updated DESC, id DESC)
+    WHERE kind='marker' AND stream='main' AND NOT before_orch AND payload->>'marker'='harness_changed' AND payload #>> '{data,change}'='mcp_configuration';
+
+-- Original masked operands are private and never part of an item projection.
+CREATE TABLE native_item_operands (
+    item_id uuid PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    data bytea NOT NULL
+);
+
+CREATE TABLE native_trace_streams (
+    segment_id uuid NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    stream_hash text NOT NULL,
+    rules bytea NOT NULL,
+    ended boolean NOT NULL DEFAULT false,
+    lost boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (segment_id, stream_hash)
+);
+
+CREATE TABLE native_trace_parts (
+    segment_id uuid NOT NULL,
+    stream_hash text NOT NULL,
+    n bigint NOT NULL,
+    part integer NOT NULL,
+    data bytea NOT NULL,
+    PRIMARY KEY (segment_id, n, part),
+    FOREIGN KEY (segment_id,stream_hash) REFERENCES native_trace_streams(segment_id,stream_hash) ON DELETE CASCADE
+);
+CREATE INDEX native_trace_parts_stream ON native_trace_parts(segment_id,stream_hash,n,part);
+
+-- Stable public source identities do not disclose a native private path.
+CREATE TABLE native_instruction_operands (
+    segment_id uuid NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    source_hash text NOT NULL,
+    source_id uuid NOT NULL UNIQUE,
+    data bytea,
+    PRIMARY KEY(segment_id, source_hash)
+);

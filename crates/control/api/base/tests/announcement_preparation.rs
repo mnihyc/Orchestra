@@ -11,7 +11,7 @@ mod support;
 
 use orch_access_contract::permissions::ObjectKind;
 use orch_api_contract::topics::{AnnouncementCreateBody, NodeAnnouncementCreate};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_authz::{Caller, Principal};
 use orch_db::queries::{identity, transaction_guard};
 use orch_engine::tools::announce::{AnnounceError, PersonAnnouncement};
@@ -174,11 +174,12 @@ async fn person_announcement_checks_the_http_key_after_its_real_recipient_row_wa
     for expire in [false, true] {
         let s = Scene::new().await;
         let thread = s.thread_by(&s.ada, "The locked recipient").await.base.id;
-        let secret = new_token(API_TOKEN_PREFIX);
+        let issued_key_id = new_id();
+        let secret = new_api_token(issued_key_id);
         identity::create_api_token(
             &mut *s.rig.world.conn().await,
             &identity::NewApiToken {
-                id: new_id(),
+                id: issued_key_id,
                 user_id: s.ada.id(),
                 name: "Native announcement wait",
                 token_hash: &token_hash(&secret),

@@ -31,6 +31,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+orch-model-contract.workspace = true
+orch-translator-responses-messages.workspace = true
 orch-conformance.workspace = true
 axum.workspace = true
 orch-testkit.workspace = true

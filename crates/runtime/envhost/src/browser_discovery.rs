@@ -287,6 +287,17 @@ pub async fn discover(
             sandbox,
         },
         EnvironmentFactsVnc {
+            desktop: {
+                #[cfg(target_os = "linux")]
+                {
+                    (!managed && crate::displays::desktop::Desktop::discover(Vec::new()).is_some())
+                        .then_some(true)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    None
+                }
+            },
             servers,
             window_manager,
         },
