@@ -1,4 +1,5 @@
 /** A compact list of agent programs and their reported builds and status. */
+import { PathLink } from '@/shell/TrailLink';
 import { useLayoutEffect, useRef, useState, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
@@ -61,7 +62,7 @@ export function ProgramList({ programs, onOpen }: { programs: readonly ProgramLi
   const status = (value: ProgramListStatus) => <StateChip state={value.state} label={value.label} className="max-w-full" />;
   const columns: Column<ProgramListEntry>[] = [
     { id: 'name', header: t('programList.program'), cell: (row, shown) => <div className="flex min-w-0 flex-col gap-1">
-      <a href={`/admin/harnesses?program=${encodeURIComponent(row.kind)}`} onClick={(event) => open(event, row.kind)} data-overflow-text={row.name} title={row.name} className="min-w-0 truncate font-medium text-accent-text hover:underline">{row.name}</a>
+      <PathLink href={`/admin/harnesses?program=${encodeURIComponent(row.kind)}`} onClick={(event) => open(event, row.kind)} data-overflow-text={row.name} title={row.name} className="min-w-0 truncate font-medium text-accent-text hover:underline">{row.name}</PathLink>
       <span tabIndex={0} data-overflow-text={row.kind} className="focus-inset min-w-0 truncate rounded-md text-sm text-text-muted" title={row.kind}>{row.kind}</span>
       {!shown.has(SECONDARY_COLUMNS.protocol) && detail(t('programList.protocol'), protocol(row))}
       {!shown.has(SECONDARY_COLUMNS.shipped) && detail(t('programList.shipped'), builds(row.shipped))}

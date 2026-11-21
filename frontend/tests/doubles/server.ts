@@ -12,12 +12,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Job } from '../../src/generated/api-types.ts';
+import type { Job, MeLandingReply } from '../../src/generated/api-types.ts';
 
 import { type SceneName, sceneOf } from './thread-scenes.ts';
 import { type Answer, type Person, Refusal, type Subscriber, World } from './world.ts';
 import { bootstrap } from './bootstrap.ts';
-import { threadOpening } from './thread-opening.ts';
+import { sessionThreadOpening, threadOpening, threadOpeningPart } from './thread-opening.ts';
 import { chatOpening, nodeChatOpening, documentPages, nodeOverview, orgOverview, orgLandingPlaces } from './screen-openings.ts';
 import { installScreenFixture } from './screen-gate.ts';
 
@@ -145,11 +145,20 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       return world.setAdminMode(bearer, await bodyOf(request));
     case 'POST /me/admin-openings':
       return world.openings.cached(bearer, await bodyOf(request), requestId);
-    case 'GET /me/bootstrap': {
+    case 'GET /me/bootstrap':
+    case 'GET /me/landing': {
       const person = world.caller(bearer);
       const zone = request.headers['x-orch-timezone'];
       if (typeof zone === 'string' && person.me.timezone_mode === 'device' && person.me.timezone !== zone) world.updateMe(person, { timezone: zone, timezone_mode: 'device', timezone_report: true });
-      return { status: 200, body: await bootstrap(world, person, bearer) };
+      const shell = await bootstrap(world, person, bearer);
+      if (route === 'GET /me/bootstrap') return { status: 200, body: shell };
+      const sidebar = shell.state.sidebar;
+      const place: unknown = typeof sidebar === 'object' && sidebar !== null && 'last_place' in sidebar ? sidebar.last_place : null;
+      const saved = typeof place === 'object' && place !== null && 'node_id' in place && typeof place.node_id === 'string'
+        && 'route' in place && typeof place.route === 'string' && place.route.replace(/\/$/, '') === '/thread/' + place.node_id ? place.node_id : null;
+      const id = query.get('thread') ?? saved;
+      const thread = id === null ? { status: 'omitted' as const } : await threadOpeningPart(world, world.browserPerson(bearer), id, requestId);
+      return { status: 200, body: { shell, thread_id: id, thread } satisfies MeLandingReply };
     }
     case 'PATCH /me':
       return world.updateMe(world.caller(bearer), await bodyOf(request));
@@ -168,10 +177,16 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       ? { mode: 'places', nodes: await orgLandingPlaces(world, person, overview[1], query) }
       : { mode: 'overview', data: await orgOverview(world, person, overview[1], query) } };
   }
+  const addressed = /^POST \/auth\/session\/thread\/([^/]+)$/.exec(route);
+  if (addressed?.[1] !== undefined) {
+    receivedRequests.push({ id: requestId, method, path, body: {} });
+    return sessionThreadOpening(world, addressed[1], cookiesOf(request), csrfHeader, requestId);
+  }
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    const requested = query.get('limit');
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], requested === null ? undefined : Number(requested)) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
@@ -387,7 +402,7 @@ const server = createServer((request, response) => {
     if (request.method === 'GET' && result.status < 300 && typeof view === 'string' && request.headers.authorization !== undefined) {
       try {
         const { noteView } = await import('./view-read.ts');
-        await noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
+        noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
       } catch { /* Personal bookkeeping never changes a successful native page answer. */ }
     }
     return result;
@@ -520,7 +535,7 @@ live.on('connection', (socket: WebSocket) => {
         joined.clear();
         for (const { part } of world.parts) part.gone?.(subscriber);
         for (const feed of subs.values()) world.subscribers.get(feed)?.delete(subscriber);
-        subs.clear();
+        subs.clear();world.closeHierarchy(subscriber);
         for (const [id, feed] of former) subscriber.send({ op: 'resync', id, feed });
       } });
       if (frame.op === 'auth') {
@@ -531,6 +546,7 @@ live.on('connection', (socket: WebSocket) => {
           server_time: new Date().toISOString(),
           access_expires_at: new Date(Date.now() + world.accessLifeMs).toISOString(),
           heartbeat_secs: 25,
+          max_client_frame_bytes:16*1024,
           build: world.meta.build,
         });
       }
@@ -564,6 +580,12 @@ live.on('connection', (socket: WebSocket) => {
           socket.close(4403); return;
         }
         finally { pendingOpening = null; }
+        if(world.isHierarchy(feed)){
+          if(frame.window!==undefined){world.hierarchyWindow(subscriber,person,id,feed,frame.window);return;}
+          subs.set(id,feed);world.openHierarchy(subscriber,id,feed);
+          subscriber.send({op:'subscribed',id,feed,seq:null,mode:'ephemeral'});
+          return;
+        }
         const orgId = /^org:(.+)$/.exec(feed)?.[1];
         const tree = orgId === undefined ? undefined : world.trees.get(orgId);
         if (orgId === undefined || tree === undefined) {
@@ -598,6 +620,7 @@ live.on('connection', (socket: WebSocket) => {
         const feed = subs.get(id);
         if (feed !== undefined) {
           subs.delete(id);
+          world.closeHierarchy(subscriber,id);
           world.subscribers.get(feed)?.delete(subscriber);
           subscriber.send({ op: 'closed', id, feed, reason: 'unsubscribed' });
         }
@@ -613,6 +636,7 @@ live.on('connection', (socket: WebSocket) => {
   });
 
   socket.on('close', () => {
+    world.closeHierarchy(subscriber);
     clearTimeout(late);
     sockets.delete(socket);
     sessionReaders.delete(socket);
