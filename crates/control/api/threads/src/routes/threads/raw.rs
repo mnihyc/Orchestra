@@ -53,7 +53,7 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
             "is the number of an event, from 1",
         ));
     }
-    let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
+    let mut conn = orch_db::queries::raw_events::begin_reading(&ctx.app.db).await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     authorization::require_on_path_in(&ctx, &mut conn, &principal, "thread.manage").await?;
     let projection = orch_db::queries::thread_continuations::projection(
@@ -103,6 +103,10 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
     let page = raw_events::page(&mut conn, &row, segment.id, query.before, limit)
         .await
         .map_err(snapshot_read::engine_error)?;
+    let capture = orch_db::queries::raw_events::capture(&mut conn, segment.id).await?;
+    let retention = raw_events::retention(&mut conn, principal.now().get())
+        .await
+        .map_err(snapshot_read::engine_error)?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
     // Preserve the existing post-snapshot checkpoint, with current target facts as well.
     let mut current = ctx.app.db.acquire().await?;
@@ -112,5 +116,7 @@ async fn list_snapshot(ctx: Ctx, query: ThreadRawListQuery) -> ApiResult<ThreadR
         projection: Some(orch_engine::continuations::projection::scope(&projection)),
         events: page.events,
         has_older: page.has_older,
+        capture,
+        retention: Some(retention),
     })
 }

@@ -4,11 +4,12 @@
  * it can still be read; else to the org they last had in view, the one team org they belong to when
  * there is exactly one, or their own org. Without a readable home, Shared is the normal entrance.
  */
+import { supersededRead } from '@/api/reads';
+import { READ_NOW } from '@/api/freshness';
 import { createFileRoute, redirect } from '@tanstack/react-router';
 
 import { nodeQuery } from '@/api/nodes';
 import { ApiError, client } from '@/api/client';
-import { CancelledError } from '@tanstack/react-query';
 import { resolveLandingPlaces } from '@/api/orgOverview';
 import { queryClient } from '@/api/query';
 import { ensureShellBootstrap } from '@/shell/bootstrap';
@@ -48,14 +49,14 @@ export async function landingAddress(prepare?: (node: Node) => void): Promise<st
     // Without any readable org context, retain the native node reads. There
     // is no hidden org overview/navigation to preload merely for this check.
     nodes = (await Promise.all(wanted.map(async (id) => {
-      try { return await queryClient.query({ ...nodeQuery(id), staleTime: 0 }); }
+      try { return await queryClient.query({ ...nodeQuery(id), ...READ_NOW }); }
       catch (error) {
         if (!(error instanceof ApiError) || ![403, 404, 410].includes(error.status)) throw error;
         return null;
       }
     }))).filter((node): node is Node => node !== null);
   }
-  if (client.session.getState().userId !== userId || client.session.getState().readerVersion !== reader) throw new CancelledError({ silent: true });
+  if (client.session.getState().userId !== userId || client.session.getState().readerVersion !== reader) throw supersededRead();
   for (const node of nodes) known.set(node.id, node);
   const finish = (node: Node, route: string) => { prepare?.(node); return route; };
   if (place !== null) {
