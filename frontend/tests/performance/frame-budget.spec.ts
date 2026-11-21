@@ -57,7 +57,7 @@ for (const width of [1440, 400]) for (const kind of kinds) {
       if (tab === null || panel === null) throw new Error('The inventory lost its native tab and panel.');
       const body = page.locator(`[id=${JSON.stringify(panel)}]`);
       for (const name of new Set(identities)) await expect(body.getByText(name, { exact: true }).first()).toBeVisible();
-      if (width === 1440) await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
+      if (width === 1440) await expect(page.getByRole('tree', { name: 'Organizations, projects, topics and threads' })).toBeVisible();
       await page.waitForLoadState('networkidle');
       cold = [...reads];
       coldComplete = true;

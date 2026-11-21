@@ -1,17 +1,19 @@
 /** A held sender's second step is solved under Security, whatever the reader's thread role. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { screen } from '@testing-library/react';
+import { cleanup, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { i18n, setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
 import type { Thread } from '@/generated/api-types';
 import { show } from './support';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => <a href={to} className={className}>{children}</a> }));
 
 function draw(manages: boolean, detail: string) {
   const thread = { id: 'thread-1', name: 'Repair login', state: 'blocked', lock: null, blocked: { reason: 'binding_invalid', detail }, binding: null, owner: { display_name: 'Dana' }, access: { permissions: manages ? ['thread.view', 'thread.manage'] : ['thread.view'] } } as unknown as Thread;
-  show(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><BlockedBanner thread={thread} onProceed={vi.fn()} /></QueryClientProvider>);
+  return show(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><BlockedBanner thread={thread} onProceed={vi.fn()} /></QueryClientProvider>);
 }
 
 describe('a thread held for a second step', () => {
@@ -31,3 +33,30 @@ describe('a thread held for a second step', () => {
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 });
+
+
+const appearance = useAppearance.getState();
+afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1440, 400]) {
+  for (const [name, mode] of [['Ask', 'ask'], ['On request', 'on_request'], ['Auto', 'auto'], ['Bypass', 'bypass']] as const) {
+    for (const kind of ['unsupported', 'disallowed'] as const) it(`names the ${mode} approval ${kind} once and keeps Switch usable (${locale}/${theme}/${width})`, async () => {
+      await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
+      const before = window.innerWidth;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      try {
+        const label = i18n.t(`composer.mode.labels.${mode}`);
+        const ending = kind === 'unsupported' ? 'is not supported by this agent' : 'is not allowed here';
+        const raw = `Approval mode “${name}” ${ending}`;
+        const page = draw(true, raw);
+        const line = page.container.querySelector('[data-blocked="binding_invalid"]');
+        const expected = locale === 'en' ? `Approval mode “${label}” ${ending}`
+          : kind === 'unsupported' ? `此智能体不支持“${label}”审批模式` : `此处不允许“${label}”审批模式`;
+        expect(line).toBeVisible();
+        expect(line?.textContent).toBe(expected);
+        expect(line).not.toHaveTextContent(/approval\.mode|approval\.allowed_modes|Auto:|current agent setup|no longer allowed/u);
+        expect(screen.getByRole('button', { name: i18n.t('change.banner.switchProfile') })).toBeEnabled();
+      } finally { Object.defineProperty(window, 'innerWidth', { configurable: true, value: before }); }
+    });
+  }
+}
