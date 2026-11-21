@@ -34,6 +34,7 @@ pub(super) struct Delete;
 pub(super) struct Value {
     row: McpRow,
     copies: Vec<rows::Offering>,
+    notification: orch_api_contract::resource_facts::ResourceNotificationQuery,
 }
 
 pub(super) struct Output {
@@ -56,7 +57,7 @@ async fn copies(conn: &mut Conn, server: Id) -> ApiResult<Vec<rows::Offering>> {
 
 impl effects::Effect for Delete {
     type Source = Source;
-    type Query = ();
+    type Query = orch_api_contract::resource_facts::ResourceNotificationQuery;
     type Body = ();
     type Value = Value;
     type Output = Output;
@@ -67,7 +68,7 @@ impl effects::Effect for Delete {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        (): (),
+        notification: Self::Query,
         (): (),
     ) -> BoxFuture<'a, ApiResult<(Value, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
@@ -134,12 +135,13 @@ impl effects::Effect for Delete {
             if writing {
                 let machine_ids: Vec<Id> = sqlx::query_scalar("SELECT machine_id FROM mcp_server_offerings WHERE server_id=$1 ORDER BY machine_id FOR UPDATE")
                     .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
-                let _ =
-                    sqlx::query("SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR SHARE")
-                        .bind(machine_ids)
-                        .fetch_all(&mut *conn)
-                        .await
-                        .map_err(DbError::from)?;
+                let _ = sqlx::query(
+                    "SELECT id FROM machines WHERE id=ANY($1) ORDER BY id FOR KEY SHARE",
+                )
+                .bind(machine_ids)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(DbError::from)?;
                 let _ = sqlx::query("SELECT name FROM secrets WHERE owner_kind='mcp_server' AND owner_id=$1 ORDER BY name FOR UPDATE")
                     .bind(id).fetch_all(&mut *conn).await.map_err(DbError::from)?;
                 selected = copies(conn, id).await?;
@@ -166,6 +168,7 @@ impl effects::Effect for Delete {
                 Value {
                     row,
                     copies: selected,
+                    notification,
                 },
                 facts,
             ))
@@ -201,9 +204,30 @@ impl effects::ApplyOwned for Delete {
             )
             .await
             .map_err(ApiError::engine)?;
+            let operation = super::super::lifecycle_notifications::accept(
+                ctx,
+                &mut tx,
+                principal,
+                ObjectRef {
+                    kind: ResourceKind::McpServer.into(),
+                    id: value.row.id,
+                },
+                &value.row.name,
+                "mcp_delete",
+                &value.notification,
+            )
+            .await?;
             before.check()?;
-            let commands = deletion
-                .apply(&mut tx, principal, ctx.app.clock.as_ref())
+            let commands = orch_engine::notifications::operation_scope(
+                Some(operation.id),
+                deletion.apply(&mut tx, principal, ctx.app.clock.as_ref()),
+            )
+            .await
+            .map_err(ApiError::engine)?;
+            orch_engine::notifications::attach_operation(&mut tx, &[], &operation, ctx.now)
+                .await
+                .map_err(ApiError::engine)?;
+            orch_engine::notifications::notify_operation(&mut tx, &operation, "done", ctx.now)
                 .await
                 .map_err(ApiError::engine)?;
             deadline.check()?;
@@ -213,7 +237,11 @@ impl effects::ApplyOwned for Delete {
     }
 }
 
-pub(super) async fn run(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+pub(super) async fn run(
+    ctx: Ctx,
+    _query: orch_api_contract::resource_facts::ResourceNotificationQuery,
+    (): (),
+) -> ApiResult<()> {
     let (tx, _) = transaction_guard::begin(&ctx).await?;
     let completed = effects::apply_owned::<Delete>(&ctx, tx).await?;
     let _ = deliver(&ctx, completed.output).await;
@@ -227,9 +255,16 @@ pub(super) async fn from_machine(
     request: Id,
 ) -> ApiResult<bool> {
     let tx = app.db.begin().await?;
-    let completed =
-        effects::apply_owned_from_machine::<Delete>(app, tx, machine, server, request, (), ())
-            .await?;
+    let completed = effects::apply_owned_from_machine::<Delete>(
+        app,
+        tx,
+        machine,
+        server,
+        request,
+        Default::default(),
+        (),
+    )
+    .await?;
     let removed = deliver(&completed.ctx, completed.output).await;
     Ok(removed.contains(&machine))
 }
@@ -242,6 +277,8 @@ async fn deliver(ctx: &Ctx, output: Output) -> std::collections::BTreeSet<Id> {
         let dispatcher = ctx.app.link.dispatcher();
         if dispatcher
             .issue_stored(crate::dispatch::StoredCommand {
+                content_transit: false,
+                native_target: command.native_target.clone(),
                 id: Some(command.id),
                 machine: command.machine,
                 kind: command.kind.as_str().into(),

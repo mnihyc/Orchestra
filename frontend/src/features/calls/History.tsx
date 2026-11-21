@@ -1,4 +1,5 @@
 /** Recovery history uses recorded attempts and a sentence, with one link to its rule. */
+import { PathLink } from '@/shell/TrailLink';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import type { MarkerCallRecovery } from '@/generated/api-types';
@@ -27,5 +28,5 @@ export function RecoveryRuleLink({ rule }: { rule: string }) {
   const { threadId } = useTimelineContext();
   const topic = useThreadPart(threadId, (view) => view.thread?.topic_id);
   const label = t('calls.ruleNamed', { rule });
-  return topic === undefined ? <span>{label}</span> : <a className="focus-inset inline-block max-w-full rounded-sm wrap-anywhere text-accent-text underline underline-offset-2" href={`/topic/${encodeURIComponent(topic)}?tab=settings&section=defaults&setting=calls.rules#${encodeURIComponent(rule)}`}>{label}</a>;
+  return topic === undefined ? <span>{label}</span> : <PathLink className="focus-inset inline-block max-w-full rounded-sm wrap-anywhere text-accent-text underline underline-offset-2" href={`/topic/${encodeURIComponent(topic)}?tab=settings&section=defaults&setting=calls.rules#${encodeURIComponent(rule)}`}>{label}</PathLink>;
 }

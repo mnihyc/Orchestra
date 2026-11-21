@@ -1,6 +1,3 @@
 # Moving a conversation to another topic
 
-The shared Tree offers readable topics in the same root. Each visible topic's current Interact permission enables selection; a stored server review names access and inherited setting changes, and confirmation preserves the conversation's owner and workspace.
-
-- `MoveToTopic.tsx`: Topic selection, stored review and guarded confirmation with truthful failures.
-- `tree.ts`: Readable folder ancestry and topic leaves of one root, without hidden or archived destinations.
+Move to… uses the shared searchable destination picker. A topic in the same root opens the thread’s reparenting review. For a coding thread crossing roots, the change wizard opens on the selected topic and reviews destination bindings, full history, file placement, sharing defaults and deletion of the original. The accepted move job owns progress after the original closes.

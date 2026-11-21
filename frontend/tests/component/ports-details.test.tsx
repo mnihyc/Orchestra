@@ -3,8 +3,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as portApi from '@/api/ports';
+import { OpeningRow } from '@/features/ports/Opening';
+import { openingView } from '@/features/ports/wire';
+import { setLocale } from '@/i18n';
 import { PortEntries, OnceLink } from '@/features/ports/Entries';
 import { PortRequestCard } from '@/features/ports/Request';
 import { ProgramDialog } from '@/features/ports/Program';
@@ -16,8 +19,9 @@ import { portsEnvironment, portsProjection } from './ports-fixtures';
 import { show } from './support';
 import type { PortOpenReply } from '@/generated/api-types';
 
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#">{children}</a> }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+afterEach(async () => { await setLocale('en'); });
 function withQuery(body: ReactNode) { const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); return { ...show(<QueryClientProvider client={cache}>{body}</QueryClientProvider>), cache }; }
 const request: PortRequest = { id: 'request-1', revision: 1, environment_id: 'environment-1', port: 3000, way: 'link', reason: 'A webhook must call this port.', agent: 'Main', address: 'https://port.example', audience: 'Anyone with this link can enter.', until: new Date(Date.now() + 3_600_000).toISOString(), can_decide: true, state: 'pending', transports: 'tcp_udp', link_carriers: 'both' };
 describe('intentional audience and entry facts', () => {
@@ -67,4 +71,34 @@ describe('intentional audience and entry facts', () => {
     expect(save).toHaveBeenCalledWith(portsEnvironment.id, 3000, { http_scheme: 'https', host_header: null, proxy_protocol: true }, 0);
     expect(opening).not.toHaveBeenCalled();
   });
+});
+
+it.each(['en','zh-CN'] as const)('states a stored refusal and its exact ask-again time without a new card in %s',async(locale)=>{
+  await setLocale(locale);
+  const world=new World(),person=world.people.get('ada');if(person===undefined)throw new Error('The fixture needs its manager');
+  world.ports.control('/set',{scene:'full'});
+  const produced=await world.ports.handle(person,'POST',`/threads/${ACME.repro}/port-requests`,new URLSearchParams(),{port:3000,kind:'link',reason:'A webhook',until:'2030-11-15T12:00:00Z'});
+  const wire=produced?.body as PortOpenReply;
+  const until='2030-11-15T13:00:00.000Z',opening=openingView({...wire.opening,state:'refused',refused_until:until});
+  const data=portsProjection(),port=data.ports[0];if(port===undefined)throw new Error('The fixture needs its observed port');
+  const view=withQuery(<OpeningRow opening={opening} port={port} data={data} manage={false} onChanged={vi.fn()} onError={vi.fn()}/>);
+  expect(screen.getByText(locale==='en'?'Previously refused':'此前已拒绝')).toBeVisible();
+  expect(screen.getByText(locale==='en'?'Ask again after':'可再次请求时间')).toBeVisible();
+  expect(view.container.querySelector(`time[datetime="${until}"]`)).not.toBeNull();
+});
+
+
+it.each(['en','zh-CN'] as const)('keeps a refused request’s exact retry time in its existing history line in %s',async(locale)=>{
+  await setLocale(locale);
+  const world=new World(),person=world.people.get('ada');if(person===undefined)throw new Error('The fixture needs its manager');
+  world.ports.control('/set',{scene:'full'});
+  const made=(await world.ports.handle(person,'POST',`/threads/${ACME.repro}/port-requests`,new URLSearchParams(),{port:3000,kind:'link',reason:'A webhook',until:'2030-11-15T12:00:00Z'}))?.body as PortOpenReply;
+  const approval=(await world.ports.handle(person,'GET',`/approvals/${made.request?.id}`,new URLSearchParams(),{}))?.body as PortApproval;
+  const until='2030-11-15T13:00:00.000Z';
+  const refused:PortApproval={...approval,state:'denied',can_decide:false,request:{...approval.request,opening:{...approval.request.opening,refused_until:until}}};
+  const view=withQuery(<PortRequestCard request={portApi.requestView(refused)}/>);
+  await userEvent.click(screen.getByRole('button',{expanded:false}));
+  expect(screen.getByText(locale==='en'?'Previously refused':'此前已拒绝')).toBeVisible();
+  expect(screen.getByText(locale==='en'?'Ask again after':'可再次请求时间')).toBeVisible();
+  expect(view.container.querySelector(`time[datetime="${until}"]`)).not.toBeNull();
 });

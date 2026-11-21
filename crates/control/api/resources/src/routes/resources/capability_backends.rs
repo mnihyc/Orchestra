@@ -72,7 +72,7 @@ struct Choices;
 #[derive(Clone)]
 struct Ready {
     provider: Id,
-    place: Id,
+    place: Option<Id>,
     page: Page<CapabilityBackendCandidate>,
 }
 
@@ -80,7 +80,7 @@ struct Ready {
 #[serde(deny_unknown_fields)]
 struct Cursor {
     provider: Id,
-    place: Id,
+    place: Option<Id>,
     capability: String,
     query: String,
     lookup: Option<String>,
@@ -118,7 +118,11 @@ fn after(
         .transpose()
 }
 
-async fn facts(conn: &mut Conn, provider: Id, place: Id) -> ApiResult<Vec<native::Facts<Source>>> {
+async fn facts(
+    conn: &mut Conn,
+    provider: Id,
+    place: Option<Id>,
+) -> ApiResult<Vec<native::Facts<Source>>> {
     let provider = targets::page_object(
         conn,
         ObjectRef {
@@ -127,19 +131,33 @@ async fn facts(conn: &mut Conn, provider: Id, place: Id) -> ApiResult<Vec<native
         },
     )
     .await?;
-    let place = targets::node_identity(conn, place).await?;
+    let place = match place {
+        Some(place) => {
+            let target = targets::node_identity(conn, place).await?;
+            vec![(target.object.kind, vec![target])]
+        }
+        None => Vec::new(),
+    };
     Ok(vec![
         native::Facts::one(
             Source::Provider,
             KeyTargetKind::Object(ObjectKind::Provider),
             provider,
         ),
-        native::Facts::one(Source::Place, place.object.kind, place),
+        native::Facts::collection(Source::Place, place),
     ])
 }
 
-async fn require(conn: &mut Conn, principal: &Principal, provider: Id, place: Id) -> ApiResult<()> {
+async fn require(
+    conn: &mut Conn,
+    principal: &Principal,
+    provider: Id,
+    place: Option<Id>,
+) -> ApiResult<()> {
     super::providers::provider_for(conn, principal, provider, Permission::ProviderView).await?;
+    let Some(place) = place else {
+        return Ok(());
+    };
     authorization::require(
         conn,
         principal,
@@ -246,15 +264,28 @@ impl native::Selected for Choices {
     ) -> BoxFuture<'a, ApiResult<(Ready, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let provider = ctx.id("id")?;
+            if query.place.is_none() && !matches!(query.capability.as_str(), "summary" | "ask") {
+                return Err(ApiError::invalid(
+                    "place",
+                    "this capability needs its actual governing node",
+                ));
+            }
             let declared = facts(conn, provider, query.place).await?;
             let plan = native::bind_required(ctx, Self::DECLARATION, &declared)?;
             let principal = plan.preparation_principal(ctx, conn, caller).await?;
             require(conn, &principal, provider, query.place).await?;
-            let declarations = ctx.app.builtin_sources.capabilities().declarations();
+            let declarations = ctx
+                .app
+                .engine
+                .capability_backend_declarations()
+                .map_err(ApiError::engine)?;
             let capability = declarations
                 .capabilities
                 .get(&query.capability)
-                .filter(|cap| cap.backend_setting.is_some())
+                .filter(|cap| {
+                    cap.backend_setting.is_some()
+                        || matches!(query.capability.as_str(), "summary" | "ask")
+                })
                 .map(|_| query.capability.clone())
                 .ok_or_else(|| {
                     ApiError::invalid("capability", "does not declare a backend setting")
@@ -275,7 +306,7 @@ impl native::Selected for Choices {
                 .iter()
                 .filter(|(_, route)| match route.executor.as_deref() {
                     Some("program-session") => row.kind == "subscription",
-                    Some("model-backed") => row.kind == "api",
+                    Some("model-backed" | "summarizer-model") => row.kind == "api",
                     _ => false,
                 })
                 .copied()
@@ -310,7 +341,7 @@ impl native::Selected for Choices {
                         let availability = ctx
                             .app
                             .engine
-                            .review_capability_backend(
+                            .review_capability_backend_at(
                                 conn,
                                 &principal,
                                 query.place,
@@ -323,7 +354,7 @@ impl native::Selected for Choices {
                             "model",
                             CapabilityBackendCandidate {
                                 backend,
-                                offering_name: if display.is_empty() {
+                                offering_name: if display.trim().is_empty() {
                                     offering.clone()
                                 } else {
                                     display.clone()
@@ -397,7 +428,7 @@ impl native::Selected for Choices {
                         let availability = ctx
                             .app
                             .engine
-                            .review_capability_backend(
+                            .review_capability_backend_at(
                                 conn,
                                 &principal,
                                 query.place,
