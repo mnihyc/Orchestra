@@ -1221,7 +1221,7 @@ async fn the_scripted_server_is_asked_in_the_way_each_endpoint_says_with_its_own
     let secret = "gateway-secret-value";
     let body = json!({
         "provider_id": p.rig.provider,
-        "protocols": [RESPONSES, MESSAGES],
+        "upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols": [RESPONSES, MESSAGES],
         "upstreams": [
             { "protocol": RESPONSES, "base_url": p.mock.responses_base_url(), "options": {
                 "headers": { "x-route": "team-a" }, "query": { "api-version": "2025-01-01" },
@@ -1565,5 +1565,150 @@ async fn declared_native_search_reaches_the_same_forwarder_and_cumulative_usage_
         closed["usage_groups"][0]["reported_cost_usage"],
         json!({"total":{"amount":"0.0071","unit":"USD"},"known_requests":1}),
         "the known subtotal retains incomplete coverage after the second response omitted cost"
+    );
+}
+
+#[tokio::test]
+async fn a_public_model_call_uses_the_native_key_and_streams_through_memory_without_starting_a_shared_provider()
+ {
+    use bytes::Bytes;
+    use orch_link::content::{BlobEndpoint, PutRefusal, RelayReply, RelayRequest};
+    use orch_link_contract::{
+        commands::{ProviderRelay, ProviderRelayHead, SerialKey},
+        content::{BlobProgress, PutQuery},
+    };
+    use orch_types::{Hash, Id};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+    struct Pipe {
+        input: Mutex<BTreeMap<Id, Bytes>>,
+        output: Mutex<BTreeMap<Id, Vec<u8>>>,
+    }
+    #[async_trait::async_trait]
+    impl BlobEndpoint for Pipe {
+        async fn status(
+            &self,
+            _: orch_types::Id,
+            _: &Hash,
+        ) -> Result<orch_link_contract::content::TransferStatus, PutRefusal> {
+            panic!("a public call never asks for a stored blob")
+        }
+        async fn relay(
+            &self,
+            command: Id,
+            _: Id,
+            request: RelayRequest,
+            _: Duration,
+        ) -> Result<RelayReply, PutRefusal> {
+            let input = self.input.lock().unwrap();
+            let body = input
+                .get(&command)
+                .expect("the actual native command owns its input");
+            let start = i64::try_from(body.len()).unwrap();
+            match request {
+                RelayRequest::Stand { received } => {
+                    assert!(received <= start);
+                    Ok(RelayReply::Progress(received))
+                }
+                RelayRequest::Pull { offset, len } => Ok(RelayReply::Piece(body.slice(
+                    usize::try_from(offset).unwrap()..usize::try_from(offset + len).unwrap(),
+                ))),
+                RelayRequest::Push { offset, bytes } => {
+                    let mut output = self.output.lock().unwrap();
+                    let out = output.entry(command).or_default();
+                    assert_eq!(offset, start + i64::try_from(out.len()).unwrap());
+                    out.extend_from_slice(&bytes);
+                    Ok(RelayReply::Progress(
+                        start + i64::try_from(out.len()).unwrap(),
+                    ))
+                }
+            }
+        }
+        async fn head(&self, _: Id, _: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
+            panic!("a public call never asks for a stored blob")
+        }
+        async fn put(
+            &self,
+            _: Id,
+            _: &Hash,
+            _: PutQuery,
+            _: Bytes,
+        ) -> Result<BlobProgress, PutRefusal> {
+            panic!("a public call never stores its content")
+        }
+        async fn get(&self, _: Id, _: &Hash, _: i64, _: i64) -> Result<Bytes, PutRefusal> {
+            panic!("a public call never reads a stored blob")
+        }
+        async fn missing(&self, _: Id, _: &[Hash]) -> Result<Vec<Hash>, PutRefusal> {
+            panic!("a public call never grants stored content")
+        }
+    }
+    let pipe = Arc::new(Pipe {
+        input: Mutex::default(),
+        output: Mutex::default(),
+    });
+    let endpoint = Arc::clone(&pipe);
+    let p = ProviderRig::with(move |rig, _| rig.blob_endpoint = Some(endpoint)).await;
+    for stream in [false, true] {
+        let id = new_id();
+        let input=serde_json::to_vec(&json!({"model":MODEL,"input":"A private SDK input kept out of native storage","stream":stream})).unwrap();
+        pipe.input
+            .lock()
+            .unwrap()
+            .insert(id, Bytes::copy_from_slice(&input));
+        p.mock.queue("say Direct").unwrap();
+        let command:ProviderRelay=serde_json::from_value(json!({
+            "start":{"provider_id":p.rig.provider,"upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols":[RESPONSES],
+                "upstreams":[{"protocol":RESPONSES,"base_url":p.mock.responses_base_url(),"options":{}}],
+                "credential":p.sealed_key_for(id,&p.key),"secrets":{}},
+            "lease":{"lease_id":id,"provider_id":p.rig.provider,"thread_id":id,"mode":"forwarded","protocol":RESPONSES,
+                "allowed_models":[MODEL],"model_parameters":{(MODEL):{}}},
+            "relay_id":new_id(),"path":"/responses","headers":{"content-type":"application/json","authorization":"Bearer not-an-upstream-key"},
+            "request_bytes":input.len(),"request_hash":Hash::of(&input),"max_request_bytes":16777216,"idle_secs":30,"retry_ms":1
+        })).unwrap();
+        assert!(matches!(
+            p.command_with_id(id, &SerialKey::None, &command).await,
+            Progress::Succeeded(_)
+        ));
+        let output = pipe.output.lock().unwrap().get(&id).unwrap().clone();
+        let length = usize::try_from(u64::from_be_bytes(output[..8].try_into().unwrap())).unwrap();
+        let head: ProviderRelayHead = serde_json::from_slice(&output[8..8 + length]).unwrap();
+        assert_eq!(head.status, 200);
+        let body = String::from_utf8_lossy(&output[8 + length..]);
+        assert!(body.contains("Direct"), "{body}");
+        assert_eq!(p.model_requests().last().unwrap().body["model"], MODEL);
+        assert!(files_holding(p.rig.data.path(), &p.key).is_empty());
+        assert!(
+            files_holding(
+                p.rig.data.path(),
+                "A private SDK input kept out of native storage"
+            )
+            .is_empty()
+        );
+    }
+    assert_eq!(p.model_requests().len(), 2);
+}
+
+#[tokio::test]
+async fn the_common_thread_choice_is_used_after_overlapping_wire_format_choices() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease=serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,"mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],
+        "model_parameters":{(MODEL):{"request_options":{
+            "common":{"properties":{"cache":{"type":"object","properties":{"key":{"type":"string"}}}}},
+            (RESPONSES):{"properties":{"prompt_cache_key":{"type":"string"}}}
+        }}},
+        "request_options":{"common":{"cache":{"key":"common-choice"}},(RESPONSES):{"prompt_cache_key":"wire-choice"}}
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &lease).await;
+    p.mock.queue("say Common value kept").unwrap();
+    let reply=p.harness(p.thread).post("/v1/responses",&json!({"model":MODEL,"input":"Check the actual common choice","prompt_cache_key":"sdk-choice"})).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        p.model_requests().last().unwrap().body["prompt_cache_key"],
+        "common-choice"
     );
 }

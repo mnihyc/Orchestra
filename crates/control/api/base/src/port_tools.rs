@@ -34,7 +34,7 @@ use orch_authz::Principal;
 
 use orch_authz::TokenGrant;
 
-use orch_db::Tx;
+use orch_db::{Conn, Tx};
 
 use orch_db::queries::threads::ThreadRow;
 
@@ -89,7 +89,9 @@ fn refusal(error: ApiError) -> Refusal {
         ErrorCode::RequestTooLarge => Code::TooLarge,
         ErrorCode::PortsNotAllowed | ErrorCode::AuthSuspended => Code::Disabled,
         ErrorCode::PortsUnavailable => Code::NotReachable,
-        ErrorCode::ConflictStaleRevision | ErrorCode::PortsProgramConflict => Code::Changed,
+        ErrorCode::ConflictStaleRevision
+        | ErrorCode::ConflictConcurrentChange
+        | ErrorCode::PortsProgramConflict => Code::Changed,
         ErrorCode::Internal => Code::Unsupported,
         _ => Code::Invalid,
     };
@@ -113,16 +115,9 @@ fn arguments_only(arguments: &Json) -> ApiResult<Json> {
         .as_object_mut()
         .ok_or_else(|| ApiError::invalid("arguments", "give an object"))?;
     if let Some(bytes) = object.remove("max_bytes")
-        && !bytes.as_i64().is_some_and(|bytes| {
-            (orch_engine::tools::definitions::READ_BYTES_MIN
-                ..=orch_engine::tools::definitions::READ_BYTES_MAX)
-                .contains(&bytes)
-        })
+        && !bytes.as_i64().is_some_and(|bytes| bytes > 0)
     {
-        return Err(ApiError::invalid(
-            "max_bytes",
-            "use an integer from 1000 to 40000",
-        ));
+        return Err(ApiError::invalid("max_bytes", "use a positive integer"));
     }
     if let Some(ids) = object.remove("ids")
         && !ids.is_boolean()
@@ -146,6 +141,7 @@ fn check_answer(tool: &str, arguments: &Json, value: impl serde::Serialize) -> A
 
 fn link_delivery(
     ctx: &Ctx,
+    public_url: &str,
     row: &rows::Opening,
     view: &PortOpening,
 ) -> ApiResult<Option<PortLinkDelivery>> {
@@ -161,7 +157,7 @@ fn link_delivery(
     let proof = String::from_utf8(proof).map_err(ApiError::internal)?;
     let helper = format!(
         "{}/api/v1/ports/links/{}#{proof}",
-        ctx.app.config.system.public_url.trim_end_matches('/'),
+        public_url.trim_end_matches('/'),
         row.id
     );
     let browser = if view.entry_methods.contains(&PortEntryMethod::Browser) {
@@ -183,14 +179,23 @@ fn link_delivery(
 }
 
 /// Checks the actual current opening/card and prospective once-only link before its creation commits.
-pub fn check_open_budget(
+pub async fn check_open_budget(
     ctx: &Ctx,
+    conn: &mut Conn,
     row: &rows::Opening,
     reply: &PortOpenReply,
     arguments: &Json,
 ) -> ApiResult<()> {
     let mut shown = reply.clone();
-    shown.link = link_delivery(ctx, row, &shown.opening)?;
+    shown.link = link_delivery(
+        ctx,
+        &crate::public_addresses::read(&ctx.app, conn)
+            .await?
+            .addresses
+            .public_url,
+        row,
+        &shown.opening,
+    )?;
     check_answer("open_port", arguments, &shown)
 }
 
@@ -277,7 +282,15 @@ async fn outcome(
         None => None,
     };
     let link = if consume {
-        link_delivery(&ctx, &row, &view)?
+        link_delivery(
+            &ctx,
+            &crate::public_addresses::read(app, &mut tx)
+                .await?
+                .addresses
+                .public_url,
+            &row,
+            &view,
+        )?
     } else {
         None
     };
@@ -483,7 +496,11 @@ pub async fn tell_late(app: &App) -> ApiResult<()> {
             let proof = String::from_utf8(proof).map_err(ApiError::internal)?;
             let helper = format!(
                 "{}/api/v1/ports/links/{}#{proof}",
-                app.config.system.public_url.trim_end_matches('/'),
+                crate::public_addresses::read(app, &mut tx)
+                    .await?
+                    .addresses
+                    .public_url
+                    .trim_end_matches('/'),
                 row.id
             );
             location.push_str(&format!(" Link: {helper}."));
