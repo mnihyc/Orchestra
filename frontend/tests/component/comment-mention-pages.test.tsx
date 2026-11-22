@@ -74,7 +74,7 @@ it('loads the next page by keyboard and keeps the caret until a person is chosen
   await input.keyboard('{Enter}');
   expect(box).toHaveValue('@grace ');
   expect(await screen.findByText("Grace Hopper can't open this document")).toBeVisible();
-  await input.click(screen.getByRole('button', { name: 'Leave' }));
+  await input.click(screen.getByRole('button', { name: 'Leave as is' }));
   await input.type(box, '@');
   expect(await screen.findByRole('option', { name: 'More people' })).toBeVisible();
   expect(screen.queryByRole('option', { name: /Grace Hopper/ })).not.toBeInTheDocument();
@@ -152,7 +152,7 @@ it('keeps one candidate page after repeated requests in a million-person directo
     expect(screen.queryAllByText(/Person 000000/)).toHaveLength(0);
   }
   expect(pages.read).toHaveBeenCalledTimes(21);
-  await input.click(screen.getByRole('button', { name: 'First people' }));
+  await input.click(screen.getByRole('button', { name: 'Back to the first people' }));
   expect(await screen.findByRole('option', { name: /Person 000000/ })).toBeVisible();
   expect(screen.getAllByRole('option')).toHaveLength(size + 1);
 }, 30_000); // Twenty separate bounded page interactions; structural assertions, not loaded-machine timing, prove scale.

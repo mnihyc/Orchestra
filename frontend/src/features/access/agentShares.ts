@@ -7,7 +7,7 @@
  * holds nothing that a request does.
  */
 import type { AccessKind } from '@/api/access';
-import type { AgentAccessChoice, AgentLevel, AgentShare, PermissionPage, ShareDocumentsLevel, ShareLevel, ShareParts } from '@/generated/api-types';
+import type { AgentAccessChoice, AgentAccessWhere, AgentLevel, AgentShare, PermissionPage, ShareDocumentsLevel, ShareLevel, ShareParts } from '@/generated/api-types';
 
 import type { Reach } from './Covers';
 
@@ -76,9 +76,23 @@ export function mayGiveParts(parts: ShareParts, available: ShareParts): boolean 
     && ADVANCED.every((row) => parts[row] !== true || advancedGiven(available, row));
 }
 
+export const REACHES: readonly AgentAccessWhere[] = ['nothing', 'thread', 'topic', 'project'];
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** An invalid or newer value remains visible in the ordinary value control instead of being replaced with a grant. */
+export function agentAccessValue(value: unknown): AgentAccessChoice | null {
+  if (!record(value) || Object.keys(value).some((key) => key !== 'where' && key !== 'parts') || !record(value.parts)) return null;
+  const givenParts = value.parts;
+  const where = REACHES.find((entry) => entry === value.where);
+  if (where === undefined || where === 'nothing' && Object.keys(value.parts).length > 0 || where === 'thread' && (Object.hasOwn(value.parts, 'timeline') || ADVANCED.some((row) => Object.hasOwn(givenParts, row)))) return null;
+  const parts = sharePartsValue(value.parts);
+  if (parts === null) return null;
+  if (AREAS.some((area) => !creationAreas(where).includes(area) && stepOf(area, parts) > 0)) return null;
+  return { where, parts };
+}
+
 /** Native and legacy JSON are checked before an area can be displayed as available. */
 export function sharePartsValue(value: unknown): ShareParts | null {
-  const record = (input: unknown): input is Record<string, unknown> => typeof input === 'object' && input !== null && !Array.isArray(input);
   if (!record(value) || Object.keys(value).some((key) => ![...AREAS, ...ADVANCED].some((area) => area === key))) return null;
   const parts: ShareParts = {};
   for (const area of AREAS) {
