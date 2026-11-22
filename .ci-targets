@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-engine --test lifecycle --test loss --test kept_images
+test -p orch-engine --lib -- reaper:: retention:: kept_images:: jobs::remove::
+test -p orch-db --lib
+test -p orch-api-core --test hosted_environments

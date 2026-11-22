@@ -197,6 +197,7 @@ impl native::Selected for Destinations {
     type Query = CopyDestinationsRequest;
     type Value = Value;
     type Reply = CopyDestinationsResponse;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &COPY_DESTINATIONS;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

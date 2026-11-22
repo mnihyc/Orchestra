@@ -95,6 +95,9 @@ pub struct ModelInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInputListQuery {
+    /// Literal words in block keys, source labels and stored preview text; full blobs are read separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// One record, by its identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Id>,
@@ -107,7 +110,7 @@ pub struct ModelInputListQuery {
     /// Those recorded after this sequence: the page after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<Seq>,
-    /// How many: 50 when left out, at most 200.
+    /// How many: 50 when left out, any positive representable count when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<i64>,
 }
