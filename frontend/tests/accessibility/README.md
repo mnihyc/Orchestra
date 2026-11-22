@@ -3,7 +3,7 @@
 The shared screen sweep also calls `navigation.ts`: every visible section list marks exactly one
 current destination matching its controlled section, including the compact phone presentation.
 Covered/inert lists wait until shown. `e2e/workbench-navigation.spec.ts` supplies real-route and
-negative auditor fixtures; the integrator executes these sources.
+negative auditor fixtures.
 
 - `trace.spec.ts`: Keyboard phone filters, retained content and explicit confirmations with axe in both themes.
 - `admin.spec.ts`: Management with axe in both themes: each section, the refusal, and the dialogs that make a person, a link, a provider and a capability.

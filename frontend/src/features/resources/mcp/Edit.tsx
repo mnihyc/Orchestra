@@ -11,12 +11,14 @@ import { HomePicker } from '@/features/resources/HomePicker';
 import { readObject } from '@/features/resources/jsonObject';
 import { useActKey } from '@/lib/forms';
 import { Input } from '@/ui/Input';
+import { SecretField } from '@/ui/SecretField';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Select } from '@/ui/Select';
 import { StateLine } from '@/ui/StateLine';
 import { Switch } from '@/ui/Switch';
 import { Textarea } from '@/ui/Textarea';
 import { chooseAuthentication, chooseTransport, connection, definitionIssue, secretWrites, strings, type Authentication, type Definition, type Transport } from './definition';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 export function EditMcp({ server: offered, onClose, onCreated }: { server?: McpServer; onClose: () => void; onCreated?: (server: McpServer) => void }) {
   const { t } = useTranslation();
@@ -48,6 +50,8 @@ export function EditMcp({ server: offered, onClose, onCreated }: { server?: McpS
   const nameValid = /^[a-z][a-z0-9_-]{1,31}$/u.test(name.trim());
   const saved = { name: server?.name, description: server?.description, enabled: server?.enabled };
   const changed = name !== saved.name || description !== saved.description || enabled !== saved.enabled || (!imported && (specChanged || Object.keys(secrets).length > 0));
+  const runtimeChanged=server!==undefined&&(name.trim()!==server.name||enabled!==server.enabled||!imported&&(specChanged||Object.keys(secrets).length>0));
+  const application=useApplicationImpact({object:{kind:'mcp_server',id:server?.id??''},model_id:null},runtimeChanged);
   const valid = nameValid && (server !== undefined || home !== '') && (imported || spec !== null && (!specChanged && server !== undefined || issue === null) && !needsValue && !namesMissing);
   const save = useMutation({ mutationFn: () => {
     if (!valid || spec === null) throw new Error(t('resourceDetails.mcp.form.invalidDefinition'));
@@ -69,12 +73,12 @@ export function EditMcp({ server: offered, onClose, onCreated }: { server?: McpS
   const mapped = imported ? ['name'] : ['name', commandConnection ? 'spec.command' : 'spec.url', 'spec.authentication', 'secrets', ...(usingVariables ? ['spec.secret_env'] : [])];
   const unplaced = faults.length === 0 || faults.some((fault) => !mapped.some((path) => fault.path === path || fault.path.startsWith(path + '[') || fault.path.startsWith(path + '.')));
   const fieldDisabled = save.isPending || imported || spec === null;
-  const secretField = (key: string, label: string) => <Input key={key} type="password" label={label} autoComplete="new-password" spellCheck={false} value={values[key] ?? ''}
-    disabled={fieldDisabled} placeholder={retained.has(key) ? t('resourceDetails.mcp.form.keepSecret') : undefined}
-    onChange={(event) => { const value = event.target.value; setValues((before) => ({ ...before, [key]: value })); save.reset(); }} onBlur={() => touch('secret:' + key)}
+  const secretField = (key: string, label: string) => <SecretField key={key} label={label} spellCheck={false} value={values[key] ?? ''}
+    disabled={fieldDisabled} set={retained.has(key)}
+    onValueChange={(value) => { setValues((before) => ({ ...before, [key]: value })); save.reset(); }} onBlur={() => touch('secret:' + key)}
     error={touched.has('secret:' + key) && !retained.has(key) && (values[key] ?? '').trim() === '' ? t('resourceDetails.mcp.form.secretRequired') : undefined} />;
   return <EditDialog admin={adminSpec(server, server?.environment === null ? 'mcp.manage' : 'environment.manage')} title={server === undefined ? t('resourceDetails.mcp.add') : t('resources.edit.title', { name: server.name })}
-    submitLabel={server === undefined ? t('common.add') : undefined} changed={changed} valid={valid} pending={save.isPending} error={unplaced ? save.error : null} onSave={() => save.mutate()} onClose={onClose}>
+    submitLabel={server === undefined ? t('common.add') : undefined} changed={changed} valid={valid&&application.ready} pending={save.isPending} error={unplaced ? save.error : null} onSave={() => save.mutate()} onClose={onClose}>
     <Input label={t('resources.edit.name')} value={name} disabled={save.isPending} maxLength={32} onChange={(event) => { setName(event.target.value); save.reset(); }} onBlur={() => touch('name')}
       error={fieldError('name') ?? (touched.has('name') && !nameValid ? t('resourceDetails.mcp.form.nameInvalid') : undefined)} data-autofocus />
     {server === undefined && <HomePicker value={home} onChange={setHome} disabled={save.isPending} />}
@@ -117,5 +121,6 @@ export function EditMcp({ server: offered, onClose, onCreated }: { server?: McpS
       </div>}
     </details>
     {server !== undefined && <Switch label={t('resourceDetails.enabled')} checked={enabled} disabled={save.isPending} onCheckedChange={setEnabled} />}
+    {runtimeChanged&&<ApplicationPreview read={application.read} kind={enabled?'change':'disable'}/>}
   </EditDialog>;
 }

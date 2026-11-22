@@ -42,6 +42,8 @@ use orch_api_contract::auth::MeAuthorityReply;
 
 use orch_api_contract::auth::MeBootstrapReply;
 
+use orch_api_contract::auth::PersonalRevision;
+
 use orch_api_contract::operation_sources::Declaration;
 
 use orch_api_contract::users::Me;
@@ -125,6 +127,7 @@ async fn report_admission(
 pub(super) struct Shell;
 
 pub(super) struct ShellSelection {
+    personal_revision: PersonalRevision,
     person: Me,
     state: orch_api_contract::personal::PersonalState,
     orgs: account_read::Organizations,
@@ -149,6 +152,10 @@ impl Selected for Shell {
         _: &'a (),
     ) -> BoxFuture<'a, ApiResult<(ShellSelection, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
+            let (personal, inbox, meta, authority) =
+                orch_db::sequences::personal_revision(conn, caller.user())
+                    .await?
+                    .ok_or_else(ApiError::not_found)?;
             let root = account_read::account_for(ctx, conn, caller, Source::Account).await?;
             let orgs =
                 account_read::organizations(ctx, conn, caller, Self::DECLARATION, &root).await?;
@@ -201,6 +208,12 @@ impl Selected for Shell {
             );
             Ok((
                 ShellSelection {
+                    personal_revision: PersonalRevision {
+                        personal,
+                        inbox,
+                        meta,
+                        authority,
+                    },
                     person,
                     state,
                     orgs,
@@ -254,6 +267,7 @@ impl Selected for Shell {
                 orch_api_contract::users::Locale::ZhCn => "zh-CN",
             };
             Ok(MeBootstrapReply {
+                personal_revision: value.personal_revision,
                 meta,
                 person: value.person.clone(),
                 state: value.state.clone(),

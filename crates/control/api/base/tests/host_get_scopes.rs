@@ -14,7 +14,7 @@ use http::StatusCode;
 use orch_access_contract::{decisions::ObjectRef, key_scope::KeyScope, permissions::ResourceKind};
 use orch_api_contract::resources::HostGet;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
     thread_access::AuthzAccess,
 };
@@ -35,7 +35,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
