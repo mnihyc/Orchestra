@@ -131,6 +131,8 @@ pub struct AdminProgramListQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminProgramBuildListQuery {
+    /// Literal version, platform or check-state words, before the output page.
+    pub q: Option<String>,
     /// Page size; the ordinary list default applies when omitted.
     pub limit: Option<u32>,
     /// Continuation returned with the same program and filters.

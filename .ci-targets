@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/live-wait.spec.ts tests/e2e/reconnect.spec.ts tests/e2e/machine-programs.spec.ts tests/e2e/resources.spec.ts tests/e2e/admin-mode-double.spec.ts tests/e2e/change.spec.ts tests/e2e/documents.spec.ts --project=chromium --retries=1 --grep-invert "that Orch made is started, kept awake and stopped|a template is made, its recipe is changed|a host is closed to new environments|explicit enrollment opens one Programs workflow"

@@ -4,13 +4,14 @@ import { treeNode } from '../doubles/tree-node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Approval, HarnessRequest, Item, ServerFrame, TreeNode } from '@/generated/api-types';
-import { type ClientFrame, createRealtimeSocket, type SocketLike } from '@/realtime/socket';
+import { type ClientFrame, createRealtimeSocket, type SocketLike, type HierarchyPage } from '@/realtime/socket';
 import { treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import { threadWriter, threadViewOf, waitingInputs, type ThreadRows } from '@/realtime/stores/thread';
 import { approvalItem, harnessApproval, threadInput, AT } from '../doubles/thread-rows';
 import { me, userRef } from '../doubles/fixtures';
 import { type DurableFeed, FeedRegistry, followFeed, type Loaded, UNSUBSCRIBE_AFTER_MS } from '@/realtime/sync';
 import { beginOpening, openingId } from '@/lib/opening';
+import { hierarchyFeed } from '@/api/hierarchyFeed';
 
 /** A socket that a test plays the server for. */
 class FakeSocket implements SocketLike {
@@ -49,7 +50,7 @@ class FakeSocket implements SocketLike {
 
   ready(): void {
     this.accept();
-    this.say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b1' });
+    this.say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, max_client_frame_bytes:16*1024, build: 'b1' });
   }
 
   of<Op extends ClientFrame['op']>(op: Op): Extract<ClientFrame, { op: Op }>[] {
@@ -150,6 +151,35 @@ describe('the connection', () => {
     socket.stop();
   });
 
+  it('a released subscription whose listener asks hears what the server sent before its end, and nothing after it', () => {
+    const { socket, last } = harness();
+    socket.start(); last().ready();
+    const after = vi.fn(), onFrame = vi.fn(), plain = vi.fn();
+    const released = socket.subscribe('user', { since: () => null, onFrame, afterRelease: after });
+    const other = socket.subscribe('org:a', { since: () => null, onFrame: plain });
+    const [mine, theirs] = last().of('sub').map((frame) => frame.id);
+    released.unsubscribe(); other.unsubscribe();
+    expect(last().of('unsub').map((frame) => frame.id)).toEqual([mine, theirs]);
+    // Sent before the server had the release: heard, by the listener that asked for it, as a late frame.
+    const notice = { op: 'event', id: mine, feed: 'user', data: { what: 'enrollment', receipt: 'r1' } };
+    last().say(notice);
+    last().say({ op: 'event', id: theirs, feed: 'org:a', data: { what: 'changed' } });
+    expect(after).toHaveBeenCalledWith(notice);
+    expect(onFrame).not.toHaveBeenCalled(); expect(plain).not.toHaveBeenCalled();
+    // Its end is not told, and nothing after it is heard.
+    last().say({ op: 'closed', id: mine, feed: 'user', reason: 'unsubscribed' });
+    last().say({ op: 'event', id: mine, feed: 'user', data: { what: 'enrollment', receipt: 'r2' } });
+    expect(after).toHaveBeenCalledTimes(1);
+    // A release on a connection that then goes hears nothing of the next one.
+    const again = socket.subscribe('user', { since: () => null, onFrame: vi.fn(), afterRelease: after });
+    const next = last().of('sub').at(-1)!.id;
+    again.unsubscribe();
+    last().drop();
+    last().say({ op: 'event', id: next, feed: 'user', data: { what: 'enrollment', receipt: 'r3' } });
+    expect(after).toHaveBeenCalledTimes(1);
+    socket.stop();
+  });
+
   it('dispatches a generated subscription frame and keeps a connection-wide error out of that feed', () => {
     const { socket, last } = harness();
     const receive = vi.fn();
@@ -200,7 +230,7 @@ describe('the connection', () => {
     const { socket, last } = harness();
     socket.start();
     last().accept();
-    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, build: 'b1' });
+    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, max_client_frame_bytes:16*1024, build: 'b1' });
     expect(socket.status.getState().phase).toBe('ready');
     expect(last().sent[0]).toEqual({ op: 'auth', token: 'token-1' });
     socket.stop();
@@ -337,11 +367,11 @@ describe('the connection', () => {
     last().accept();
     vi.advanceTimersByTime(40);
     last().say({ op: 'ready', connection_id: 'c', user_id: 'u', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b' });
-    expect(socket.status.getState().roundTripMs).toBe(40);
+    expect(socket.status.getState().roundTripMs).toBeNull();
 
-    // Two more: one quick, one that a late packet made slow.
-    for (const late of [20, 900]) {
-      vi.advanceTimersByTime(25_000);
+    // Three actual ping replies: one late packet changes nothing.
+    for (const late of [40, 20, 900]) {
+      vi.advanceTimersToNextTimer();
       const ping = last().of('ping').at(-1);
       vi.advanceTimersByTime(late);
       last().say({ op: 'pong', n: ping?.n });
@@ -349,6 +379,48 @@ describe('the connection', () => {
 
     // 40, 20 and 900: one late packet changes nothing.
     expect(socket.status.getState().roundTripMs).toBe(40);
+  });
+
+  it('treats a stable 700 ms line as usual and warns only when its measured line becomes worse', () => {
+    const { socket, last } = harness();
+    socket.start(); last().ready();
+    const sample = (latency: number) => {
+      vi.advanceTimersToNextTimer();
+      const ping = last().of('ping').at(-1);
+      vi.advanceTimersByTime(latency); last().say({ op: 'pong', n: ping?.n });
+    };
+    for (let index = 0; index < 12; index += 1) {
+      sample(700);
+      expect(socket.status.getState()).toMatchObject({ roundTripMs: 700, slow: false });
+    }
+    expect(socket.status.getState()).toMatchObject({ usualRoundTripMs: 700 });
+    sample(12_000);
+    expect(socket.status.getState()).toMatchObject({ roundTripMs: 700, slow: false });
+    sample(1_600); sample(1_600);
+    expect(socket.status.getState()).toMatchObject({ roundTripMs: 1_600, usualRoundTripMs: 700, slow: true });
+    last().drop(); vi.advanceTimersByTime(500); last().ready();
+    expect(socket.status.getState()).toMatchObject({ roundTripMs: null, usualRoundTripMs: 700, slow: false });
+    socket.stop();
+    expect(socket.status.getState()).toMatchObject({ usualRoundTripMs: null, slow: false });
+  });
+
+  it('uses the current measured-link defaults without treating one absolute latency as a fault', () => {
+    const peer = new FakeSocket();
+    let defaults = { recent_samples: 1, usual_samples: 3, slow_increase_percent: 25, slow_extra_ms: 50 };
+    const options = { url: () => 'ws://orch.test/api/v1/ws', token: () => 'synthetic-token', renew: () => Promise.resolve(true),
+      onSuspended: () => undefined, connect: () => peer, quality: () => defaults };
+    const socket = createRealtimeSocket(options);
+    socket.start(); peer.ready();
+    const sample = (latency: number) => {
+      vi.advanceTimersToNextTimer(); const ping = peer.of('ping').at(-1);
+      vi.advanceTimersByTime(latency); peer.say({ op: 'pong', n: ping?.n });
+    };
+    sample(700); sample(700); sample(700); sample(900);
+    expect(socket.status.getState()).toMatchObject({ usualRoundTripMs: 700, slow: true });
+    defaults = { ...defaults, slow_increase_percent: 100 };
+    sample(900);
+    expect(socket.status.getState()).toMatchObject({ slow: false });
+    socket.stop();
   });
 
   it('counts a connection that says nothing for a minute as gone, and connects again', () => {
@@ -609,6 +681,21 @@ describe('a feed that is kept in order', () => {
     expect(last().of('sub')).toHaveLength(sent);
     last().drop();vi.advanceTimersByTime(500);last().ready();
     expect(last().of('sub')).toEqual([]);
+  });
+
+  it('keeps the affected view and a readable capacity reason while its subscription waits', async () => {
+    const { socket, last } = harness(); socket.start(); last().ready();
+    const acme = tree('acme', [node('thread', 1, 'Kept selection')], 1);
+    const failed = vi.fn<(error: unknown) => void>();
+    const follower = followFeed(socket, { ...acme.feed, failed }); await settle();
+    const id = last().of('sub').find((frame) => frame.feed === 'org:acme')?.id;
+    last().say({ op: 'error', id, code: 'too_many_subscriptions', detail: 'opaque native capacity detail' });
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed.mock.calls[0]?.[0]).toMatchObject({ code: 'too_many_subscriptions' });
+    expect(JSON.stringify(failed.mock.calls[0]?.[0])).toBe('{}');
+    expect(acme.names()).toEqual(['Kept selection']); expect(follower.lastSeq()).toBe(1);
+    expect(acme.loads).toEqual([null]);
+    follower.stop();
   });
 
   it('is loaded over HTTP first and subscribed from the sequence of that answer', async () => {
@@ -897,4 +984,42 @@ describe('a feed that several views show', () => {
     vi.advanceTimersByTime(5 * 60_000);
     expect(evict).toHaveBeenCalledTimes(1);
   });
+});
+
+
+it('hundreds of hierarchy pages and a long search keep every reconnect frame inside the announced native budget', async () => {
+  const {socket,last}=harness();
+  const queries:HierarchyPage[]=Array.from({length:100},(_,index)=>({window:index+1,root:'root',query:{parent_id:'root',cursor:`root|parent|123|scope|${index}`}}));
+  queries.push({window:101,root:'root',query:{parent_id:'root',q:'名字'.repeat(12_000)}});
+  socket.start();last().ready();
+  const feed=hierarchyFeed();
+  const frames:unknown[]=[];
+  const source=socket.subscribe(feed,{since:()=>null,hierarchy:()=>queries,onFrame:(frame)=>frames.push(frame)});
+  const accept=()=>{
+    const sub=last().of('sub').find((frame)=>frame.feed===feed&&frame.window===undefined);
+    expect(sub).toBeDefined();
+    last().say({op:'subscribed',id:sub?.id,feed,seq:null,mode:'ephemeral'});
+  };
+  accept();
+  const registered=()=>last().of('sub').filter((frame)=>frame.window?.kind==='query');
+  expect(new Set(registered().map((frame)=>frame.window?.window)).size).toBe(101);
+  const verify=()=>{
+    const payloads=new Map<number,number[]>();
+    for(const frame of last().sent) {
+      expect(new TextEncoder().encode(JSON.stringify(frame)).length).toBeLessThanOrEqual(16*1024);
+      if(frame.op!=='sub'||frame.window?.kind!=='query')continue;
+      const held=payloads.get(frame.window.window)??[];
+      held.push(...Uint8Array.from(atob(frame.window.data.replaceAll('-','+').replaceAll('_','/')),(character)=>character.charCodeAt(0)));
+      payloads.set(frame.window.window,held);
+    }
+    expect(JSON.parse(new TextDecoder().decode(Uint8Array.from(payloads.get(101)??[])))).toEqual(queries.at(-1)?.query);
+  };
+  verify();
+  last().drop();await vi.advanceTimersByTimeAsync(500);last().ready();accept();verify();
+  expect(new Set(registered().map((frame)=>frame.window?.window)).size).toBe(101);
+  queries.splice(0,1);source.updateViews?.();
+  expect(last().of('sub').at(-1)?.window).toEqual({kind:'remove',window:1});
+  last().say({op:'event',id:last().of('sub')[0]?.id,feed,data:{window:100,hierarchy:{nodes:[],seq:7}}});
+  expect(frames.at(-1)).toMatchObject({data:{window:100}});
+  source.unsubscribe();socket.stop();
 });

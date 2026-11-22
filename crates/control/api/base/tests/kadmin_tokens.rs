@@ -115,7 +115,8 @@ async fn a_token_is_made_only_with_a_fresh_password_and_the_second_step_in_the_s
         .token(signed.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert!(listed.is_empty(), "nothing was made");
 
     // With an authenticator, the password alone is not enough, and a code of it completes the proof.
@@ -171,7 +172,8 @@ async fn the_same_creation_asked_again_by_its_key_answers_what_was_made_without_
         .token(signed.token())
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(listed.len(), 1, "no second token");
 }
 
