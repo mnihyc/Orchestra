@@ -1,0 +1,11 @@
+fmt
+clippy
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test bound
+test -p orch-api-core --test everything_scale -- resource_lists restoring_the_team_members_session --nocapture --test-threads=1
+test -p orch-api-core --test everything_resources
+test -p orch-api-core --test resource_groups
+test -p orch-api-core --test nodes_lists
+test -p orch-api-core --test org_contents
+test -p orch-api-core --test sign_in
+test -p orch-api-core --test realtime_feeds

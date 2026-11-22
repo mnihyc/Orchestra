@@ -79,7 +79,7 @@ pub(super) fn holders<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    (): (),
+    _query: orch_api_contract::common::CollectionQuery,
     (): (),
 ) -> OperationFuture<'a> {
     Box::pin(async move {
@@ -117,9 +117,9 @@ pub(super) fn holders<'a>(
 /// Use the source rows selected by the same actual read-connection preparation.
 pub(super) async fn holder_list(
     ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
     (): (),
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::access::Holder>> {
+) -> ApiResult<orch_api_contract::common::Page<orch_api_contract::access::Holder>> {
     let mut conn = ctx.app.db.begin_snapshot().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
     let prepared = ctx.operation_data::<PreparedHolders>()?;
@@ -144,7 +144,14 @@ pub(super) async fn holder_list(
         .await?
     };
     conn.commit().await.map_err(DbError::from)?;
-    Ok(answer)
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("group-holders:{}", ctx.id("id")?),
+        answer,
+        orch_api_base::collection::holder_key,
+        orch_api_base::collection::holder_name,
+        false,
+    )
 }
 
 /// Only the operation's Read may materialize the updated Group and membership count.

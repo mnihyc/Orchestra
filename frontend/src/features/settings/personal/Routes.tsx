@@ -1,3 +1,8 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { useRetainedRows } from '@/lib/retainedRows';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
+import { Pagination } from '@/ui/Pagination';
 /** A person's routes: one card for each channel they can be reached through, with its switch, how long a notification stays unread first, how often a message goes, the kinds it carries, and for a bot the link that connects their chat.
  *
  * Nothing leaves the application for a person until they switch a way on, so every card begins off. A card says
@@ -6,10 +11,10 @@
  * takes push, a bot that was started. Where it can, it says what it sends, how long a notification must stay
  * unread first and how often at most a message goes, and has Send a test. A way nobody set up has no card.
  */
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { FlaskConical, Mail, Pencil, Plus, Trash2, Unplug } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StateLine } from '@/ui/StateLine';
 import { EmptyState } from '@/ui/EmptyState';
@@ -17,10 +22,10 @@ import { choiceOption } from '@/i18n/choices';
 
 import { meQuery, resendConfirmation } from '@/api/auth';
 import { ApiError } from '@/api/client';
-import { deleteChannel, deleteRoute, notificationChannelsKey, notificationChannelsQuery, notifiersQuery, setRoute, testChannel } from '@/api/notifications';
+import { deleteChannel, deleteRoute, notificationChannelsKey, notificationChannelsPageQuery, notifiersQuery, setRoute, testChannel } from '@/api/notifications';
 import { ALL_KINDS, KIND_LOOK } from '@/features/inbox/kinds';
 import { ConnectDialog } from '@/features/settings/personal/Connect';
-import { routesQuery } from '@/api/away';
+import { routesPageQuery, routesQuery } from '@/api/away';
 import { DeviceReadiness } from '@/features/settings/personal/away/Device';
 import { RetainedRoute, RouteOutcome } from '@/features/settings/personal/away/Outcome';
 import { useAwayLive } from '@/features/settings/personal/away/live';
@@ -282,12 +287,13 @@ function Details({ channel, save, busy }: { channel: NotificationChannel; save: 
 }
 
 /** What is missing before a way can reach the person, and the one thing that gives it. */
-function Need({ channel, notifier }: { channel: NotificationChannel; notifier: Notifier | undefined }) {
+function Need({ channel, notifier, onActive }: { channel: NotificationChannel; notifier: Notifier | undefined; onActive: (active: boolean) => void }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const me = useQuery(meQuery).data;
   const [state, setState] = useState<{ pending: boolean; error: unknown; done: boolean }>({ pending: false, error: null, done: false });
   const [connecting, setConnecting] = useState(false);
+  useEffect(() => onActive(connecting || state.pending), [onActive, connecting, state.pending]);
   const need = channel.route.needs;
   const reload = () => queryClient.invalidateQueries({ queryKey: notificationChannelsKey });
   const run = (act: () => Promise<unknown>) => {
@@ -332,7 +338,7 @@ function Need({ channel, notifier }: { channel: NotificationChannel; notifier: N
   );
 }
 
-function ChannelCard({ channel, notifier }: { channel: NotificationChannel; notifier: Notifier | undefined }) {
+function ChannelCard({ channel, notifier, visible, keep }: { channel: NotificationChannel; notifier: Notifier | undefined; visible: boolean; keep: (row: NotificationChannel, active: boolean) => void }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const me = useQuery(meQuery).data;
@@ -346,6 +352,8 @@ function ChannelCard({ channel, notifier }: { channel: NotificationChannel; noti
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<unknown>(null);
   const [removePending, setRemovePending] = useState(false);
+  const [childActive, setChildActive] = useState(false);
+  useEffect(() => keep(channel, busy || editing || removing || childActive || removePending), [keep, channel, busy, editing, removing, childActive, removePending]);
 
   const save = (body: MeNotificationRouteSetBody) => {
     setBusy(true);
@@ -377,7 +385,7 @@ function ChannelCard({ channel, notifier }: { channel: NotificationChannel; noti
         : undefined;
 
   return (
-    <li>
+    <li hidden={!visible} className={visible ? undefined : 'hidden'}>
       <section data-channel={channel.id} data-kind={channel.kind} aria-label={heading} className="flex flex-col gap-3 rounded-lg border border-border bg-surface px-4 py-3">
         <Switch
           label={<span className="font-medium">{heading}</span>}
@@ -391,7 +399,7 @@ function ChannelCard({ channel, notifier }: { channel: NotificationChannel; noti
             void save({ enabled: next });
           }}
         />
-        {needs && <Need channel={channel} notifier={notifier} />}
+        {needs && <Need channel={channel} notifier={notifier} onActive={setChildActive} />}
         {channel.kind === 'push' && <DeviceReadiness channelId={channel.id} />}
         {outcome !== null && <RouteOutcome route={outcome} />}
         {!needs && <Details channel={channel} save={(body) => void save(body)} busy={busy} />}
@@ -455,23 +463,29 @@ function ChannelCard({ channel, notifier }: { channel: NotificationChannel; noti
 // ---------------------------------------------------------------- all of them
 
 /** The ways out of the application that can reach the person, one card each, and the way to add a webhook of their own. */
-export function OutsideOrch() {
+function DeliveryRoutes() {
   const { t } = useTranslation();
   useAwayLive();
-  const channels = useQuery(notificationChannelsQuery);
+  const search = useCollectionSearch('personal-delivery');
+  const channels = useInfiniteQuery(notificationChannelsPageQuery(search.q));
+  const removed = useInfiniteQuery(routesPageQuery(search.q));
   const routes = useQuery(routesQuery);
   useAwayAnchor(channels.dataUpdatedAt + routes.dataUpdatedAt);
   const notifiers = useQuery(notifiersQuery);
   const [adding, setAdding] = useState(false);
   const byName = new Map((notifiers.data ?? []).map((notifier) => [notifier.name, notifier]));
-  const current = new Map((routes.data ?? []).filter((route) => route.channel_id !== null && route.health !== 'channel_removed').map((route) => [route.channel_id, route]));
-  const list = channels.data?.map((channel) => {
-    const route = current.get(channel.id);
-    return { ...channel, route: route === undefined ? channel.route : { ...route, channel_id: channel.id } };
-  });
-  const retained = (routes.data ?? []).filter((route) => route.health === 'channel_removed');
+  const list = useMemo(() => {
+    const current = new Map((routes.data ?? []).filter((route) => route.channel_id !== null && route.health !== 'channel_removed').map((route) => [route.channel_id, route]));
+    return channels.data?.pages.flatMap((page) => page.items).map((channel) => {
+      const route = current.get(channel.id);
+      return route === undefined ? channel : { ...channel, route: { ...route, channel_id: channel.id } };
+    });
+  }, [channels.data, routes.data]);
+  const held = useRetainedRows(list ?? []);
+  const retained = removed.data?.pages.flatMap((page) => page.items) ?? [];
   return (
     <div className="flex flex-col gap-3">
+      <CollectionSearch name={t('notifications.outside.title')} {...search} />
       {list === undefined && channels.isPending ? (
         <SkeletonGroup read={channels} className="flex flex-col gap-3">
           {[0, 1].map((index) => (
@@ -485,16 +499,16 @@ export function OutsideOrch() {
         <ErrorState compact error={channels.error} retrying={channels.isRefetching} onRetry={() => void channels.refetch()} />
       ) : list.length === 0 ? (
         <EmptyState compact title={t('notifications.outside.none')} />
-      ) : (
-        <ul className="flex flex-col gap-3">
-          {list.map((channel) => (
-            <ChannelCard key={channel.id} channel={channel} notifier={byName.get(channel.kind)} />
-          ))}
-        </ul>
-      )}
-      {retained.length > 0 && <ul className="flex flex-col gap-3">{retained.map((route) => <RetainedRoute key={route.id} route={route} />)}</ul>}
+      ) : null}
+      {held.rows.length > 0 && <ScrollRegion kind="table" label={t('notifications.outside.title')} className="max-h-96 overflow-y-auto"><ul className="flex flex-col gap-3">
+        {held.rows.map((channel) => <ChannelCard key={channel.id} channel={channel} notifier={byName.get(channel.kind)} visible={held.visible.has(channel.id)} keep={held.keep} />)}
+      </ul></ScrollRegion>}
+      <Pagination hasMore={channels.hasNextPage} loading={channels.isFetchingNextPage} error={channels.isFetchNextPageError ? channels.error : null} onMore={() => void channels.fetchNextPage()} />
+      {retained.length > 0 && <ScrollRegion kind="table" label={t('away.outcome.removedName')} className="max-h-96 overflow-y-auto"><ul className="flex flex-col gap-3">{retained.map((route) => <RetainedRoute key={route.id} route={route} />)}</ul></ScrollRegion>}
+      {removed.isError && !removed.isFetchNextPageError && <ErrorState compact error={removed.error} onRetry={() => void removed.refetch()} />}
+      <Pagination hasMore={removed.hasNextPage} loading={removed.isFetchingNextPage} error={removed.isFetchNextPageError ? removed.error : null} onMore={() => void removed.fetchNextPage()} />
       {routes.isError && <ErrorState compact error={routes.error} retrying={routes.isRefetching} onRetry={() => void routes.refetch()} />}
-      {channels.isError && list !== undefined && <ErrorState compact error={channels.error} retrying={channels.isRefetching} onRetry={() => void channels.refetch()} />}
+      {channels.isError && !channels.isFetchNextPageError && list !== undefined && <ErrorState compact error={channels.error} retrying={channels.isRefetching} onRetry={() => void channels.refetch()} />}
       <div>
         <Button icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>
           {t('notifications.webhook.add')}
@@ -503,4 +517,9 @@ export function OutsideOrch() {
       {adding && <WebhookDialog channel={null} open={adding} onOpenChange={setAdding} />}
     </div>
   );
+}
+
+export function OutsideOrch() {
+  const { scope } = useCollectionSearch('personal-delivery');
+  return <DeliveryRoutes key={scope} />;
 }

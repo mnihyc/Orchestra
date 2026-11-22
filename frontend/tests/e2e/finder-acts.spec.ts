@@ -59,7 +59,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await expect(switching).toBeVisible(); await expect(switching.locator('[data-change-runs]')).toBeVisible();
     await switching.getByRole('button', { name: caption('@common.close', locale), exact: true }).click();
 
-    await act(page, locale, locale === 'en' ? '> new thread' : '> 新建 线程', 'create.thread');
+    await act(page, locale, locale === 'en' ? '> new thread' : '> 新建 会话', 'create.thread');
     await expect(page.locator('[data-new-thread]')).toBeVisible();
     await page.getByRole('dialog').getByRole('button', { name: caption('@common.cancel', locale), exact: true }).click();
 

@@ -42,6 +42,43 @@ fn component(parts: &[SystemComponent], name: SystemComponentName) -> &SystemCom
 }
 
 #[tokio::test]
+async fn the_api_keeps_serving_and_names_its_metrics_listener_when_the_bind_is_unavailable() {
+    let world = World::new().await;
+    let c = cast(&world).await;
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    assert!(world.app.app.bind_metrics(&address).await.is_err());
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    let api = component(&info.components, SystemComponentName::Api);
+    assert!(api.ok, "the optional listener does not stop the API");
+    assert_eq!(
+        serde_json::to_value(api.issue).unwrap(),
+        json!("metrics_listener_unavailable")
+    );
+    drop(held);
+    let listening = world.app.app.bind_metrics(&address).await.unwrap();
+    let info = world
+        .app
+        .call(AdminSystemGet, &[])
+        .token(&c.root.token)
+        .send()
+        .await
+        .ok();
+    assert!(
+        component(&info.components, SystemComponentName::Api)
+            .issue
+            .is_none()
+    );
+    drop(listening);
+}
+
+#[tokio::test]
 async fn the_state_of_the_system_says_how_its_parts_fare_and_what_waits_in_its_queues() {
     let world = World::new().await;
     let c = cast(&world).await;
@@ -415,7 +452,7 @@ async fn the_authority_names_the_machines_whose_certificates_end_soon_in_expiry_
 }
 
 #[tokio::test]
-async fn the_pki_list_stops_at_fifty_soonest_certificates_but_counts_every_machine_due() {
+async fn the_pki_list_pages_every_due_certificate_and_searches_before_its_first_page() {
     let world = World::new().await;
     let c = cast(&world).await;
     let mut expected = Vec::new();
@@ -449,6 +486,36 @@ async fn the_pki_list_stops_at_fifty_soonest_certificates_but_counts_every_machi
         "the total is not capped with the list"
     );
     assert_eq!(pki.machines_expiring.len(), 50);
+    let next = pki
+        .machines_next_cursor
+        .clone()
+        .expect("later due machines remain reachable");
+    let rest = world
+        .app
+        .call(AdminPkiGet, &[])
+        .token(&c.root.token)
+        .query(&orch_api_contract::common::CollectionQuery {
+            q: None,
+            limit: None,
+            cursor: Some(next),
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(rest.machines_expiring.len(), 3);
+    assert_eq!(rest.machines_next_cursor, None);
+    let found = world
+        .app
+        .call(AdminPkiGet, &[])
+        .token(&c.root.token)
+        .raw_query("q=due-53&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.machines_expiring.len(), 1);
+    assert_eq!(found.machines_expiring[0].machine.name, "due-53");
+    assert_eq!(found.machines_expiring_30d, 53);
+
     assert_eq!(
         pki.machines_expiring
             .iter()
@@ -641,7 +708,8 @@ async fn every_host_of_the_system_is_listed_to_a_system_admin_those_of_orgs_and_
         .token(&c.root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
 
     let names: Vec<_> = hosts.iter().map(|host| host.base.name.as_str()).collect();
     assert_eq!(
@@ -761,6 +829,7 @@ async fn runtimes(world: &World, by: &Who, query: &AdminRuntimeListQuery) -> Vec
         .send()
         .await
         .ok()
+        .items
 }
 
 #[tokio::test]
@@ -776,6 +845,7 @@ async fn the_runtimes_of_both_pools_are_listed_whoever_s_they_are_and_those_remo
         &AdminRuntimeListQuery {
             host_id: Some(on.first),
             kind: None,
+            ..AdminRuntimeListQuery::default()
         },
     )
     .await;
@@ -785,6 +855,7 @@ async fn the_runtimes_of_both_pools_are_listed_whoever_s_they_are_and_those_remo
         &AdminRuntimeListQuery {
             host_id: None,
             kind: Some(UnitKind::Provider),
+            ..AdminRuntimeListQuery::default()
         },
     )
     .await;
@@ -1135,7 +1206,8 @@ async fn the_plugins_the_configuration_names_and_those_machines_report_are_liste
         .token(&c.root.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
 
     assert_eq!(listed.len(), 3);
     let configured = listed
