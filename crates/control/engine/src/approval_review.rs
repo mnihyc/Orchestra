@@ -8,6 +8,13 @@ use orch_db::Conn;
 use orch_db::queries::threads::ThreadRow;
 use orch_types::{Id, Json};
 
+pub(crate) struct ReviewSource {
+    pub thread: Id,
+    pub segment: Id,
+    pub serving: bool,
+    pub opening_id: Option<Id>,
+}
+
 impl Engine {
     /// Native modes the thread can choose now, with the same model and confinement gates as opening it.
     pub async fn offered_approval_modes(
@@ -39,13 +46,126 @@ impl Engine {
         models: &[String],
         binding: Option<(orch_agent_contract::credentials::CredentialPath, &str)>,
     ) -> Result<Vec<ApprovalMode>, EngineError> {
+        let choices = self
+            .approval_choices_with_binding(conn, environment, descriptor, allowed, models, binding)
+            .await?;
+        Ok(descriptor
+            .approval_modes
+            .iter()
+            .copied()
+            .filter(|mode| {
+                let name = serde_json::to_value(mode).ok();
+                choices.iter().any(|choice| {
+                    choice.available
+                        && name.as_ref().and_then(Json::as_str) == Some(choice.mode.as_str())
+                })
+            })
+            .fold(Vec::new(), |mut modes, mode| {
+                if !modes.contains(&mode) {
+                    modes.push(mode);
+                }
+                modes
+            }))
+    }
+
+    /// Current facts from the same gates used by admission, retaining only declared modes.
+    pub async fn approval_choices_with_binding(
+        &self,
+        conn: &mut Conn,
+        environment: Option<Id>,
+        descriptor: &AgentDescriptor,
+        allowed: &[ApprovalMode],
+        models: &[String],
+        binding: Option<(orch_agent_contract::credentials::CredentialPath, &str)>,
+    ) -> Result<Vec<orch_api_contract::settings::ApprovalModeChoice>, EngineError> {
+        use orch_api_contract::settings::{
+            ApprovalCheckTarget, ApprovalChoiceReason as Reason,
+            ApprovalChoiceRequirement as Requirement, ApprovalModeChoice,
+        };
         let mut modes = Vec::new();
-        for mode in &descriptor.approval_modes {
-            if !allowed.contains(mode) {
+        let mut declared = descriptor.approval_modes.clone();
+        if descriptor.approval_auto.is_some() && !declared.contains(&ApprovalMode::Auto) {
+            declared.push(ApprovalMode::Auto);
+        }
+        for mode in &declared {
+            let name = serde_json::to_value(mode)?
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if modes
+                .iter()
+                .any(|choice: &ApprovalModeChoice| choice.mode == name)
+            {
                 continue;
             }
-            // Auto exists only where the descriptor of the build says so (it keeps the mode only for a build whose
-            // check proved it) and declares the reviewer, and only for someone who may use that reviewer's model.
+            if !allowed.contains(mode) {
+                modes.push(ApprovalModeChoice {
+                    check: None,
+                    build: None,
+                    mode: name,
+                    available: false,
+                    reason: Some(Reason::NotAllowedHere),
+                    requirement: Some(Requirement::PolicyAllowance),
+                });
+                continue;
+            }
+            if *mode == ApprovalMode::Auto {
+                use orch_agent_contract::descriptor::AutoApprovalState as State;
+                let reason = match descriptor.approval_auto.as_ref().map(|proof| proof.state) {
+                    Some(State::Passed) if descriptor.approval_modes.contains(mode) => None,
+                    Some(State::Passed) => Some(Reason::NotSupportedByBuild),
+                    Some(State::Unavailable) => Some(Reason::AutoCheckUnavailable),
+                    Some(State::NeedsHost) => Some(Reason::AutoCheckNeedsHost),
+                    Some(State::Failed) => Some(Reason::AutoCheckFailed),
+                    Some(State::NotProven) | None => Some(Reason::AutoNotProven),
+                };
+                if let Some(reason) = reason {
+                    // Without a build host online the check cannot run: the choice leads to the hosts instead.
+                    let check = descriptor
+                        .approval_auto
+                        .as_ref()
+                        .filter(|proof| {
+                            proof.check_available
+                                && !matches!(proof.state, State::Passed | State::NeedsHost)
+                        })
+                        .and_then(|proof| {
+                            Some(ApprovalCheckTarget {
+                                machine_id: proof.machine_id?,
+                                sha256: proof.sha256.clone()?,
+                                kind: descriptor.kind.clone(),
+                                version: descriptor.harness.version.clone(),
+                            })
+                        });
+                    // A check of it runs for minutes on a build host: the person sees it under way, and why it did
+                    // not pass once it ends, with the choice.
+                    let build = match &check {
+                        Some(target) => {
+                            crate::hosting::kept_build(
+                                conn,
+                                &target.kind,
+                                &target.version,
+                                &target.sha256,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    };
+                    modes.push(ApprovalModeChoice {
+                        mode: name,
+                        available: false,
+                        reason: Some(reason),
+                        requirement: Some(if reason == Reason::NotSupportedByBuild {
+                            Requirement::AgentBuild
+                        } else {
+                            Requirement::AutoCheck
+                        }),
+                        check,
+                        build,
+                    });
+                    continue;
+                }
+            }
+            // A proved Auto build also needs its declared reviewer and the person's Use of that model.
             let reviewer = match binding {
                 Some((path, model)) => {
                     reviewer_allowed_for(*mode, Some(descriptor), models, path, model)
@@ -53,10 +173,35 @@ impl Engine {
                 None => reviewer_allowed(*mode, Some(descriptor), models),
             };
             if *mode == ApprovalMode::Auto && reviewer.is_err() {
+                let missing = descriptor.capabilities.approval_reviewer.is_none();
+                modes.push(ApprovalModeChoice {
+                    check: None,
+                    build: None,
+                    mode: name,
+                    available: false,
+                    reason: Some(if missing {
+                        Reason::ReviewerUnavailable
+                    } else {
+                        Reason::ReviewerAccessRequired
+                    }),
+                    requirement: Some(if missing {
+                        Requirement::NativeReviewer
+                    } else {
+                        Requirement::ReviewerUse
+                    }),
+                });
                 continue;
             }
             if *mode == ApprovalMode::Bypass {
                 let Some(environment) = environment else {
+                    modes.push(ApprovalModeChoice {
+                        check: None,
+                        build: None,
+                        mode: name,
+                        available: false,
+                        reason: Some(Reason::RequiredIsolationUnavailable),
+                        requirement: Some(Requirement::IsolatedEnvironment),
+                    });
                     continue;
                 };
                 if self
@@ -64,12 +209,25 @@ impl Engine {
                     .await?
                     .is_some()
                 {
+                    modes.push(ApprovalModeChoice {
+                        check: None,
+                        build: None,
+                        mode: name,
+                        available: false,
+                        reason: Some(Reason::RequiredIsolationUnavailable),
+                        requirement: Some(Requirement::IsolatedEnvironment),
+                    });
                     continue;
                 }
             }
-            if !modes.contains(mode) {
-                modes.push(*mode);
-            }
+            modes.push(ApprovalModeChoice {
+                check: None,
+                build: None,
+                mode: name,
+                available: true,
+                reason: None,
+                requirement: None,
+            });
         }
         Ok(modes)
     }
@@ -98,6 +256,8 @@ impl Engine {
                 .provider_use(
                     conn,
                     &ProviderUse {
+                        pool: None,
+                        purpose: orch_access_contract::permissions::UsagePurpose::Review,
                         person: person.unwrap_or(thread.owner_id),
                         node: thread.node_id,
                         provider,
@@ -139,12 +299,17 @@ impl Engine {
     pub(crate) async fn record_review_item(
         &self,
         unit: &mut crate::unit::Unit<'_>,
-        thread: Id,
-        segment: Id,
+        source: ReviewSource,
         native_ref: &str,
         turn: Option<Id>,
         payload: &Json,
     ) -> Result<(), EngineError> {
+        let ReviewSource {
+            thread,
+            segment,
+            serving,
+            opening_id,
+        } = source;
         let Some(detail) = detail(payload) else {
             return Ok(());
         };
@@ -169,20 +334,35 @@ impl Engine {
                 .unwrap_or(false),
             usage_apart: usage.is_some(),
         };
-        let seq = unit.stamp(thread).await?;
-        sqlx::query("UPDATE segments SET approval_reviewer=$2,seq_updated=$3 WHERE id=$1")
-            .bind(segment)
-            .bind(serde_json::to_value(reviewer)?)
-            .bind(seq)
-            .execute(&mut *unit.conn)
-            .await
-            .map_err(orch_db::DbError::from)?;
+        let current = serving
+            && orch_db::queries::session_dependencies::model_member_matches(
+                unit.conn, segment, opening_id, turn,
+            )
+            .await?
+            && match turn {
+                Some(turn) => {
+                    orch_db::queries::thread_history::selected_turn(unit.conn, thread, turn).await?
+                }
+                None => orch_db::queries::threads::active_turn(unit.conn, thread)
+                    .await?
+                    .is_none(),
+            };
+        if current {
+            let seq = unit.stamp(thread).await?;
+            sqlx::query("UPDATE segments SET approval_reviewer=$2,seq_updated=$3 WHERE id=$1")
+                .bind(segment)
+                .bind(serde_json::to_value(reviewer)?)
+                .bind(seq)
+                .execute(&mut *unit.conn)
+                .await
+                .map_err(orch_db::DbError::from)?;
+        }
         let Some(usage) = usage else {
             return Ok(());
         };
         let turn = match turn {
             Some(turn) => orch_db::queries::threads::turn(&mut *unit.conn, turn).await?,
-            None => orch_db::queries::threads::active_turn(&mut *unit.conn, thread).await?,
+            None => None,
         };
         let Some(turn) = turn.filter(|turn| turn.segment_id == segment && turn.thread_id == thread)
         else {

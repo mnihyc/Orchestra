@@ -1,0 +1,9 @@
+fmt
+clippy
+contracts
+test -p orch-node --lib
+test -p orch-node --test conformance -- a_bundled_node_whose_own_program_its_daemon_cannot_see_runs_the_check_from_its_data_directory an_unavailable_check_image_is_named_without_hiding_a_daemon_failure
+test -p orch-api-core --test harness_checks --test threads_settings --test offline_checksums --test admin_catalogue
+test -p orch-engine --test approval_review
+test -p orch-engine --lib -- --skip history_pages::
+test -p orch-api-base --lib -- harness_checks
