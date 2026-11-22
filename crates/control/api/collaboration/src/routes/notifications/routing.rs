@@ -152,15 +152,25 @@ pub async fn set(
     let waiting_count = route_rows::waiting_count(&mut tx, route.id).await?;
     let link = super::channels::own_link(&mut tx, &route, ctx.now).await?;
     let orgs = orgs_of(&mut tx, row.org_id.into_iter().collect()).await?;
+    let pending_delivery = super::views::pending_delivery(
+        &mut tx,
+        me,
+        route.id,
+        ctx.now,
+        !route.enabled || !row.enabled || needs.is_some(),
+    )
+    .await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(route_view(RouteFacts {
+    let mut shown = route_view(RouteFacts {
         channel_id: Some(channel),
         channel: Some(views::route_channel_of(&row, &orgs)),
         route: Some(&route),
         needs,
         waiting_count,
         link,
-    }))
+    });
+    shown.pending_delivery = pending_delivery;
+    Ok(shown)
 }
 
 /// The root orgs named, as the caller may know them.
@@ -186,7 +196,35 @@ async fn orgs_of(conn: &mut orch_db::Conn, ids: Vec<Id>) -> ApiResult<BTreeMap<I
 /// The caller's own routes: one for each channel they changed theirs for, and those kept after
 /// their channel was removed, until they remove them. A removed channel's org is named only
 /// while the caller is still a member of it.
-pub async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>> {
+pub async fn list(
+    ctx: Ctx,
+    query: orch_api_contract::notifications::NotificationRouteListQuery,
+    (): (),
+) -> ApiResult<orch_api_contract::common::Page<NotificationRoute>> {
+    let source = format!("personal-routes:{}:{:?}", ctx.user()?.id(), query.retained);
+    let rows = list_snapshot(ctx, (), ()).await?.into_iter().filter(|row| query.retained.is_none_or(|retained| retained == (row.health == orch_api_contract::notifications::NotificationRouteHealth::ChannelRemoved))).collect();
+    crate::collection::snapshot(
+        &query.collection(),
+        &source,
+        rows,
+        |row| (row.channel_id, row.id),
+        |row| {
+            format!(
+                "{} {} {}",
+                row.channel
+                    .as_ref()
+                    .map_or("", |channel| channel.name.as_str()),
+                row.channel
+                    .as_ref()
+                    .map_or("", |channel| channel.kind.as_str()),
+                row.label.as_deref().unwrap_or("")
+            )
+        },
+        false,
+    )
+}
+
+async fn list_snapshot(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>> {
     let me = ctx.user()?.id();
     let mut conn = ctx.app.db.acquire().await?;
     let person = people::recipient(&mut conn, me)
@@ -227,7 +265,7 @@ pub async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>>
         };
         let waiting_count = route_rows::waiting_count(&mut conn, route.id).await?;
         let link = super::channels::own_link(&mut conn, route, ctx.now).await?;
-        shown.push(route_view(RouteFacts {
+        let mut ready = route_view(RouteFacts {
             channel_id: route.channel_id,
             channel: match current {
                 Some(row) => Some(views::route_channel_of(row, &orgs)),
@@ -237,7 +275,16 @@ pub async fn list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<NotificationRoute>>
             needs,
             waiting_count,
             link,
-        }));
+        });
+        ready.pending_delivery = super::views::pending_delivery(
+            &mut conn,
+            me,
+            route.id,
+            ctx.now,
+            !route.enabled || current.is_none_or(|row| !row.enabled) || needs.is_some(),
+        )
+        .await?;
+        shown.push(ready);
     }
     Ok(shown)
 }

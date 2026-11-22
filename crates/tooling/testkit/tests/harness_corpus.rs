@@ -566,6 +566,9 @@ async fn collecting_uses_an_actual_native_barrier_and_keeps_every_intermediate_e
         thread,
         segment,
         SessionEvent::SessionLost(SessionLost {
+            expected: false,
+            opening_id: orch_types::new_id(),
+            uncertain: false,
             reason: "native barrier".into(),
         }),
     )

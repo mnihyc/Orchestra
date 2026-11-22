@@ -5,7 +5,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::common::PageQuery;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken};
@@ -22,11 +22,12 @@ fn rule(operation: &str, kind: &str, id: Id, business: &str, action: &str) -> Js
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native private audience fixture",
             token_hash: &token_hash(&token),

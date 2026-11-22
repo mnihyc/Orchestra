@@ -628,7 +628,7 @@ test('the rates inside a project are read as they stand and are written for the 
   await page.getByRole('button', { name: 'See the rates' }).click();
   const dialog = page.getByRole('dialog', { name: 'Rates · Web' });
   await expect(rateRow(page, 'Claude Opus 5')).toContainText('≈ Estimate · "claude-*"');
-  await expect(dialog.getByText('Rates are written for an org as a whole, and count in everything inside it.')).toBeVisible();
+  await expect(dialog.getByText('Rates are written for an organization as a whole, and count in everything inside it.')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Copy to the rate card' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Add a rate' })).toHaveCount(0);
   await expect(dialog.getByRole('switch', { name: 'Estimates' })).toBeDisabled();
@@ -732,4 +732,27 @@ test('a system with no catalogue in force says so, and a model with no rate of i
   await expect(estimates.getByText('No catalogue is in force')).toBeVisible();
   await expect(estimates.getByRole('alert')).toHaveCount(0);
   await expect(estimates.getByRole('textbox')).toHaveCount(0);
+});
+
+
+for (const width of [400, 1440]) test(`a usage record aligns the labels and values in one grid at ${width}px`, async ({page}) => {
+  await page.setViewportSize({width, height:900});
+  await signIn(page);
+  await page.goto('/usage?range=7d');
+  const records = page.getByRole('table', {name:'Records'});
+  const grid = records.locator('dl').filter({has:page.locator('dt').filter({hasText:'Provider'})}).first();
+  await expect(grid).toBeVisible();
+  const pairs = await grid.evaluate((list) => Array.from(list.querySelectorAll('dt'), (term) => {
+    const value = term.nextElementSibling;
+    if (value?.tagName !== 'DD') throw new Error('A record term needs its value');
+    const label = term.getBoundingClientRect(), figure = value.getBoundingClientRect();
+    return {labelLeft:label.left, valueLeft:figure.left, topDifference:Math.abs(label.top - figure.top)};
+  }));
+  expect(pairs.length).toBeGreaterThan(2);
+  for (const pair of pairs) {
+    expect(Math.abs(pair.labelLeft - pairs[0]!.labelLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(pair.valueLeft - pairs[0]!.valueLeft)).toBeLessThanOrEqual(1);
+    expect(pair.topDifference).toBeLessThanOrEqual(1);
+    expect(pair.valueLeft).toBeGreaterThan(pair.labelLeft);
+  }
 });

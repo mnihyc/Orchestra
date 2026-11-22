@@ -46,6 +46,9 @@ pub enum InstructionEvidence {
 /// One source of what the agent reads, in its place in the order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InstructionSource {
+    /// Its native path is hidden by capture masking, so it is not a public file door.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub path_redacted: bool,
     /// Its place in the order, from 0.
     pub order: u32,
     /// What kind of source.
