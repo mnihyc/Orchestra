@@ -1,0 +1,1 @@
+web-e2e tests/performance/frame-budget.spec.ts tests/performance/tree-scale.spec.ts

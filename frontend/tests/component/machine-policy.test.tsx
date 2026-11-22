@@ -1,15 +1,15 @@
 /** Policy rows are compact; one native invocation, not a key's role, identifies the enforcing program. */
-import { screen,within } from '@testing-library/react';
+import { fireEvent,screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach,expect,it,vi } from 'vitest';
 import { ApiError } from '@/api/client';
-import { MachinePolicyTab,policyCommand } from '@/features/resources/machines/Policy';
+import { MachineLimits,MachinePolicyTab,policyCommand } from '@/features/resources/machines/Policy';
 import type { MachinePolicy,MachinePolicyKey } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
 import { show } from './support';
 const {read,write,openGuide}=vi.hoisted(()=>({read:vi.fn<()=>Promise<MachinePolicy>>(),write:vi.fn<()=>Promise<MachinePolicy>>(),openGuide:vi.fn()}));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>openGuide}));
-vi.mock('@/api/resources',()=>({
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>openGuide}));
+vi.mock('@/api/resources',async (loadOriginal) => ({ ...await loadOriginal<object>(),
   machinePolicyQuery:()=>({queryKey:['machine-policy','machine'],queryFn:read}),
   machineQuery:()=>({queryKey:['machine','machine']}),updateMachinePolicy:write,
 }));
@@ -22,6 +22,66 @@ function policy(command="'/home/ada/.local/bin/orch-connector' --data-dir '/data
   ]};
 }
 beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue(policy());});
+for (const locale of ['en','zh-CN'] as const) it(`uses the native applicable keys and puts their actual authority in the existing help opening (${locale})`, async () => {
+  await setLocale(locale);
+  try {
+    const current = { ...policy(), limits: { unit_context: true, applicable_keys: [
+      { key: 'environment.terminal', governing_resource: 'environment' as const, authority_source: 'physical_operator' as const },
+    ] } };
+    read.mockResolvedValue(current);
+    const view = show(<MachineLimits machineId="machine" bounds="environment" id="limits" title="Machine limits" lead="" />);
+    await screen.findByRole('region', { name: 'Machine limits' });
+    expect(view.container.querySelector('[data-setting="environment.roots"]')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('machines.policy.keys.environment_terminal.title') }) }));
+    const body = document.querySelector('[data-fact-disclosure-body]');
+    expect(body).not.toBeNull();
+    expect(body).toHaveTextContent(locale === 'en' ? 'Applies to this unit' : '适用于此单元');
+    expect(body).toHaveTextContent(locale === 'en' ? 'Physical machine operator' : '物理机器操作员');
+    expect(screen.queryByRole('button', { name: i18n.t('common.details') })).not.toBeInTheDocument();
+    expect(read).toHaveBeenCalledOnce(); expect(write).not.toHaveBeenCalled();
+  } finally { await setLocale('en'); }
+});
+
+it('keeps an unfinished policy choice while its long collection is filtered away and restored', async () => {
+  const current = policy();
+  current.keys = [{ ...entry('environment.terminal',['environment'],false), delegated:true, writable:true },
+    ...Array.from({length:29},(_,index)=>entry(`future.${index}`,['environment'],false))];
+  read.mockResolvedValue(current);
+  const view = show(<MachineLimits machineId="machine" bounds="environment" id="limits" title="Machine limits" lead="" />);
+  const search = await screen.findByRole('searchbox');
+  await userEvent.click(screen.getByRole('button',{name:i18n.t('machines.policy.editTitle',{key:i18n.t('machines.policy.keys.environment_terminal.title')})}));
+  await userEvent.click(screen.getByRole('switch'));
+  expect(screen.getByRole('switch')).toBeChecked();
+  fireEvent.change(search,{target:{value:'no matching key'}});
+  expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+  fireEvent.change(search,{target:{value:'environment.terminal'}});
+  expect(screen.getByRole('switch')).toBeChecked();
+  expect(view.container.querySelector('[data-policy-keys]')).toHaveClass('max-h-(--list-max-height)');
+  expect(write).not.toHaveBeenCalled();
+});
+
+it('finds a reported directory value without expanding an unbounded policy list', async () => {
+  const current = policy();
+  current.keys = [entry('environment.roots',['environment','node'],Array.from({length:30},(_,index)=>`/workspace/${index}`))];
+  read.mockResolvedValue(current);
+  show(<MachinePolicyTab machine={{id:'machine'}} />);
+  await userEvent.click(await screen.findByRole('button',{name:i18n.t('machines.policy.viewTitle',{key:i18n.t('machines.policy.keys.environment_roots.title')})}));
+  const search = await screen.findByRole('searchbox',{name:i18n.t('machines.policy.findValue')});
+  fireEvent.change(search,{target:{value:'/workspace/29'}});
+  expect(screen.getByText('/workspace/29',{exact:true})).toBeVisible();
+  expect(screen.queryByText('/workspace/0',{exact:true})).not.toBeInTheDocument();
+  expect(write).not.toHaveBeenCalled();
+});
+for(const locale of ['en','zh-CN'] as const)it(`names the physical operator in a unit's existing locally kept limit source (${locale})`,async()=>{
+  await setLocale(locale);
+  try {
+    const view=show(<MachineLimits machineId="machine" bounds="environment" id="limits" title="Machine limits" lead=""/>);
+    await screen.findByRole('region',{name:'Machine limits'});
+    const row=view.container.querySelector('[data-setting="environment.terminal"]');
+    expect(row).toHaveTextContent(locale==='en'?'Physical machine operator':'物理机器操作员');
+    expect(within(row as HTMLElement).queryByRole('button',{name:i18n.t('machines.policy.editTitle',{key:i18n.t('machines.policy.keys.environment_terminal.title')})})).not.toBeInTheDocument();
+  }finally{await setLocale('en');}
+});
 for(const locale of ['en','zh-CN'] as const)it(`keeps descriptions and exact kept commands behind Help, with shared keys shown once (${locale})`,async()=>{
   await setLocale(locale);
   try {
@@ -149,4 +209,54 @@ it('shows a mixed failure in the field and the existing alert', async () => {
   expect(await screen.findByRole('alert')).toBeVisible();
   expect(editor).toHaveAttribute('aria-invalid', 'true');
   expect(editor).toHaveAccessibleDescription(new RegExp(i18n.t('machines.policy.driverFaults.type')));
+});
+
+it('finds every complete policy declaration while its open driver draft survives filtering and paging', async () => {
+  const initial = policy();
+  initial.keys = [{ ...entry('drivers', ['node'], { allowed: ['docker'] }), delegated: true, writable: true },
+    ...Array.from({ length: 1000 }, (_, index) => ({ ...entry(`future.${index}`, ['node'], true), definition: { ...entry(`future.${index}`, ['node'], true).definition, title: `Future ${index}` } }))];
+  read.mockResolvedValue(initial); write.mockResolvedValue(initial);
+  const user = userEvent.setup(); show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+  await user.click(await screen.findByRole('button', { name: i18n.t('machines.policy.editTitle', { key: i18n.t('machines.policy.keys.drivers.title') }) }));
+  const editor = screen.getByRole('textbox', { name: i18n.t('machines.policy.value') });
+  await user.clear(editor); await user.paste('{"allowed":["podman"]}');
+  const search = screen.getByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('machines.policy.sections.node.name') }) });
+  await user.click(search); await user.paste('future.999'); expect(await screen.findByText('Future 999')).toBeVisible();
+  expect(editor).toHaveValue('{"allowed":["podman"]}');
+  await user.clear(search); await user.click(screen.getByRole('button', { name: i18n.t('resourceDetails.layout.next') }));
+  expect(editor).toHaveValue('{"allowed":["podman"]}');
+  await user.click(screen.getByRole('button', { name: i18n.t('machines.policy.save') }));
+  await waitFor(() => expect(write).toHaveBeenCalledWith('machine', { drivers: { allowed: ['podman'] } }));
+  expect(read).toHaveBeenCalledOnce();
+});
+
+it('confirms only the system build currently reported by the machine and can revoke it', async () => {
+  const build = { os: 'windows', arch: 'x86_64', executable: 'a'.repeat(64) };
+  const key = { ...entry('exec.platform', ['machine'], { state: 'off' }), delegated: true, writable: true };
+  const initial: MachinePolicy = { ...policy(), keys: [key], platform_review: { build, approved: false, approval: null } };
+  read.mockResolvedValue(initial);
+  write.mockResolvedValue({ ...initial, platform_review: { build, approved: true, approval: null } });
+  const view = show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+  try {
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm this system' }));
+    expect(write).toHaveBeenCalledWith('machine', { 'exec.platform': { state: 'approved', build } });
+    await userEvent.click(await screen.findByRole('button', { name: 'Revoke confirmation' }));
+    expect(write).toHaveBeenCalledWith('machine', { 'exec.platform': { state: 'off' } });
+  } finally { view.unmount(); }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps the machine file bound a named choice independent of agent sandbox (${locale})`, async () => {
+  await setLocale(locale);
+  try {
+    read.mockResolvedValue({ ...policy(), keys: [{ ...entry('environment.files_reach', ['environment'], 'roots'), writable: true, delegated: true }, entry('agent.max_sandbox', ['agent'], 'workspace')] });
+    show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+    const name = i18n.t('machines.policy.keys.environment_files_reach.title');
+    await userEvent.click(await screen.findByRole('button', { name: i18n.t('machines.policy.editTitle', { key: name }) }));
+    const choice = screen.getByRole('combobox');
+    expect(choice).toHaveTextContent(i18n.t('fileReach.roots'));
+    await userEvent.click(choice);
+    await userEvent.click(screen.getByRole('option', { name: i18n.t('fileReach.machine') }));
+    expect(choice).toHaveTextContent(i18n.t('fileReach.machine'));
+    expect(screen.getByText(i18n.t('machines.policy.sandbox.workspace'))).toBeVisible();
+  } finally { await setLocale('en'); }
 });

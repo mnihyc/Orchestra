@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import type { SettingsTarget } from '@/api/settings';
 import { useGuideEntry } from '@/features/help/guideEntries';
 import { useHelpOpener } from '@/features/help/open';
-import { settingArticle, settingDefinitionForKey, settingHelpEntries } from '@/features/help/settings';
+import { settingArticle, settingHelpEntry } from '@/features/help/settings';
 import { useHelpState } from '@/features/help/state';
 import type { SettingDef } from '@/generated/api-types';
 import { HelpHint } from '@/ui/HelpHint';
@@ -19,8 +19,7 @@ export function SettingHelpGroup({ settingKeys, target, term, article, heading =
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const show = useHelpOpener();
-  const available = settingHelpEntries(i18n);
-  const definitions = [...new Map(settingKeys.map((key) => settingDefinitionForKey(available, key))
+  const definitions = [...new Map(settingKeys.map((key) => settingHelpEntry(i18n, key))
     .filter((def): def is SettingDef => def !== undefined).map((def) => [def.key, def])).values()];
   const { ref, hidden } = useGuideEntry(definitions.length === 0 ? null : article, heading, 'group');
   const entry = (def: SettingDef) => {

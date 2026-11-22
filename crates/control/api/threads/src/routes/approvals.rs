@@ -328,11 +328,19 @@ async fn views_routed(
             None
         };
         let shown = access.remove(&row.id);
-        let request = match &shown {
+        let mut request = match &shown {
             Some(shown) => ApprovalRequest::Access(shown.request.clone()),
             None => serde_json::from_value(json!({ "kind": row.kind, "request": row.request }))
                 .map_err(ApiError::internal)?,
         };
+        if row.state != "pending"
+            && let ApprovalRequest::Port(port) = &mut request
+        {
+            port.opening.refused_until =
+                orch_db::queries::ports::refused_until(conn, port.opening.id)
+                    .await?
+                    .map(Time::new);
+        }
         let requester = match (
             row.requester_user_id,
             row.requester_thread_id.or(row.thread_id),
@@ -347,6 +355,12 @@ async fn views_routed(
             _ => return Err(ApiError::internal("an approval nobody asked for")),
         };
         approvals.push(Approval {
+            delivery: row
+                .decision_delivery
+                .clone()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(ApiError::internal)?,
             id: row.id,
             request,
             state: match &shown {
