@@ -7,17 +7,23 @@ import { changeRoute, removeRetainedRoute } from '@/api/away';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { FactDisclosure } from '@/ui/FactDisclosure';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { RelativeTime } from '@/ui/RelativeTime';
 import type { AwayRoute } from './types';
 
 export function RouteOutcome({ route }: { route: AwayRoute }) {
   const { t } = useTranslation();
+  const format=useFormatContext();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const name = route.channel?.name ?? t('away.outcome.removedName');
   const failed = route.health === 'failed' || route.health === 'partial';
   const removed = route.health === 'channel_removed';
   const rejected = route.health === 'target_gone';
+  const delivery=route.pending_delivery??undefined;
+  const fragment=delivery?.acceptance==='unknown'?t('placesMail.acceptanceUnknown'):delivery?.acceptance==='pending'&&delivery.attempts>0&&delivery.next_eligible_at!==null?<>{t('placesMail.retryEligible')} <RelativeTime at={delivery.next_eligible_at}/></>:undefined;
   const retry = async () => {
     if (route.channel_id === null || busy) return;
     setBusy(true); setError(null);
@@ -26,6 +32,13 @@ export function RouteOutcome({ route }: { route: AwayRoute }) {
   return (
     <div className="flex flex-col gap-2" id={route.id === null ? undefined : `route-${route.id}`}>
       <p className="text-sm text-text-muted">{t('away.outcome.lastAccepted')} {route.last_ok_at === null ? <>{t('away.outcome.never')}{route.health === 'never' && <> · {t('away.notTested')}</>}</> : <RelativeTime at={route.last_ok_at} />}</p>
+      <FactDisclosure fragment={fragment} groups={[{key:'delivery',kind:'recorded_outcome',facts:[
+        {key:'attempt',label:t('placesMail.lastAttempt'),value:delivery?.last_attempt_at===undefined||delivery.last_attempt_at===null?undefined:<RelativeTime at={delivery.last_attempt_at}/>},
+        {key:'count',label:t('placesMail.attempts'),value:delivery===undefined?undefined:formatNumber(delivery.attempts,format.locale)},
+        {key:'eligible',label:t('placesMail.retryEligible'),value:delivery?.next_eligible_at===undefined||delivery.next_eligible_at===null?undefined:<RelativeTime at={delivery.next_eligible_at}/>},
+        {key:'acceptance',label:t('placesMail.acceptance'),value:delivery===undefined?undefined:t(`placesMail.acceptances.${delivery.acceptance}`)},
+      ]}]}/>
+      {route.failure?.code === 'invalid_timezone' && <InlineAlert tone="warning" title={t('notifications.quiet.zoneProblem')}>{route.failure.message}</InlineAlert>}
       {(failed || rejected || removed) && <InlineAlert tone="warning" title={removed ? t('away.outcome.removed', { name }) : rejected ? t('away.outcome.rejected', { reason: route.failure?.message ?? '' }) : t('away.outcome.failed', { way: name })}>
         {!rejected && route.failure !== null && <p className="wrap-anywhere">{route.failure.message}</p>}
         {route.health === 'partial' && (route.failure?.affected_devices.length ?? 0) > 0 && <p>{t('away.outcome.partial', { devices: route.failure?.affected_devices.join(t('startFlow.separator')) ?? '' })}</p>}

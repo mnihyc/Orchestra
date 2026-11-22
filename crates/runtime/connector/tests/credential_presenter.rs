@@ -156,7 +156,7 @@ async fn rig(exchange: Arc<Exchange>) -> ProviderRig {
 
 async fn start(p: &ProviderRig, name: &str) {
     let id = new_id();
-    let body:ProviderStart=serde_json::from_value(json!({"provider_id":p.rig.provider,"protocols":[RESPONSES,MESSAGES],
+    let body:ProviderStart=serde_json::from_value(json!({"provider_id":p.rig.provider,"upstream_policy":{"head_secs":600,"idle_secs":300,"whole_bytes":16777216},"translation_output_tokens":4096,"protocols":[RESPONSES,MESSAGES],
         "upstreams":[
             {"protocol":RESPONSES,"base_url":p.mock.responses_base_url(),"options":{"auth":"header","auth_header":"api-key","headers":{"x-fixed":"kept"},"query":{"region":"east"}}},
             {"protocol":MESSAGES,"base_url":p.mock.messages_base_url(),"options":{}}
