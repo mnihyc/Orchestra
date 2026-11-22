@@ -1,0 +1,11 @@
+test -p orch-engine --test source_uniform --test source
+test -p orch-engine --lib -- jobs::source:: views::
+test -p orch-api-core --test workspace_source --test workspace_source_scopes
+test -p orch-api-core --lib
+test -p orch-node --test uninstall
+test -p orch-node --test drivers
+test -p orch-node --test program
+test -p orch-node --lib -- composition::
+web typecheck
+web lint
+web test
