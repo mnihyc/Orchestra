@@ -138,6 +138,8 @@ async fn restore_fixture() -> (Site, orch_types::Id, std::sync::Arc<RestoreReade
         &mut conn,
         snapshot,
         &FsRecordResult {
+            indexing: None,
+
             state: RecordState::Complete,
             tree_ref: Some("retained-native-root".into()),
             repository_head: None,
@@ -321,6 +323,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         token: None,
         creator_origin: None,
         scheduled_input: None,
+        workspace_edits: Vec::new(),
+        prepared_source: None,
         action: Action::Prepare {
             directory: thread.workspace_dir,
             source: frozen.clone(),
@@ -347,6 +351,8 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         .body(&EnvironmentSourcePrepareBody {
             thread_id: site.thread,
             source: None,
+            workspace_edits: None,
+            workspace_edit_revision: None,
         })
         .send()
         .await
@@ -364,6 +370,102 @@ async fn source_retry_keeps_the_original_repository_branch_native_identity_and_d
         job.id, effect,
         "the new progress job retries one original native effect"
     );
+}
+
+/// Where Prepare's answer goes: its statements by template, their rows, and its time, printed for a diagnosis.
+#[tokio::test]
+async fn preparing_a_source_again_shows_where_its_answer_goes() {
+    use orch_api_contract::source::{
+        EnvironmentSourcePrepare, EnvironmentSourcePrepareBody, RepositorySource,
+        SourceDestination, SourceInfo, SourceKind, SourceState,
+    };
+    use orch_engine::jobs::source::{Action, Plan};
+    let site = Site::live().await;
+    let mut conn = site.world.conn().await;
+    let environment =
+        orch_db::queries::environments::workspace::environment(&mut conn, site.environment)
+            .await
+            .unwrap()
+            .unwrap();
+    let thread = orch_db::queries::threads::thread(&mut conn, site.thread)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = RepositorySource {
+        repository_url: Some("https://code.example.test/team/repository.git".into()),
+        branch: None,
+        secret_name: None,
+    };
+    let info = SourceInfo {
+        kind: SourceKind::Repository,
+        directory: thread.workspace_dir.clone(),
+        repository_url: frozen.repository_url.clone(),
+        branch: None,
+        head: None,
+        state: SourceState::Failed,
+        job: None,
+        reason: Some("remote_refused".into()),
+    };
+    let original = Plan {
+        environment: site.environment,
+        generation: environment.generation,
+        machine: environment.machine_id.unwrap(),
+        thread: Some(site.thread),
+        caller: site.ada.id(),
+        token: None,
+        creator_origin: None,
+        scheduled_input: None,
+        workspace_edits: Vec::new(),
+        prepared_source: None,
+        action: Action::Prepare {
+            directory: thread.workspace_dir,
+            source: frozen.clone(),
+            credential: None,
+            destination: SourceDestination::MissingDirectory,
+            effect_id: Some(new_id()),
+        },
+    };
+    sqlx::query("UPDATE threads SET source = $2 WHERE node_id = $1")
+        .bind(site.thread)
+        .bind(json!({ "info": info, "source": frozen, "prepare": true, "native_plan": original }))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let began = std::time::Instant::now();
+    let (job, measured) = support::Statements::queries(
+        site.app()
+            .call(EnvironmentSourcePrepare, &[&site.environment])
+            .token(&site.ada.token)
+            .body(&EnvironmentSourcePrepareBody {
+                thread_id: site.thread,
+                source: None,
+                workspace_edits: None,
+                workspace_edit_revision: None,
+            })
+            .send(),
+    )
+    .await;
+    let elapsed = began.elapsed();
+    let job = job.ok();
+    let mut rows: Vec<_> = measured.statements.iter().collect();
+    rows.sort_by(|a, b| b.1.statements.cmp(&a.1.statements).then(a.0.cmp(b.0)));
+    eprintln!(
+        "PREPARE {} statements, {} rows, {} ms, job {}",
+        measured.totals.statements,
+        measured.totals.rows,
+        elapsed.as_millis(),
+        job.id
+    );
+    for (template, reads) in rows.iter().take(60) {
+        let text: String = template.split_whitespace().collect::<Vec<_>>().join(" ");
+        eprintln!(
+            "PREPARE {:>4} x {:>5} rows | {}",
+            reads.statements,
+            reads.rows,
+            text.chars().take(220).collect::<String>()
+        );
+    }
 }
 
 #[tokio::test]
@@ -589,12 +691,15 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
             kinds: Some("thread".to_owned()),
             org_id: Some(site.org),
             limit: None,
+            picker: None,
+            cursor: None,
         })
         .send()
         .await
@@ -622,12 +727,15 @@ async fn tree_topic_and_finder_show_independent_nullable_flags_and_true_only_cou
         .call(NameSearchList, &[])
         .token(&site.ada.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some(thread.base.name.clone()),
             kinds: Some("thread".to_owned()),
             org_id: Some(site.org),
             limit: None,
+            picker: None,
+            cursor: None,
         })
         .send()
         .await

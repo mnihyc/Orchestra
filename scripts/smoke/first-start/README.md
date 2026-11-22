@@ -7,4 +7,8 @@ web edge with the release's version; the security headers on every response, the
 of a sign-in (`HttpOnly`, `Secure`, `SameSite=Strict`); the first administrator and signing in; `orchctl doctor`
 in the API's container, then `orchctl doctor --url` from inside the stack (a page, an API call, a signed-in
 realtime socket held idle, a body of 8 MiB, the link's upgrade, each advertised endpoint); the bundled node
-enrolling once there is an administrator; and that a second first start is refused.
+enrolling once there is an administrator; `update.sh doctor` from the host, which passes on the ready stack, says which
+address the edge check used and where it came from, changes nothing, and fails naming the services that were stopped; and
+that a second first start is refused.
+
+The server and PostgreSQL use separate host directories outside the deployment. The scenario checks PostgreSQL initialization, an API write visible to the web edge and a repeat update against those paths.

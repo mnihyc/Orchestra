@@ -1,5 +1,6 @@
 /** Seven ordinary detail pages stay within two screens, with visible tabs and quiet unopened panels. */
 import { expect, type Page, type Request, test } from '@playwright/test';
+import { resourceFixtures } from '../../e2e/layout-fixtures';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { RUNS_ON, id } from '../doubles/fixtures';
@@ -111,5 +112,29 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     } else await sections.getByRole('link', { name: words.machines.tabs.policy, exact: true }).click();
     await expect(page.locator('[data-resource-section="policy"]')).toBeVisible();
     await expect(page).toHaveURL(/tab=policy/);
+  });
+}
+
+for (const [width, height] of [[400, 860], [1440, 900]] as const) {
+  test(`resource tabs start in the top quarter of the main area at ${width} by ${height}`, async ({ page }) => {
+    test.setTimeout(150_000);
+    await scenario();
+    await page.setViewportSize({ width, height });
+    await signIn(page);
+    await resourceFixtures(page);
+    for (const [kind, path] of [...pages, ['provider', `/resources/providers/${RUNS_ON.openAiKey}`], ['skill', '/resources/skills']] as const) {
+      await page.goto(path);
+      if (kind === 'skill') await page.getByRole('link', { name: 'pdf-tools', exact: true }).first().click();
+      const main = page.locator('[data-main-area]:visible').first();
+      const tabs = main.getByRole('tablist').filter({ has: page.getByRole('tab', { name: 'Overview', exact: true }) }).first();
+      await expect(tabs).toBeVisible();
+      const geometry = await tabs.evaluate((element) => {
+        const pane = element.closest('[data-main-area]')!.getBoundingClientRect();
+        return { top: element.getBoundingClientRect().top - pane.top, height: pane.height };
+      });
+      expect(geometry.height).toBeGreaterThan(0);
+      expect(geometry.top, kind).toBeGreaterThanOrEqual(0);
+      expect(geometry.top, kind).toBeLessThan(geometry.height / 4);
+    }
   });
 }

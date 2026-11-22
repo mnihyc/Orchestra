@@ -1,7 +1,7 @@
 //! Baseline-compatible actual-key controls for only the two provider runtime batch operations.
 use super::*;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, jobs};
 
 const PREVIEW: &str = "ProviderRuntimeUpdateBatchPreflight";
@@ -20,8 +20,8 @@ fn rule(operation: &str, kind: &str, id: Id, actions: &[&str]) -> serde_json::Va
 async fn key(world: &World, user: Id, rules: Vec<serde_json::Value>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -148,6 +148,7 @@ async fn desired_runtime(world: &World, team: &Team, name: &str, value: serde_js
         .call(provider_api::ProviderUpdate, &[&team.provider])
         .token(&team.c.admin.token)
         .body(&provider_api::ProviderUpdateBody {
+            relay: None,
             service_offerings: None,
             model_group_options: None,
             name: None,
@@ -480,7 +481,7 @@ async fn a_manage_key_does_not_receive_live_host_labels_through_a_batch_plan() {
         &world,
         &team,
         orch_settings_contract::registry::keys::RUNTIME_HOST_ID,
-        json!(destination),
+        json!(orch_provider_contract::pools::Target::host(destination)),
     )
     .await;
     let rules = vec![
@@ -580,7 +581,7 @@ async fn a_changed_selected_host_invalidates_an_ordinary_saved_batch_before_any_
         &world,
         &team,
         orch_settings_contract::registry::keys::RUNTIME_HOST_ID,
-        json!(destination),
+        json!(orch_provider_contract::pools::Target::host(destination)),
     )
     .await;
     let (status, refused) = confirm(&world, &team.c.admin.token, id).await;

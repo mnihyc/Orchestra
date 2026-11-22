@@ -249,15 +249,17 @@ impl DirectoryPages {
             build.cancel();
             build.join().await?;
         }
+        self.join_searches(environment, attachment).await?;
         self.reap().await
     }
 }
 
 // Shared futures retain one error. Reconstruct the same typed failure for each reader rather
 // than erase its normalized code/retryability. IO keeps its OS code, or kind and original words.
-fn copy_error(error: &HostError) -> HostError {
+pub(super) fn copy_error(error: &HostError) -> HostError {
     match error {
         HostError::Cancelled => HostError::Cancelled,
+        HostError::FileReachDenied => HostError::FileReachDenied,
         HostError::NotFound(value) => HostError::NotFound(value.clone()),
         HostError::Ignored(value) => HostError::Ignored(value.clone()),
         HostError::Exists(value) => HostError::Exists(value.clone()),
@@ -280,6 +282,12 @@ fn copy_error(error: &HostError) -> HostError {
         HostError::ExecNotOffered(value) => HostError::ExecNotOffered(value.clone()),
         HostError::McpImportDisabled => HostError::McpImportDisabled,
         HostError::McpAddDisabled => HostError::McpAddDisabled,
+        HostError::CloneStalled(seconds) => HostError::CloneStalled(*seconds),
+        HostError::RemoteRefused(value) => HostError::RemoteRefused(value.clone()),
+        HostError::RemoteClosed(value) => HostError::RemoteClosed(value.clone()),
+        HostError::RemoteUnresolved(value) => HostError::RemoteUnresolved(value.clone()),
+        HostError::RemoteCredential(value) => HostError::RemoteCredential(value.clone()),
+        HostError::RemoteFailed(value) => HostError::RemoteFailed(value.clone()),
         HostError::Timeout(value) => HostError::Timeout(value.clone()),
         HostError::Busy(value) => HostError::Busy(value.clone()),
         HostError::Content(value) => HostError::Content(value.clone()),

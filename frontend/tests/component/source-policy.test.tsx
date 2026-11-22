@@ -1,14 +1,17 @@
 /** A topic repository is one optional choice, a plain directory says nothing of Git, and a machine refusing writes explains its policy while the first input stays held. */
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
-import { expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import { waitingWords } from '@/features/timeline/waiting';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { RepositoryChoice } from '@/features/source/RepositoryChoice';
-import type { Thread } from '@/generated/api-types';
+import type { Job, Thread } from '@/generated/api-types';
+import { currentLocale, i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-vi.mock('@/api/source', () => ({ prepareSource: vi.fn() }));
+vi.mock('@/api/source', async (original) => ({ ...await original<object>(), prepareSource: vi.fn() }));
+afterEach(() => vi.unstubAllGlobals());
 
 it('offers the topic repository as one compact optional choice with a working opt-out', async () => {
   const onChange = vi.fn();
@@ -40,7 +43,7 @@ it('offers nothing when the topic names no repository', () => {
 
 it('names the write policy and recovery without exposing the protocol reason', () => {
   const thread = {
-    id: 'source-policy', environment: { id: 'environment-policy', name: 'Workspace' }, environment_permissions: ['environment.manage'],
+    id: 'source-policy', directory:'web', environment: { id: 'environment-policy', name: 'Workspace' }, environment_permissions: ['environment.manage'],
     source: { kind: 'repository', directory: 'web', repository_url: 'https://example.test/team/repo.git', branch: 'main',
       head: null, state: 'failed', job: null, reason: 'workspace.remote_write_disabled' },
   } as unknown as Thread;
@@ -49,6 +52,25 @@ it('names the write policy and recovery without exposing the protocol reason', (
   expect(screen.getByText('The first message waits until the source is ready.')).toBeVisible();
   expect(screen.getByRole('button', { name: 'Prepare again' })).toBeEnabled();
   expect(container).not.toHaveTextContent('workspace.remote_write_disabled');
+});
+
+it.each([
+  ['remote_refused', "The repository's server refused the connection. Check the address or the network, then choose Prepare again."],
+  ['remote_closed', "The repository's server closed the connection. Check the address or the network, then choose Prepare again."],
+  ['remote_unresolved', "The repository's server name could not be found. Check the address or the network, then choose Prepare again."],
+  ['remote_failed', "Git could not get the repository. Check the address and the machine's network, then choose Prepare again."],
+])('says why a repository could not be reached (%s) and offers Prepare again, not another machine', (reason, words) => {
+  const thread = {
+    id: 'source-remote', directory: 'web', state: 'blocked', blocked: { reason: 'source_failed' },
+    environment: { id: 'environment-remote', name: 'Workspace' }, environment_permissions: ['environment.manage'],
+    source: { kind: 'repository', directory: 'web', repository_url: 'https://git.example.test/team/repo.git', branch: null,
+      head: null, state: 'failed', job: null, reason },
+  } as unknown as Thread;
+  const { container } = show(<SourcePreparation thread={thread} />);
+  expect(screen.getByText(words)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Prepare again' })).toBeEnabled();
+  expect(container).not.toHaveTextContent(/cannot prepare a source|another environment/);
+  expect(container).not.toHaveTextContent(reason);
 });
 
 it('waits for a plain directory without any word of Git or a repository', () => {
@@ -60,4 +82,61 @@ it('waits for a plain directory without any word of Git or a repository', () => 
   expect(container.querySelector('[data-source-state="pending"]')).toBeInTheDocument();
   expect(screen.getByText('Using existing files in notes.')).toBeVisible();
   expect(container).not.toHaveTextContent(/Git|repository/i);
+});
+
+it.each(['en', 'zh-CN'] as const)('opens the source job on demand and shows its actual failure in %s', async (locale) => {
+  const previous = currentLocale();
+  await setLocale(locale);
+  try {
+    const job: Job = {
+      id: 'preparation-job', kind: 'workspace_prepare', node_id: 'source-failure', environment_id: 'workspace', provider_id: null,
+      batch_id: null, created_by: null, created_at: '2026-11-01T10:00:00Z', started_at: '2026-11-01T10:00:00Z', finished_at: '2026-11-01T10:05:00Z',
+      state: 'failed', result: null, log: null,
+      error: { code: 'not_found', phase: 'prepare', message: 'Git could not find the release branch in the source repository.', undone: true },
+      progress: { phase: 'prepare', percent: 28, message: null, phases: [], bytes_done: 0, bytes_total: null,
+        files_done: 0, files_total: null, rate_bps: null, eta_seconds: null },
+    };
+    const fetch = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockImplementation((input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.method !== 'GET' || new URL(request.url).pathname !== '/api/v1/jobs/preparation-job') throw new Error(`Unexpected preparation read: ${request.url}`);
+      return Promise.resolve(Response.json(job));
+    });
+    vi.stubGlobal('fetch', fetch);
+    const thread = {
+      id: 'source-failure', directory:'web', state: 'idle', environment: { id: 'workspace', name: 'Workspace' }, environment_permissions: [],
+      source: { kind: 'repository', directory: 'web', repository_url: 'https://example.test/team/repo.git', branch: 'release',
+        head: null, state: 'failed', reason: 'not_found', job: { id: job.id, kind: job.kind, phase: 'prepare', percent: 28, state: 'failed' } },
+    } as unknown as Thread;
+    show(<SourcePreparation thread={thread} />);
+    expect(fetch).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('source.prepare.details') }));
+    const dialog = await screen.findByRole('dialog', { name: i18n.t('source.prepare.detailsTitle') });
+    expect(await within(dialog).findByText(job.error!.message)).toBeVisible();
+    expect(within(dialog).getByText(i18n.t('source.prepare.reasons.notFound'))).toBeVisible();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: i18n.t('source.prepare.again') })).not.toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  } finally {
+    await setLocale(previous);
+  }
+});
+
+it('names the stalled remote and measured idle allowance beside Retry', () => {
+  const thread = {
+    id: 'silent-source', directory: 'checkout', state: 'blocked', blocked: { reason: 'source_failed' },
+    environment: { id: 'environment', name: 'Workspace' }, environment_permissions: ['environment.manage'],
+    source: { kind: 'repository', directory: 'checkout', repository_url: 'https://origin.example/team/repo.git',
+      branch: null, head: null, state: 'failed', reason: 'clone_stalled', job: { id: 'attempt', state: 'failed',
+        percent: 5, phase: 'apply', clone: { bytes: 80, objects: 2, idle_seconds: 17 } } },
+  } as unknown as Thread;
+  show(<SourcePreparation thread={thread} />);
+  expect(screen.getByText(/origin\.example.*17 seconds/)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeEnabled();
+});
+
+it('shows the bytes and objects received before the thread has a turn', () => {
+  const thread = { state: 'starting', starting_step: 'source', starting_work: null, lock: null,
+    source: { state: 'preparing', job: { clone: { bytes: 1536, objects: 3, idle_seconds: 30 } } } } as unknown as Thread;
+  expect(waitingWords(thread, i18n.getFixedT('en'))).toBe('Cloning the repository · 1.5 KiB received · 3 objects');
 });

@@ -22,6 +22,9 @@ pub enum HostError {
     /// has to stay in, or is not one a path may be.
     #[error("{0}")]
     NotFound(String),
+    /// No read or mutation reach admits this resolved native target.
+    #[error("outside allowed file reach")]
+    FileReachDenied,
     /// The workspace's ignore rules leave the path out.
     #[error("{0}")]
     Ignored(String),
@@ -71,6 +74,24 @@ pub enum HostError {
     /// The machine's owner lets no tool server be written from Orch for it.
     #[error("this machine lets no tool server be added from Orch")]
     McpAddDisabled,
+    /// The source stopped transferring data during the configured interval.
+    #[error("The repository made no progress for {0} s. Retry the clone.")]
+    CloneStalled(u64),
+    /// The repository's server refused the connection.
+    #[error("{0}")]
+    RemoteRefused(String),
+    /// The repository's server closed the connection before it answered.
+    #[error("{0}")]
+    RemoteClosed(String),
+    /// The name of the repository's server could not be found.
+    #[error("{0}")]
+    RemoteUnresolved(String),
+    /// The repository refused the credential it was given.
+    #[error("{0}")]
+    RemoteCredential(String),
+    /// Git could not get the repository, for none of the reasons above.
+    #[error("{0}")]
+    RemoteFailed(String),
     /// It took longer than it may.
     #[error("{0}")]
     Timeout(String),
@@ -123,6 +144,7 @@ impl HostError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotFound(_) => ErrorCode::NotFound,
+            Self::FileReachDenied => ErrorCode::FileReachDenied,
             Self::Ignored(_) => ErrorCode::Ignored,
             Self::Exists(_) | Self::Stale { .. } | Self::Cancelled => ErrorCode::Conflict,
             Self::Changed(_) => ErrorCode::Changed,
@@ -135,6 +157,12 @@ impl HostError {
             Self::ExecNotOffered(_) => ErrorCode::PolicyExecNotOffered,
             Self::McpImportDisabled => ErrorCode::PolicyMcpImportDisabled,
             Self::McpAddDisabled => ErrorCode::PolicyMcpAddDisabled,
+            Self::CloneStalled(_) => ErrorCode::CloneStalled,
+            Self::RemoteRefused(_) => ErrorCode::RemoteRefused,
+            Self::RemoteClosed(_) => ErrorCode::RemoteClosed,
+            Self::RemoteUnresolved(_) => ErrorCode::RemoteUnresolved,
+            Self::RemoteCredential(_) => ErrorCode::CredentialUnusable,
+            Self::RemoteFailed(_) => ErrorCode::RemoteFailed,
             Self::Timeout(_) => ErrorCode::Timeout,
             Self::Busy(_) => ErrorCode::Busy,
             Self::Content(_) | Self::Io { .. } | Self::Internal(_) => ErrorCode::Internal,
@@ -148,6 +176,7 @@ impl HostError {
             self,
             Self::Changed(_)
                 | Self::RestoreRecoveryRequired(_)
+                | Self::CloneStalled(_)
                 | Self::Timeout(_)
                 | Self::Busy(_)
                 | Self::Content(_)
