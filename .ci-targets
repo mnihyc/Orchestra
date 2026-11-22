@@ -1,0 +1,4 @@
+test -p orch-api-core --test thread_creator_initial_files_scopes --test thread_creator_deep_operation_scopes
+test -p orch-api-core --test runtime_updates --test hosted_environments
+test -p orch-api-core --test standalone_creation --test provider_setup_scopes --test provider_services
+test -p orch-api-core --test providers --test creation_replays --test environment_duplicates

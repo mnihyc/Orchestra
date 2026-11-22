@@ -31,7 +31,7 @@ test('an invitation says what it is before anything is asked, and a stranger reg
 
   // One line before they go in: where they are, and that they have an org of their own.
   await expect(page.getByText('You are in Acme.')).toBeVisible();
-  await expect(page.getByText('You also have an org of your own, for work that is only yours.')).toBeVisible();
+  await expect(page.getByText('You also have an organization of your own, for work that is only yours.')).toBeVisible();
   await page.getByRole('button', { name: 'Continue' }).click();
   await expect(page).toHaveURL(screenAddress('/org/acme'));
 });
@@ -115,7 +115,7 @@ test('without an invitation the page says what the system allows', async ({ page
   await fillIdentity(page, 'ada', 'Another Ada');
   await page.getByRole('button', { name: 'Create account' }).click();
   await expect(page.getByLabel('Username')).toHaveAttribute('aria-invalid','true');
-  await expect(page.getByLabel('Username')).toHaveAccessibleDescription('A username or root org already uses this public name.');
+  await expect(page.getByLabel('Username')).toHaveAccessibleDescription('A username or root organization already uses this public name.');
 
   // Somebody who came without an invitation lands in their own org.
   await page.getByLabel('Username').fill('newcomer');
@@ -195,7 +195,7 @@ test('asking for a reset always answers the same, and the link sets a new passwo
   await page.getByLabel('Username or email address').fill('ada');
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.ada.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page.getByText('Wrong name or password.')).toBeVisible();
+  await expect(page.getByText('Wrong username or password.')).toBeVisible();
   await page.getByLabel('Password', { exact: true }).fill('a brand new password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   // Reset changes the credential; this established reader still returns to the selected team.
