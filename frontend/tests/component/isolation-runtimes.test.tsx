@@ -10,9 +10,9 @@ import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const limits = [
-  { key: 'live_changes_lost', touches: [], todo: 'a mount or device change makes the environment again', why: 'this runtime cannot change them while it runs; software installed outside the volumes is removed' },
+  { key: 'live_changes_lost', touches: [], todo: 'a mount or device change recreates the environment', why: 'this container runtime cannot change them while it runs; software installed outside the volumes is removed' },
   { key: 'file_events', touches: ['mounts'], todo: 'read the file again instead of waiting for a change event', why: 'files changed outside this environment raise no file events inside it and show up about a second late' },
-  { key: 'docker_inside_network', touches: ['docker_inside'], todo: 'run the containers you start inside with --network=host', why: "this runtime has no firewall for Docker's own network: a container on it cannot reach the network, though -p still serves a port" },
+  { key: 'docker_inside_network', touches: ['docker_inside'], todo: 'run the containers you start inside with --network=host', why: "this container runtime has no firewall for Docker's own network: a container on it cannot reach the network, though -p still serves a port" },
 ];
 
 const gvisor: RuntimeClass = {
@@ -30,11 +30,11 @@ describe('the line under the runtime choice', () => {
     show(<RuntimeLimitsLine runtime={gvisor} limits={limitsTouching(limits, templateSubjects({}))} />);
     const line = screen.getByTestId('runtime-limits');
     expect(line).toHaveTextContent('gVisor: its own kernel written in user space');
-    expect(line).toHaveTextContent('A mount or device change makes the environment again (this runtime cannot change them while it runs; software installed outside the volumes is removed)');
+    expect(line).toHaveTextContent('A mount or device change recreates the environment (this container runtime cannot change them while it runs; software installed outside the volumes is removed)');
     expect(line).not.toHaveTextContent('--network=host');
     await userEvent.click(within(line).getByRole('button', { name: 'Help: Limits here' }));
     const card = await screen.findByRole('dialog');
-    expect(card).toHaveTextContent('A mount or device change makes the environment again');
+    expect(card).toHaveTextContent('A mount or device change recreates the environment');
     expect(card).toHaveTextContent('a kernel in user space has no hardware virtualisation to give');
   });
 
@@ -55,7 +55,7 @@ describe('the runtime choice of the dialog that makes an environment', () => {
     const cluster = { drivers: [{ name: 'kubernetes', title: 'Kubernetes', default_runtime: 'runc', runtime_classes: ['runsc', 'runc'], runtimes: [gvisor, runc] }] } as never;
     const recipe = { driver: 'kubernetes', spec: {} } as unknown as Template;
     show(<RuntimeChoice template={recipe} hosts={[cluster]} value="" onChange={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Runtime' })).toHaveTextContent('runc');
+    expect(screen.getByRole('combobox', { name: 'Container runtime' })).toHaveTextContent('runc');
     expect(screen.getByText('Kubernetes · runc')).toHaveClass('sr-only');
   });
 
@@ -65,8 +65,8 @@ describe('the runtime choice of the dialog that makes an environment', () => {
     const recipe = { driver: 'kubernetes', spec: {} } as unknown as Template;
     const changed = vi.fn();
     show(<RuntimeChoice template={recipe} hosts={[first, second]} value="" onChange={changed} />);
-    const select = screen.getByRole('combobox', { name: 'Runtime' });
-    expect(select).toHaveTextContent('Use default runtime');
+    const select = screen.getByRole('combobox', { name: 'Container runtime' });
+    expect(select).toHaveTextContent('Use default container runtime');
     expect(screen.getByText('Kubernetes')).toHaveClass('sr-only');
     await userEvent.click(select);
     await userEvent.click(screen.getByRole('option', { name: /gVisor/ }));
@@ -91,7 +91,7 @@ describe('the runtime choice of the dialog that makes an environment', () => {
 
   it('is a labelled choice with what each runtime shares where the host offers several, and the template\'s own is the one chosen', () => {
     show(<RuntimeChoice template={template({ runtime: 'runsc', allowed_runtimes: ['runsc', 'runc'] })} hosts={[host(runc, gvisor)]} value="" onChange={() => undefined} />);
-    expect(screen.getByRole('combobox', { name: 'Runtime' })).toHaveTextContent('gVisor');
+    expect(screen.getByRole('combobox', { name: 'Container runtime' })).toHaveTextContent('gVisor');
     expect(screen.getByTestId('runtime-limits')).toHaveTextContent('gVisor: its own kernel written in user space');
   });
 
@@ -109,7 +109,7 @@ describe('the runtime choice of the dialog that makes an environment', () => {
 
   it('keeps refused runtimes visible with their reason when the place requires the only permitted one', async () => {
     show(<RuntimeChoice template={template({ runtime: 'runsc' })} hosts={[host(runc, gvisor)]} value="" onChange={() => undefined} policy={{ runsc: 'require' }} />);
-    await userEvent.click(screen.getByRole('combobox', { name: 'Runtime' }));
+    await userEvent.click(screen.getByRole('combobox', { name: 'Container runtime' }));
     const refused = await screen.findByRole('option', { name: /runc/ });
     expect(refused).toHaveAttribute('aria-disabled', 'true');
     expect(refused).toHaveTextContent(i18n.t('isolation.select.required_elsewhere'));
@@ -117,7 +117,7 @@ describe('the runtime choice of the dialog that makes an environment', () => {
 
   it('shows the reason when the only host runtime is forbidden', async () => {
     show(<RuntimeChoice template={template({ runtime: 'runsc' })} hosts={[host(gvisor)]} value="" onChange={() => undefined} policy={{ runsc: 'forbid' }} />);
-    await userEvent.click(screen.getByRole('combobox', { name: 'Runtime' }));
+    await userEvent.click(screen.getByRole('combobox', { name: 'Container runtime' }));
     const refused = await screen.findByRole('option', { name: /gVisor/ });
     expect(refused).toHaveAttribute('aria-disabled', 'true');
     expect(refused).toHaveTextContent(i18n.t('isolation.select.forbidden'));
@@ -126,7 +126,7 @@ describe('the runtime choice of the dialog that makes an environment', () => {
   it('keeps the chooser when an explicit runtime is now forbidden, so an allowed runtime can be chosen', async () => {
     const changed = vi.fn();
     show(<RuntimeChoice template={template({ runtime: 'runsc' })} hosts={[host(gvisor, runc)]} value="runsc" onChange={changed} policy={{ runsc: 'forbid' }} />);
-    await userEvent.click(screen.getByRole('combobox', { name: 'Runtime' }));
+    await userEvent.click(screen.getByRole('combobox', { name: 'Container runtime' }));
     expect(await screen.findByRole('option', { name: /gVisor/ })).toHaveAttribute('aria-disabled', 'true');
     await userEvent.click(screen.getByRole('option', { name: /^runc/ }));
     expect(changed).toHaveBeenLastCalledWith('runc');
@@ -145,7 +145,7 @@ describe('the Runtime and Limits rows of an environment', () => {
 
   it('are the pair, its hint, and every limit as what to do and why', () => {
     const rows = environmentRuntimeRows(isolation, i18n.t.bind(i18n));
-    expect(rows.map((row) => row.name)).toEqual(['Runtime', 'Limits here']);
+    expect(rows.map((row) => row.name)).toEqual(['Container runtime', 'Limits here']);
     show(<dl>{rows.map((row) => <div key={row.name}><dt>{row.name}</dt><dd>{row.value}</dd></div>)}</dl>);
     expect(screen.getByText('Docker · gVisor')).toBeVisible();
     expect(screen.getByText('gVisor: its own kernel written in user space')).toBeVisible();
@@ -165,7 +165,7 @@ describe('the Runtime and Limits rows of an environment', () => {
     expect(environmentRuntimeRows(null, i18n.t.bind(i18n))).toEqual([]);
     const machine: RuntimeIsolation = { ...isolation, driver: 'host', driver_title: 'Registered directories', runtime: null, runtime_title: null, boundary: 'none', limits: [], unavailable: {} };
     const rows = environmentRuntimeRows(machine, i18n.t.bind(i18n));
-    expect(rows.map((row) => row.name)).toEqual(['Runtime', 'Limits here']);
+    expect(rows.map((row) => row.name)).toEqual(['Container runtime', 'Limits here']);
     show(<dl>{rows.map((row) => <div key={row.name}><dt>{row.name}</dt><dd>{row.value}</dd></div>)}</dl>);
     expect(screen.getByText('Registered directories')).toBeVisible();
     expect(screen.getByText(i18n.t('isolation.boundary.none'))).toBeVisible();
@@ -181,7 +181,7 @@ describe('the Runtime and Limits rows of an environment', () => {
   it('translates shipped driver names, Runtime and Limits rows into Chinese while keeping runtime names', async () => {
     await setLocale('zh-CN');
     const rows = environmentRuntimeRows({ ...isolation, driver_title: 'Docker containers', runtime: 'runc', runtime_title: 'runc', boundary: 'shared_kernel', unavailable: {}, limits: [] }, i18n.t.bind(i18n));
-    expect(rows.map((row) => row.name)).toEqual(['运行时', '此处的限制']);
+    expect(rows.map((row) => row.name)).toEqual(['容器运行时', '此处的限制']);
     show(<dl>{rows.map((row) => <div key={row.name}><dt>{row.name}</dt><dd>{row.value}</dd></div>)}</dl>);
     expect(screen.getByText('Docker 容器 · runc')).toBeVisible();
     expect(screen.getByText(i18n.t('isolation.hint', { runtime: 'runc', boundary: i18n.t('isolation.boundary.shared_kernel') }))).toBeVisible();

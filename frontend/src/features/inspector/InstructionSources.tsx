@@ -61,7 +61,7 @@ export function InstructionSources({ threadId }: { threadId: string }) {
       : <ol className="mt-2 space-y-1 text-sm" aria-label={t('threadViews.given.sources.title')}>
         {sources.map((source) => <li key={source.order} className="flex flex-col gap-1 rounded-md border border-border px-2 py-1">
           <span className="flex flex-wrap items-center gap-2">
-            {source.readable && typeof source.workspace_path === 'string' && source.source_environment !== null
+            {source.path_redacted !== true && source.readable && typeof source.workspace_path === 'string' && source.source_environment !== null
               ? <Button size="sm" variant="ghost" onClick={() => { if (typeof source.workspace_path === 'string' && source.source_environment !== null) openFile({ environmentId: source.source_environment.id, threadId, path: source.workspace_path }); }}>{title(t, source)}</Button>
               : source.readable && (source.kind === 'preamble' || source.kind === 'guide' || source.kind === 'standing')
                 ? <Button size="sm" variant="ghost" onClick={() => openGiven(threadId, {}, owner)}>{title(t, source)}</Button>
@@ -71,7 +71,7 @@ export function InstructionSources({ threadId }: { threadId: string }) {
           {source.path !== null && <span className="break-all font-mono text-xs text-text-muted">{source.path}</span>}
           {typeof source.parent_path === 'string' && <span className="break-all text-xs text-text-muted">{t('threadViews.given.sources.importedFrom', { path: source.parent_path })}</span>}
           <Size source={source} />
-          {source.reason !== null && <span className="text-xs text-text-muted">{source.reason}</span>}
+          {(source.path_redacted === true || source.reason !== null) && <span className="text-xs text-text-muted">{source.path_redacted === true ? t('timeline.masking.path') : source.reason}</span>}
         </li>)}
       </ol>}
     <p className="mt-2 text-xs text-text-muted">{t('threadViews.given.sources.standing', { characters: standing.characters, limit: standing.limit })}</p>

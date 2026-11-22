@@ -80,6 +80,40 @@ async fn ready(path: &std::path::Path) {
 }
 
 #[tokio::test]
+async fn a_fresh_birth_never_reuses_or_rewrites_an_existing_host_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    let mut request = spec(dir.path(), &current_user());
+    let driver = HostDriver::open(config.clone(), Arc::new(SystemClock))
+        .await
+        .unwrap();
+    let unit = driver.create(&request).await.unwrap();
+    let record = config
+        .base
+        .join("units")
+        .join(format!("{}.json", unit.name));
+    let before = std::fs::read(&record).unwrap();
+    request
+        .labels
+        .insert("orch.birth".into(), new_id().to_string());
+    request.gateway_url = "wss://replacement.example.invalid".into();
+    assert!(matches!(
+        driver.create(&request).await,
+        Err(DriverError::InvalidSpec(_))
+    ));
+    assert_eq!(
+        std::fs::read(&record).unwrap(),
+        before,
+        "the prior unit and its launch files stay unchanged"
+    );
+    assert_eq!(
+        driver.inspect(&unit).await.unwrap().state,
+        UnitStateKind::Stopped
+    );
+    driver.remove(&unit).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_host_connector_gets_every_launch_path_and_keeps_its_files_across_restart_and_unit_removal()
  {
     let dir = tempfile::tempdir().unwrap();

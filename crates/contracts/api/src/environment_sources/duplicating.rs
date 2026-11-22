@@ -11,11 +11,12 @@ pub const MANAGED: Declaration<CreateSource> = Declaration {
         CREATE.bindings[3],
         CREATE.bindings[4],
         CREATE.bindings[5],
+        CREATION_POOLS,
     ],
 };
 
 /// Source View and Files View share its actual Environment Read; creation keeps its own operands.
-pub const MANAGED_FACETS: [FacetSpec; 6] = [
+pub const MANAGED_FACETS: [FacetSpec; 7] = [
     FacetSpec::required(
         KeyAction::Write,
         &[KeyTargetKind::Object(ObjectKind::Environment)],
@@ -26,6 +27,7 @@ pub const MANAGED_FACETS: [FacetSpec; 6] = [
     CREATE_FACETS[3],
     CREATE_FACETS[4],
     CREATE_FACETS[5],
+    CREATION_POOLS_FACET,
 ];
 
 /// A registered directory copy has an actual physical recipient and no managed template or unit.
@@ -102,6 +104,7 @@ pub const MOVE_MANAGED: Declaration<CreateSource> = Declaration {
         MANAGED.bindings[4],
         MANAGED.bindings[5],
         MOVE_SUBJECT,
+        CREATION_POOLS,
     ],
 };
 pub const MOVE_CONNECTED: Declaration<CreateSource> = Declaration {
@@ -126,6 +129,7 @@ pub const MOVE_MANAGED_PREVIEW: Declaration<CreateSource> = Declaration {
         MANAGED.bindings[5],
         MOVE_SUBJECT,
         MOVE_PREVIEW,
+        CREATION_POOLS,
     ],
 };
 pub const MOVE_CONNECTED_PREVIEW: Declaration<CreateSource> = Declaration {
@@ -140,7 +144,7 @@ pub const MOVE_CONNECTED_PREVIEW: Declaration<CreateSource> = Declaration {
         MOVE_PREVIEW,
     ],
 };
-pub const MOVE_MANAGED_FACETS: [FacetSpec; 7] = [
+pub const MOVE_MANAGED_FACETS: [FacetSpec; 8] = [
     MANAGED_FACETS[0],
     MANAGED_FACETS[1],
     MANAGED_FACETS[2],
@@ -148,6 +152,7 @@ pub const MOVE_MANAGED_FACETS: [FacetSpec; 7] = [
     MANAGED_FACETS[4],
     MANAGED_FACETS[5],
     MOVE_FACET,
+    CREATION_POOLS_FACET,
 ];
 pub const MOVE_CONNECTED_FACETS: [FacetSpec; 6] = [
     CONNECTED_FACETS[0],
@@ -157,7 +162,7 @@ pub const MOVE_CONNECTED_FACETS: [FacetSpec; 6] = [
     CONNECTED_FACETS[4],
     MOVE_FACET,
 ];
-pub const MOVE_MANAGED_PREVIEW_FACETS: [FacetSpec; 8] = [
+pub const MOVE_MANAGED_PREVIEW_FACETS: [FacetSpec; 9] = [
     MOVE_MANAGED_FACETS[0],
     MOVE_MANAGED_FACETS[1],
     MOVE_MANAGED_FACETS[2],
@@ -166,6 +171,7 @@ pub const MOVE_MANAGED_PREVIEW_FACETS: [FacetSpec; 8] = [
     MOVE_MANAGED_FACETS[5],
     MOVE_MANAGED_FACETS[6],
     PREVIEW_FACET,
+    CREATION_POOLS_FACET,
 ];
 pub const MOVE_CONNECTED_PREVIEW_FACETS: [FacetSpec; 7] = [
     MOVE_CONNECTED_FACETS[0],
