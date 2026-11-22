@@ -74,8 +74,8 @@ impl Fixture {
         })
     }
     async fn current(&self, operation: &str, read: bool) -> TestResult<Ctx> {
-        let bearer = authentication::new_token(authentication::API_TOKEN_PREFIX);
         let id = new_id();
+        let bearer = authentication::new_api_token(id);
         let (kind, target, resource, action) = if read {
             (
                 ObjectKind::Document,

@@ -1,0 +1,7 @@
+clippy
+contracts
+fmt
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test

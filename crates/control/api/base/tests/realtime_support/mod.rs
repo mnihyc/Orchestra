@@ -36,6 +36,7 @@ use orch_api_core::backplane::Link;
 
 use orch_api_core::middleware::authentication::ACCESS_TOKEN_PREFIX;
 
+use orch_api_core::middleware::authentication::new_api_token;
 use orch_api_core::middleware::authentication::new_token;
 
 use orch_api_core::middleware::authentication::token_hash;
@@ -379,6 +380,7 @@ impl ResourceAccess for OpenAccess {
 // ---------------------------------------------------------------- the commands double
 
 struct Issued {
+    mirrored: bool,
     machine: Id,
     cmd: Cmd,
     handle: CommandHandle,
@@ -389,15 +391,58 @@ struct Issued {
 /// issued, and one asked for twice under one identifier is made once.
 pub struct ScriptedCommands {
     link: ControllerLink,
+    db: Db,
     issued: Mutex<HashMap<Id, Issued>>,
     clock: Arc<dyn Clock>,
+}
+
+impl ScriptedCommands {
+    async fn settle_finished(&self) -> Result<(), CommandsError> {
+        let finished: Vec<_> = lock(&self.issued)
+            .iter()
+            .filter_map(|(id, entry)| {
+                (!entry.mirrored)
+                    .then(|| outcome_of(&entry.handle.progress()).map(|outcome| (*id, outcome)))
+                    .flatten()
+            })
+            .collect();
+        for (id, outcome) in finished {
+            let error = match &outcome {
+                Outcome::Failed(error) => Some(
+                    serde_json::to_value(error)
+                        .map_err(|error| CommandsError::Body(error.to_string()))?,
+                ),
+                _ => None,
+            };
+            let ending = match &outcome {
+                Outcome::Succeeded(value) => link_queries::Ending::Succeeded(value),
+                Outcome::Failed(_) => link_queries::Ending::Failed(
+                    error.as_ref().expect("a failed receipt has its error"),
+                ),
+                Outcome::Cancelled => link_queries::Ending::Cancelled,
+                Outcome::Expired => link_queries::Ending::Expired,
+            };
+            let mut conn = self
+                .db
+                .acquire()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            link_queries::finish_command(&mut conn, id, &ending, self.clock.now())
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            if let Some(entry) = lock(&self.issued).get_mut(&id) {
+                entry.mirrored = true;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn stage_of(progress: &Progress) -> Stage {
     match progress {
         Progress::Queued => Stage::Queued,
         Progress::Sent => Stage::Sent,
-        Progress::Accepted => Stage::Accepted,
+        Progress::Accepted | Progress::Running | Progress::Released => Stage::Accepted,
         _ => Stage::Over,
     }
 }
@@ -421,13 +466,40 @@ impl Commands for ScriptedCommands {
             ));
         }
         // Use the real scripted link without retaining the volatile roster in issued rows.
+        let native_target = match command.native_target.clone() {
+            Some(target) => Some(target),
+            None => {
+                let (thread, segment) = orch_link_contract::native_target::session_address(
+                    command.kind.as_str(),
+                    &command.body,
+                )
+                .ok_or_else(|| {
+                    CommandsError::Other("the live read has no session address".into())
+                })?;
+                let mut conn = self
+                    .db
+                    .acquire()
+                    .await
+                    .map_err(|error| CommandsError::Other(error.to_string()))?;
+                Some(
+                    orch_db::queries::session_dependencies::target(&mut conn, thread, segment)
+                        .await
+                        .map_err(|error| CommandsError::Other(error.to_string()))?,
+                )
+            }
+        };
         let cmd = Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+
+            native_target,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
-            deadline: Time::new(
-                self.clock.now() + Span::seconds(i64::from(command.kind.deadline_secs())),
-            ),
+            deadline: command.deadline.unwrap_or_else(|| {
+                Time::new(self.clock.now() + Span::seconds(i64::from(command.kind.deadline_secs())))
+            }),
             body: command.body,
         };
         let mut handle = self.link.commands().issue(cmd);
@@ -457,8 +529,7 @@ impl Commands for ScriptedCommands {
         command: Outgoing,
         before: Option<orch_engine::commands::BeforeCommand<'_>>,
     ) -> Result<(), CommandsError> {
-        let mut issued = lock(&self.issued);
-        if issued.contains_key(&command.id) {
+        if lock(&self.issued).contains_key(&command.id) {
             if let Some(check) = before {
                 check().map_err(CommandsError::BeforeEffect)?;
             }
@@ -468,20 +539,78 @@ impl Commands for ScriptedCommands {
         let deadline = command.deadline.unwrap_or_else(|| {
             Time::new(now + Span::seconds(i64::from(command.kind.deadline_secs())))
         });
-        let cmd = Cmd {
+        let frozen = {
+            let mut tx = self
+                .db
+                .begin()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
+            let serial = command.key.wire();
+            let authority = command
+                .authority
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            link_queries::insert_command_with_authority(
+                &mut tx,
+                &link_queries::NewCommand {
+                    content_transit: command.content_transit,
+                    native_target: command.native_target.as_ref(),
+                    id: command.id,
+                    machine_id: command.machine,
+                    kind: command.kind.as_str(),
+                    body: &command.body,
+                    serial_key: serial.as_deref(),
+                    deadline_at: deadline.get(),
+                },
+                now,
+                authority.as_ref(),
+            )
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+            let facts =
+                orch_db::queries::session_dependencies::command_tool_session(&mut tx, command.id)
+                    .await
+                    .map_err(|error| CommandsError::Other(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+            facts
+        };
+        let mut cmd = Cmd {
+            authority_until: None,
+            native_members: None,
+            native_revision: None,
+            native_target: frozen
+                .as_ref()
+                .and_then(|facts| facts.get("native_target"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| CommandsError::Other(error.to_string()))?,
             id: command.id,
             kind: command.kind.as_str().to_owned(),
             key: command.key.wire(),
             deadline,
             body: command.body,
         };
-        if let Some(check) = before {
-            check().map_err(CommandsError::BeforeEffect)?;
+        if let Some(facts) = &frozen {
+            cmd.set_session_facts(facts)
+                .map_err(|error| CommandsError::Other(error.to_string()))?;
+        }
+        let mut issued = lock(&self.issued);
+        if issued.contains_key(&command.id) {
+            return Ok(());
         }
         let handle = self.link.commands().issue(cmd.clone());
         issued.insert(
             command.id,
             Issued {
+                mirrored: false,
                 machine: command.machine,
                 cmd,
                 handle,
@@ -776,6 +905,7 @@ impl Server {
         realtime.listening().await;
         let app: App = Arc::new(AppState {
             builtin_sources: Arc::default(),
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             db: db.clone(),
             config,
@@ -1129,6 +1259,12 @@ impl Rig {
         .unwrap();
         drop(conn);
 
+        // Native command deadlines and the API use one clock, including during a held-time socket proof.
+        let held_time = hold_time.then(|| ManualClock::new(clock.now()));
+        let clock: Arc<dyn Clock> = match &held_time {
+            Some(held) => Arc::new(held.clone()),
+            None => clock,
+        };
         // The machine and the hub between it and the system.
         let pki = TestPki::new(Arc::clone(&clock));
         let identity = pki.machine(machine_id);
@@ -1154,6 +1290,7 @@ impl Rig {
         ));
         let commands = Arc::new(ScriptedCommands {
             link: link.clone(),
+            db: pool.clone(),
             issued: Mutex::new(HashMap::new()),
             clock: Arc::clone(&clock),
         });
@@ -1164,12 +1301,7 @@ impl Rig {
         let config = Arc::new(configured);
         let mut tuning = quick(&config);
         change(&mut tuning);
-        // Every row of the rig is older than a clock that is held from here on.
-        let held_time = hold_time.then(|| ManualClock::new(clock.now()));
-        let api_clock: Arc<dyn Clock> = match &held_time {
-            Some(held) => Arc::new(held.clone()),
-            None => Arc::clone(&clock),
-        };
+        let api_clock = Arc::clone(&clock);
         let realtime = Realtime::tuned(&pool, &api_clock, tuning);
         let engine = Engine::new(EngineParts {
             db: pool.clone(),
@@ -1188,6 +1320,7 @@ impl Rig {
             Link::detached(pool.clone(), Arc::clone(&clock), Arc::clone(&config)).unwrap();
         let app: App = Arc::new(AppState {
             builtin_sources: Arc::default(),
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             db: pool.clone(),
             config,
@@ -1319,11 +1452,16 @@ impl Rig {
         let clock = Arc::clone(&self.clock);
         let database = Arc::clone(&self.db);
         let stopping = self.server.shutdown.clone();
+        let commands = self.commands.clone();
         self.server.own(async move {
             let _database = database;
             loop {
                 let notice = tokio::select! { biased;
                     () = stopping.cancelled() => break,
+                    () = tokio::time::sleep(engine_config().sweep_every) => {
+                        commands.settle_finished().await.expect("the joined native receipt owner reconciles terminal commands");
+                        continue;
+                    }
                     notice = notices.recv() => match notice { Some(notice) => notice, None => break },
                 };
                 match notice {
@@ -1369,7 +1507,7 @@ impl Rig {
                         set_online(&pool, machine, false).await;
                         let _ = engine.machine_offline(machine).await;
                     }
-                    Notice::Report(eph) if forward_reports => {
+                    Notice::Report { eph, .. } if forward_reports => {
                         orch_api_core::realtime::ephemeral::forward_report(&pool,
                             &orch_api_core::backplane::Report {machine_id:machine,eph}).await
                             .expect("the metadata fixture forwards the actual machine's transient report");
@@ -1452,11 +1590,13 @@ impl Rig {
                 lock(&seen).push(command.clone());
                 Ok(match command {
                     Command::AgentStart(_) => CommandResult::AgentStart(AgentStartResult {
+                        home: None,
                         reused: false,
                         harness_version: "1.0.0".to_owned(),
                         descriptor: serde_json::from_value(descriptor()).unwrap(),
                     }),
                     Command::SessionOpen(open) => CommandResult::SessionOpen(SessionOpenResult {
+                        mcp: None,
                         native_session_ref: format!("native-{}", open.segment_id),
                         resumed: open.mode == SessionMode::Resume,
                         import_report: None,
@@ -1467,6 +1607,7 @@ impl Rig {
                     // opened as any other, in the lane the system names.
                     Command::SessionOpenFenced(fenced) => {
                         CommandResult::SessionOpenFenced(SessionOpenResult {
+                            mcp: None,
                             native_session_ref: fenced
                                 .session
                                 .native_session_ref
@@ -1619,10 +1760,15 @@ impl Rig {
     /// An API token of a person, which is no key to the socket.
     pub async fn api_token(&self, user: Id) -> String {
         let mut conn = self.pool.acquire().await.unwrap();
-        let token = new_token(orch_api_core::middleware::authentication::API_TOKEN_PREFIX);
-        orch_db::queries::identity::testing::insert_api_token(&mut conn, user, &token_hash(&token))
-            .await
-            .unwrap();
+        let token = new_api_token(orch_types::new_id());
+        orch_db::queries::identity::testing::insert_api_token(
+            &mut conn,
+            orch_api_contract::api_keys::key_id(&token).unwrap(),
+            user,
+            &token_hash(&token),
+        )
+        .await
+        .unwrap();
         token
     }
 
@@ -1730,8 +1876,22 @@ impl Rig {
         }
         // This scripted producer has one ordered event lane. Returning means
         // its own report committed, not only that its local spool accepted it.
-        let _publishing = self.publishing.lock().await;
         let segment = self.segment_of(thread).await;
+        let mut producers = Vec::with_capacity(events.len());
+        for event in events {
+            producers.push(
+                orch_testkit::doubles::sessions::report_opening(
+                    self.pool.pool(),
+                    thread,
+                    segment,
+                    event,
+                    events,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let _publishing = self.publishing.lock().await;
         if let Some(opening) =
             orch_testkit::doubles::sessions::prepare(self.pool.pool(), thread, segment)
                 .await
@@ -1797,7 +1957,8 @@ impl Rig {
         // allowing the link's normal batching and one disk flush for the ordered group.
         let handed: Vec<_> = events
             .iter()
-            .map(|event| self.machine.link.publish_now(&stream, event))
+            .zip(producers)
+            .map(|(event, producer)| self.machine.link.publish_from_now(producer, &stream, event))
             .collect();
         futures::future::try_join_all(handed).await.unwrap();
         let committed = tokio::time::timeout(PATIENCE, async {

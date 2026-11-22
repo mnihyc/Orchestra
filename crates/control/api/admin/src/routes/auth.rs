@@ -11,10 +11,6 @@
 //! The requests that answer `202` whatever the name or the address do the
 //! same work for every one, so that they tell nothing.
 
-use crate::middleware::authentication::SESSION_PREFIX;
-
-use crate::middleware::authentication::new_token;
-
 use crate::middleware::authentication::token_hash;
 
 use crate::middleware::requests::ApiError;
@@ -28,10 +24,15 @@ use crate::registry::Ctx;
 use crate::registry::Registry;
 
 use crate::sign_in::accounts;
+use crate::sign_in::session_restore;
 
 use crate::sign_in::accounts::Details;
 
 use crate::sign_in::accounts::How;
+
+use crate::sign_in::human_check;
+
+use crate::sign_in::human_check::Act;
 
 use crate::sign_in::mail;
 
@@ -51,8 +52,6 @@ use crate::sign_in::NOT_KEPT;
 
 use crate::sign_in::Opened;
 
-use crate::sign_in::access_life;
-
 use crate::sign_in::cleared_session_cookie;
 
 use crate::sign_in::login as sign_in_login;
@@ -61,15 +60,9 @@ use crate::sign_in::open_session;
 
 use crate::sign_in::passwords;
 
-use crate::sign_in::people;
-
 use crate::sign_in::record;
 
 use crate::sign_in::remember_browser;
-
-use crate::sign_in::session_cookie;
-
-use crate::sign_in::session_life;
 
 use crate::sign_in::system_policy;
 
@@ -127,15 +120,11 @@ use orch_api_contract::auth::VerificationRequired;
 
 use orch_api_contract::common::ErrorCode;
 
-use orch_api_contract::common::SESSION_COOKIE;
-
 use orch_db::audit::Actor;
 
 use orch_db::queries::identity;
 
 use orch_types::Id;
-
-use orch_types::Time;
 
 use serde_json::json;
 /// Binds this module's requests.
@@ -145,8 +134,10 @@ pub fn mount(registry: &mut Registry) {
         .on(AuthRegister, register)
         .on(AuthLogin, login)
         .on(AuthEmailCodeSend, email_code)
-        .on(AuthRefresh, refresh)
-        .on(AuthSessionRestore, restore_session)
+        .on(AuthRefresh, |ctx, (), ()| session_restore::refresh(ctx))
+        .on(AuthSessionRestore, |ctx, (), ()| {
+            session_restore::restore(ctx)
+        })
         .on(AuthLogout, logout)
         .on(AuthRecoveryStart, recovery)
         .on(AuthRecoveryCheck, recovery_check)
@@ -220,6 +211,8 @@ async fn register(
         }
         _ => {}
     }
+    // Before anything is made or hashed: an account is the act a program would repeat without end.
+    human_check::require(&ctx, Act::Register).await?;
 
     // A personal link is for one address, which the link reached, and which
     // therefore counts as confirmed.
@@ -412,6 +405,9 @@ async fn login(
     (): (),
     body: orch_api_contract::auth::AuthLoginBody,
 ) -> ApiResult<Answer<AuthResult>> {
+    // Every call asks for it, the second step's too: it carries the password again, and one that did not
+    // ask would be a password guess with no check. It is asked before the name is looked at.
+    human_check::require(&ctx, Act::SignIn).await?;
     // The proof and session futures include policy and notification branches;
     // keep them out of the routing and authority wrappers' inline state.
     Ok(Box::pin(sign_in_login::login(&ctx, &body)).await?.answer())
@@ -424,107 +420,27 @@ async fn email_code(
     (): (),
     body: orch_api_contract::auth::AuthEmailCodeSendBody,
 ) -> ApiResult<()> {
+    human_check::require(&ctx, Act::EmailCode).await?;
     sign_in_login::send_code(&ctx, &body).await
-}
-
-/// The value of the session cookie of a request, where it has one in the
-/// form of one.
-fn session_value(ctx: &Ctx) -> Option<&str> {
-    ctx.cookie(SESSION_COOKIE)
-        .filter(|value| value.starts_with(SESSION_PREFIX))
-}
-
-/// Anonymous discovery is a successful empty result; a real cookie uses the
-/// same guarded refresh and session lifetime as every ordinary renewal.
-async fn restore_session(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<Option<AuthResult>>> {
-    if session_value(&ctx).is_none() {
-        return Ok(Answer::from(None).header(CACHE_CONTROL, NOT_KEPT));
-    }
-    let answer = refresh(ctx, (), ()).await?;
-    Ok(Answer {
-        body: Some(answer.body),
-        status: answer.status,
-        headers: answer.headers,
-    })
-}
-
-/// Gives a new access token to the browser that holds the session cookie, and
-/// renews the session: a session lasts as long after its last use as the
-/// system says.
-async fn refresh(mut ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<AuthResult>> {
-    let Some(value) = session_value(&ctx).map(str::to_owned) else {
-        return Err(ApiError::new(
-            ErrorCode::AuthRequired,
-            "there is no session cookie",
-        ));
-    };
-    let invalid = || {
-        ApiError::new(
-            ErrorCode::AuthInvalidToken,
-            "the session has ended or is unknown",
-        )
-    };
-    let auth = &ctx.app.config.auth;
-    let mut tx = ctx.app.db.begin().await?;
-    let hash = token_hash(&value);
-    let session = identity::session_by_refresh_hash(&mut tx, &hash, ctx.now)
-        .await?
-        .ok_or_else(invalid)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, session.user_id)
-        .await?
-        .ok_or_else(invalid)?;
-    ctx.now = ctx.app.clock.now();
-    let session = identity::session_by_refresh_hash(&mut tx, &hash, ctx.now)
-        .await?
-        .ok_or_else(invalid)?;
-    if user.suspended() {
-        return Err(ApiError::new(
-            ErrorCode::AuthSuspended,
-            "this user is suspended",
-        ));
-    }
-    let life = session_life(auth);
-    identity::slide_session(&mut tx, session.id, ctx.now, ctx.now + life).await?;
-    let access = new_token(crate::middleware::authentication::ACCESS_TOKEN_PREFIX);
-    let access_expires_at = ctx.now + access_life(auth);
-    identity::add_access_token(&mut tx, &token_hash(&access), session.id, access_expires_at)
-        .await?;
-    identity::touch_last_seen(&mut tx, user.id, ctx.now).await?;
-    let me = people::me(&mut tx, &user, ctx.now).await?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(Answer::from(AuthResult {
-        access_token: access,
-        access_expires_at: Time::new(access_expires_at),
-        user: me,
-    })
-    // The same cookie again, so that its life slides with the session's.
-    .header(CACHE_CONTROL, NOT_KEPT)
-    .header(SET_COOKIE, &session_cookie(&value, life)))
 }
 
 /// Ends the session of the browser and revokes it. A browser that has none is
 /// as signed out as it can be, and is answered the same.
 async fn logout(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
-    if let Some(value) = session_value(&ctx) {
+    if let Some(value) = session_restore::session_value(&ctx) {
         let mut tx = ctx.app.db.begin().await?;
-        if let Some(session) =
-            identity::session_by_refresh_hash(&mut tx, &token_hash(value), ctx.now).await?
-            && orch_db::queries::transaction_guard::lock_person(&mut tx, session.user_id)
+        if let Some((session, user)) =
+            identity::revoke_cookie_session(&mut tx, &token_hash(value), ctx.app.clock.now())
                 .await?
-                .is_some()
-            && identity::session_by_refresh_hash(&mut tx, &token_hash(value), ctx.app.clock.now())
-                .await?
-                .is_some()
-            && identity::revoke_session(&mut tx, session.id, session.user_id, ctx.now).await?
         {
             record(
                 &ctx,
                 &mut tx,
-                Actor::User(session.user_id),
+                Actor::User(user),
                 orch_db::audit::action!(AuditAction::AuthLogout),
-                Some(session.user_id),
+                Some(user),
                 "a session was ended by signing out",
-                json!({ "session": session.id }),
+                json!({ "session": session }),
             )
             .await?;
         }
@@ -538,6 +454,7 @@ async fn logout(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<()>> {
 /// is, if there is one. It answers `202` whatever the address, after the same
 /// work.
 async fn recovery(ctx: Ctx, (): (), body: AuthRecoveryStartBody) -> ApiResult<()> {
+    human_check::require(&ctx, Act::Recovery).await?;
     let limits = Limits::of(&ctx.app.config.auth);
     let mut conn = ctx.app.db.acquire().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "recovery").await?;
@@ -637,7 +554,7 @@ async fn recovery_confirm(
     let person = identity::email_token_owner(&mut tx, &hash, Purpose::Reset.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, person)
+    let user = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, person)
         .await?
         .ok_or_else(gone)?;
     ctx.now = ctx.app.clock.now();
@@ -704,7 +621,7 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
     let person = identity::email_token_owner(&mut tx, &hash, Purpose::Verify.stored(), ctx.now)
         .await?
         .ok_or_else(gone)?;
-    let user = orch_db::queries::transaction_guard::lock_person(&mut tx, person)
+    let user = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, person)
         .await?
         .ok_or_else(gone)?;
     ctx.now = ctx.app.clock.now();
@@ -759,6 +676,7 @@ async fn verify_email(mut ctx: Ctx, (): (), body: AuthEmailVerifyBody) -> ApiRes
 /// confirmed, if there is one. It answers `202` whatever the name, after the
 /// same work.
 async fn verify_resend(ctx: Ctx, (): (), body: AuthEmailVerifyResendBody) -> ApiResult<()> {
+    human_check::require(&ctx, Act::Resend).await?;
     let limits = Limits::of(&ctx.app.config.auth);
     let mut conn = ctx.app.db.acquire().await?;
     throttle::by_address(&ctx, &mut conn, &limits, "verify").await?;

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { CapStatus, UsageAnalytics, UsageCap, UsageFigures, UsageKey } from '@/generated/api-types';
 import { amountText, check, draftOf, emptyDraft, inputOf, isChange, modelPattern, splitOf, subjectOf, updateOf } from '@/features/usage/capForm';
-import { changeOf, creditsState, formatCredits, formatMeasure, isEmpty, tokenParts } from '@/features/usage/figures';
+import { changeOf, creditsState, formatCredits, formatMeasure, scaleLabels, isEmpty, tokenParts } from '@/features/usage/figures';
 import { filterValue, isRest, keyDetail, keyId, keyLabel } from '@/features/usage/keys';
 import { assignSlots, barsOf, REST_SLOT } from '@/features/usage/series';
 import {serviceUnitsWords,serviceQuoteWords} from '@/features/usage/services';
@@ -211,7 +211,7 @@ describe('what a row of a table is about', () => {
 
   it('is a person or model by its display name, never a routing subtitle, and use of nobody as such', () => {
     expect(keyLabel('person', person, t)).toBe('Bo Lindqvist');
-    expect(keyLabel('person', { person: null }, t)).toBe('Not put down to a person');
+    expect(keyLabel('person', { person: null }, t)).toBe('Not attributed to a person');
     expect(keyLabel('model', { model: 'gpt-5.4', model_display: 'GPT-5.4' }, t)).toBe('GPT-5.4');
     expect(keyLabel('model', { model: 'our-local-model', model_display: '' }, t)).toBe(t('composer.model.displayUnknown'));
     expect(keyDetail('model', { model: 'private_model_route', model_display: 'Reasoner' }, t)).toBeNull();
@@ -223,7 +223,7 @@ describe('what a row of a table is about', () => {
 
   it('is a line without a name where the reader may not see the place, and cannot be pressed', () => {
     const hidden: UsageKey = { project: { id: ID, kind: 'project', name: null, redacted: true } };
-    expect(keyLabel('project', hidden, t)).toBe('A project you cannot see');
+    expect(keyLabel('project', hidden, t)).toBe('One project you cannot see');
     expect(filterValue('project', hidden)).toBeNull();
     expect(filterValue('project', { project: { id: ID, kind: 'project', name: 'Web', redacted: false } })).toBe(ID);
   });
@@ -605,4 +605,17 @@ it('keeps all-unpriced service chart keys and their credit gaps without treating
   const analytics:UsageAnalytics={...answer(),totals,series:[{at:'2026-10-01T00:00:00Z',figures:totals,by:[{key:{offering:{kind:'service',name:'studio-images'}},figures:totals}]}]};
   const [stack]=barsOf(analytics,'credits','offering',t).stacks;
   expect(stack?.label).toBe('studio-images');expect(stack?.rest).toBe(false);expect(stack?.unrated).toEqual([true]);expect(stack?.allUnrated).toBe(true);
+});
+
+
+for (const locale of ['en', 'zh-CN']) it(`labels fractional and large usage ticks in their real units in ${locale}`, () => {
+  for (const ticks of [[0, 0.001, 0.002, 0.003, 0.004], [0.000025, 0.00005, 0.000075], [0, 2500000, 5000000]]) {
+    expect(scaleLabels(ticks, 'credits', locale)).toEqual(ticks.map((value) => new Intl.NumberFormat(locale, { maximumSignificantDigits: 15 }).format(value)));
+  }
+  for (const measure of ['speed', 'first_token', 'errors'] as const) {
+    const labels = scaleLabels([0, 0.0001, 0.0002], measure, locale);
+    expect(new Set(labels).size).toBe(3);
+    expect(labels.every((label) => /[^0-9.,\s]/u.test(label))).toBe(true);
+  }
+  expect(scaleLabels([0, 0.25, 0.5, 0.75, 1], 'turns', locale)).toEqual(['0', '', '', '', '1']);
 });
