@@ -49,3 +49,11 @@ orch_api_base::api_family_callback! {
 
     async fn private_rows<'__api>(arg0: &'__api mut orch_db::Conn, arg1: &'__api orch_authz::Principal, arg2: &'__api [orch_types::Id]) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::common::HiddenItem>>;
 }
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_eb1fd91e22, __api_install_eb1fd91e22, __api_callback_eb1fd91e22;
+    slot __ApiCallbackeb1fd91e22, __API_CALLBACK_EB1FD91E22, __api_set_eb1fd91e22;
+    base orch_api_base::routes::nodes::tree;
+
+    async fn hierarchy_metadata<'__api>(arg0: &'__api orch_api_base::registry::Ctx, arg1: &'__api mut orch_db::Conn, arg2: &'__api orch_authz::Principal, arg3: &'__api orch_api_contract::nodes::OrgTreeGetQuery) -> orch_api_base::middleware::requests::ApiResult<orch_api_contract::nodes::OrgTreeGetReply>;
+}

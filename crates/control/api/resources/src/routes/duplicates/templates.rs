@@ -206,7 +206,8 @@ async fn prepare_native(
     )
     .await?;
     revision(&body, row.revision)?;
-    templates::creation_authority(conn, &principal, home, &row.driver).await?;
+    // A copy is shared the way its home shares, so a driver kept to the admins stays theirs to copy.
+    templates::creation_authority(conn, &principal, home, &row.driver, false).await?;
     let org = copy_to(conn, &principal, subject(DuplicateKind::Template, id), home).await?;
     let delete = if moving {
         if org == row.org_id {
@@ -448,6 +449,7 @@ impl native::Selected for Preview {
     type Query = DuplicateBody;
     type Value = Prepared;
     type Reply = MoveOutDeletePlan;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::TEMPLATE_MOVE_PREVIEW;
     const WATCH_ORDINARY: bool = true;
     fn select<'a>(

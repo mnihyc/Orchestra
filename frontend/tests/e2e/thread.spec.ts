@@ -1,6 +1,7 @@
 import { DOCS } from './documents-support';
 /** A thread at work: a turn streamed from frames (text in pieces, a command and its output, a change and its diff, an approval, the end with its usage), a message sent while the agent works, Stop, a connection lost and found with a gap, a thread that is blocked and why, and somebody who may only watch. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
+import type { ThreadItemListReply } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 
@@ -18,7 +19,7 @@ import {
   turn,
   userMessage,
 } from '../doubles/thread-rows.ts';
-import { bodySent, ACME, addApproval, closeThread, configureThread, delta, dropConnections, emit, PEOPLE, playScene, scenario, setPresence, signIn, threadHeld } from './support.ts';
+import { arrived, bodySent, ACME, addApproval, closeThread, configureThread, delta, dropConnections, emit, PEOPLE, playScene, scenario, setPresence, signIn, threadHeld } from './support.ts';
 
 const MAIN = ACME.mainThread;
 
@@ -366,6 +367,88 @@ test('who is looking at a thread is shown, and a thread taken away from its read
   await expect(page.getByText('You can no longer see this thread.')).toBeVisible();
 });
 
+test('a returning thread can use its shell worker while its summary is still loading', async ({ page }) => {
+  test.skip(process.env.ORCH_E2E_DEV === '1', 'The pinned shell is part of the production build.');
+  // Restore a session on the thread itself, before another page can install the worker.
+  const signedIn = await page.request.post('/api/v1/auth/login', { data: PEOPLE.ada });
+  expect(signedIn.ok()).toBe(true);
+  let releaseSummary!: () => void;
+  const summary = new Promise<void>((resolve) => { releaseSummary = resolve; });
+  await page.route('**/api/v1/summaries/batch', async (route) => {
+    await summary;
+    await route.continue();
+  });
+  try {
+    await page.goto(`/thread/${MAIN}`);
+    await expect(header(page)).toBeVisible();
+    await expect(composer(page)).toBeEditable();
+    const busy = page.locator('[data-summary-inspector] [aria-busy="true"]');
+    await expect(busy).toBeAttached();
+    await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller?.state)).toBe('activated');
+    await expect(busy).toBeAttached();
+  } finally {
+    releaseSummary();
+  }
+});
+
+test('a folded opening fills the conversation from its end without a wheel gesture', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const previous = Array.from({ length: 9 }, (_, i) => turn(`turn-${i}`, { ordinal: i + 1, state: 'completed', inputId: `input-${i}` }));
+  const latest = turn('latest', { ordinal: 10, state: 'completed', inputId: 'input-latest' });
+  await emit(MAIN, {
+    turns: [...previous, latest],
+    items: [...previous.flatMap((one) => [
+      userMessage(`question-${one.id}`, `Question ${one.ordinal}`, { author: ADA, turn: one.id }),
+      agentMessage(`answer-${one.id}`, `Answer ${one.ordinal}`, { turn: one.id }),
+    ]), userMessage('latest-question', 'The latest question', { author: ADA, turn: latest.id }),
+    ...Array.from({ length: 40 }, (_, i) => command(`step-${i}`, { command: 'inspect', exit: 0, turn: latest.id })),
+    agentMessage('latest-answer', 'The final answer', { turn: latest.id })],
+  });
+  let releaseHistory!: () => void;
+  const history = new Promise<void>((resolve) => { releaseHistory = resolve; });
+  let olderReads = 0;
+  const olderPage = (url: URL) => url.pathname === `/api/v1/threads/${MAIN}/items` && url.searchParams.has('before');
+  await page.route(olderPage, async (route) => {
+    olderReads += 1;
+    await history;
+    await route.continue();
+  });
+  const log = conversation(page);
+  const gapBelowLastRow = () => log.evaluate((element) => {
+    const port = element.closest('[data-scroll-area]')!;
+    const last = element.querySelector('li[data-index]:last-child')!;
+    return Math.abs(port.getBoundingClientRect().bottom - last.getBoundingClientRect().bottom);
+  });
+  try {
+    await open(page);
+    await expect(log.getByText('The final answer', { exact: true })).toBeInViewport();
+    await expect.poll(gapBelowLastRow).toBeLessThanOrEqual(1);
+    await expect.poll(() => olderReads, { message: 'The painted partial conversation requests the earlier page' }).toBe(1);
+    const earlier = arrived(page.waitForResponse((response) => olderPage(new URL(response.url()))));
+    releaseHistory();
+    const response = await earlier;
+    expect(response.ok()).toBe(true);
+    const pageOfItems = await response.json() as ThreadItemListReply;
+    expect(pageOfItems.items.map((item) => item.id)).toContain('latest-question');
+  } finally {
+    releaseHistory();
+  }
+  await expect.poll(() => log.evaluate((element) => {
+    const port = element.closest('[data-scroll-area]')!;
+    const first = element.querySelector('li[data-index]');
+    const index = first?.getAttribute('data-index') ?? 'none';
+    const count = first?.getAttribute('aria-setsize') ?? 'none';
+    return [`scroll ${port.scrollTop} of ${port.scrollHeight - port.clientHeight}, first row ${index} of ${count}`,
+      ...Array.from(element.querySelectorAll('[data-item]'), (row) => row.getAttribute('data-item'))];
+  }), { message: 'Earlier history draws the newest prompt above the folded work' }).toContain('latest-question');
+  const question = log.locator('[data-item="latest-question"]');
+  await expect(question).toContainText('The latest question');
+  await expect(question).toBeInViewport();
+  await expect(log.getByText('The final answer', { exact: true })).toBeInViewport();
+  await expect.poll(gapBelowLastRow).toBeLessThanOrEqual(1);
+  expect(olderReads).toBe(1);
+});
+
 test('the work of an older turn is folded into one line, which opens to its steps', async ({ page }) => {
   await playScene(MAIN, 'history');
   await open(page);
@@ -698,7 +781,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // The menu of an item begins the picking with that item; every item then has a box, and the bar stands in place of the one the message is written in.
   const first = conversation(page).locator('[data-item="u1"]');
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   const bar = page.getByRole('toolbar', { name: 'Selected items' });
   await expect(bar.getByText('1 selected')).toBeVisible();
@@ -721,7 +804,7 @@ test('items are picked across turns from their menus and by their boxes, and Quo
   // Cancel leaves everything as it was. The box took the keyboard, and the screen it shares with the conversation went down to it: the first item is brought back.
   await scrollConversationToTop(page);
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await page.getByRole('toolbar', { name: 'Selected items' }).getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByRole('toolbar', { name: 'Selected items' })).toHaveCount(0);
