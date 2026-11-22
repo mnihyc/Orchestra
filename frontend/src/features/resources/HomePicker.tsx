@@ -5,15 +5,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
-import { fetchTree, nodeQuery, orgsQuery } from '@/api/nodes';
-import { departmentsOf } from '@/features/navigation/OrgSwitcher';
+import { nodeQuery, orgsQuery } from '@/api/nodes';
+import { usePlacePages, PlacePageFoot } from '@/features/navigation/usePlacePages';
+import { placesOfTree } from '@/features/settings/PlacePicker';
 import { Hint } from '@/features/help/Hint';
 import { choiceCopy } from '@/i18n/choices';
 import { rememberedOrg, useSelectedOrg } from '@/shell/org';
 import { client } from '@/api/client';
 import { useTreeStore } from '@/realtime/stores/tree';
-import type { Org, TreeNode } from '@/generated/api-types';
-import { Combobox } from '@/ui/Combobox';
+import type { NodeKind, Org } from '@/generated/api-types';
+import { ResourcePickerLookup } from '@/ui/ResourcePicker';
+import type { ChoiceResource } from '@/ui/DetailCard';
 import { ErrorState } from '@/ui/ErrorState';
 
 export interface HomeChoice {
@@ -25,9 +27,6 @@ export interface HomeChoice {
   /** Whether it lies inside a root org. */
   department: boolean;
 }
-
-/** How long the tree of an org read for its departments is good: they change rarely, and a dialog is short. */
-const TREE_FRESH_MS = 60_000;
 
 /**
  * The root org in view in the left bar (or the one this device remembers for the person), when it is
@@ -46,43 +45,47 @@ export function useViewedOrgState() {
 export function useViewedOrg():Org|null {return useViewedOrgState().org;}
 
 /** The orgs a resource could have as its home, and whether they have all been read. */
-export function useHomeChoices(selected = ''): { choices: HomeChoice[]; pending: boolean; error: unknown; retry: () => void } {
+export function useHomeChoices(selected = '', search = '', open = false) {
   const { t } = useTranslation();
   const orgs = useQuery(orgsQuery);
   const roots: Org[] = useMemo(() => orgs.data ?? [], [orgs.data]);
   const byOrg = useTreeStore((state) => state.byOrg);
-  const viewed = useSelectedOrg((state) => state.orgId);
   const cachedRoot = [...byOrg].find(([, tree]) => tree.nodes.has(selected))?.[0];
-  const unknown = selected !== '' && !roots.some((org) => org.id === selected) && cachedRoot === undefined;
-  const node = useQuery({ ...nodeQuery(selected), enabled: unknown, staleTime: TREE_FRESH_MS });
-  const rootId = roots.find((org) => org.id === selected)?.id ?? cachedRoot ?? (unknown ? node.data?.org_id : undefined)
-    ?? roots.find((org) => org.id === viewed)?.id ?? roots.find((org) => org.org_kind !== 'personal')?.id ?? roots[0]?.id ?? '';
-  // Use the live tree when it is already open. Opening this picker never reads every other org.
-  const tree = useQuery({
-    queryKey: ['tree-places', rootId] as const,
-    queryFn: ({ signal }) => fetchTree(rootId, null, signal),
-    staleTime: TREE_FRESH_MS,
-    enabled: selected !== '' && (!unknown || node.data !== undefined) && rootId !== '' && roots.find((org) => org.id === rootId)?.org_kind !== 'personal' && byOrg.get(rootId)?.loaded !== true,
-  });
+  const unknown = orgs.data!==undefined && selected !== '' && !roots.some((org) => org.id === selected) && cachedRoot === undefined;
+  const node = useQuery({ ...nodeQuery(selected), enabled: unknown });
+  const viewed=useSelectedOrg((state)=>state.orgId);
+  const rootId=roots.find((org)=>org.id===selected)?.id??cachedRoot??node.data?.org_id??viewed??roots.find((org)=>org.org_kind!=='personal')?.id??roots[0]?.id;
+  const searched=useMemo(()=>{
+    const teams=roots.filter((org)=>org.org_kind!=='personal'),needle=search.trim().toLocaleLowerCase();
+    if(needle==='')return teams.filter((org)=>org.id===rootId);
+    return teams;
+  },[roots,search,rootId]);
+  const selection=useMemo(()=>({q:search.trim(),kind:'org' as const}),[search]);
+  const pages=usePlacePages(searched,selection,open);
   const choices = useMemo(() => {
     const found: HomeChoice[] = [];
     roots.forEach((org) => {
       const personal = org.org_kind === 'personal';
       found.push({ id: org.id, label: personal ? t('resources.home.ownOrg', { name: org.name }) : org.name, personal, department: false });
-      const rows: ReadonlyMap<string, TreeNode> = byOrg.get(org.id)?.nodes ?? new Map((org.id === rootId ? tree.data?.nodes ?? [] : []).map((row) => [row.id, row]));
-      for (const { node, path } of departmentsOf(rows, org.id)) {
-        found.push({ id: node.id, label: [org.name, ...path].join(t('resources.home.pathJoin')), personal: false, department: true });
+      const page=pages.pages.find((page)=>page.root.id===org.id);
+      const cached=[...byOrg.get(org.id)?.nodes.values()??[]];
+      const rows=[...new Map([...cached,...page?.rows??[]].map((row)=>[row.id,row])).values()];
+      for(const place of placesOfTree(rows,t('resources.home.pathJoin')))if(place.kind==='org'&&place.id!==org.id&&(page?.matches.has(place.id)||cached.some((row)=>row.id===place.id)&&place.path.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))) {
+        found.push({id:place.id,label:place.path,personal:false,department:true});
       }
     });
+    const held=byOrg.get(cachedRoot??'');
+    const selectedPlace=held===undefined?undefined:placesOfTree([...held.nodes.values()],t('resources.home.pathJoin')).find((place)=>place.id===selected);
+    if(selectedPlace?.kind==='org'&&!found.some((choice)=>choice.id===selectedPlace.id))found.push({id:selectedPlace.id,label:selectedPlace.path,personal:false,department:true});
     const current = unknown ? node.data : undefined;
     if (current?.kind === 'org' && !found.some((one) => one.id === current.id)) {
       found.push({ id: current.id, label: current.path.flatMap((part) => part.redacted || part.name === null ? [] : [part.name]).join(t('resources.home.pathJoin')), personal: false, department: true });
     }
     return found;
-  }, [roots, byOrg, rootId, tree.data, unknown, node.data, t]);
-  return { choices, pending: orgs.isPending, error: orgs.error ?? tree.error ?? node.error, retry: () => {
-    if(orgs.isError)void orgs.refetch();if(tree.isError)void tree.refetch();if(node.isError && unknown)void node.refetch();
-  } };
+  }, [roots, pages.pages, unknown, node.data, t,byOrg,cachedRoot,selected,search]);
+  return {choices,pages:pages.pages,pending:orgs.isPending,error:orgs.error??pages.error??node.error,pageError:pages.error,frameError:orgs.error??node.error,retry:()=>{
+    if(orgs.isError)void orgs.refetch();pages.retry();if(node.isError&&unknown)void node.refetch();
+  }};
 }
 
 /**
@@ -114,39 +117,43 @@ export interface HomePickerProps {
   /** The server chooses this home at the effect; choosing another entry is an explicit override. */
   defaultChoice?: string;
   /** An environment may take its settings from the topic or project currently being used. */
-  places?: readonly { id: string; name: string }[];
+  places?: readonly { id: string; name: string;kind?:NodeKind }[];
 }
 
 /** A choice of the org a resource belongs to, with the one in view chosen to begin with. */
 export function HomePicker({ value, onChange, label, hint, error, disabled, compact = false, preferPersonal = false, defaultChoice, places = [] }: HomePickerProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
-  const { choices, pending, error:readError, retry } = useHomeChoices(places.some((place) => place.id === value) ? '' : value);
+  const [open,setOpen]=useState(false);
+  const reader=useStore(client.session,(state)=>state.readerVersion);
+  const [selectedLabel,setSelectedLabel]=useState<{id:string;name:string;reader:number|undefined}|null>(null);
+  const { choices, pages, pending, error:readError, pageError, frameError, retry } = useHomeChoices(places.some((place) => place.id === value) ? '' : value,query,open);
   const userId = useStore(client.session, (state) => state.userId);
   const inView = useSelectedOrg((state) => state.orgId) ?? (userId === null ? null : rememberedOrg(userId));
   useEffect(() => {
     if (defaultChoice === undefined && value === '' && choices.length > 0) onChange((preferPersonal ? choices.find((choice) => choice.personal)?.id : undefined) ?? defaultHome(choices, inView));
   }, [value, choices, inView, onChange, preferPersonal, defaultChoice]);
-  const options: { value: string; name: string; description?: string }[]=[...(defaultChoice===undefined?[]:[{value:'',name:defaultChoice}]),...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name })),
-    ...choices.map((choice)=>({value:choice.id,...(compact?{name:choice.label}:choiceCopy(t,`resourceHome.${choice.personal?'personal':choice.department?'department':'org'}`,{name:choice.label}))}))];
+  const options: { value: string; name: string; description?: string;resource?:ChoiceResource }[]=[...(defaultChoice===undefined?[]:[{value:'',name:defaultChoice}]),...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name,...(place.kind===undefined?{}:{resource:{kind:place.kind,id:place.id}}) })),
+    ...choices.map((choice)=>({value:choice.id,resource:{kind:'org',id:choice.id},...(compact?{name:choice.label}:choiceCopy(t,`resourceHome.${choice.personal?'personal':choice.department?'department':'org'}`,{name:choice.label}))}))];
   const words = query.trim().toLocaleLowerCase();
   const found = options.filter((option) => option.name.toLocaleLowerCase().includes(words)).map((option) => ({
-    value: option.value, label: option.name, text: option.name,
+    value: option.value, label: option.name, text: option.name,resource:option.resource,
     ...('description' in option ? { description: option.description } : {}),
   }));
   return (
-    <div className="flex min-w-0 flex-col gap-2"><Combobox
+    <div className="flex min-w-0 flex-col gap-2"><ResourcePickerLookup pickerKey="resource-home" groupHomes={false}
       label={label ?? t('resources.home.label')}
       help={<Hint id="home" />}
       {...(hint === undefined ? {} : { hint })}
       error={error}
-      query={query} onQueryChange={setQuery}
-      onOpenChange={(open) => { if (!open) setQuery(''); }}
-      displayValue={options.find((option) => option.value === value)?.name ?? ''}
-      onSelect={(option) => { setQuery(''); onChange(option.value); }}
+      query={query} onQueryChange={setQuery} initialActiveValue={value}
+      onOpenChange={(open) => { setOpen(open);if (!open) setQuery(''); }}
+      footer={pages.some((page)=>page.back||Boolean(page.result.data?.next_cursor)||page.result.data!==undefined&&page.live!=='current')||pageError!==null?<><PlacePageFoot pages={pages}/>{pageError!==null&&<ErrorState compact error={pageError} onRetry={retry}/>}</>:undefined}
+      displayValue={options.find((option) => option.value === value)?.name ?? (readError===null&&selectedLabel?.id===value&&selectedLabel.reader===reader?selectedLabel.name:'')}
+      onSelect={(option) => { setSelectedLabel({id:option.value,name:option.text,reader});setOpen(false);setQuery(''); onChange(option.value); }}
       disabled={disabled === true || pending}
       groups={[{ id: 'homes', label: '', options: found }]} empty={t('ui.combobox.empty')}
       placeholder={pending ? t('resources.home.loading') : t('ui.combobox.search')}
-    />{readError!==null && <ErrorState compact error={readError} onRetry={retry}/>}</div>
+    />{frameError!==null && <ErrorState compact error={frameError} onRetry={retry}/>}</div>
   );
 }

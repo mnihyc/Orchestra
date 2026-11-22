@@ -1,0 +1,2 @@
+web build
+web-e2e tests/e2e/openings.spec.ts -g "reads each part of the navigation tree" --repeat-each=8 --retries=0
