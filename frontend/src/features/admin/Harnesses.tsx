@@ -137,8 +137,8 @@ function BuildsTable({ builds, title, catalogue, onChange }: { builds: readonly 
   });
 
   const status = (build: HarnessBuild) => <span className="flex min-w-0 flex-wrap items-center gap-2">
-    <BuildStatus build={build} name={title(build.kind)} catalogue={catalogue(build.kind)} />
-    {build.source !== 'release' && build.status !== 'checking' && <Button size="sm" variant="ghost" pending={check.isPending && check.variables.kind === build.kind && check.variables.version === build.version} onClick={() => check.mutate(build)}>{t('admin.harnesses.check')}</Button>}
+    <BuildStatus build={build} name={title(build.kind)} catalogue={catalogue(build.kind)} showOutcome />
+    {build.status !== 'checking' && <Button size="sm" variant="ghost" pending={check.isPending && check.variables.kind === build.kind && check.variables.version === build.version} onClick={() => check.mutate(build)}>{t('admin.harnesses.check')}</Button>}
   </span>;
   const defaultChoice = (build: HarnessBuild) => build.is_default
     ? <StatusTag tone="accent">{t('admin.harnesses.isDefault')}</StatusTag>
@@ -242,11 +242,11 @@ function ProgramBuilds({ detail, search, onSearch }: SectionProps & { detail: Pr
   const client = useQueryClient();
   const kind = detail.summary.harness.kind;
   const name = programName(detail.summary.harness, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
-  const builds = useQuery({ ...adminProgramBuildsQuery(kind, search.buildCursor), refetchInterval: (query) => query.state.data?.items.some((build) => build.status === 'checking') === true ? CHECK_FOLLOW_MS : false });
+  const builds = useQuery({ ...adminProgramBuildsQuery(kind, search.buildCursor,{q:search.buildQ}), refetchInterval: (query) => query.state.data?.items.some((build) => build.status === 'checking') === true ? CHECK_FOLLOW_MS : false });
   const [adding, setAdding] = useState(false);
   const refresh = () => Promise.all([
     client.invalidateQueries({ queryKey: adminProgramQuery(kind).queryKey, exact: true }),
-    client.invalidateQueries({ queryKey: adminProgramBuildsQuery(kind, search.buildCursor).queryKey, exact: true }),
+    client.invalidateQueries({ queryKey: adminProgramBuildsQuery(kind, search.buildCursor,{q:search.buildQ}).queryKey, exact: true }),
   ]);
   const readChannels = useMutation({ mutationFn: () => readProgramChannels(kind), onSuccess: async () => { await refresh(); toast({ tone: 'success', title: t('admin.harnesses.channelsRead') }); } });
   const openHelp = useHelpOpener();
@@ -259,7 +259,8 @@ function ProgramBuilds({ detail, search, onSearch }: SectionProps & { detail: Pr
   </span>}>
     {readChannels.error !== null && <ErrorAlert error={readChannels.error} />}
     <ChannelReadStatus value={detail.channels} title={() => name} />
-    {builds.isPending ? <SkeletonRows read={builds} rows={3} /> : builds.isError ? <ErrorState compact error={builds.error} retrying={builds.isRefetching} onRetry={() => void builds.refetch()} /> : builds.data.items.length === 0 ? <EmptyState compact icon={<Package aria-hidden />} title={t('admin.harnesses.noBuilds')} description={t('admin.harnesses.noBuildsHint')} /> : <BuildsTable builds={builds.data.items} title={() => name} catalogue={() => detail.program?.checks ?? null} onChange={refresh} />}
+    <Input type="search" label={t('ui.collection.find',{name:t('admin.harnesses.buildsTitle')})} placeholder={t('ui.collection.search')} value={search.buildQ??''} onChange={(event)=>onSearch({buildQ:event.target.value || undefined,buildCursor:undefined})}/>
+    {builds.isPending ? <SkeletonRows read={builds} rows={3} /> : builds.isError ? <ErrorState compact error={builds.error} retrying={builds.isRefetching} onRetry={() => void builds.refetch()} /> : builds.data.items.length === 0 ? <EmptyState compact icon={<Package aria-hidden />} title={t(search.buildQ?'ui.collection.none':'admin.harnesses.noBuilds')} description={search.buildQ?undefined:t('admin.harnesses.noBuildsHint')} /> : <BuildsTable builds={builds.data.items} title={() => name} catalogue={() => detail.program?.checks ?? null} onChange={refresh} />}
     <Pages cursor={search.buildCursor} next={builds.data?.next_cursor} loading={builds.isFetching} onPage={(buildCursor) => onSearch({ buildCursor }, { replace: false })} />
     {adding && <BuildDialog kinds={[detail.summary.harness]} onClose={() => { setAdding(false); void refresh(); }} />}
   </Section>;

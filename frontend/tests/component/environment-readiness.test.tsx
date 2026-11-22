@@ -10,7 +10,7 @@ import { World } from '../doubles/world';
 import { sandboxReadiness } from '../fixtures/sandbox-readiness';
 import { show } from './support';
 
-vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: vi.fn() }));
 afterEach(async () => { cleanup(); vi.clearAllMocks(); delete document.documentElement.dataset.theme; await setLocale('en'); });
 function nativeEnvironment() {
   const world = new World(), ada = world.people.get('ada');

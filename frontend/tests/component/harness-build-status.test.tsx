@@ -5,10 +5,11 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { BuildStatus, ChannelReadStatus } from '@/features/admin/HarnessVersions';
 import type { HarnessBuild, HarnessChannelsStatus } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 
 const openHelp = vi.hoisted(() => vi.fn());
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => openHelp }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => openHelp }));
 afterEach(async () => { cleanup(); openHelp.mockClear(); await setLocale('en'); });
 
 const build: HarnessBuild = {
@@ -44,10 +45,49 @@ for (const locale of ['en', 'zh-CN'] as const) it(`follows interface, conformanc
   expect(screen.getByText(locale === 'en' ? 'Checking interface…' : '正在检查接口…')).toBeVisible();
   const second = { ...build, check: { ...build.check!, stage: 'conformance' as const } };
   view.rerender(<BuildStatus build={second} />);
-  expect(screen.getByText(locale === 'en' ? 'Checking conformance…' : '正在检查兼容性…')).toBeVisible();
+  expect(screen.getByText(locale === 'en' ? 'Checking compatibility…' : '正在检查兼容性…')).toBeVisible();
   view.rerender(<BuildStatus build={{ ...second, status: 'failed', check: { ...second.check, stage: 'complete', cases: [{ name: 'user_input', passed: false, feature: 'approvals.user_input', error: 'No native question', elapsed_ms: 12 }] } }} />);
   expect(screen.getByText(i18n.t('programVersions.offInBuild', { feature: i18n.t('programVersions.disabledFeatures.questions') }))).toBeVisible();
   view.rerender(<BuildStatus build={{ ...second, status: 'checked', check: { ...second.check, stage: 'complete' } }} />);
+  expect(screen.getByText(locale === 'en' ? 'Checked' : '已检查')).toBeVisible();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`says how long a check under way has run (${locale})`, async () => {
+  await setLocale(locale);
+  const began = new Date(Date.now() - (6 * 60 + 30) * 1000).toISOString();
+  show(<BuildStatus build={{ ...build, check: { ...build.check!, stage: 'conformance', at: began } }} />);
+  // How long is written in the person's own format, which the language does not set.
+  const minutes = new Intl.NumberFormat(useAppearance.getState().locale, { style: 'unit', unit: 'minute', unitDisplay: 'narrow' }).format(6);
+  expect(screen.getByText(locale === 'en' ? 'Checking compatibility…' : '正在检查兼容性…')).toHaveTextContent(minutes);
+});
+
+/** The catalogue of a program as its page gets it: the cases of the present manifest, by name, with their titles. */
+const catalogue = { cases: [
+  { name: 'startup', title: { en: 'Starts with isolated settings', 'zh-CN': '使用隔离设置启动' }, feature: null },
+  { name: 'background_commands', title: { en: 'Lists a command left running and ends it by name', 'zh-CN': '列出留在后台运行的命令并按名称结束' }, feature: 'background_commands' },
+  { name: 'steer_id', title: { en: 'Steers a running turn', 'zh-CN': '引导正在运行的轮次' }, feature: 'steer' },
+] };
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows a build that passed every case it had as checked, with the cases it has not run pending (${locale})`, async () => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  show(<BuildStatus catalogue={catalogue} build={{ ...build, status: 'checked', check: { ...build.check!, stage: 'complete', cases: [{ name: 'startup', passed: true, feature: null, error: null, elapsed_ms: 12 }] } }} />);
+  const label = i18n.t('programVersions.checkedPending', { count: 2, number: '2' });
+  const trigger = screen.getByRole('button', { name: label });
+  expect(trigger).toBeVisible();
+  expect(trigger).not.toHaveTextContent(i18n.t('admin.harnesses.status.failed'));
+  expect(trigger).not.toHaveTextContent(i18n.t('admin.harnesses.status.untested'));
+  await user.click(trigger);
+  const details = screen.getByRole('dialog', { name: i18n.t('admin.harnesses.checkResults') });
+  expect(details).toHaveTextContent(i18n.t('programVersions.casesPending', { names: `${locale === 'en' ? 'Lists a command left running and ends it by name' : '列出留在后台运行的命令并按名称结束'}, ${locale === 'en' ? 'Steers a running turn' : '引导正在运行的轮次'}` }));
+  expect(details).toHaveTextContent(`${i18n.t('programVersions.checks.startup')} · ${i18n.t('admin.harnesses.status.checked')}`);
+  expect(details).not.toHaveTextContent('background_commands');
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`shows a build that has run every present case as plainly checked (${locale})`, async () => {
+  await setLocale(locale);
+  const ran = catalogue.cases.map((entry) => ({ name: entry.name, passed: true, feature: entry.feature, error: null, elapsed_ms: 12 }));
+  show(<BuildStatus catalogue={catalogue} build={{ ...build, status: 'checked', check: { ...build.check!, stage: 'complete', cases: ran } }} />);
   expect(screen.getByText(locale === 'en' ? 'Checked' : '已检查')).toBeVisible();
 });
 

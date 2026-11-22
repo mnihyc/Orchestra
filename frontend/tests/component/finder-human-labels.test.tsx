@@ -22,7 +22,7 @@ const recents = [
   hit({ id: 'gpu', kind: 'provider', name: 'GPU model', address: 'acme.ada.gpu', path: [root], href: '/resources/providers/gpu' }),
 ];
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof Nodes>(), orgsQuery: { queryKey: ['human-finder-orgs'], queryFn: () => Promise.resolve([]) } }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => () => undefined }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => () => undefined }));
 vi.mock('@/features/finder/sources', async (original) => ({ ...await original<typeof Sources>(),
   useEnv: (showCard: Env['showCard']): Env => ({ t: i18n.t, go: calls.go, orgSlug: 'acme', exists: () => true, showCard }),
   useAnswers: (input: Sources.AnswerInput): ReturnType<typeof Sources.useAnswers> => ({
