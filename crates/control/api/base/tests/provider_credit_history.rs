@@ -29,16 +29,17 @@ fn rule(operation: &str, provider: Id, action: &str) -> Value {
 
 async fn key(world: &World, user: Id, rules: Vec<Value>) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let scope = serde_json::to_value(scope).unwrap();
-    let token = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let token = new_api_token(issued_key_id);
     create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Credit history observer",
             token_hash: &token_hash(&token),
