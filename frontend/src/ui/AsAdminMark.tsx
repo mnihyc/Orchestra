@@ -3,6 +3,7 @@ import { ShieldUser } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { usePlaceLabel } from '@/features/navigation/placeLabels';
 import type { AdminAccess, NodeOrSystem } from '@/generated/api-types';
+import { LockBadge } from '@/ui/LockBadge';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
 
@@ -11,9 +12,6 @@ export interface AsAdminMarkProps {
   iconOnly?: boolean;
   /** Dense table rows retain the shield on a phone. */
   responsive?: boolean;
-  /** Page headers say why in visible words, on the same line as Private where appropriate. */
-  sentence?: boolean;
-  private?: boolean;
 }
 
 export function useAdminPlaceName(of: NodeOrSystem | null | undefined): string | null {
@@ -22,16 +20,26 @@ export function useAdminPlaceName(of: NodeOrSystem | null | undefined): string |
   return of === null || of === undefined ? null : of === 'system' ? t('access.place.system') : label(of) ?? t('access.place.hidden');
 }
 
-function Mark({ of, iconOnly = false, responsive = false, sentence = false, private: privatePage = false }: AsAdminMarkProps & { of: NodeOrSystem }) {
+function useReachReason(of: NodeOrSystem) {
   const { t } = useTranslation();
   const place = useAdminPlaceName(of);
-  const reason = of === 'system' ? t('adminReach.mark.system') : t('adminReach.mark.place', { place });
-  const words = privatePage ? t('adminReach.mark.private', { reason }) : reason;
-  return <Tooltip content={words}><span role="img" aria-label={words}
-    data-as-admin-mark className={cx('inline-flex max-w-full shrink-0 items-center gap-1 text-xs font-normal text-text-muted', sentence && 'text-sm')}>
+  return of === 'system' ? t('adminReach.mark.system') : t('adminReach.mark.place', { place });
+}
+
+/** A restricted opening carries its privacy and provenance on the lock. */
+export function PrivateOpeningMark({ of }: { of: NodeOrSystem }) {
+  const { t } = useTranslation();
+  const reason = useReachReason(of);
+  return <LockBadge label={t('adminReach.mark.private', { reason })} />;
+}
+
+function Mark({ of, iconOnly = false, responsive = false }: AsAdminMarkProps & { of: NodeOrSystem }) {
+  const { t } = useTranslation();
+  const reason = useReachReason(of);
+  return <Tooltip content={reason}><span role="img" aria-label={reason}
+    data-as-admin-mark className="inline-flex max-w-full shrink-0 items-center gap-1 text-xs font-normal text-text-muted">
     <ShieldUser aria-hidden className="size-4 shrink-0" />
     {!iconOnly && <span aria-hidden className={cx(responsive && 'hidden sm:inline')}>{t('adminReach.mode.name')}</span>}
-    {sentence && <><span aria-hidden>·</span><span aria-hidden>{words}</span></>}
   </span></Tooltip>;
 }
 

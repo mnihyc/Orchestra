@@ -14,6 +14,7 @@
 //! | [`imports`] | What a spec can be proposed from |
 //! | [`units`] | Unit identity, state, and reconciliation |
 //! | [`volumes`] | Persistent storage on a host's named storages |
+//! | [`volume_stream`] | Whole-volume metadata shared by native transfer producers |
 //! | [`mounts`] | How mounts are attached |
 //! | [`capabilities`] | Per-driver capability patches |
 //! | [`isolation`] | Runtimes as declared classes: boundary, what holds differently under each, and its limits |
@@ -35,4 +36,8 @@ pub mod resources;
 pub mod runtime;
 pub mod sources;
 pub mod units;
+pub mod volume_stream;
 pub mod volumes;
+
+/// Frozen, isolated native capability work.
+pub mod work;

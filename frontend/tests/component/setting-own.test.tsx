@@ -11,7 +11,7 @@ import { show } from './support';
 import type { ResolvedSetting as SettingWithParts } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), putSetting: vi.fn(), clearSetting: vi.fn() }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => Promise.resolve({ kind: 'org', id, address: id, name: id }) }) }));

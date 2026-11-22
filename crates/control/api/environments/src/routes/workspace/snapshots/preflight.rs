@@ -220,6 +220,8 @@ pub(super) async fn measure_source(
     let dispatcher = ctx.app.link.dispatcher();
     dispatcher
         .issue_stored(crate::dispatch::StoredCommand {
+            content_transit: false,
+            native_target: command.native_target.clone(),
             id: Some(command.id),
             machine: command.machine,
             kind: command.kind.as_str().to_owned(),

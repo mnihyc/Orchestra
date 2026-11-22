@@ -193,7 +193,10 @@ fn check_directory_identities(bindings: &[String]) -> anyhow::Result<()> {
             let metadata = std::fs::metadata(&expected.path)?;
             if !metadata.is_dir()
                 || expected.device != Some(metadata.dev())
-                || expected.inode != Some(metadata.ino())
+                || expected.inode
+                    != Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                        metadata.ino(),
+                    ))
             {
                 anyhow::bail!(
                     "the existing directory at {} changed since environment.roots was checked; its owners must restore it or recreate with an allowed directory",
