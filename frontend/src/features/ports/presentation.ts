@@ -17,6 +17,7 @@ export interface PortOpening {
   transports: HostTransports; opened_by: UserRef | null; entries?: PortEntry[]; opened_at: string; until: string | null;
   requested_by?: UserRef | null; requested_by_thread?: NodeRef | null; allowed_by?: UserRef | null; admission?: PortOpeningAdmission | null; label?: string; link_recipient?: 'thread' | 'person';
   desired: boolean; state: 'waiting' | 'opening' | 'open' | 'nothing_listens' | 'stopped' | 'unavailable' | 'refused' | 'failed' | 'closed' | 'expired';
+  refused_until?: string | null;
   reason: string | null; name: string | null; url: string | null; host: HostRef | null; publisher?: MachineRef | null;
   host_port: number | null; fixed_host_port: boolean; revision: number;
   place: NodeRef | null; viewers: number | null; link_carriers: LinkCarriers | null;
@@ -37,6 +38,7 @@ export interface ListeningPort extends Omit<ObservedPort, 'process'> {
 }
 
 export interface EnvironmentPort {
+  namedLoopback?: boolean;
   port: number; name: string | null; url: string | null; helper_command: string; program?: PortHttp; revision?: number;
   counts?: number | null; entries?: PortEntry[]; as_of?: string; discovery?: PortTarget['discovery'];
   listeners: ListeningPort[]; openings: PortOpening[]; internal: boolean;

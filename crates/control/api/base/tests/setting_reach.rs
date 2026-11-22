@@ -26,6 +26,7 @@ async fn put(world: &World, who: &Who, at: Id, key: &str, value: Json, locked: b
         .call(NodeSettingSet, &[&at, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,
@@ -173,21 +174,22 @@ async fn an_ignored_wider_minimum_is_not_an_override_and_a_tighter_one_is() {
     let project = make_project(&world, &owner, org, "Web").await.base.id;
     let topic = make_topic(&world, &owner, project, "Login").await.base.id;
     thread(&world, &owner, topic).await;
-    put(
-        &world,
-        &owner,
-        org,
-        "agents.subagents_at_once",
-        json!(4),
-        false,
-    )
-    .await;
+    // The project's wider minimum was chosen before the org's ceiling, which only narrows it.
     put(
         &world,
         &owner,
         project,
         "agents.subagents_at_once",
         json!(8),
+        false,
+    )
+    .await;
+    put(
+        &world,
+        &owner,
+        org,
+        "agents.subagents_at_once",
+        json!(4),
         false,
     )
     .await;
@@ -394,5 +396,115 @@ async fn system_reach_has_the_system_settings_read_gate_and_unknown_keys_are_not
             .problem()
             .code,
         ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn an_environment_setting_reaches_the_environments_homed_below_that_take_it_and_their_threads()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "owner").await;
+    let org = make_org(&world, &owner, "Team", "team").await.base.id;
+    let project = make_project(&world, &owner, org, "Web").await.base.id;
+    let topic = make_topic(&world, &owner, project, "Login").await.base.id;
+    let taking = thread(&world, &owner, topic).await;
+    let keeping = thread(&world, &owner, topic).await;
+    let elsewhere = thread(&world, &owner, topic).await;
+    let idle = thread(&world, &owner, topic).await;
+    let own = {
+        let mut conn = world.conn().await;
+        orch_db::queries::hierarchy::testing::put_thread_in_environment(
+            &mut conn,
+            taking,
+            "connected",
+            owner.id(),
+            topic,
+        )
+        .await
+        .unwrap();
+        let own = orch_db::queries::hierarchy::testing::put_thread_in_environment(
+            &mut conn,
+            keeping,
+            "connected",
+            owner.id(),
+            topic,
+        )
+        .await
+        .unwrap();
+        // Homed above the topic: the topic's value is not its own.
+        orch_db::queries::hierarchy::testing::put_thread_in_environment(
+            &mut conn,
+            elsewhere,
+            "connected",
+            owner.id(),
+            org,
+        )
+        .await
+        .unwrap();
+        orch_db::queries::settings::put(
+            &mut conn,
+            Some(topic),
+            "env.idle_stop_minutes",
+            &orch_db::queries::settings::Stored {
+                value: &json!(30),
+                locked: false,
+                by: Some(owner.id()),
+                at: world.now(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        own
+    };
+    // Its own value replaces the topic's.
+    sqlx::query("UPDATE environments SET config=$2 WHERE id=$1")
+        .bind(own)
+        .bind(json!({"env.idle_stop_minutes": 10}))
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let shown = reach(
+        &world,
+        &owner,
+        topic,
+        "env.idle_stop_minutes",
+        PageQuery::default(),
+    )
+    .await;
+    // One environment takes the topic's value, with its one thread; the thread with no environment is no part of it.
+    assert_eq!(
+        (
+            shown.applies.environments,
+            shown.applies.environment_threads
+        ),
+        (1, 1),
+        "{idle} has no environment"
+    );
+    // Nothing is set at the project: of the two environments below it, one takes the topic's value and one its own.
+    let above = reach(
+        &world,
+        &owner,
+        project,
+        "env.idle_stop_minutes",
+        PageQuery::default(),
+    )
+    .await;
+    assert_eq!(above.applies.environments, 0);
+    // A key no environment takes reaches none.
+    let agents = reach(
+        &world,
+        &owner,
+        topic,
+        "agents.subagents_at_once",
+        PageQuery::default(),
+    )
+    .await;
+    assert_eq!(
+        (
+            agents.applies.environments,
+            agents.applies.environment_threads
+        ),
+        (0, 0)
     );
 }

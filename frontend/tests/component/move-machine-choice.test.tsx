@@ -33,3 +33,16 @@ it('shows a declared policy refusal and does not permit that choice', async () =
   await userEvent.click(choice);
   expect(onMachine).not.toHaveBeenCalled();
 });
+
+it('shows the current machine capacity in the place picker when its reported total changes', async () => {
+  const choice = (memory_bytes:number) => ({...machine, capacity:{cpus:4,memory_bytes,data_volume_bytes: 128 * 1024 ** 3,capacity_refresh_secs:600}});
+  const props = {hosts:[],value:null,onChange:vi.fn(),loading:false,onMachine:vi.fn()};
+  const page = show(<HostChoices {...props} machines={[choice(40 * 1024 ** 3)]}/>);
+  await userEvent.click(screen.getByRole('combobox',{name:'Place'}));
+  expect(screen.getByText(/40 GiB/)).toBeVisible();
+  page.rerender(<HostChoices {...props} machines={[choice(36 * 1024 ** 3)]}/>);
+  expect(await screen.findByText(/36 GiB/)).toBeVisible();
+  expect(screen.queryByText(/40 GiB/)).not.toBeInTheDocument();
+  // Its data disk in the decimal gigabytes of every storage report: 128 GiB is 137.4 GB.
+  expect(screen.getByText(/137\.4 GB/)).toBeVisible();
+});

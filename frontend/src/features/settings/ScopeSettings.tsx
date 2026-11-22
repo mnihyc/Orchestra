@@ -21,6 +21,7 @@ import { placeSettingsSections } from '@/features/settings/navigation';
 import { sectionLabel } from '@/features/settings/sectionLabels';
 import { useSettingsTabTitle } from '@/features/workbench/settingsTabTitle';
 import { SettingsEditor } from '@/features/settings/Editor';
+import { usePlaceSwitchEffect } from '@/features/settings/EffectLine';
 import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { General } from '@/features/settings/org/General';
 import { Tags } from '@/features/settings/org/Tags';
@@ -44,9 +45,11 @@ function placeOf(node: Project | Topic): RowPlace {
 /** The editor at a node's scope, with the secrets of the place. */
 export function ScopeEditor({ node }: { node: Project | Topic }) {
   const { t } = useTranslation();
+  // Its switches of mounts, MCP servers, templates and skills say when a change lands and what it reaches.
+  const effectFor = usePlaceSwitchEffect({ kind: 'node', id: node.id });
   return (
     <Section id="defaults" title={t('day100.names.defaults')}>
-      <SettingsEditor target={{ kind: 'node', id: node.id }} scope={node.kind} place={placeOf(node)} secrets />
+      <SettingsEditor target={{ kind: 'node', id: node.id }} scope={node.kind} place={placeOf(node)} secrets effectFor={effectFor} />
     </Section>
   );
 }

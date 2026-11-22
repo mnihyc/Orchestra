@@ -1,0 +1,11 @@
+fmt
+clippy
+contracts
+test -p orch-api-contract --lib
+test -p orch-api-core --test setting_reach
+test -p orch-api-core --test resource_groups
+test -p orch-driver-docker --lib
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/resource-details.spec.ts tests/e2e/walk-settings.spec.ts tests/e2e/settings-rows.spec.ts tests/e2e/agent-history.spec.ts tests/e2e/live-wait.spec.ts tests/e2e/reconnect.spec.ts tests/e2e/machine-programs.spec.ts tests/e2e/call-recovery.spec.ts --project=chromium --retries=1 --grep-invert "resource details are bounded, reachable and lazy|explicit enrollment opens one Programs workflow"

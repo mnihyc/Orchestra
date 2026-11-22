@@ -88,6 +88,7 @@ class Session:
         self.lock = threading.Lock()
         self.cancelled = {}
         self.turns = {}
+        self.openings = {}
         self.held = []
         self.hold_timer = None
         self.dead = False
@@ -176,6 +177,17 @@ class Session:
             return entry[min(index, len(entry) - 1)]
         return entry
 
+    def capture_events(self, events, params, openings):
+        captured = []
+        for event in events:
+            body = expand(event.get("params", {}), params)
+            if (SCRIPT.get("kind") == "adapter" and isinstance(body, dict)
+                    and "thread_id" in body and "segment_id" in body):
+                body.setdefault("native_opening_id", openings.get(body["thread_id"])
+                                if isinstance(body["thread_id"], str) else None)
+            captured.append({"event": event["event"], "params": body})
+        return captured
+
     def answer(self, request):
         request_id = request["id"]
         method = request["method"]
@@ -195,10 +207,22 @@ class Session:
                                                      "message": "unknown method %r" % method,
                                                      "retryable": False}})
             return
+        # These observations belong to the admitted request, including after its delayed reply.
+        with LOG_LOCK:
+            if (method == "session.open" and "error" not in entry and isinstance(params, dict)
+                    and isinstance(params.get("thread_id"), str)
+                    and isinstance(params.get("opening_id"), str)):
+                self.openings[params["thread_id"]] = params["opening_id"]
+            openings = dict(self.openings)
+            if (method == "session.close" and "error" not in entry and isinstance(params, dict)
+                    and isinstance(params.get("thread_id"), str)):
+                self.openings.pop(params["thread_id"], None)
+        before = self.capture_events(entry.get("events", []), params, openings)
+        after = self.capture_events(entry.get("events_after", []), params, openings)
         for progress in entry.get("progress", []):
             self.send({"progress": request_id, "params": progress})
-        for event in entry.get("events", []):
-            self.send({"event": event["event"], "params": expand(event.get("params", {}), params)})
+        for event in before:
+            self.send(event)
         delay = entry.get("delay_ms", 0) / 1000.0
         if delay:
             cancelled = self.cancelled.setdefault(request_id, threading.Event())
@@ -212,8 +236,8 @@ class Session:
         else:
             reply["result"] = expand(entry.get("result", {}), params)
         self.finish_reply(request_id, reply)
-        for event in entry.get("events_after", []):
-            self.send({"event": event["event"], "params": expand(event.get("params", {}), params)})
+        for event in after:
+            self.send(event)
 
     def should_exit_once(self):
         if not ARGS.once_marker:

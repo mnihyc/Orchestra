@@ -1,9 +1,10 @@
 /** Seven ordinary detail pages stay within two screens, with visible tabs and quiet unopened panels. */
 import { expect, type Page, type Request, test } from '@playwright/test';
+import { resourceFixtures } from '../../e2e/layout-fixtures';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { RUNS_ON, id } from '../doubles/fixtures';
-import { scenario, signIn } from './support';
+import { ACME, RUNS_ON, id } from '../doubles/fixtures';
+import { DOUBLE, PEOPLE, scenario, signIn } from './support';
 
 const pages = [
   ['agent', `/resources/agents/${RUNS_ON.codexOnLaptop}`], ['machine', `/resources/machines/${RUNS_ON.laptop}`],
@@ -111,5 +112,76 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     } else await sections.getByRole('link', { name: words.machines.tabs.policy, exact: true }).click();
     await expect(page.locator('[data-resource-section="policy"]')).toBeVisible();
     await expect(page).toHaveURL(/tab=policy/);
+  });
+}
+
+for (const [width, height] of [[400, 860], [1440, 900]] as const) {
+  test(`resource tabs start in the top quarter of the main area at ${width} by ${height}`, async ({ page }) => {
+    test.setTimeout(150_000);
+    await scenario();
+    await page.setViewportSize({ width, height });
+    await signIn(page);
+    await resourceFixtures(page);
+    // A topic, where Home and Sign in land, opens with the same one-row header as the resources.
+    for (const [kind, path] of [...pages, ['provider', `/resources/providers/${RUNS_ON.openAiKey}`], ['skill', '/resources/skills'], ['topic', `/topic/${ACME.fixLogin}`]] as const) {
+      await page.goto(path);
+      if (kind === 'skill') await page.getByRole('link', { name: 'pdf-tools', exact: true }).first().click();
+      const main = page.locator('[data-main-area]:visible').first();
+      const tabs = main.getByRole('tablist').filter({ has: page.getByRole('tab', { name: 'Overview', exact: true }) }).first();
+      await expect(tabs).toBeVisible();
+      const geometry = await tabs.evaluate((element) => {
+        const pane = element.closest('[data-main-area]')!.getBoundingClientRect();
+        return { top: element.getBoundingClientRect().top - pane.top, height: pane.height };
+      });
+      expect(geometry.height).toBeGreaterThan(0);
+      expect(geometry.top, kind).toBeGreaterThanOrEqual(0);
+      expect(geometry.top, kind).toBeLessThan(geometry.height / 4);
+      // The name has the room first: the state and the acts beside it give way (to a second row) before it is cut.
+      const name = main.getByRole('heading', { level: 1 }).first();
+      const cut = await name.evaluate((element) => ({ text: element.textContent, over: element.scrollWidth - element.clientWidth, row: element.parentElement?.closest('header')?.clientWidth ?? 0 }));
+      expect(cut.over, `${kind}: "${cut.text}" is shown whole in a ${String(cut.row)} px header`).toBeLessThanOrEqual(1);
+    }
+  });
+}
+
+test('a compact header gives the name its room first at 400, the state and acts moving under it', async ({ page }) => {
+  await scenario();
+  await page.setViewportSize({ width: 400, height: 860 });
+  await signIn(page);
+  await resourceFixtures(page);
+  // A name that fits the row by itself, but was cut ("Lab workspa…") beside Running, Edit and Details: given to the
+  // environment through the world's API, so that every read of the page has it.
+  const login = await fetch(`${DOUBLE}/api/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(PEOPLE.ada) });
+  const { access_token: token } = await login.json() as { access_token: string };
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const held = await (await fetch(`${DOUBLE}/api/v1/environments/${RUNS_ON.workspace}`, { headers })).json() as { revision: number };
+  const renamed = await fetch(`${DOUBLE}/api/v1/environments/${RUNS_ON.workspace}`, { method: 'PATCH', headers, body: JSON.stringify({ name: 'Lab workspace on ada-laptop', expected_revision: held.revision }) });
+  expect(renamed.ok).toBe(true);
+  await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
+  const main = page.locator('[data-main-area]:visible').first();
+  const name = main.getByRole('heading', { level: 1, name: 'Lab workspace on ada-laptop' });
+  await expect(name).toBeVisible();
+  expect(await name.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  // The state and the primary act are still there, whole, and the tabs stay in the top quarter.
+  const header = main.locator('header').first();
+  await expect(header.getByRole('button', { name: english.common.details, exact: true })).toBeVisible();
+  const tabs = main.getByRole('tablist').filter({ has: page.getByRole('tab', { name: 'Overview', exact: true }) }).first();
+  const geometry = await tabs.evaluate((element) => ({ top: element.getBoundingClientRect().top - element.closest('[data-main-area]')!.getBoundingClientRect().top, height: element.closest('[data-main-area]')!.getBoundingClientRect().height }));
+  expect(geometry.top).toBeLessThan(geometry.height / 4);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+// A fact whose value is wide (the roles a machine keeps, with the command that changes them) stays on its label's line.
+for (const width of [1440, 400]) {
+  test(`a machine's Roles stand on their own line beside their label, with the command that changes them (${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await signIn(page);
+    await page.goto(`/resources/machines/${RUNS_ON.laptop}`);
+    const roles = page.locator('[data-resource-facts] [data-item]').filter({ has: page.locator('dt', { hasText: `${english.machines.overview.roles}:` }) }).first();
+    await expect(roles.locator('dd').getByRole('button', { name: english.machines.add.copyRoles })).toBeVisible();
+    const label = await roles.locator('dt').boundingBox(), value = await roles.locator('dd').boundingBox();
+    if (label === null || value === null) throw new Error('the Roles fact is not laid out');
+    expect(Math.abs(value.y - label.y)).toBeLessThan(6);
+    expect(value.x).toBeGreaterThanOrEqual(label.x + label.width);
   });
 }
