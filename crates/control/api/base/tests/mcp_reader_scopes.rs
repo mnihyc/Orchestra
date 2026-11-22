@@ -18,7 +18,7 @@ use orch_api_contract::directory::{GroupMemberAdd, OrgGroupCreate, OrgGroupCreat
 use orch_api_contract::resources::{
     McpServerCreate, McpServerCreateBody, McpServerGet, McpServerList, McpServerListQuery,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::routes::resources::sealing::install_master_key;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -244,7 +244,7 @@ async fn issue(s: &Scene, user: Id, rules: Option<Vec<Json>>) -> Key {
         Vec::new()
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.world.conn().await,
         &NewApiToken {

@@ -245,6 +245,7 @@ pub fn settings_of(
         settings.data_dir = dir;
     }
     settings.config_file = Some(config_path.to_owned());
+    settings.follow_enrollment()?;
     orch_node_core::machine_policy::configure(&mut settings)?;
     Ok((config, settings))
 }
@@ -852,6 +853,8 @@ mod tests {
         adopt_at: usize,
         refusal: Option<EnrollRefusal>,
         tries: Mutex<usize>,
+        /// What the system calls itself in its answer.
+        name: &'static str,
     }
 
     impl System {
@@ -871,6 +874,7 @@ mod tests {
                 adopt_at,
                 refusal,
                 tries: Mutex::new(0),
+                name: "Orch",
             }
         }
 
@@ -936,7 +940,7 @@ mod tests {
                     trust: Trust::Pinned,
                 }],
                 system: EnrollReplySystem {
-                    name: "Orch".into(),
+                    name: self.name.into(),
                     public_url: "https://orch.test".into(),
                 },
                 protocol_version: enrolled.protocol_version,
@@ -1015,6 +1019,47 @@ mod tests {
         assert_eq!(system.tries(), 3, "two refusals waited for, then enrolled");
         assert!(data.is_enrolled());
         assert_eq!(enrolled.record.name, "host-a");
+    }
+
+    #[tokio::test]
+    async fn a_host_added_with_the_installer_keeps_its_volumes_under_the_name_of_the_system_it_joined()
+     {
+        // The installer writes only a [node] table, so the configured name is the shipped one, while the
+        // system that enrolls the host is called otherwise and names its volumes and units with its own name.
+        let mut system = System::new(1, None);
+        system.name = "orch-walk";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("orch.toml");
+        let data_dir = dir.path().join("machine");
+        std::fs::write(
+            &config,
+            format!(
+                "version = 1\n\n[node]\ndata_dir = {:?}\ngateway_url = \"wss://gateway.orch.test:9443\"\ndrivers = [\"host\"]\n",
+                data_dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let (_, before) = settings_of(&config, None).unwrap();
+        assert_eq!(
+            before.system_name,
+            ServerConfig::default().system.name,
+            "a node that has not enrolled yet keeps the configured name"
+        );
+        let data = DataDir::open(&data_dir).unwrap();
+        enroll_host(&data, &system.host(), "0.1.0", &system, &system.clock)
+            .await
+            .unwrap();
+        let (_, settings) = settings_of(&config, None).unwrap();
+        assert_eq!(
+            settings.system_name, "orch-walk",
+            "the node labels its volumes with the name the system asks for them with"
+        );
+        assert_eq!(
+            crate::docker::config_of(&settings).unwrap().labels
+                [orch_driver_contract::runtime::LABEL_SYSTEM],
+            "orch-walk",
+            "what its Docker driver makes carries the same name"
+        );
     }
 
     #[tokio::test]

@@ -152,6 +152,8 @@ async fn transfer_action(
                 other => ApiError::internal(other),
             })?;
     let policies = subject::resource_policy(&mut tx, thing, &site).await?;
+    let server_host =
+        crate::server_host_use::Before::take_intent(&mut tx, &principal, object, &body).await?;
     let handed = match hand_over_prepared_fenced(
         &mut tx,
         &principal,
@@ -169,6 +171,9 @@ async fn transfer_action(
         }
         Err(orch_authz::pages::EffectFailure::BeforeEffect(error)) => return Err(error),
     };
+    if let Some(before) = server_host {
+        before.require(&ctx, &mut tx, &principal).await?;
+    }
     if handed.changed && object.kind == ObjectKind::Document {
         documents_rows::touch(&mut tx, object.id).await?;
     }

@@ -288,12 +288,12 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
         .send()
         .await
         .ok();
-    for reply in [
-        (200, "not JSON".to_owned(), 0),
-        (200, "x".repeat(1_048_577), 0),
-        (302, String::new(), 0),
-        (200, manifest("0.1.0"), 0),
-        (200, manifest("2.0.0"), 2000),
+    for (reply, older) in [
+        ((200, "not JSON".to_owned(), 0), false),
+        ((200, "x".repeat(1_048_577), 0), false),
+        ((302, String::new(), 0), false),
+        ((200, manifest("0.1.0"), 0), true),
+        ((200, manifest("2.0.0"), 2000), false),
     ] {
         *site.reply.lock().unwrap() = reply;
         world.advance(Duration::hours(1));
@@ -305,6 +305,10 @@ async fn invalid_oversized_redirected_older_and_timed_out_answers_keep_the_dated
             .await
             .ok();
         assert!(failed.error.is_some());
+        assert_eq!(
+            failed.error.as_deref() == Some("release.source_older"),
+            older
+        );
         assert_eq!(failed.checked_at, first.checked_at);
         assert_eq!(failed.offered_version, first.offered_version);
         let shown = world
@@ -679,4 +683,93 @@ async fn another_installation_or_older_pair_cannot_advance_the_imported_success(
         BackupCause::Manual,
     );
     assert!(backups::publish_pair(records.path(), &dump, &manifest, &system).is_err());
+}
+
+#[path = "installation_records/server_update.rs"]
+mod server_update;
+
+#[tokio::test]
+async fn only_system_administrators_can_see_and_retry_a_bundled_host_registration_failure() {
+    use orch_api_contract::admin::{
+        AdminBundledNodeEnrollmentGet, AdminBundledNodeEnrollmentRetry, BundledNodeEnrollment,
+    };
+    let world = World::new().await;
+    let cast = admin_support::cast(&world).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("node_enrollment_token");
+    std::fs::write(&path, "invalid-test-file").unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let service = world.app.app.link.certificates().clone();
+    let task = tokio::spawn({
+        let cancelled = stop.clone();
+        let file = path.clone();
+        async move { service.register_bundled_node(&file, cancelled).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = world
+                .app
+                .call(AdminBundledNodeEnrollmentGet, &[])
+                .token(&cast.root.token)
+                .send()
+                .await
+                .ok();
+            if state == Some(BundledNodeEnrollment::InvalidTokenFile) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentGet, &[])
+            .token(&cast.ada.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentRetry, &[])
+            .token(&cast.ada.token)
+            .send()
+            .await
+            .status,
+        403
+    );
+    let token = orch_pki::enrollment::issue_token(
+        world.app.app.link.certificates().authority(),
+        std::time::Duration::ZERO,
+        world.app.app.clock.as_ref(),
+    );
+    std::fs::write(&path, token.token.to_string()).unwrap();
+    assert_eq!(
+        world
+            .app
+            .call(AdminBundledNodeEnrollmentRetry, &[])
+            .token(&cast.root.token)
+            .send()
+            .await
+            .status,
+        204
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if world.app.app.link.certificates().bundled_node_enrollment()
+                == Some(BundledNodeEnrollment::WaitingForNode)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the administrator's retry wakes registration before the automatic interval");
+    stop.cancel();
+    task.await.unwrap();
 }
