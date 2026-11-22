@@ -1,0 +1,13 @@
+fmt
+clippy
+test -p orch-node --lib -- composition::
+test -p orch-node --test program
+test -p orch-node --test uninstall
+test -p orch-api-core --features test-support --test templates
+test -p orch-api-core --features test-support --test kfix_schemas
+test -p orch-api-core --features test-support --test provider_managed
+test -p orch-engine --lib -- places::
+test -p orch-engine --test provider_runtime
+web typecheck
+web lint
+web test -- tests/component/machine-native-harnesses.test.tsx tests/component/agent-program-create.test.tsx tests/component/host-settings-entry.test.tsx tests/component/machine-programs.test.tsx tests/component/resource-read-availability.test.tsx tests/unit/help-reference-coverage.test.ts tests/unit/help-content.test.ts tests/unit/catalogue-usage.test.ts tests/unit/catalogue.test.ts

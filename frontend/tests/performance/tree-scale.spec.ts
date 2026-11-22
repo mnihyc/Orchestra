@@ -277,7 +277,7 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
       observer.observe(document, { childList: true, subtree: true });
     },
     { key: `orch.${fixtureId(1, 1)}.tree.${ACME.org}`, open: seeded.open, wanted, documents,
-      selector: '[role="tree"][aria-label="Orgs, projects, topics and threads"]' },
+      selector: '[role="tree"][aria-label="Organizations, projects, topics and threads"]' },
   );
   interface NativeRead { method: string; path: string; status: number; readable: boolean; bootstrap?: unknown }
   // Observe completion in the consuming document: Chromium can lose CDP's completion/body
@@ -325,7 +325,7 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
   await Promise.all([page.goto(`/project/${ACME.shop}`).then(async () => {
     // A closed or refused navigation view cannot produce the required tree response.
     // Report that visible fixture failure without spending the native read's whole deadline.
-    await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads', exact: true })).toBeVisible();
+    await expect(page.getByRole('tree', { name: 'Organizations, projects, topics and threads', exact: true })).toBeVisible();
   }), opened]);
   await page.waitForFunction(() => typeof (window as unknown as { __tree?: { lastRow: number | null } }).__tree?.lastRow === 'number', undefined, { timeout: WAIT_MS * slow });
   // The documents of every open place have come, and no place still says that its documents are on their way.

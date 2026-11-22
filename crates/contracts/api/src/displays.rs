@@ -26,6 +26,8 @@ pub const DISPLAY_CLOSE_CODE: u16 = 4000;
 /// A virtual screen or an agent's announced VNC server, without its credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Display {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<crate::browsers::InteractiveLifecycle>,
     /// Its identifier.
     pub id: Id,
     /// Where it runs.
@@ -67,11 +69,13 @@ pub struct Display {
 /// The current displays, discovered support and policy gates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentDisplays {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<Id>,
     /// Why the door is off, or null.
     pub off: Option<BrowsersOff>,
     /// The installed display programs.
     pub support: EnvironmentSupportVnc,
-    /// Open displays followed by those closed within a day.
+    /// One page of open displays, or retained closed rows on explicit request.
     pub displays: Vec<Display>,
     /// Owned live displays and the resolved limit.
     pub limit: EnvironmentBrowsersLimit,
@@ -81,6 +85,23 @@ pub struct EnvironmentDisplays {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentDisplayListQuery {
+    /// Retained closed rows instead of open work; this performs no discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    /// Literal case-insensitive displayed-name or note search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Continue this environment, state and search in descending identity order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<Id>,
+    /// Preferred positive page size; there is no product maximum.
+    #[serde(
+        default,
+        deserialize_with = "crate::common::query_u32",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub limit: Option<u32>,
+
     /// Look again before answering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<bool>,
@@ -96,6 +117,31 @@ pub struct EnvironmentDisplayCreateBody {
     /// Its dimensions, or the environment's setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<String>,
+    /// An existing server on this machine's loopback interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach: Option<DisplayServer>,
+    /// Share the current local desktop on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<bool>,
+}
+
+/// A loopback RFB port and the optional password used only by the machine.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayServer {
+    /// The port on 127.0.0.1.
+    pub port: std::num::NonZeroU16,
+    /// The server's VNC password, sealed before persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for DisplayServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DisplayServer")
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Requests watching, or also working with Manage.

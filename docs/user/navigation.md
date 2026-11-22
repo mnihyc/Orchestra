@@ -8,7 +8,9 @@ summary: Use Tree, Recent and Everything, then arrange bars and keep useful tabs
 
 # Navigation and tabs
 
-Navigation follows the org selected in the rail. On a phone, choose the org at
+This page shows how the tree and the lists of **Navigation** work, and how tabs and bars behave on a desktop and on a phone.
+
+Navigation follows the organization selected in the rail. On a phone, choose the organization at
 the head of the Navigation sheet.
 
 Lists and tables keep comfortable rows in either density. Compact changes
@@ -37,7 +39,7 @@ That small section is hidden while Projects shows Recent.
 
 A row's menu has **Show in tree**. It switches back, opens the way to that row
 and briefly marks it. The arrow keys and row menus work in both arrangements.
-Each org's Navigation keeps its last arrangement and recent order on this device.
+The Navigation of each organization keeps its last arrangement and recent order on this device.
 
 ## Everything with more room
 
@@ -66,9 +68,9 @@ Rows you can no longer read disappear on the next read.
 
 ## Bars that slide out
 
-On a desktop, a rail icon opens its view as a docked bar. An org icon opens that
-org's Navigation. Press the front view's icon again to hide it; an org icon hides
-Navigation when you are already at that org's home. Another icon switches views.
+On a desktop, a rail icon opens its view as a docked bar. An organization icon opens that
+organization's Navigation. Press the front view's icon again to hide it; an organization icon hides
+Navigation when you are already at the home of that organization. Another icon switches views.
 The title-bar toggle and shortcut also dock or hide the bar. The left-bar shortcut
 is Ctrl+\ (Command+\ on Mac); the right-bar shortcut is Ctrl+Shift+.
 (Command+Shift+. on Mac).

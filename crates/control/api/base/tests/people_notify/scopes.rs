@@ -4,7 +4,7 @@ use super::*;
 use async_trait::async_trait;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::{RawReply, TestApp};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_db::queries::notifications::{channels, outbox, people, routes};
@@ -31,7 +31,7 @@ async fn key(desk: &Desk, rules: Vec<Json>) -> (Id, String) {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
@@ -196,7 +196,10 @@ impl Scene {
             master: MasterKey::new([7; 32]),
             surroundings: Surroundings {
                 system_name: "System fallback".into(),
-                public_url: "https://orch.test".into(),
+                address_seed: orch_api_contract::public_addresses::PublicAddresses {
+                    public_url: "https://orch.test".into(),
+                    alternate_urls: Vec::new(),
+                },
             },
             retry: orch_notifier_contract::delivery::DEFAULT_RETRY_SCHEDULE.to_vec(),
             metrics: Arc::new(Metrics::new()),
