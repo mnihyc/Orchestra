@@ -63,6 +63,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 const TEXT: &[u8] = b"frozen private attachment text\nsecond source line\n";
 
 struct Probe {
+    store: Arc<dyn BlobStore>,
     // Retain the native test-owned upload directory for uploads made during the source wait.
     inner: crate::blobs::Blobs,
     hash: Hash,
@@ -74,13 +75,22 @@ struct Probe {
 
 #[async_trait::async_trait]
 impl BlobStore for Probe {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.store.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         body: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
-        self.inner.store().put(hash, size, body).await
+        publication.check(self.lifetimes(), hash)?;
+        self.inner
+            .store()
+            .put_held(hash, size, body, publication)
+            .await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         let read = self.inner.store().get(hash, range).await;
@@ -99,14 +109,20 @@ impl BlobStore for Probe {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.store().size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.store().delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.store().delete_held(hash, retirement).await
     }
 }
 
 fn probe(scene: &mut Scene) -> Arc<Probe> {
     let old = scene.rig.world.app.app.clone();
     let probe = Arc::new(Probe {
+        store: old.blobs.store(),
         inner: old.blobs.clone(),
         hash: Hash::of(TEXT),
         used: AtomicBool::new(false),
@@ -124,6 +140,7 @@ fn probe(scene: &mut Scene) -> Arc<Probe> {
         build: old.build,
         blobs: crate::blobs::Blobs::new(probe.clone(), probe.inner.uploads_dir()),
         cache: crate::cache::Cache::new(&old.config),
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
     });

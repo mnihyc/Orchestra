@@ -162,7 +162,7 @@ async fn a_unit_is_made_with_the_builds_of_the_harnesses_its_template_lets_run_b
     );
     assert_eq!(
         create.body["roles"],
-        serde_json::json!(["environment", "agent"]),
+        serde_json::json!(["environment", "agent", "provider"]),
         "and its connector hosts harnesses"
     );
 }
@@ -185,7 +185,10 @@ async fn a_unit_whose_template_lets_no_harness_run_there_is_made_with_the_connec
         .find(|call| call.kind == K::NodeRuntimeCreate)
         .unwrap();
     assert_eq!(create.body["tools"], serde_json::json!([]));
-    assert_eq!(create.body["roles"], serde_json::json!(["environment"]));
+    assert_eq!(
+        create.body["roles"],
+        serde_json::json!(["environment", "provider"])
+    );
     assert_eq!(
         host.count(K::NodeToolEnsure),
         1,
@@ -546,6 +549,49 @@ async fn a_job_in_the_middle_of_its_work_when_the_api_restarts_is_finished_by_th
 }
 
 #[tokio::test]
+async fn taking_over_a_lease_keeps_the_retry_boundary_before_any_native_work_begins() {
+    use chrono::Utc;
+    use orch_types::{ManualClock, Time};
+    use std::sync::Arc;
+    let start = Time::new(Utc::now()).get();
+    let clock = Arc::new(ManualClock::new(start));
+    let world = World::with_clock(clock.clone()).await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host-1", 16_384).await;
+    let template = template(&world).await;
+    let lease = start + chrono::Duration::seconds(1);
+    let retry = start + chrono::Duration::seconds(2);
+    let statement = format!("UPDATE jobs SET plan=plan || jsonb_build_object(
+        'runner',jsonb_build_object('id',gen_random_uuid()::text,'until','{lease}'::timestamptz),
+        'lifecycle_wait',jsonb_build_object('retry_eligible_at','{retry}'::timestamptz,
+            'last_attempt_at','{start}'::timestamptz,'reason_code','internal','observed_at','{start}'::timestamptz))
+        WHERE environment_id=(SELECT id FROM environments ORDER BY created_at DESC LIMIT 1)");
+    let made = hosting::make_after(&world, template, "Retained retry", &statement).await;
+    clock.advance(chrono::Duration::seconds(1));
+    eventually(
+        "the inherited retry wait or an early native command",
+        || async {
+            let plan: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
+                .bind(made.job.id)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+            plan.pointer("/lifecycle_wait/waiting")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                || !host.kinds().is_empty()
+        },
+    )
+    .await;
+    assert!(
+        host.kinds().is_empty(),
+        "a reclaimed lease cannot advance the captured retry time"
+    );
+    clock.advance(chrono::Duration::seconds(1));
+    host.wait_for(K::NodeImageEnsure, 1).await;
+}
+
+#[tokio::test]
 async fn a_job_whose_runner_died_is_taken_over_when_its_lease_has_run_out_and_not_before() {
     let world = World::new().await;
     serve(&world);
@@ -638,8 +684,7 @@ fn no_capacity(why: &str) -> CommandError {
 }
 
 #[tokio::test]
-async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_what_it_had_declared()
-{
+async fn a_host_that_cannot_make_a_unit_keeps_its_capacity_refusal_in_the_error_and_job_log() {
     let world = World::new().await;
     serve(&world);
     // 1 100 MiB, and an environment declares 1 024: one fits, a second finds the host full.
@@ -649,7 +694,7 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
     let before = host.kinds().len();
     host.refuse(K::NodeRuntimeCreate, no_capacity("out of memory"));
     let made = make(&world, template, "Second").await;
-    let (state, _, error) = wait_over(&world, made.job.id).await;
+    let (state, progress, error) = wait_over(&world, made.job.id).await;
     assert_eq!(state, "failed");
     let error = error.unwrap();
     assert_eq!(error["phase"], "create");
@@ -657,6 +702,18 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
     assert_eq!(
         error["message"],
         "host-1 could not start it: out of memory. It had declared 76 MiB free, and this environment needs 1024 MiB"
+    );
+    let log = progress["log"]
+        .as_str()
+        .expect("the failed setup has a readable log");
+    let reason = format!(
+        "create · no_capacity: {}",
+        error["message"].as_str().unwrap()
+    );
+    assert_eq!(
+        log.lines().filter(|line| *line == reason).count(),
+        1,
+        "the same native refusal is visible once in the log after cleanup"
     );
     assert!(
         host.kinds().len() > before,
@@ -669,6 +726,25 @@ async fn a_host_that_is_full_warns_by_default_and_a_unit_it_cannot_make_says_wha
             .await
             .unwrap();
     assert_eq!(plan["warnings"], serde_json::json!(["full", "no_room"]));
+    assert_eq!(plan["calculation"]["thresholds"]["full_percent"], 90);
+    assert_eq!(plan["calculation"]["declared_totals"]["memory_mb"], 1024);
+    assert_eq!(plan["calculation"]["capacities"]["memory_mb"], 1100);
+    assert_eq!(plan["calculation"]["consequence"], "warn");
+    sqlx::query("UPDATE hosts SET capacity='{\"memory_mb\":65536}',when_full='block' WHERE id=$1")
+        .bind(host.id)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let kept: serde_json::Value =
+        sqlx::query_scalar("SELECT plan->'calculation' FROM jobs WHERE id=$1")
+            .bind(made.job.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        kept, plan["calculation"],
+        "a later capacity or policy report cannot rewrite this placement"
+    );
 }
 
 #[tokio::test]
@@ -1239,11 +1315,12 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
             world.clock.now(),
             &principal,
             &Request {
+                identity: None,
                 owner: world.ada,
                 name: Some("Prepared creation"),
                 home: world.root,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &config,
             },
         )
@@ -1290,4 +1367,124 @@ async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_fi
         tx.rollback().await.unwrap();
     }
     assert_eq!(checks.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn one_native_request_can_create_distinct_environment_slots_and_repreparing_a_slot_keeps_one_pool_choice()
+ {
+    use orch_authz::{Caller, Principal};
+    use orch_engine::environments;
+    use orch_provider_contract::pools::{Kind, Target};
+    use serde_json::json;
+    let world = common::World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "Multiple creation slots", 32768).await;
+    let template = hosting::template(&world).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let pool = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut tx,
+        "pool",
+        Some(world.ada),
+        Some(world.root),
+        "Creation slots",
+    )
+    .await
+    .unwrap();
+    orch_authz::ownership::start_resource(
+        &mut tx,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Pool,
+            id: pool,
+        },
+        world.ada,
+        orch_authz::ownership::NewAccess::OnlyMe,
+        world.clock.time(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pools SET kind='host',definition=$2 WHERE id=$1").bind(pool).bind(json!({"kind":"host","enabled":true,"policy":{"type":"round_robin"},"lend_members":false,"members":[],"config":{}})).execute(&mut *tx).await.unwrap();
+    sqlx::query(
+        "INSERT INTO pool_members(pool_id,id,position,rule,enabled) VALUES($1,$2,0,$3,true)",
+    )
+    .bind(pool)
+    .bind(orch_types::new_id())
+    .bind(json!({"type":"single","resource":{"kind":"host","id":host.id}}))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let actor = Principal::load(&mut tx, Caller::session(world.ada), world.clock.time())
+        .await
+        .unwrap();
+    let input = orch_types::new_id();
+    let config = json!({});
+    let mut made = Vec::new();
+    for name in ["First creation slot", "Second creation slot"] {
+        let request = environments::Request {
+            identity: Some(input),
+            owner: world.ada,
+            name: Some(name),
+            home: world.root,
+            template: Some(template),
+            host: Some(Some(Target::Pool {
+                kind: Kind::Host,
+                id: pool,
+            })),
+            config: &config,
+        };
+        let _first = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        let prepared = environments::prepare_creation(&mut tx, world.clock.now(), &actor, &request)
+            .await
+            .unwrap();
+        made.push(
+            environments::apply_creation(&mut tx, world.clock.now(), &prepared, || Ok(()))
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    assert_ne!(made[0], made[1]);
+    let choices:i64=sqlx::query_scalar("SELECT count(*) FROM pool_choices WHERE source->>'kind'='environment_creation' AND source->>'node'=$1::uuid::text")
+        .bind(world.root).fetch_one(&mut *tx).await.unwrap();
+    assert_eq!(
+        choices, 2,
+        "each accepted slot owns one choice across repeated preparation"
+    );
+    tx.commit().await.unwrap();
+    world.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_multiline_host_refusal_is_kept_once_in_the_failed_setup_log() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "host", 16_384).await;
+    let template = template(&world).await;
+    host.refuse(
+        K::NodeImageEnsure,
+        CommandError::new(
+            ErrorCode::Unsupported,
+            "The image could not be prepared.\nThe registry refused this image.",
+        ),
+    );
+    let made = make(&world, template, "Main").await;
+    let (state, progress, error) = wait_over(&world, made.job.id).await;
+    assert_eq!(state, "failed");
+    let error = error.unwrap();
+    let summary = format!(
+        "{} · {}: {}",
+        error["phase"].as_str().unwrap(),
+        error["code"].as_str().unwrap(),
+        error["message"].as_str().unwrap()
+    );
+    assert!(summary.contains('\n'));
+    let log = progress["log"]
+        .as_str()
+        .expect("the refused setup has a log");
+    assert_eq!(
+        log.matches(summary.as_str()).count(),
+        1,
+        "cleanup keeps the complete public reason without duplicating its lines"
+    );
 }

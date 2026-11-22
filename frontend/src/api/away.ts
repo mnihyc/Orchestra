@@ -1,6 +1,7 @@
 /** Scoped notification status, pause, retained routes, device registrations and grouped read requests. */
 import { queryOptions } from '@tanstack/react-query';
 
+import { collectionQuery, readAllPages } from '@/api/collection';
 import { suppliedRead } from '@/api/readScheduler';
 import type { OutsideStatus } from '@/generated/api-types';
 import { api, done, ok, repeatable } from '@/api/client';
@@ -34,8 +35,10 @@ export const awayPrefsQuery = queryOptions({
   retry: false,
 });
 
-export const routesQuery = queryOptions({ queryKey: routesKey, queryFn: ({ signal }) => ok(api.GET('/me/notification-routes', { signal })), retry: false });
-export const devicesQuery = queryOptions({ queryKey: devicesKey, queryFn: ({ signal }) => ok(api.GET('/me/push-subscriptions', { signal })), retry: false });
+export const routesQuery = queryOptions({ queryKey: routesKey, queryFn: ({ signal }) => readAllPages((cursor) => ok(api.GET('/me/notification-routes', { params: { query: cursor === null ? {} : { cursor } }, signal })), signal), retry: false });
+export const routesPageQuery = (q: string) => collectionQuery([...routesKey, 'retained'], q, (query, signal) => ok(api.GET('/me/notification-routes', { params: { query: { ...query, retained: true } }, signal })));
+export const devicesQuery = queryOptions({ queryKey: devicesKey, queryFn: ({ signal }) => readAllPages((cursor) => ok(api.GET('/me/push-subscriptions', { params: { query: cursor === null ? {} : { cursor } }, signal })), signal), retry: false });
+export const devicesPageQuery = (q: string) => collectionQuery(devicesKey, q, (query, signal) => ok(api.GET('/me/push-subscriptions', { params: { query }, signal })));
 
 /** The revision is the one the person was shown, not one fetched behind the confirmation. */
 export const changePrefs = (body: PrefsChange) => ok(api.PUT('/me/notification-prefs', { body }));
@@ -44,8 +47,8 @@ export const removeRetainedRoute = (routeId: string) => done(api.DELETE('/me/not
 export const removeDevice = (id: string) => done(api.DELETE('/me/push-subscriptions/{id}', { params: { path: { id } } }));
 export const testDevice = (channelId: string, deviceId?: string) => ok(api.POST('/notification-channels/{id}/test', { params: { path: { id: channelId } }, body: deviceId === undefined ? {} : { device_id: deviceId } }));
 
-export function fetchPlacePage(filter: 'all' | 'unread' | 'mentions', cursor: string | null, signal?: AbortSignal): Promise<AwayPage> {
-  return ok(api.GET('/notifications', { params: { query: { group_by: 'place', limit: INBOX_PAGE, ...(filter === 'unread' ? { unread: true } : {}), ...(filter === 'mentions' ? { kind: 'mention,doc.mention,person.notify' } : {}), ...(cursor === null ? {} : { cursor }) } }, ...(signal === undefined ? {} : { signal }) }));
+export function fetchPlacePage(filter: 'all' | 'unread' | 'mentions', cursor: string | null, signal?: AbortSignal, q=''): Promise<AwayPage> {
+  return ok(api.GET('/notifications', { params: { query: { group_by: 'place', limit: INBOX_PAGE, ...(q===''?{}:{q}), ...(filter === 'unread' ? { unread: true } : {}), ...(filter === 'mentions' ? { kind: 'mention,doc.mention,person.notify' } : {}), ...(cursor === null ? {} : { cursor }) } }, ...(signal === undefined ? {} : { signal }) }));
 }
 
 /** Retry reuses this exact key/body; only a new explicit group act makes a new batch. */
