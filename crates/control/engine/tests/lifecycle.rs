@@ -17,6 +17,604 @@ use orch_link_contract::commands::{CommandError, CommandKind as K, ErrorCode};
 use serde_json::json;
 
 #[tokio::test]
+async fn stopping_a_new_environment_before_its_create_reply_keeps_its_exact_birth_and_data() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Held environment birth", 16_384).await;
+    let template = template(&world).await;
+    let birth = hosting::hold_created_reply(&host);
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    let made =
+        hosting::make_with(&world, template, "Pending birth", Some(host.id), &json!({})).await;
+    eventually(
+        "the actual allocation before its held reply or job failure",
+        || async {
+            let allocated = birth.lock().unwrap().is_some();
+            allocated
+                || matches!(
+                    hosting::job(&world, made.job.id).await.0.as_str(),
+                    "failed" | "cancelled" | "succeeded"
+                )
+        },
+    )
+    .await;
+    let (runtime, source) = birth
+        .lock()
+        .unwrap()
+        .expect("the original Create must be admitted before its effect");
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(orch_link_contract::native_target::RuntimeSource::untracked())
+    );
+    let engine = world.engine();
+    let by = world.ada;
+    let environment = made.id;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    eventually(
+        "Stop freezes the birth before waiting for native confirmation",
+        || async {
+            stopping.is_finished()
+                || sqlx::query_scalar::<_, bool>(
+                    "SELECT native_stop IS NOT NULL FROM runtimes WHERE id=$1",
+                )
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap()
+        },
+    )
+    .await;
+    assert!(
+        !stopping.is_finished(),
+        "Stop cannot finish or refuse before confirming its admitted birth"
+    );
+    let control: serde_json::Value =
+        sqlx::query_scalar("SELECT native_stop->'control' FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(control["source"], json!({"incarnation":null}));
+    assert_eq!(control["pending"], json!([source.incarnation.unwrap()]));
+    host.added
+        .machine
+        .handler
+        .release_kind(K::NodeRuntimeCreate);
+    host.added.machine.handler.release_kind(K::NodeRuntimeStop);
+    tokio::time::timeout(common::PATIENCE, stopping)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(status(&world, made.id).await.0, "stopped");
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(source)
+    );
+    assert_ne!(hosting::wait_over(&world, made.job.id).await.0, "succeeded");
+    assert_eq!(host.count(K::NodeRuntimeCreate), 1);
+    assert_eq!(host.count(K::NodeRuntimeStop), 1);
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
+async fn a_new_environment_starts_from_its_canonical_creation_source_and_records_its_admitted_start()
+ {
+    use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Original creation host", 16_384).await;
+    let template = template(&world).await;
+    let (created, starts) = hosting::canonical_creation_replies(&host);
+    let made = hosting::make_with(
+        &world,
+        template,
+        "Original creation",
+        Some(host.id),
+        &json!({}),
+    )
+    .await;
+    eventually(
+        "creation starts its own source or reports its terminal failure",
+        || async {
+            let started = !starts.lock().unwrap().is_empty();
+            started
+                || matches!(
+                    hosting::job(&world, made.job.id).await.0.as_str(),
+                    "failed" | "cancelled" | "succeeded"
+                )
+        },
+    )
+    .await;
+    let state = hosting::job(&world, made.job.id).await;
+    let captured = starts.lock().unwrap().first().cloned();
+    assert!(
+        captured.is_some(),
+        "the admitted creation failed before its native Start: {state:?}"
+    );
+    let (command, target) = captured.unwrap();
+    let Some(NativeTarget::Lifecycle(target)) = target else {
+        panic!(
+            "Start must consume its own canonical Create source before choosing native operands"
+        );
+    };
+    let runtime: orch_types::Id =
+        sqlx::query_scalar("SELECT (plan->>'runtime')::uuid FROM jobs WHERE id=$1")
+            .bind(made.job.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        target.subject,
+        orch_link_contract::native_target::LifecycleSubject::Runtime {
+            runtime_id: runtime
+        }
+    );
+    let created = created
+        .lock()
+        .unwrap()
+        .expect("the native model actually allocated its birth")
+        .incarnation
+        .expect("the actual birth is tracked");
+    assert_eq!(target.observed, Some(created));
+    let opening = target
+        .opening
+        .expect("the new Start has its admitted candidate before its first native effect");
+    assert_ne!(opening, created);
+    let phase: serde_json::Value =
+        sqlx::query_scalar("SELECT operands FROM runtime_control_phases WHERE id=$1")
+            .bind(command)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(phase["source"], json!({"incarnation":created}));
+    assert_eq!(phase["opening"], json!(opening));
+    let _unit = hosting::enroll(&world, runtime).await;
+    let ended = hosting::wait_over(&world, made.job.id).await;
+    assert_eq!(ended.0, "succeeded", "{ended:?}");
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(RuntimeSource {
+            incarnation: Some(opening)
+        }),
+        "the actual canonical Start reply supplies the source that the environment publishes"
+    );
+}
+
+#[tokio::test]
+async fn a_provisioning_reply_never_publishes_or_cleans_up_a_later_unrelated_native_source() {
+    use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Superseded creation host", 16_384).await;
+    let template = template(&world).await;
+    let (_, starts) = hosting::canonical_creation_replies(&host);
+    let made = hosting::make_with(
+        &world,
+        template,
+        "Superseded creation",
+        Some(host.id),
+        &json!({}),
+    )
+    .await;
+    eventually(
+        "creation reaches its actual native Start or fails",
+        || async {
+            let started = !starts.lock().unwrap().is_empty();
+            started
+                || matches!(
+                    hosting::job(&world, made.job.id).await.0.as_str(),
+                    "failed" | "cancelled" | "succeeded"
+                )
+        },
+    )
+    .await;
+    let captured = starts.lock().unwrap().first().cloned();
+    let Some((_, Some(NativeTarget::Lifecycle(target)))) = captured else {
+        panic!("the original creation must reach its source-bound native Start");
+    };
+    let runtime: orch_types::Id =
+        sqlx::query_scalar("SELECT (plan->>'runtime')::uuid FROM jobs WHERE id=$1")
+            .bind(made.job.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    let opened = RuntimeSource {
+        incarnation: target.opening,
+    };
+    eventually(
+        "the original canonical Start result is recorded before enrollment",
+        || async {
+            orch_db::queries::runtime_incarnations::current(
+                &mut world.pool.acquire().await.unwrap(),
+                runtime,
+            )
+            .await
+            .unwrap()
+                == Some(opened)
+        },
+    )
+    .await;
+    let later = RuntimeSource {
+        incarnation: Some(orch_types::new_id()),
+    };
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, made.id)
+        .await
+        .unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(&mut tx, host.id, runtime, later, false)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE runtimes SET state='running' WHERE id=$1")
+        .bind(runtime)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let volumes: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let _unit = hosting::enroll(&world, runtime).await;
+    let ended = hosting::wait_over(&world, made.job.id).await;
+    assert_ne!(
+        ended.0, "succeeded",
+        "a different current native source cannot finish this creation"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    let row: (String, Option<orch_types::Id>, serde_json::Value) =
+        sqlx::query_as("SELECT state,native_incarnation,volumes FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        row,
+        ("running".into(), later.incarnation, volumes),
+        "old forward work and undo both leave the later physical instance and its files alone"
+    );
+}
+
+#[tokio::test]
+async fn starting_a_kept_environment_consumes_its_admitted_source_and_records_the_actual_new_start()
+{
+    use orch_link_contract::native_target::{NativeTarget, RuntimeSource};
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Kept environment start", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Kept workspace").await;
+    let original = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, original).await;
+    world
+        .engine()
+        .stop_environment(environment, false, StopReason::Person(world.ada))
+        .await
+        .unwrap();
+    let (_, starts) = hosting::canonical_creation_replies(&host);
+    let orch_engine::environments::Starting::Job(job) = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("the kept stopped environment needs its own Start job");
+    };
+    eventually(
+        "the kept environment reaches its admitted Start or fails",
+        || async {
+            let started = !starts.lock().unwrap().is_empty();
+            started
+                || matches!(
+                    hosting::job(&world, job.id).await.0.as_str(),
+                    "failed" | "cancelled" | "succeeded"
+                )
+        },
+    )
+    .await;
+    let captured = starts.lock().unwrap().first().cloned();
+    let Some((command, Some(NativeTarget::Lifecycle(target)))) = captured else {
+        panic!("Start must retain the kept environment's original native source");
+    };
+    assert_eq!(target.observed, Some(original));
+    let next = target
+        .opening
+        .expect("the next native Start has its admitted opening");
+    assert_ne!(next, original);
+    let mut conn = world.pool.acquire().await.unwrap();
+    let admitted = orch_db::queries::runtime_controls::for_job(&mut conn, job.id, runtime)
+        .await
+        .unwrap()
+        .expect("Start admission was retained");
+    assert_eq!(admitted.source().incarnation, Some(original));
+    assert_eq!(job.plan["runtime"], json!(runtime));
+    let operands: serde_json::Value =
+        sqlx::query_scalar("SELECT operands FROM runtime_control_phases WHERE id=$1")
+            .bind(command)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(operands["source"], json!({"incarnation":original}));
+    assert_eq!(operands["opening"], json!(next));
+    drop(conn);
+    let ended = hosting::wait_over(&world, job.id).await;
+    assert_eq!(ended.0, "succeeded", "{ended:?}");
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(RuntimeSource {
+            incarnation: Some(next)
+        })
+    );
+    assert_eq!(host.count(K::NodeRuntimeCreate), 0);
+    assert_eq!(host.count(K::NodeRuntimeStart), 1);
+}
+
+#[tokio::test]
+async fn an_existing_environment_start_keeps_its_admitted_source_when_a_later_report_arrives_before_work()
+ {
+    use orch_link_contract::native_target::RuntimeSource;
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Superseded kept Start", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, unit) = running(&world, &host, template, "Current workspace").await;
+    let original = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, original).await;
+    world
+        .engine()
+        .stop_environment(environment, false, StopReason::Person(world.ada))
+        .await
+        .unwrap();
+    let mut tx = world.pool.begin().await.unwrap();
+    let orch_engine::environments::Starting::Job(job) =
+        orch_engine::environments::start(&mut tx, world.clock.now(), environment, Some(world.ada))
+            .await
+            .unwrap()
+    else {
+        panic!("the Start must have an admitted job before any work");
+    };
+    let admitted = orch_db::queries::runtime_controls::for_job(&mut tx, job.id, runtime)
+        .await
+        .unwrap()
+        .expect("the original source is captured before the queue commit");
+    assert_eq!(admitted.source().incarnation, Some(original));
+    let orch_engine::environments::Starting::Job(joined) =
+        orch_engine::environments::start(&mut tx, world.clock.now(), environment, Some(world.ada))
+            .await
+            .unwrap()
+    else {
+        panic!("the second request joins the original Start");
+    };
+    assert_eq!(joined.id, job.id);
+    assert_eq!(
+        orch_db::queries::runtime_controls::for_job(&mut tx, job.id, runtime)
+            .await
+            .unwrap(),
+        Some(admitted)
+    );
+    let later = RuntimeSource {
+        incarnation: Some(orch_types::new_id()),
+    };
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(&mut tx, host.id, runtime, later, false)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE runtimes SET state='running' WHERE id=$1")
+        .bind(runtime)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE environments SET status='running',machine_id=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(unit.id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let volumes: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world.engine().kick();
+    let ended = hosting::wait_over(&world, job.id).await;
+    assert_ne!(
+        ended.0, "succeeded",
+        "the older Start cannot publish a later source"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStart), 0);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert_eq!(
+        host.count(K::NodeRuntimeStop),
+        1,
+        "only the original completed Stop ran"
+    );
+    let row: (String, Option<orch_types::Id>, serde_json::Value) =
+        sqlx::query_as("SELECT state,native_incarnation,volumes FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(row, ("running".into(), later.incarnation, volumes));
+    assert_eq!(status(&world, environment).await.0, "running");
+}
+
+#[tokio::test]
+async fn stopping_an_environment_owns_the_already_started_candidate_while_its_start_reply_is_still_held()
+ {
+    use orch_link_contract::native_target::RuntimeSource;
+    use std::sync::atomic::Ordering;
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Pending environment Start", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Pending workspace").await;
+    let original = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, original).await;
+    world
+        .engine()
+        .stop_environment(environment, false, StopReason::Person(world.ada))
+        .await
+        .unwrap();
+    let pending = hosting::hold_started_reply(
+        &host,
+        runtime,
+        RuntimeSource {
+            incarnation: Some(original),
+        },
+    );
+    let orch_engine::environments::Starting::Job(job) = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("a Start job owns this stopped unit");
+    };
+    eventually("the actual new Start effect before its held reply", || {
+        let running = pending.running.load(Ordering::SeqCst);
+        async move { running }
+    })
+    .await;
+    let opened = *pending.source.lock().unwrap();
+    assert!(opened.incarnation.is_some());
+    assert_ne!(opened.incarnation, Some(original));
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(RuntimeSource {
+            incarnation: Some(original)
+        }),
+        "the Start effect happened while its canonical reply remains unreceived"
+    );
+    let engine = world.engine();
+    let by = world.ada;
+    let mut stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    eventually(
+        "Stop is admitted against the original pending opening or reports its refusal",
+        || async {
+            stopping.is_finished()
+                || sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM runtimes WHERE id=$1 AND state='stopping')",
+                )
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap()
+        },
+    )
+    .await;
+    let already_finished = stopping.is_finished();
+    if already_finished {
+        (&mut stopping)
+            .await
+            .unwrap()
+            .expect("Stop admits the pending original instead of refusing the creating state");
+    }
+    let control: serde_json::Value =
+        sqlx::query_scalar("SELECT native_stop->'control' FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(control["source"], json!({"incarnation":original}));
+    assert_eq!(
+        control["pending"],
+        json!([opened.incarnation.expect("the actual start is tracked")])
+    );
+    host.added.machine.handler.release_kind(K::NodeRuntimeStart);
+    if !already_finished {
+        tokio::time::timeout(common::PATIENCE, &mut stopping)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    assert!(!pending.running.load(Ordering::SeqCst));
+    assert_eq!(pending.stops.lock().unwrap().len(), 1);
+    assert_eq!(status(&world, environment).await.0, "stopped");
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(opened)
+    );
+    assert_ne!(hosting::wait_over(&world, job.id).await.0, "succeeded");
+    let orch_engine::environments::Starting::Job(next) = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("the kept original is available for another ordinary Start");
+    };
+    let ended = hosting::wait_over(&world, next.id).await;
+    assert_eq!(
+        ended.0, "succeeded",
+        "the confirmed source supports the next Start without waiting for another report: {ended:?}"
+    );
+    assert!(pending.running.load(Ordering::SeqCst));
+    let next_source = *pending.source.lock().unwrap();
+    assert_ne!(next_source, opened);
+    assert_eq!(pending.starts.lock().unwrap().len(), 2);
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::current(
+            &mut world.pool.acquire().await.unwrap(),
+            runtime
+        )
+        .await
+        .unwrap(),
+        Some(next_source)
+    );
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
 async fn a_person_stops_an_environment_and_its_unit_and_volumes_are_kept() {
     let world = World::new().await;
     serve(&world);
@@ -47,6 +645,135 @@ async fn a_person_stops_an_environment_and_its_unit_and_volumes_are_kept() {
         .await
         .unwrap();
     assert_eq!(host.count(K::NodeRuntimeStop), 1);
+}
+
+#[tokio::test]
+async fn a_host_report_finishes_an_environment_stop_while_its_command_reply_is_held() {
+    for state in ["absent", "stopped", "failed"] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+        let template = template(&world).await;
+        let (environment, runtime, _unit) =
+            running(&world, &host, template, "Stopped workspace").await;
+        host.added.machine.handler.hold(K::NodeRuntimeStop);
+        let engine = world.engine();
+        let by = world.ada;
+        let stopping = tokio::spawn(async move {
+            engine
+                .stop_environment(environment, false, StopReason::Person(by))
+                .await
+        });
+        host.wait_began(K::NodeRuntimeStop, 1).await;
+        host.tell(runtime, state, None).await;
+        eventually(
+            "the reported stop to settle before the command reply",
+            || async { status(&world, environment).await.0 == "stopped" },
+        )
+        .await;
+        let row: (String, bool) =
+            sqlx::query_as("SELECT state,loss_missing FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(row, ("stopped".into(), state == "absent"));
+        host.added.machine.handler.release();
+        stopping.await.unwrap().unwrap();
+        assert_eq!(status(&world, environment).await.0, "stopped");
+    }
+}
+
+#[tokio::test]
+async fn a_late_stop_reply_keeps_the_environment_of_a_newer_start_running() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) =
+        running(&world, &host, template, "Restarted workspace").await;
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
+    let engine = world.engine();
+    let by = world.ada;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    host.wait_began(K::NodeRuntimeStop, 1).await;
+    // A completed stop report and a subsequent start can be committed before the first waiter's reply.
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE runtimes SET state='running',updated_at=updated_at+interval '1 second' WHERE id=$1",
+    )
+    .bind(runtime)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release();
+    stopping.await.unwrap().unwrap();
+    assert_eq!(status(&world, environment).await.0, "running");
+    let state: String = sqlx::query_scalar("SELECT state FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+}
+
+#[tokio::test]
+async fn starting_after_a_reported_absent_stop_makes_an_environment_unit_on_the_same_owned_volumes()
+{
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Reporting host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Missing workspace").await;
+    let volumes: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtimes SET state='stopping' WHERE id=$1")
+        .bind(runtime)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    host.tell(runtime, "absent", None).await;
+    eventually("the absent stop to settle", || async {
+        status(&world, environment).await.0 == "stopped"
+    })
+    .await;
+    let orch_engine::environments::Starting::Job(job) = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap()
+    else {
+        panic!("a unit reported absent must be made again");
+    };
+    assert_eq!(
+        job.plan["mode"], "make",
+        "Start cannot target a unit the host has reported absent"
+    );
+    host.wait_for(K::NodeRuntimeStart, 1).await;
+    let replacement = host.started().unwrap();
+    assert_ne!(runtime, replacement);
+    let _replacement = hosting::enroll(&world, replacement).await;
+    let (state, _, error) = hosting::wait_over(&world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let kept: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(replacement)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(volumes, kept);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+    assert_eq!(status(&world, environment).await.0, "running");
 }
 
 #[tokio::test]
@@ -388,6 +1115,31 @@ async fn a_removal_that_fails_is_tried_again_with_pauses_that_grow_and_the_reaso
     .await
     .unwrap();
     assert_eq!(failed, 2);
+    let attempts: Vec<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT plan->'lifecycle_wait' FROM jobs WHERE environment_id=$1
+         AND kind='environment_remove' AND state='failed' ORDER BY created_at,id",
+    )
+    .bind(environment)
+    .fetch_all(world.pool.pool())
+    .await
+    .unwrap();
+    for (index, attempt) in attempts.into_iter().enumerate() {
+        let attempt =
+            attempt.expect("each actual failed removal retains its accepted retry boundary");
+        let at: chrono::DateTime<Utc> = attempt["last_attempt_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let retry: chrono::DateTime<Utc> = attempt["retry_eligible_at"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected = common::config().hosting.removal_first_pause * (1u32 << index);
+        assert_eq!(retry - at, chrono::Duration::from_std(expected).unwrap());
+        assert_eq!(attempt["reason_code"], "unsupported");
+    }
 }
 
 #[tokio::test]
@@ -584,4 +1336,707 @@ async fn an_environment_near_its_idle_stop_warns_its_people_once_and_is_not_stop
         "its time has not come"
     );
     assert_eq!(host.count(K::NodeRuntimeStop), 0);
+}
+
+async fn record_native_start(
+    world: &World,
+    host: &ScriptedHost,
+    environment: orch_types::Id,
+    runtime: orch_types::Id,
+    incarnation: orch_types::Id,
+) {
+    host.record_native_source(
+        runtime,
+        orch_link_contract::native_target::RuntimeSource {
+            incarnation: Some(incarnation),
+        },
+        true,
+    );
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    assert!(
+        orch_db::queries::runtime_incarnations::observe(
+            &mut tx,
+            host.id,
+            runtime,
+            orch_link_contract::native_target::RuntimeSource {
+                incarnation: Some(incarnation)
+            },
+            false
+        )
+        .await
+        .unwrap()
+    );
+    tx.commit().await.unwrap();
+}
+
+async fn accept_stop(
+    world: &World,
+    environment: orch_types::Id,
+) -> orch_engine::environments::AcceptedStop {
+    accept_stop_with_interrupt(world, environment, false).await
+}
+
+async fn accept_stop_with_interrupt(
+    world: &World,
+    environment: orch_types::Id,
+    interrupt: bool,
+) -> orch_engine::environments::AcceptedStop {
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = orch_authz::Principal::load(
+        &mut tx,
+        Caller::session(world.ada),
+        orch_types::Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    world
+        .engine()
+        .accept_environment_stop_in(
+            tx,
+            &principal,
+            &orch_db::audit::Origin::default(),
+            orch_engine::environments::StopRequest {
+                environment,
+                interrupt,
+                reason: StopReason::Person(world.ada),
+            },
+            || Ok(()),
+            || Ok(()),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_accepted_environment_stop_withdraws_its_original_before_preparation() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Preparing environment Stop", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Preparing Stop").await;
+    record_native_start(&world, &host, environment, runtime, orch_types::new_id()).await;
+    let starts = host.count(K::NodeRuntimeStart);
+    let accepted = accept_stop(&world, environment).await;
+    let stop = orch_db::queries::runtime_incarnations::stop(
+        &mut world.pool.acquire().await.unwrap(),
+        runtime,
+    )
+    .await
+    .unwrap()
+    .expect("the original is retained before preparation");
+    assert!(!stop.ready);
+    assert_eq!(status(&world, environment).await.0, "running");
+    let started = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await;
+    assert!(
+        matches!(
+            started,
+            Err(orch_engine::environments::StartError::Unavailable(_))
+        ),
+        "new work cannot reuse a withdrawn original: {started:?}"
+    );
+    assert!(
+        !orch_engine::resource_facts::activity::accepts_context(
+            &mut world.pool.acquire().await.unwrap(),
+            world.provider,
+            common::MODEL,
+            None,
+            Some(environment),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(host.count(K::NodeRuntimeStart), starts);
+    world
+        .engine()
+        .finish_accepted_environment_stop(accepted)
+        .await
+        .unwrap();
+    assert_eq!(status(&world, environment).await.0, "stopped");
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
+async fn an_old_environment_stop_does_not_withdraw_a_new_home_on_the_same_unit() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Independent environment home", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Independent home").await;
+    record_native_start(&world, &host, environment, runtime, orch_types::new_id()).await;
+    let home: orch_types::Id =
+        sqlx::query_scalar("SELECT home_node_id FROM environments WHERE id=$1")
+            .bind(environment)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    let next = if home == world.topic {
+        world.root
+    } else {
+        world.topic
+    };
+    let accepted = accept_stop(&world, environment).await;
+    sqlx::query("UPDATE environments SET home_node_id=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(next)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    let started = world
+        .engine()
+        .start_environment(environment, Some(world.ada))
+        .await
+        .unwrap();
+    assert!(matches!(started, orch_engine::environments::Starting::Up));
+    assert!(
+        orch_engine::resource_facts::activity::accepts_context(
+            &mut world.pool.acquire().await.unwrap(),
+            world.provider,
+            common::MODEL,
+            None,
+            Some(environment),
+        )
+        .await
+        .unwrap()
+    );
+    let stopped = world
+        .engine()
+        .finish_accepted_environment_stop(accepted)
+        .await;
+    assert!(
+        matches!(stopped, Err(StopError::Unavailable(_))),
+        "the old Stop cannot act in the new home: {stopped:?}"
+    );
+    assert_eq!(status(&world, environment).await.0, "running");
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
+async fn an_accepted_stop_keeps_a_later_native_start_of_the_same_runtime_running() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Original stop host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) =
+        running(&world, &host, template, "Original stop workspace").await;
+    let original = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, original).await;
+    let accepted = accept_stop(&world, environment).await;
+    record_native_start(&world, &host, environment, runtime, orch_types::new_id()).await;
+    let stopped = world
+        .engine()
+        .finish_accepted_environment_stop(accepted)
+        .await;
+    assert!(
+        matches!(stopped, Err(StopError::Unavailable(_))),
+        "{stopped:?}"
+    );
+    assert_eq!(
+        host.count(K::NodeRuntimeStop),
+        0,
+        "the original stop never adopts the replacement"
+    );
+    assert_eq!(status(&world, environment).await.0, "running");
+    let state: String = sqlx::query_scalar("SELECT state FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+}
+
+#[tokio::test]
+async fn an_old_successful_stop_reply_does_not_confirm_a_later_native_start() {
+    for changed_stamp in [false, true] {
+        let world = World::new().await;
+        serve(&world);
+        let host = ScriptedHost::on(&world, "Held original stop host", 16_384).await;
+        let template = template(&world).await;
+        let (environment, runtime, _unit) =
+            running(&world, &host, template, "Held original stop").await;
+        record_native_start(&world, &host, environment, runtime, orch_types::new_id()).await;
+        host.added.machine.handler.hold(K::NodeRuntimeStop);
+        let engine = world.engine();
+        let person = world.ada;
+        let stopping = tokio::spawn(async move {
+            engine
+                .stop_environment(environment, false, StopReason::Person(person))
+                .await
+        });
+        host.wait_began(K::NodeRuntimeStop, 1).await;
+        let stamp: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT updated_at FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        let replacement = orch_types::new_id();
+        record_native_start(&world, &host, environment, runtime, replacement).await;
+        let pending: (String, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT state,updated_at FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            pending,
+            ("stopping".into(), stamp),
+            "the old timestamp guard alone cannot distinguish native starts"
+        );
+        if changed_stamp {
+            let mut tx = world.pool.begin().await.unwrap();
+            orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE runtimes SET updated_at=updated_at+interval '1 second' WHERE id=$1",
+            )
+            .bind(runtime)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        host.added.machine.handler.release();
+        let stopped = stopping.await.unwrap();
+        let observed: (String, Option<orch_types::Id>, chrono::DateTime<Utc>) =
+            sqlx::query_as("SELECT state,native_incarnation,updated_at FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert!(
+            matches!(stopped, Err(StopError::Unavailable(_))),
+            "{stopped:?}; changed timestamp: {changed_stamp}; original timestamp: {stamp:?}; actual runtime: {observed:?}"
+        );
+        assert_eq!(status(&world, environment).await.0, "running");
+        let current: (String, Option<orch_types::Id>) =
+            sqlx::query_as("SELECT state,native_incarnation FROM runtimes WHERE id=$1")
+                .bind(runtime)
+                .fetch_one(world.pool.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            current,
+            ("stopping".into(), Some(replacement)),
+            "the replacement has no confirmed Stop"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_late_environment_stop_receipt_does_not_publish_into_a_changed_home() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Stop reply changed home", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) =
+        running(&world, &host, template, "Changed home reply").await;
+    let original = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, original).await;
+    host.added.machine.handler.hold_result(K::NodeRuntimeStop);
+    let engine = world.engine();
+    let by = world.ada;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    host.wait_for(K::NodeRuntimeStop, 1).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let previous = orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap()
+        .unwrap();
+    let stop = orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    let next = if previous.home_node_id == world.topic {
+        world.root
+    } else {
+        world.topic
+    };
+    sqlx::query("UPDATE environments SET home_node_id=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(next)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release_kind(K::NodeRuntimeStop);
+    let result = tokio::time::timeout(common::PATIENCE, stopping)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(result, Err(StopError::Unavailable(_))),
+        "the old reply records its physical receipt without becoming a new-home operation: {result:?}"
+    );
+    let current = orch_db::queries::environments::hosting::environment(
+        &mut world.pool.acquire().await.unwrap(),
+        environment,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let outcome: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT outcome FROM runtime_control_phases WHERE id=$1")
+            .bind(stop.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        outcome,
+        Some(json!({"outcome":"stopped","source":{"incarnation":original}})),
+        "the original command retains the verified host receipt even after the registration changes"
+    );
+    assert_eq!(current.home_node_id, next);
+    assert_eq!(
+        current.status, previous.status,
+        "the old action does not stamp the new registration"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStop), 1);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
+async fn an_environment_stop_finishes_its_original_phase_after_its_progress_detail_changes() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Same original Stop progress", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Stop progress").await;
+    record_native_start(&world, &host, environment, runtime, orch_types::new_id()).await;
+    host.added.machine.handler.hold_result(K::NodeRuntimeStop);
+    let engine = world.engine();
+    let by = world.ada;
+    let stopping = tokio::spawn(async move {
+        engine
+            .stop_environment(environment, false, StopReason::Person(by))
+            .await
+    });
+    host.wait_for(K::NodeRuntimeStop, 1).await;
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    let original = orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    let command = orch_db::queries::link::command(&mut tx, original.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        command.state.as_str(),
+        "queued" | "sent" | "accepted"
+    ));
+    let cleanup = orch_db::queries::lifecycle::controls(&mut tx, i64::MAX)
+        .await
+        .unwrap();
+    assert!(
+        cleanup.iter().all(|row| row.id != original.id),
+        "the environment owns its Stop while the machine's reply is pending"
+    );
+    let updated: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT updated_at FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(
+        orch_db::queries::environments::hosting::set_runtime_state(
+            &mut tx,
+            runtime,
+            &["stopping"],
+            "stopping",
+            Some("the same original Stop is still waiting"),
+            updated + Duration::microseconds(1),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        orch_db::queries::runtime_incarnations::stop(&mut tx, runtime)
+            .await
+            .unwrap(),
+        Some(original)
+    );
+    tx.commit().await.unwrap();
+    host.added.machine.handler.release_kind(K::NodeRuntimeStop);
+    tokio::time::timeout(common::PATIENCE, stopping)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        status(&world, environment).await.0,
+        "stopped",
+        "a matching original receipt completes despite a progress-only edit"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStop), 1);
+    assert_eq!(host.count(K::NodeRuntimeRemove), 0);
+    assert_eq!(host.count(K::NodeVolumeRemove), 0);
+}
+
+#[tokio::test]
+async fn an_accepted_stop_of_the_same_native_start_still_finishes_and_keeps_its_data() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Matching stop host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Matching stop").await;
+    let incarnation = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, incarnation).await;
+    let volumes: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    let accepted = accept_stop(&world, environment).await;
+    world
+        .engine()
+        .finish_accepted_environment_stop(accepted)
+        .await
+        .unwrap();
+    assert_eq!(host.count(K::NodeRuntimeStop), 1);
+    let sent = world.commands.issued_commands("node.runtime.stop");
+    assert_eq!(sent.len(), 1);
+    let (machine, command) = &sent[0];
+    assert_eq!(*machine, host.machine);
+    let Some(orch_link_contract::native_target::NativeTarget::Lifecycle(target)) =
+        &command.native_target
+    else {
+        panic!("the original stop must reach the native role with its physical target");
+    };
+    assert_eq!(
+        target.subject,
+        orch_link_contract::native_target::LifecycleSubject::Runtime {
+            runtime_id: runtime
+        }
+    );
+    assert_eq!(target.observed, Some(incarnation));
+    assert_eq!(target.opening, None);
+    let revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM runtime_control_phases WHERE id=$1")
+            .bind(command.id)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(target.revision, revision);
+    assert_eq!(status(&world, environment).await.0, "stopped");
+    let kept: serde_json::Value = sqlx::query_scalar("SELECT volumes FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, volumes);
+}
+
+#[tokio::test]
+async fn a_registration_change_during_stop_preparation_keeps_the_new_registration_running() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Original registration host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) =
+        running(&world, &host, template, "Original registration").await;
+    let source = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, source).await;
+    let thread = world.thread("Work before the move").await;
+    hosting::bind(&world, thread, environment).await;
+    let (turn, _) = world.running_turn(thread, "go").await;
+    let accepted = accept_stop_with_interrupt(&world, environment, true).await;
+    let engine = world.engine();
+    let stopping =
+        tokio::spawn(async move { engine.finish_accepted_environment_stop(accepted).await });
+    eventually("the original stop to wait for its actual turn", || async {
+        world.ran(K::TurnInterrupt) == 1
+    })
+    .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE environments SET home_node_id=$2 WHERE id=$1")
+        .bind(environment)
+        .bind(world.root)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::TurnCompleted(
+                orch_link_contract::events::TurnCompleted {
+                    turn_id: turn.turn_id,
+                    status: orch_link_contract::events::TurnOutcome::Interrupted,
+                    error: None,
+                },
+            ),
+        )
+        .await;
+    let result = stopping.await.unwrap();
+    assert!(
+        matches!(result, Err(StopError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        host.count(K::NodeRuntimeStop),
+        0,
+        "the accepted stop cannot follow the moved registration"
+    );
+    assert_eq!(status(&world, environment).await.0, "running");
+    let current: (String, Option<orch_types::Id>) =
+        sqlx::query_as("SELECT state,native_incarnation FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        current,
+        ("running".into(), Some(source)),
+        "unchanged physical identity does not substitute for the original registration"
+    );
+}
+
+#[tokio::test]
+async fn a_newer_control_during_stop_preparation_keeps_the_same_native_start_untouched() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Original intent host", 16_384).await;
+    let template = template(&world).await;
+    let (environment, runtime, _unit) = running(&world, &host, template, "Original intent").await;
+    let source = orch_types::new_id();
+    record_native_start(&world, &host, environment, runtime, source).await;
+    let thread = world.thread("Work before the new control").await;
+    hosting::bind(&world, thread, environment).await;
+    let (turn, _) = world.running_turn(thread, "go").await;
+    let accepted = accept_stop_with_interrupt(&world, environment, true).await;
+    let engine = world.engine();
+    let stopping =
+        tokio::spawn(async move { engine.finish_accepted_environment_stop(accepted).await });
+    eventually(
+        "the original intent to wait for turn settlement",
+        || async { world.ran(K::TurnInterrupt) == 1 },
+    )
+    .await;
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::environments::hosting::lock_environment(&mut tx, environment)
+        .await
+        .unwrap();
+    let later = orch_db::queries::runtime_controls::accept(&mut tx, runtime, orch_types::new_id())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    world
+        .say(
+            thread,
+            orch_link_contract::events::Event::TurnCompleted(
+                orch_link_contract::events::TurnCompleted {
+                    turn_id: turn.turn_id,
+                    status: orch_link_contract::events::TurnOutcome::Interrupted,
+                    error: None,
+                },
+            ),
+        )
+        .await;
+    let result = stopping.await.unwrap();
+    assert!(
+        matches!(result, Err(StopError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert_eq!(host.count(K::NodeRuntimeStop), 0);
+    assert_eq!(status(&world, environment).await.0, "running");
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        orch_db::queries::runtime_controls::is_current(&mut conn, &later)
+            .await
+            .unwrap()
+    );
+    let current: (String, Option<orch_types::Id>) =
+        sqlx::query_as("SELECT state,native_incarnation FROM runtimes WHERE id=$1")
+            .bind(runtime)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        current,
+        ("running".into(), Some(source)),
+        "a newer intent matters even without replacing the physical process"
+    );
+}
+
+#[tokio::test]
+async fn shells_browsers_and_displays_withdraw_during_stop_preparation_and_follow_a_new_home() {
+    use orch_db::queries::{browsers, terminals};
+    use orch_engine::{browsers::Browsers, displays::Displays, shells::Shells};
+
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Interactive Stop host", 16_384).await;
+    let template = template(&world).await;
+    let (env, _, unit) = running(&world, &host, template, "Interactive Stop").await;
+    sqlx::query("UPDATE environments SET terminal=true,browser=true,vnc=true WHERE id=$1")
+        .bind(env)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE machines SET online=true,facts=jsonb_set(COALESCE(facts,'{}'),'{policy}',COALESCE(facts->'policy','{}')||$2) WHERE id=ANY($1)")
+        .bind([host.machine, unit.id].as_slice())
+        .bind(json!({"environment.terminal":true,"environment.browser":true,"environment.vnc":true}))
+        .execute(world.pool.pool()).await.unwrap();
+    let mut accepted = None;
+    for step in 0..3 {
+        if step == 1 {
+            accepted = Some(accept_stop(&world, env).await);
+        } else if step == 2 {
+            sqlx::query("UPDATE environments SET home_node_id=$2 WHERE id=$1")
+                .bind(env)
+                .bind(world.root)
+                .execute(world.pool.pool())
+                .await
+                .unwrap();
+        }
+        let mut conn = world.pool.acquire().await.unwrap();
+        let screen = browsers::site(&mut conn, env).await.unwrap().unwrap();
+        let shell = terminals::site(&mut conn, env).await.unwrap().unwrap();
+        assert_eq!(screen.status, "running");
+        let reasons = [
+            json!(
+                Shells::opening_gates(&mut conn, &shell, orch_settings::Place::Environment(env))
+                    .await
+                    .unwrap()
+            ),
+            json!(Browsers::off(&mut conn, &screen).await.unwrap()),
+            json!(Displays::off(&mut conn, &screen).await.unwrap()),
+        ];
+        let expected = if step == 1 {
+            json!("environment_stopping")
+        } else {
+            serde_json::Value::Null
+        };
+        assert!(
+            reasons.iter().all(|reason| reason == &expected),
+            "step {step}: {reasons:?}"
+        );
+    }
+    assert!(matches!(
+        world
+            .engine()
+            .finish_accepted_environment_stop(accepted.unwrap())
+            .await,
+        Err(StopError::Unavailable(_))
+    ));
 }

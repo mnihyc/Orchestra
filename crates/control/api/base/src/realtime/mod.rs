@@ -55,8 +55,6 @@ use orch_engine::live::LiveDelta;
 
 use orch_engine::live::LiveSink;
 
-use orch_realtime_contract::delta::PERSIST_LAG_MILLIS;
-
 use orch_realtime_contract::feeds::Feed;
 
 use orch_realtime_contract::feeds::UserEvent;
@@ -112,26 +110,12 @@ pub const SOCKET_ROUTE: &str = "/ws";
 /// than anyone waits for a revoked person's tab to stop.
 pub const EPOCH_EVERY: Duration = Duration::from_secs(1);
 
-/// The least time between two reads of one feed for its subscribers. The
-/// first change is read at once; changes that follow within this are read
-/// together when it is over. A text that grows is stored with every stretch,
-/// each of which moves its row, and reading the row for every stretch would
-/// send a reader its whole text again and again: a fifth of a second is a
-/// delay no one sees in a row, and bounds a streaming message to five rows a
-/// second for each reader, deltas being what carries the text between them.
+/// How long a look at the subscribed topics waits after a node of a tree was
+/// stamped: a topic's feed moves with its nodes' stamps and is not announced by
+/// them, and the stamps of one change come together. The rows of a feed that is
+/// announced are read at once, and read again as soon as that read is done when
+/// more was announced meanwhile.
 pub const FANOUT_GAP: Duration = Duration::from_millis(200);
-
-/// The least time between two reads of a thread's feed while text is growing in
-/// it: the second the protocol allows a stored row to be behind what was
-/// forwarded. A growing text is stored with every stretch, and a row that is
-/// sent for each would send its reader the whole text again many times a second;
-/// the deltas carry the text between the rows.
-pub const STREAM_GAP: Duration = Duration::from_millis(PERSIST_LAG_MILLIS as u64);
-
-/// For how long after a stretch of text was handed over a thread's text is still
-/// taken to be growing: twice the time a row may be behind, so that one pause in
-/// a stream does not end it.
-pub const STREAMING_WINDOW: Duration = Duration::from_millis(2 * PERSIST_LAG_MILLIS as u64);
 
 /// How often a connection looks at its own clocks: how long it heard
 /// nothing, how long its token is good, how much waits for it. A second is
@@ -154,7 +138,7 @@ pub struct Tuning {
     pub silence: Duration,
     /// How often a client is told to ping.
     pub heartbeat_secs: u32,
-    /// How many bytes may wait for one connection.
+    /// How many bytes may wait in each direction for one connection.
     pub buffer_max_bytes: i64,
     /// For how many milliseconds that many may have waited.
     pub buffer_max_millis: i64,
@@ -162,10 +146,8 @@ pub struct Tuning {
     pub sweep_every: Duration,
     /// How often the authorization epoch is read when nobody announced it; zero disables this poll.
     pub epoch_every: Duration,
-    /// The least time between two reads of one feed.
+    /// How long a look at the subscribed topics waits after a node was stamped.
     pub fanout_gap: Duration,
-    /// The least time between two reads of a thread's feed while text grows in it.
-    pub stream_gap: Duration,
     /// How often a connection looks at its own clocks.
     pub tick: Duration,
     /// How long a closing connection is given to take its last frame.
@@ -187,7 +169,6 @@ impl Tuning {
             sweep_every: Duration::from_secs(u64::from(SWEEP_SECS)),
             epoch_every: EPOCH_EVERY,
             fanout_gap: FANOUT_GAP,
-            stream_gap: STREAM_GAP,
             tick: TICK,
             close_grace: CLOSE_GRACE,
         }
@@ -269,11 +250,6 @@ pub struct Entry {
     pub(crate) running: bool,
     /// Whether something was announced since that task last began.
     pub(crate) dirty: bool,
-    /// When a task last began to read for these subscriptions: the next
-    /// begins no sooner than the gap after it, whichever task it is.
-    pub(crate) last: Option<tokio::time::Instant>,
-    /// When text was last handed over for a thread.
-    pub(crate) streaming: Option<tokio::time::Instant>,
     /// Growing text handed over and not yet passed on to the subscribers.
     pub(crate) waiting: Vec<LiveDelta>,
     /// Whether a task is passing it on.
@@ -289,8 +265,6 @@ impl Entry {
             notified: 0,
             running: false,
             dirty: false,
-            last: None,
-            streaming: None,
             waiting: Vec::new(),
             carrying: false,
             changes: watch::channel(Some(0)).0,
@@ -306,7 +280,18 @@ impl Entry {
 pub struct Registry {
     pub(crate) connections: HashMap<u64, Arc<Connection>>,
     pub(crate) sources: HashMap<Source, Entry>,
+    /// Invalidation watermarks only; personalized Stop observations are projected afresh.
+    pub(crate) stop_versions: HashMap<Id, i64>,
+    /// Canonical progress can settle an outstanding native Stop without another acceptance.
+    pub(crate) stop_pending: std::collections::HashSet<Id>,
 }
+
+/// A fixture's SQL subscriber and its completion callback for one owed delivery.
+#[cfg(any(test, feature = "test-support"))]
+pub type FrameSqlTrace = (tracing::Dispatch, Box<dyn FnOnce() + Send>);
+
+#[cfg(any(test, feature = "test-support"))]
+type FrameSqlTraceFactory = Arc<dyn Fn(&Feed, Id, &'static str) -> FrameSqlTrace + Send + Sync>;
 
 /// What every part of the server shares.
 pub struct Inner {
@@ -323,6 +308,8 @@ pub struct Inner {
     pub(crate) ephemeral: ephemeral::Feeds,
     engine: OnceLock<Engine>,
     registry: Mutex<Registry>,
+    #[cfg(any(test, feature = "test-support"))]
+    frame_sql_trace: Mutex<Option<FrameSqlTraceFactory>>,
     numbers: AtomicU64,
     /// Whether the topics are being compared with the database.
     pub(crate) looking: AtomicBool,
@@ -347,6 +334,34 @@ impl std::fmt::Debug for Inner {
 }
 
 impl Inner {
+    /// A fixture can observe each read and final publication phase without changing its work.
+    pub(super) async fn traced_frame_sql<T>(
+        &self,
+        feed: Option<&Feed>,
+        user: Id,
+        phase: &'static str,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let factory = self
+                .frame_sql_trace
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let trace = feed.and_then(|feed| factory.map(|factory| factory(feed, user, phase)));
+            if let Some((dispatch, finished)) = trace {
+                use tracing::instrument::WithSubscriber as _;
+                let result = work.with_subscriber(dispatch).await;
+                finished();
+                return result;
+            }
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = (feed, user, phase);
+        work.await
+    }
+
     pub(crate) fn registry(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -432,6 +447,8 @@ impl Realtime {
                 ephemeral: ephemeral::Feeds::default(),
                 engine: OnceLock::new(),
                 registry: Mutex::new(Registry::default()),
+                #[cfg(any(test, feature = "test-support"))]
+                frame_sql_trace: Mutex::new(None),
                 numbers: AtomicU64::new(0),
                 looking: AtomicBool::new(false),
                 listening: watch::channel(false).0,
@@ -447,6 +464,19 @@ impl Realtime {
     /// connection, and a second call changes nothing.
     pub fn attach_app(&self, app: &App) {
         let _ = self.inner.app.set(Arc::downgrade(app));
+    }
+
+    /// Supplies a fresh SQL recorder for each owed delivery in a fixture; no recorder is installed by default.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trace_frame_sql(
+        &self,
+        factory: impl Fn(&Feed, Id, &'static str) -> FrameSqlTrace + Send + Sync + 'static,
+    ) {
+        *self
+            .inner
+            .frame_sql_trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(factory));
     }
 
     /// Where the thread engine hands growing text to. Give it to the engine
@@ -601,6 +631,8 @@ pub mod environments;
 #[path = "ephemeral.rs"]
 pub mod ephemeral;
 
+mod incoming;
+
 #[path = "key_reads.rs"]
 pub mod key_reads;
 
@@ -661,6 +693,7 @@ pub mod sync;
 #[path = "terminals.rs"]
 pub mod terminals;
 
+pub mod thread_stops;
 #[path = "threads.rs"]
 pub mod threads;
 
@@ -740,7 +773,6 @@ pub mod tests {
         assert_eq!(tuning.silence, Duration::from_secs(60));
         assert_eq!(tuning.heartbeat_secs, 25);
         assert_eq!(tuning.sweep_every, Duration::from_secs(5));
-        assert_eq!(tuning.stream_gap, Duration::from_secs(1));
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]

@@ -22,8 +22,6 @@ use crate::routes::nodes::view;
 
 use orch_api_contract::search::NAME_SEARCH_LIMIT_DEFAULT;
 
-use orch_api_contract::search::NAME_SEARCH_LIMIT_MAX;
-
 use orch_api_contract::search::NameHit;
 
 use orch_api_contract::search::NameKind;
@@ -54,9 +52,6 @@ const NAME_QUERY_MIN_CHARS: usize = 2;
 /// without evaluating hundreds of pages for the usual twenty-name request.
 const NAME_BATCH_PAGES: i64 = 2;
 
-/// At most four bulk access checks: a narrow reader never walks the installation to fill twenty rows.
-pub const NAME_BATCHES_MAX: usize = 4;
-
 const NAME_KINDS: &[&str] = &[
     "org",
     "project",
@@ -77,6 +72,7 @@ const NAME_KINDS: &[&str] = &[
     "mount",
     "machine",
     "skill",
+    "pool",
 ];
 
 /// Binds the requests that find things and what was written in them.
@@ -110,7 +106,7 @@ const RELATED_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 async fn related(
     ctx: Ctx,
-    query: orch_api_contract::common::PageQuery,
+    query: orch_api_contract::search::DocumentRelatedListQuery,
     (): (),
 ) -> ApiResult<orch_api_contract::search::RelatedItems> {
     tokio::time::timeout(RELATED_LOOKUP_TIMEOUT, related_page(ctx, query))
@@ -124,7 +120,7 @@ async fn related(
 
 async fn related_page(
     ctx: Ctx,
-    query: orch_api_contract::common::PageQuery,
+    query: orch_api_contract::search::DocumentRelatedListQuery,
 ) -> ApiResult<orch_api_contract::search::RelatedItems> {
     crate::key_operations::native::selected_read::<native::RelatedReader>(ctx, query, ()).await
 }
@@ -174,6 +170,7 @@ async fn render_related(
         let Some(item) = items.iter().find(|item| item.source_id == result.id) else {
             continue;
         };
+        result.name = item.name.clone();
         if result.kind == orch_api_contract::search::RelatedKind::Chat
             && result.name.is_empty()
             && let Some(chat) = orch_db::queries::chats::chat(conn, result.id).await?
@@ -514,6 +511,7 @@ pub(super) async fn render_names(
     Ok(NameSearchPage {
         items: found,
         partial,
+        next_cursor: value.next_cursor.clone(),
     })
 }
 
