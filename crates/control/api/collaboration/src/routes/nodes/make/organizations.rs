@@ -81,7 +81,7 @@ fn replay<B: Send + 'static, const ROOT: bool>(
             id: created.id,
         };
         match reply::render_completed_replay::<Content>(&ctx, ctx.user()?.id(), input).await {
-            Ok(Some(value)) => Ok(OrgCreateResponse::Full(Box::new(value))),
+            Ok(Some(value)) => Ok(OrgCreateResponse::Full(value)),
             Ok(None) => Ok(receipt),
             Err(error) if matches!(error.code(), ErrorCode::NotFound | ErrorCode::AuthzDenied) => {
                 Ok(receipt)
@@ -511,18 +511,27 @@ async fn finish<F: effects::Apply<Source = Source, Output = AcceptedOrganization
     ctx: Ctx,
 ) -> ApiResult<OrgCreateResponse> {
     let (mut tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
-    let done = effects::apply::<F>(&ctx, &mut tx).await?;
+    let done = native::observed(
+        &ctx,
+        "organization.create",
+        Box::pin(effects::apply::<F>(&ctx, &mut tx)).await,
+    )?;
     tx.commit().await.map_err(DbError::from)?;
+    tracing::debug!(target: "orch_api::native_operations", operation = ctx.route.name,
+        phase = "organization.commit", "organization creation committed");
     let receipt = OrgCreateResponse::Receipt(super::super::creation_operation::receipt(
         done.output.id,
         NodeKind::Org,
     ));
     publication::receipt(&done.ctx, &receipt)?;
-    Ok(
-        reply::render::<Content>(&done.ctx, &done.accepted, done.output)
-            .await?
-            .map_or(receipt, OrgCreateResponse::full),
-    )
+    let content = Box::pin(reply::render::<Content>(
+        &done.ctx,
+        &done.accepted,
+        done.output,
+    ))
+    .await;
+    Ok(native::observed(&done.ctx, "organization.reply", content)?
+        .map_or(receipt, OrgCreateResponse::Full))
 }
 
 pub(super) async fn root(ctx: Ctx, (): (), _body: OrgCreateBody) -> ApiResult<OrgCreateResponse> {
@@ -543,8 +552,8 @@ impl reply::Projection for Content {
     type Source = Source;
     type Input = AcceptedOrganization;
     type Subject = Id;
-    type Value = Org;
-    type Reply = Org;
+    type Value = Box<Org>;
+    type Reply = Box<Org>;
     const READ_SOURCE: Source = Source::Created;
     fn declaration(input: &Self::Input) -> &'static Declaration<Source> {
         declaration(input.root)
@@ -602,7 +611,7 @@ impl reply::Projection for Content {
         principal: &'a Principal,
         input: &'a Self::Input,
         subject: &'a Id,
-    ) -> BoxFuture<'a, ApiResult<(Org, Vec<native::Facts<Source>>)>> {
+    ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let (mut orgs, names) = super::super::projection::project_orgs(
                 ctx,
@@ -614,7 +623,8 @@ impl reply::Projection for Content {
                 &[*subject],
             )
             .await?;
-            Ok((orgs.pop().ok_or_else(ApiError::not_found)?, vec![names]))
+            let org = orgs.pop().ok_or_else(ApiError::not_found)?;
+            Ok((Box::new(org), vec![names]))
         })
     }
     fn render<'a>(
@@ -623,7 +633,7 @@ impl reply::Projection for Content {
         _principal: &'a Principal,
         _input: &'a Self::Input,
         value: &'a reply::Prepared<Self>,
-    ) -> BoxFuture<'a, ApiResult<Org>> {
+    ) -> BoxFuture<'a, ApiResult<Self::Reply>> {
         Box::pin(async move { Ok(value.value.clone()) })
     }
     fn check_opened<'a>(

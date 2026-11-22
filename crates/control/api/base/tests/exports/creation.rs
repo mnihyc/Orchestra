@@ -192,17 +192,23 @@ struct PausedStore {
 }
 #[async_trait]
 impl BlobStore for PausedStore {
-    async fn put(
+    fn lifetimes(&self) -> &orch_blob_contract::lifetime::Lifetimes {
+        self.inner.lifetimes()
+    }
+
+    async fn put_held(
         &self,
         hash: &Hash,
         size: Option<i64>,
         content: ByteStream,
+        publication: &orch_blob_contract::lifetime::Publication,
     ) -> Result<Stored, BlobError> {
+        publication.check(self.lifetimes(), hash)?;
         if self.armed.load(Ordering::SeqCst) {
             self.reached.notify_one();
             self.release.notified().await;
         }
-        self.inner.put(hash, size, content).await
+        self.inner.put_held(hash, size, content, publication).await
     }
     async fn get(&self, hash: &Hash, range: Option<ByteRange>) -> Result<BlobRead, BlobError> {
         self.inner.get(hash, range).await
@@ -213,8 +219,13 @@ impl BlobStore for PausedStore {
     async fn size(&self, hash: &Hash) -> Result<Option<i64>, BlobError> {
         self.inner.size(hash).await
     }
-    async fn delete(&self, hash: &Hash) -> Result<bool, BlobError> {
-        self.inner.delete(hash).await
+    async fn delete_held(
+        &self,
+        hash: &Hash,
+        retirement: &orch_blob_contract::lifetime::Retirement,
+    ) -> Result<bool, BlobError> {
+        retirement.check(self.lifetimes(), hash)?;
+        self.inner.delete_held(hash, retirement).await
     }
 }
 async fn paused_office() -> (Office, Arc<PausedStore>) {

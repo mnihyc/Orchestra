@@ -141,6 +141,8 @@ pub struct SubState {
     pub(crate) thread_projection: Option<orch_api_contract::threads::ThreadContinuationProjection>,
     /// An execution-scope change stops this subscription until a newly scoped HTTP cut/subscription.
     pub(crate) thread_reset: bool,
+    /// The independent Stop version and canonical cut delivered to this exact reader.
+    pub(crate) thread_stop: Option<(i64, Seq)>,
     /// Highest raw number admitted to this exact segment source, seeded at subscription.
     pub(crate) raw_after: i64,
     /// Commit-ordered usage changes already projected for this connection (never sent to it).
@@ -151,6 +153,8 @@ pub struct SubState {
     pub(crate) resource_read: Option<orch_types::Hash>,
     /// The last session-personalized document metadata view; never a cross-reader rich cache.
     pub(crate) document_tree: Option<super::document_tree::State>,
+    /// The reader's page intent survives a same-reader credential refresh, but rich fingerprints do not.
+    pub(crate) hierarchy: super::document_tree::HierarchyWindows,
     /// How far rows were read and sent.
     pub(crate) cursor: SendCursor,
     /// The highest number whose rows were read for it.
@@ -245,11 +249,13 @@ impl Subscription {
             state: tokio::sync::Mutex::new(SubState {
                 thread_projection: None,
                 thread_reset: false,
+                thread_stop: None,
                 raw_after: 0,
                 usage_read: None,
                 health_read: None,
                 resource_read: None,
                 document_tree: None,
+                hierarchy: super::document_tree::HierarchyWindows::default(),
                 cursor: SendCursor::starting_at(0),
                 read: 0,
                 epoch: 0,
@@ -437,6 +443,9 @@ fn metric_kind(feed: &Feed) -> &'static str {
         Feed::Org(_) => "org",
         Feed::User => "user",
         Feed::Chat(_) => "chat",
+        Feed::DocumentTree(
+            orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. },
+        ) => "org",
         Feed::Doc(_) | Feed::DocumentTree(_) => "document",
         Feed::Env(_)
         | Feed::EnvStats(_)
@@ -447,7 +456,7 @@ fn metric_kind(feed: &Feed) -> &'static str {
         | Feed::EnvTerminals(_)
         | Feed::EnvPorts(_)
         | Feed::EnvGit { .. } => "environment",
-        Feed::Resource { .. } => "resource",
+        Feed::Resource { .. } | Feed::ProviderRow(_) => "resource",
         Feed::Usage(_) => "usage",
         Feed::Job(_) | Feed::Fork(_) => "job",
     }
@@ -592,7 +601,7 @@ pub(crate) async fn reader_of(
     let app = inner
         .app()
         .ok_or_else(|| Fail::other("the realtime application is unavailable"))?;
-    let mut identity = match super::server::current_identity(&app, conn, &viewing.credential).await
+    let mut identity = match super::server::delivery_identity(&app, conn, &viewing.credential).await
     {
         Ok(identity) => identity,
         Err(error)
@@ -715,7 +724,9 @@ pub(crate) async fn decide(inner: &Inner, user: Id, feed: &Feed) -> Result<Acces
             }
             None => Ok(Access::NotFound),
         },
-        Feed::Resource { .. } => super::resources::decide(inner, user, feed).await,
+        Feed::Resource { .. } | Feed::ProviderRow(_) => {
+            super::resources::decide(inner, user, feed).await
+        }
         Feed::ThreadRaw(thread) => super::resources::raw_access(inner, user, *thread).await,
         // An environment's own feed is read by whoever may read the environment.
         Feed::Env(id) => super::environments::decide(inner, user, *id).await,
@@ -893,7 +904,8 @@ impl Inner {
                     }
                     // A Resource event replaces its complete recipient view. Its native
                     // projection/fingerprint, rather than an epoch alone, decides delivery.
-                    if !matches!(sub.feed(), Feed::Resource { .. }) && (!st.reload || purged.resync)
+                    if !matches!(sub.feed(), Feed::Resource { .. } | Feed::ProviderRow(_))
+                        && (!st.reload || purged.resync)
                     {
                         let text = ServerFrame::Resync(ResyncFrame {
                             id: sub.tag().id,
@@ -980,6 +992,44 @@ pub(crate) async fn subscribe(
             return Ok(());
         }
     };
+    if let Some(window) = frame.window {
+        let Some(sub) = connection
+            .subscription(id)
+            .filter(|sub| sub.feed() == &feed)
+        else {
+            refuse(
+                connection,
+                id,
+                SocketErrorCode::NotFound,
+                "That metadata subscription is no longer open.",
+            );
+            return Ok(());
+        };
+        if !matches!(
+            feed,
+            Feed::DocumentTree(
+                orch_realtime_contract::document_tree::DocumentTreeView::Hierarchy { .. }
+            )
+        ) || frame.raw_segment_id.is_some()
+            || frame.continuation_id.is_some()
+            || frame.projection_revision.is_some()
+            || frame.since.is_some()
+            || frame.sub_streams.is_some()
+        {
+            refuse(
+                connection,
+                id,
+                SocketErrorCode::BadFeed,
+                "Page selectors belong only to current hierarchy metadata.",
+            );
+            return Ok(());
+        }
+        let mut st = sub.state.lock().await;
+        if st.open {
+            super::document_tree::update_window(inner, &sub, &mut st, window).await?;
+        }
+        return Ok(());
+    }
     let raw = matches!(feed, Feed::ThreadRaw(_));
     if raw
         && (frame.raw_segment_id.is_none()
@@ -1079,6 +1129,7 @@ pub(crate) async fn subscribe(
     if require_full {
         // An incremental cursor cannot clear private fields retained under an older grant.
         let text = ServerFrame::Subscribed(SubscribedFrame {
+            personal_revision: None,
             raw: None,
             projection: None,
             id,
@@ -1209,6 +1260,7 @@ async fn inner_opened(
             environment_id: id, ..
         } => ("environment", *id),
         Feed::Resource { kind, id } => (kind.as_str(), *id),
+        Feed::ProviderRow(id) => ("provider", *id),
         Feed::User | Feed::Usage(_) | Feed::Job(_) | Feed::Fork(_) | Feed::DocumentTree(_) => {
             return Ok(());
         }
@@ -1287,6 +1339,7 @@ async fn begin(
             return super::raw_traffic::begin(inner, sub, st).await;
         }
         let text = ServerFrame::Subscribed(SubscribedFrame {
+            personal_revision: None,
             raw: None,
             projection: None,
             id: sub.tag().id,
@@ -1332,7 +1385,25 @@ async fn begin(
         answer.mode = SubscribeMode::Reload;
         answer.seq = Some(head.seq);
     }
+    // Registration and this cut are ordered by the state lock: later notices wait
+    // behind the accepted frame, while a prior missed notice moves this native cut.
+    let personal_revision = if matches!(feed, Feed::User) {
+        let mut conn = inner.db.acquire().await?;
+        orch_db::sequences::personal_revision(&mut conn, connection.user)
+            .await?
+            .map(
+                |(personal, inbox, meta, authority)| orch_api_contract::auth::PersonalRevision {
+                    personal,
+                    inbox,
+                    meta,
+                    authority,
+                },
+            )
+    } else {
+        None
+    };
     let text = ServerFrame::Subscribed(SubscribedFrame {
+        personal_revision,
         raw: None,
         projection: st.thread_projection.clone(),
         id: sub.tag().id,
@@ -1360,6 +1431,9 @@ async fn begin(
     inner
         .deliver(sub, st, head.seq, &mut Cache::default())
         .await?;
+    if let Feed::Thread(thread) = feed {
+        super::thread_stops::changed(inner, *thread);
+    }
     Ok(true)
 }
 

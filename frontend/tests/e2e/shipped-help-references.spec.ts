@@ -54,10 +54,10 @@ for (const width of [400, 1440] as const) {
     await expect(row).toBeVisible();
     await expect(row.locator('xpath=ancestor::tr')).toContainText(locale === 'en' ? 'independent of generation models' : '与生成模型列表相互独立');
     await info.attach('service-option-reference', { body: await page.screenshot(), contentType: 'image/png' });
-    for (const field of ['model', 'provider_id']) {
+    for (const field of ['backend.offering.offering', 'backend.offering.provider']) {
       const modelOption = reference.getByText(`option:ask.models.*.${field}`, { exact: true });
       await modelOption.scrollIntoViewIfNeeded(); await expect(modelOption).toBeVisible();
-      await expect(modelOption.locator('xpath=ancestor::tr')).toContainText(locale === 'en' ? (field === 'model' ? 'routing name' : 'API provider') : (field === 'model' ? '路由名称' : 'API 提供方'));
+      await expect(modelOption.locator('xpath=ancestor::tr')).toContainText(locale === 'en' ? (field === 'backend.offering.offering' ? 'Routing name' : 'selected account') : (field === 'backend.offering.offering' ? '路由名称' : '所选账号'));
     }
 
     const duplicateTitle = locale === 'en' ? 'Duplicate a resource or conversation' : '创建资源或对话的副本';
