@@ -173,6 +173,7 @@ pub enum Heard {
 
 #[derive(Debug)]
 struct Hold {
+    opening_id: Id,
     segment: Id,
     turn: Id,
     printed: Printed,
@@ -331,10 +332,11 @@ impl Settling {
 
     /// A message of a sub-agent was printed: its request waits for the window it is in to be decided. Where the
     /// settler is gone nothing waits, and the request is not reported: the use of the turn that holds it counts it.
-    pub fn printed(&self, segment: Id, turn: Id, printed: Printed) {
+    pub fn printed(&self, opening_id: Id, segment: Id, turn: Id, printed: Printed) {
         if self
             .notes
             .send(Note::Printed(Box::new(Hold {
+                opening_id,
                 segment,
                 turn,
                 printed,
@@ -442,6 +444,7 @@ enum Fate {
 
 #[derive(Debug)]
 struct Item {
+    opening_id: Id,
     request: UsageRequest,
     turn: Id,
     fate: Fate,
@@ -646,11 +649,12 @@ impl Settler {
         match note {
             Note::Printed(hold) => {
                 let Hold {
+                    opening_id,
                     segment,
                     turn,
                     printed,
                 } = *hold;
-                self.printed(segment, turn, printed);
+                self.printed(opening_id, segment, turn, printed);
             }
             Note::Placed(placement) => self.placed(placement, now),
             Note::Dropped(keys) => self.drop_undecided(&keys),
@@ -676,11 +680,12 @@ impl Settler {
         match note {
             Note::Printed(hold) => {
                 let Hold {
+                    opening_id,
                     segment,
                     turn,
                     printed,
                 } = *hold;
-                self.printed(segment, turn, printed);
+                self.printed(opening_id, segment, turn, printed);
             }
             Note::Placed(placement) => self.placed(placement, Instant::now()),
             Note::Dropped(keys) => self.drop_undecided(&keys),
@@ -737,7 +742,7 @@ impl Settler {
         }
     }
 
-    fn printed(&mut self, segment: Id, turn: Id, printed: Printed) {
+    fn printed(&mut self, opening_id: Id, segment: Id, turn: Id, printed: Printed) {
         let Printed {
             request,
             parent,
@@ -778,6 +783,7 @@ impl Settler {
         self.items.insert(
             key,
             State::Held(Box::new(Item {
+                opening_id,
                 request,
                 turn,
                 fate: Fate::Undecided,
@@ -1135,6 +1141,7 @@ impl Settler {
     /// the turn that closes the window states and leaves out what is right when its gate opens.
     async fn send(&mut self, item: Item, usage: Option<&Json>, why: Option<&'static str>) {
         let Item {
+            opening_id,
             mut request,
             turn,
             fate,
@@ -1159,7 +1166,11 @@ impl Settler {
             let held = held.unwrap_or_else(|| request.tokens.usage());
             note_contribution(&self.ledger, window, turn, request.model.clone(), held);
         }
-        let _ = self.sink.request(self.thread, segment, turn, request).await;
+        let _ = self
+            .sink
+            .for_opening(opening_id)
+            .request(self.thread, segment, turn, request)
+            .await;
         if matches!(fate, Fate::Window(_)) {
             self.owed.fetch_sub(1, Ordering::SeqCst);
         }

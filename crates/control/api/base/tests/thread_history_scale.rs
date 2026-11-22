@@ -30,10 +30,13 @@ const COMMAND_BYTES: usize = 2 * 1024; // display + raw output fit together insi
 
 fn output(text: &str) -> Proof<OutputRef> {
     Ok(OutputRef {
+        inline_source_len: None,
+        inline_limit: None,
         inline: text.to_owned(),
         total_len: i64::try_from(text.len())?,
         truncated: false,
         blob: None,
+        retained: None,
     })
 }
 

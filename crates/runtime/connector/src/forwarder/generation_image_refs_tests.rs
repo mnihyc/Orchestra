@@ -28,6 +28,20 @@ impl CountingBlobs {
 }
 #[async_trait]
 impl BlobEndpoint for CountingBlobs {
+    async fn status(
+        &self,
+        _: Id,
+        _: &Hash,
+    ) -> Result<orch_link_contract::content::TransferStatus, PutRefusal> {
+        Ok(orch_link_contract::content::TransferStatus {
+            progress: BlobProgress {
+                received: self.bytes.len() as i64,
+                complete: true,
+            },
+            ranges: vec![],
+            policy: Default::default(),
+        })
+    }
     async fn head(&self, _: Id, _: &Hash) -> Result<Option<BlobProgress>, PutRefusal> {
         Err(PutRefusal::Refused("unexpected metadata request".into()))
     }

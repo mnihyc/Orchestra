@@ -1,3 +1,4 @@
+import { CompleteCollection } from '@/ui/CompleteCollection';
 /** Update selected environments and provider runtimes with one reviewed plan and one running-turn choice. */
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
@@ -117,7 +118,7 @@ export function UpdateDialog({ targets, onClose }: { targets: UpdateTargets; onC
     {jobs.length === 0 ? <>{plan.isPending ? <SkeletonRows read={plan} rows={4} /> : plan.isError ? <ErrorAlert error={plan.error} message={plan.error instanceof ApiError && plan.error.is('request.invalid') ? t('programVersions.planRefused', { reason: plan.error.problem.detail }) : undefined} action={<Button onClick={() => void plan.refetch()}>{t('common.tryAgain')}</Button>} /> : <>
       <RunningTurnChoice activeTurn={activeTurn} minutes={minutes} running={runningCount} onChoice={setChoice} onMinutes={setWait} disabled={run.isPending} />
       {unavailable > 0 && <StateLine compact tone="warning" message={t(pool === 'environment' ? 'programVersions.unavailableEnvironments' : 'programVersions.unavailableRuntimes',{count:unavailable,number:formatNumber(unavailable,locale)})} />}
-      <Table label={t('programVersions.updateTitle')} columns={columns} rows={rows} rowKey={(row) => row.id} />
+      <CompleteCollection label={t('programVersions.updateTitle')} items={rows} textOf={(row)=>row.environment?.name??row.provider?.name??''}>{(page)=><Table label={t('programVersions.updateTitle')} columns={columns} rows={page} rowKey={(row)=>row.id}/>}</CompleteCollection>
     </>}</> : currentJobs.map((job) => {
       const row = rows.find((row) => row.id === (job.environment_id ?? job.provider_id));
       const name = row?.environment?.name ?? row?.provider?.name ?? t('programVersions.updateTitle');

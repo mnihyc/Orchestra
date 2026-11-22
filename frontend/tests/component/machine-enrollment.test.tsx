@@ -11,15 +11,18 @@ import { AddMachineDialog,commandFor } from '@/features/resources/machines/Enrol
 import { AddHostDialog } from '@/features/resources/hosts/AddHost';
 import type { EnrollmentToken,Host,Machine,MachineEnrollmentTokenCreateBody } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+// These form and command cases use complete values; a browser proves overflow layout.
+skipOverflowFallback();
 
 const info=vi.hoisted(()=>({secure:true,public_url:'https://orch.example',configure:undefined as string|undefined}));
 vi.mock('@/api/gateways', async (load) => ({ ...await load<typeof GatewayApi>(),
   gatewayCatalogueQuery: { queryKey: ['enrollment-gateway-catalogue'], queryFn: () => Promise.resolve({ revision: 'fixture', gateways: [{ id: 'asia', label: 'Asia tools', region: 'Asia', endpoints: [{ url: 'wss://asia.gateway.example.test', trust: 'pinned' as const }] }] }) },
 }));
-vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
+vi.mock('@/features/help/open',async (loadOriginal) => ({ ...await loadOriginal<object>(),useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
+vi.mock('@tanstack/react-router',async (loadOriginal) => ({ ...await loadOriginal<object>(),useNavigate:()=>vi.fn(),Link:({children}:{children:ReactNode})=><a href="#enrolled">{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({useHomeChoices:()=>({choices:[{id:'org',label:'Acme'}]}),HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Personal</option><option value="org">Acme</option></select>}));
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),
   createMachineToken:vi.fn(),createHostToken:vi.fn(),
@@ -54,7 +57,7 @@ for(const locale of ['en','zh-CN'] as const) it(`names roles once and mints only
       expect(screen.getAllByRole('checkbox',{name:i18n.t(`machines.add.roleChoices.${role}.name`)})).toHaveLength(1);
       expect(screen.getByText(i18n.t(`machines.add.roleChoices.${role}.description`))).toBeVisible();
     }
-    expect(screen.getByText(locale==='en'?'Work in folders on Linux':'在 Linux 的文件夹中工作')).toBeVisible();
+    expect(screen.getByText(locale==='en'?'Work in directories on Linux':'在 Linux 的目录中工作')).toBeVisible();
     await waitFor(()=>expect(screen.getByRole('button',{name:i18n.t('machineInstallation.showCommand')})).toBeEnabled());
     expect(screen.getByRole('button',{name:i18n.t('machineInstallation.showCommand')}).querySelector('[data-action-icon="show"].lucide-eye')).toBeInTheDocument();
     expect(createMachineToken).not.toHaveBeenCalled();expect(createHostToken).not.toHaveBeenCalled();
@@ -205,3 +208,59 @@ it('changes the gateway flag of the displayed installer without minting another 
   expect(createMachineToken).toHaveBeenLastCalledWith(expect.any(String), { roles: ['environment', 'agent'], delegate: [], dedicated: false });
   expect(createHostToken).not.toHaveBeenCalled();
 });
+
+for(const locale of ['en','zh-CN'] as const) it(`shows the installed-sign-in enrollment preset before issuing its command (${locale})`,async()=>{
+  await setLocale(locale);
+  try {
+    const user=userEvent.setup();show(<AddMachineDialog onClose={vi.fn()}/>);
+    await user.click(screen.getByRole('combobox',{name:i18n.t('machineSignup.purpose')}));
+    await user.click(screen.getByRole('option',{name:i18n.t('machineSignup.useInstalled')}));
+    for(const role of ['environment','agent','provider'] as const)expect(screen.getByRole('checkbox',{name:i18n.t(`machines.add.roleChoices.${role}.name`)})).toBeChecked();
+    expect(createMachineToken).not.toHaveBeenCalled();
+    await showCommand();
+    await waitFor(()=>expect(createMachineToken).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({roles:['environment','agent','provider'],delegate:['agent']})));
+    expect(await screen.findByText("install.sh --roles 'environment,agent,provider' --delegate 'agent' --gateway automatic")).toBeVisible();
+  } finally {await setLocale('en');}
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const entry of ['machine', 'host'] as const) {
+  it(`uses the chosen ${entry} name without issuing another permission token (${locale})`, async () => {
+    await setLocale(locale);
+    const user = userEvent.setup();
+    const view = show(entry === 'host' ? <AddHostDialog onClose={vi.fn()} /> : <AddMachineDialog onClose={vi.fn()} />);
+    try {
+      if (entry === 'host') await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+      const field = screen.getByRole('textbox', { name: (name) => name.startsWith(i18n.t('resources.edit.name')) });
+      expect(field).toHaveValue('');
+      await showCommand();
+      const before = vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls.length;
+      await user.type(field, "Team's $work");
+      expect(screen.getByText(/--name/u)).toHaveTextContent("--name 'Team'\\''s $work'");
+      expect(vi.mocked(entry === 'host' ? createHostToken : createMachineToken).mock.calls).toHaveLength(before);
+      await user.clear(field);
+      expect(screen.queryByText(/--name/u)).not.toBeInTheDocument();
+    } finally { view.unmount(); await setLocale('en'); }
+  });
+}
+
+for (const os of ['linux', 'macos', 'windows'] as const) {
+  it(`keeps spaces, quotes and shell expressions inside the ${os} machine name`, () => {
+    const options = { foreground: false, instance: '', node: false, name: "Team's $HOME $(whoami) `id`" };
+    const command = commandFor(reply('INSTALL'), os, options);
+    expect(command).toBe(os === 'windows'
+      ? "INSTALL -Name 'Team''s $HOME $(whoami) `id`'"
+      : "INSTALL --name 'Team'\\''s $HOME $(whoami) `id`'");
+    expect(commandFor(reply('INSTALL'), os, { ...options, name: '   ' })).toBe('INSTALL');
+  });
+}
+
+for (const quote of ['\u2018', '\u2019', '\u201a', '\u201b']) {
+  it(`keeps the PowerShell quote U+${quote.codePointAt(0)?.toString(16)} literal in a name and gateway`, () => {
+    const value = `Team${quote}$HOME $(exit 99)`;
+    const literal = `'Team${quote}${quote}$HOME $(exit 99)'`;
+    expect(commandFor(reply('INSTALL'), 'windows', { foreground: false, instance: '', node: false, name: value, gateway: value }))
+      .toBe(`INSTALL -Gateway ${literal} -Name ${literal}`);
+    expect(commandFor(reply('INSTALL'), 'linux', { foreground: false, instance: '', node: false, name: value, gateway: value }))
+      .toBe(`INSTALL --gateway '${value}' --name '${value}'`);
+  });
+}
