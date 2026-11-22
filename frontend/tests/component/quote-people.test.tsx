@@ -8,8 +8,8 @@ import { userMessage } from '../doubles/thread-rows';
 import { show } from './support';
 
 const nav = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@/features/chat/open', () => ({ isPlainClick: () => true, useOpenPath: () => nav.open }));
-vi.mock('@/api/chats', () => ({
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), isPlainClick: () => true, useOpenPath: () => nav.open }));
+vi.mock('@/api/chats', async (loadOriginal) => ({ ...await loadOriginal<object>(),
   quotedItemQuery: () => ({ queryKey: ['quote-test'], queryFn: () => Promise.resolve(userMessage('item', 'Earlier words', { author: DORA })) }),
 }));
 
@@ -17,7 +17,7 @@ it('opens the author card without nesting it in the original-item link', async (
   const input = userEvent.setup();
   show(<QuotedItem threadId="thread" itemId="item" />);
   const author = await screen.findByRole('button', { name: DORA.display_name });
-  const link = screen.getByRole('link', { name: 'Go to the quoted item in the conversation' });
+  const link = screen.getByRole('link', { name: 'Go to the quoted item in the thread' });
   expect(link).not.toContainElement(author);
   await input.click(link);
   expect(nav.open).toHaveBeenCalledWith(expect.stringContaining('/thread/thread?item=item'));

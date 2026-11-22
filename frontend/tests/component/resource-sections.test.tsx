@@ -1,5 +1,5 @@
 /** Detail navigation exposes every section, keeps drafts, and stops hidden readers without clipping content. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect, useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -69,12 +69,67 @@ it('loads technical content only after Details and keeps only one visible sectio
   expect(await screen.findByText('diagnostic-canary')).toBeVisible(); expect(read).toHaveBeenCalledTimes(1);
 });
 
-it('has one entrance per act while retaining Delete and the native callback', async () => {
-  const user = userEvent.setup(), edit = vi.fn(), start = vi.fn(), remove = vi.fn();
-  show(<ResourceHeadingActs name="Research" primary={{ id: 'start', label: 'Start', icon: null, run: start }} edit={{ id: 'edit', label: 'Edit', icon: null, run: edit }}
-    menu={[{ id: 'start', name: 'Start', onSelect: start }, { id: 'edit', name: 'Edit', onSelect: edit }, { id: 'rename', name: 'Rename', onSelect: edit }, { type: 'separator', id: 'gap' }, { id: 'delete', name: 'Delete', onSelect: remove }]} />);
-  expect(screen.getAllByRole('button', { name: i18n.t('resources.act.editButton') })).toHaveLength(1);
-  await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: 'Research' }) }));
-  expect(screen.queryByRole('menuitem', { name: 'Start' })).not.toBeInTheDocument(); expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument();
-  await user.click(screen.getByRole('menuitem', { name: 'Delete' })); expect(remove).toHaveBeenCalledTimes(1); expect(start).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+it.each(['en', 'zh-CN'] as const)('keeps one visible shortcut and one named menu choice per act with the native callback in %s', async (locale) => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  const calls: string[] = [];
+  const start = () => { calls.push('start'); };
+  const edit = () => { calls.push('edit'); };
+  const remove = () => { calls.push('delete'); };
+  const startLabel = i18n.t('resources.act.start');
+  const editLabel = i18n.t('resources.act.editButton');
+  const editMenuLabel = i18n.t('resources.act.edit');
+  const renameLabel = i18n.t('resources.act.rename');
+  const deleteLabel = i18n.t('resources.act.delete');
+  show(<ResourceHeadingActs name="Research"
+    primary={{ id: 'start', label: startLabel, icon: null, run: start }}
+    edit={{ id: 'edit', label: editMenuLabel, icon: null, run: edit }}
+    menu={[
+      { id: 'start', name: startLabel, onSelect: start },
+      { id: 'edit', name: editMenuLabel, onSelect: edit },
+      { id: 'rename', name: renameLabel, onSelect: edit },
+      { type: 'separator', id: 'gap' },
+      { id: 'delete', name: deleteLabel, onSelect: remove },
+    ]} />);
+
+  await user.click(screen.getByRole('button', { name: startLabel }));
+  await user.click(screen.getByRole('button', { name: editLabel }));
+  expect(calls).toEqual(['start', 'edit']);
+
+  const open = () => user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: 'Research' }) }));
+  await open();
+  expect(screen.getAllByRole('menuitem')).toHaveLength(3);
+  expect(screen.queryByRole('menuitem', { name: renameLabel })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('menuitem', { name: startLabel }));
+  await open(); await user.click(screen.getByRole('menuitem', { name: editLabel }));
+  await open(); await user.click(screen.getByRole('menuitem', { name: deleteLabel }));
+  expect(calls).toEqual(['start', 'edit', 'start', 'edit', 'delete']);
+});
+
+it('puts every settings section on one page under its heading, marks the one pressed and draws no dropdown', async () => {
+  const user = userEvent.setup();
+  const names = ['Image', 'Network', 'Variables'];
+  show(<DetailSections stacked label="Template sections" sections={names.map((name) => ({ value: name.toLowerCase(), label: name, panel: <p>{name} rows</p> }))} />);
+  for (const name of names) {
+    expect(screen.getByText(`${name} rows`)).toBeVisible();
+    expect(screen.getByRole('heading', { name })).toBeVisible();
+  }
+  const nav = screen.getByRole('navigation', { name: 'Template sections' });
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
+  expect(within(nav).getAllByRole('link')).toHaveLength(names.length);
+  const link = within(nav).getByRole('link', { name: 'Network' });
+  await user.click(link);
+  const href = link.getAttribute('href');
+  if (href === null) throw new Error('The section name has no destination');
+  expect(document.getElementById(href.slice(1))).toHaveFocus();
+  expect(link).toHaveAttribute('aria-current', 'location');
+  expect(within(nav).getAllByRole('link').filter((one) => one.hasAttribute('aria-current'))).toHaveLength(1);
+  for (const name of names) expect(screen.getByText(`${name} rows`)).toBeVisible();
+});
+
+it('draws a single settings section as its own page, with no list and no heading of its own', () => {
+  show(<DetailSections stacked label="Template sections" sections={[{ value: 'image', label: 'Image', panel: <p>Image rows</p> }]} />);
+  expect(screen.getByText('Image rows')).toBeVisible();
+  expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Image' })).not.toBeInTheDocument();
 });

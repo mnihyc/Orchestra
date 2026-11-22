@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod host;
 pub mod plugin;
 pub mod provider;
+pub mod public_address;
 pub mod usage;
 
 pub mod operator_storage;
