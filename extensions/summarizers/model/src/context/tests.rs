@@ -22,7 +22,7 @@ fn history(count: usize) -> Vec<InputItem> {
 }
 fn prompt(activity: Vec<ActivityItem>) -> Result<(String, String), Box<dyn std::error::Error>> {
     let config = crate::descriptor::Config::read(
-        &json!({"provider_id":orch_types::new_id(),"model_name":"small"}),
+        &json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":orch_types::new_id(),"offering":"small"}}}),
     )?;
     let request = SummaryRequest {
         field: SummaryField::Summary,

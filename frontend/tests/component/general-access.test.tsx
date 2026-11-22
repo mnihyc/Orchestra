@@ -45,11 +45,26 @@ vi.mock('@/features/access/GoesWith', () => ({ GoesWith: () => null }));
 vi.mock('@/features/access/RequestCard', () => ({ WaitingRequests: () => null, RequestReview: () => null }));
 vi.mock('@/features/access/RowCell', () => ({ FollowMark: () => null, RowCell: () => null }));
 vi.mock('@/features/access/Reaches', () => ({ EnvironmentReachLine: () => null, ReachesLine: () => null, privateWarning: () => null }));
-vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name?: string | null } | null | undefined) => place?.name ?? null, useKnownPlaces: () => new Map() }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), usePlaceLabel: () => (place: { name?: string | null } | null | undefined) => place?.name ?? null, useKnownPlaces: () => new Map() }));
 
-beforeEach(() => { start.mockClear(); fixture.defaultsKind = 'thread'; });
+beforeEach(async () => { await setLocale('en'); start.mockClear(); fixture.defaultsKind = 'thread'; });
 
 describe('one general access choice', () => {
+  it.each(['en', 'zh-CN'] as const)('explains the environment view grant and preserves existing access when unticked in %s', async (locale) => {
+    await setLocale(locale);
+    const changed = vi.fn();
+    show(<GeneralAccessControl catalogue={CATALOGUE} kind="thread" place="Fix login" value="defaults" onChange={() => undefined}
+      environment={{ checked: false, onChange: changed }} />);
+    const label = i18n.t('access.general.letIn');
+    expect(screen.getByRole('checkbox', { name: label })).not.toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: label }) }));
+    expect(screen.getByText(i18n.t('access.general.environmentViewHelp'))).toBeVisible();
+    expect(screen.getByText(i18n.t('access.general.environmentOffHelp'))).toBeVisible();
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('checkbox', { name: label }));
+    expect(changed).toHaveBeenCalledWith(true);
+  });
+
   it.each(['org', 'project', 'topic'] as const)('lists a %s’s holder levels and provenance without repeating a defaults paragraph', async (kind) => {
     fixture.defaultsKind = kind;
     const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: () => undefined, again: () => Promise.resolve(false), run: () => Promise.resolve(false) };
@@ -77,7 +92,7 @@ describe('one general access choice', () => {
     await user.click(screen.getByRole('button', { name: 'Options' }));
     const choice = await screen.findByRole('combobox', { name: 'General access' });
     expect(choice).toHaveTextContent('Defaults');
-    expect(screen.getByRole('checkbox', { name: 'Let them into the environment' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Viewers can open the environment' })).toBeChecked();
     await user.click(choice);
     await user.keyboard('{ArrowDown}');
     const viewChoice = await screen.findByRole('option', { name: 'View' });
@@ -87,7 +102,7 @@ describe('one general access choice', () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ generalAccess: 'view', privately: false, letIntoEnvironment: true }));
   });
 
-  it.each([['document', 'Edit', 'Everyone in Fix login can edit'], ['chat', 'Write', 'Everyone in Fix login can write'], ['provider', 'Use', 'Everyone in Fix login can use'], ['org', 'Take part', 'Every member of Fix login can take part']] as const)('uses %s’s short term with its audience described after it', async (kind, term, words) => {
+  it.each([['document', 'Edit', 'Everyone in Fix login can edit'], ['chat', 'Write', 'Everyone in Fix login can write'], ['provider', 'Use', 'Everyone in Fix login can use'], ['org', 'Interact', 'Every member of Fix login can take part']] as const)('uses %s’s short term with its audience described after it', async (kind, term, words) => {
     const user = userEvent.setup();
     show(<GeneralAccessControl catalogue={CATALOGUE} kind={kind} place="Fix login" value="defaults" onChange={() => undefined} />);
     await user.click(screen.getByRole('combobox', { name: 'General access' }));
@@ -106,7 +121,7 @@ describe('one general access choice', () => {
     expect(await screen.findByRole('option', { name: 'View' })).toHaveAccessibleDescription('Every member of Acme can view');
   });
 
-  it('changes a followed Take part role in Share, after one confirmation, and offers the way back to the place’s rules', async () => {
+  it('changes a followed Interact role in Share, after one confirmation, and offers the way back to the place’s rules', async () => {
     const user = userEvent.setup();
     const writes: PageChange[] = [];
     function Share() {

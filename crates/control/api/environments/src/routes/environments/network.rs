@@ -157,6 +157,28 @@ orch_api_base::__api_bind_4c76ea5c7c!();
 
 /// The networks of the environments `ids`, by environment: from the runtime each stands on now, and the
 /// machine's for those that are directories on a person's machine.
+pub(super) async fn start_allowed(
+    conn: &mut Conn,
+    ids: &[Id],
+    attached: &std::collections::BTreeSet<Id>,
+) -> ApiResult<HashMap<Id, bool>> {
+    let found = rows::of_environments(conn, ids).await?;
+    Ok(ids
+        .iter()
+        .map(|id| {
+            let state = state_of(
+                found.iter().find(|row| row.environment_id == Some(*id)),
+                attached.contains(id),
+            );
+            (
+                *id,
+                !(state.required_mode == EgressMode::Restricted && state.mode == EgressMode::Open),
+            )
+        })
+        .collect())
+}
+
+/// The full network presentation resolves allowed hosts and their sources only for its own reader.
 pub(crate) async fn of_environments(
     conn: &mut Conn,
     principal: &Principal,
