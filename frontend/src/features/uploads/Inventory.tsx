@@ -1,3 +1,5 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 /** Upload inventory facts stay native; completed administrative bytes use their custody id. */
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
@@ -81,7 +83,8 @@ const namedReferenceKinds = { thread: 'thread', document: 'doc', chat: 'chat' } 
 function UploadsReader() {
   const { t } = useTranslation();
   const cache = useQueryClient();
-  const list = useInfiniteQuery(ownUploadsQuery());
+  const search = useCollectionSearch('own-uploads');
+  const list = useInfiniteQuery(ownUploadsQuery(search.q));
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [ending, setEnding] = useState<UploadInventoryItem | null>(null);
   const remove = useMutation({
@@ -102,8 +105,9 @@ function UploadsReader() {
         reason={t('adminArtifacts.cannotDeleteUpload')} disabled={remove.isPending} onClick={() => { remove.reset(); setEnding(row); }}>{t('adminArtifacts.delete')}</Button></span> },
   ];
   return <div className="flex min-w-0 flex-col gap-4"><div className="flex justify-end"><Button size="sm" disabled={list.isFetching} onClick={() => void list.refetch()}>{t('operationKeys.activity.refresh')}</Button></div>
+    <CollectionSearch name={t('adminArtifacts.uploads')} {...search} />
     {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && !list.isFetchNextPageError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      : rows.length === 0 ? <EmptyState compact title={t('adminArtifacts.noUploads')} /> : <Table label={t('adminArtifacts.uploads')} rows={rows} rowKey={(row) => row.id} columns={columns} />}
+      : rows.length === 0 ? <EmptyState compact title={t('adminArtifacts.noUploads')} /> : <Table label={t('adminArtifacts.uploads')} virtual rows={rows} rowKey={(row) => row.id} columns={columns} />}
     <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
     <ConfirmDialog open={ending !== null} onOpenChange={(open) => { if (!open && !remove.isPending) setEnding(null); }} title={t('adminArtifacts.deleteUpload', { name: ending?.name ?? t('storage.kinds.upload') })}
       confirmLabel={t('adminArtifacts.delete')} danger pending={remove.isPending} error={remove.error ?? undefined} onConfirm={() => { if (ending !== null) remove.mutate({ row: ending, reader: libraryReader() }); }}>

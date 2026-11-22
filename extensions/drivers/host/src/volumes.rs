@@ -113,7 +113,7 @@ pub fn ensure(config: &HostConfig, request: &VolumeRequest) -> Result<Volume, Dr
             if config.storages.is_empty()
                 && name == orch_driver_contract::volumes::DEFAULT_STORAGE =>
         {
-            config.base.join("volumes")
+            config.units.join(crate::units::DEFAULT_VOLUMES)
         }
         Some(name) => config
             .storages
@@ -128,7 +128,7 @@ pub fn ensure(config: &HostConfig, request: &VolumeRequest) -> Result<Volume, Dr
             .iter()
             .find(|storage| storage.default)
             .map_or_else(
-                || config.base.join("volumes"),
+                || config.units.join(crate::units::DEFAULT_VOLUMES),
                 |storage| storage.path.clone(),
             ),
     };
@@ -140,6 +140,13 @@ pub fn ensure(config: &HostConfig, request: &VolumeRequest) -> Result<Volume, Dr
         ));
     }
     directory(&path)?;
+    // A volume is its unit's alone: its account is given it when the unit is made.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(crate::units::io_error)?;
+    }
     let volume = Volume {
         request: request.clone(),
         path,
@@ -182,7 +189,7 @@ pub fn storages(config: &HostConfig) -> Vec<StorageInfo> {
     let named = if config.storages.is_empty() {
         vec![crate::units::HostStorage {
             name: orch_driver_contract::volumes::DEFAULT_STORAGE.into(),
-            path: config.base.join("volumes"),
+            path: config.units.join(crate::units::DEFAULT_VOLUMES),
             default: true,
         }]
     } else {
