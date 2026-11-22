@@ -2,15 +2,17 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { queryClient } from '@/api/query';
 import { captureThreadExecution, captureThreadRead, isCurrentThreadRead, selectThreadContinuation } from '@/api/threadRead';
-import { fetchOutput, fetchThreadSync, sendInput } from '@/api/threads';
+import { fetchOutput, fetchThreadSync, sendInput, turnChoicesQuery } from '@/api/threads';
 import { createRealtimeSocket } from '@/realtime/socket';
 import { createThreadReadFeed, forgetThreadRead } from '@/realtime/threadFeed';
 import { followFeed, UNSUBSCRIBE_AFTER_MS } from '@/realtime/sync';
 import { defaultThreadRead, resultThreadRead, threadReadRegistryKey, type ThreadReadRef } from '@/realtime/threadScope';
-import { flushDeltas, holdThreadRead, setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
+import { flushDeltas, holdThreadRead, runningTurn, setThreadReadChangeHandler, setThreadReadHolder, setThreadReadRetainer,
   threadReadState, threadViewOf, threadWriter } from '@/realtime/stores/thread';
-import { Wire, deferred, viewedPrompt } from './continuation-fixtures';
-import { A, B, SHARED, T, bodyOf, coordinator, ownedRows, serve } from './thread-read-fixtures';
+import { stoppingSince } from '@/lib/threadStopping';
+import { Wire, answer, deferred, projection, snapshot, viewedPrompt } from './continuation-fixtures';
+import { AT, turn } from '../doubles/thread-rows';
+import { A, B, OLDER, SHARED, T, bodyOf, coordinator, ownedRows, serve } from './thread-read-fixtures';
 
 const route = defaultThreadRead(T), preview = resultThreadRead(T,'preview-tab'), second = resultThreadRead(T,'second-tab');
 const stopped: (() => void)[] = [];
@@ -40,6 +42,76 @@ afterEach(() => {
   for (const stop of stopped.splice(0).reverse()) stop(); flushDeltas(); threadWriter.clear(); queryClient.clear();
   setThreadReadChangeHandler(() => undefined); setThreadReadRetainer(() => undefined); setThreadReadHolder(() => () => undefined);
   vi.unstubAllGlobals(); vi.clearAllTimers(); vi.useRealTimers();
+});
+
+it.each([15_000, 6 * 60_000])('returns to the admitted native thread cut with its older history after %s hidden milliseconds', async (hiddenFor) => {
+  const server = serve(), rig = setup(); selectThreadContinuation(preview, B);
+  const first = rig.follow(preview), initial = await rig.wire.subscriptions.next(); ack(rig.wire, initial, preview);
+  const held = holdThreadRead(preview); stopped.push(held);
+  threadWriter.older(preview, [answer(OLDER, 'Older retained text', B, 5)], false, captureThreadRead(preview));
+  const before = captureThreadRead(preview), items = threadViewOf(preview).items;
+  first.release(); rig.socket.stop(); await vi.advanceTimersByTimeAsync(hiddenFor);
+  expect(threadViewOf(preview).items).toBe(items);
+  rig.socket.start(); const wire = rig.wires.at(-1); if (wire === undefined) throw new Error('The returning socket must exist'); wire.ready();
+  const returned = rig.follow(preview), resumed = await wire.subscriptions.next(); ack(wire, resumed, preview);
+  expect(resumed.since).toBe(20);
+  expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+  expect(threadViewOf(preview).items.has(OLDER)).toBe(true);
+  expect(bodyOf(threadViewOf(preview).items.get(OLDER))).toBe('Older retained text');
+  expect(threadViewOf(preview).read?.identity).toBe(before.scope.identity);
+  expect(threadViewOf(preview).read?.epoch).toBe(before.scope.epoch);
+  expect(returned.follower.lastSeq()).toBe(20);
+});
+
+it('clears a capacity refusal when the same native thread cursor is accepted with no new rows', async () => {
+  const server = serve(), rig = setup(); selectThreadContinuation(preview, B);
+  const current = rig.follow(preview), initial = await rig.wire.subscriptions.next(); ack(rig.wire, initial, preview);
+  const before = threadViewOf(preview), other = rig.socket.subscribe('org:other', { since: () => 0, onFrame: () => undefined });
+  await rig.wire.subscriptions.next();
+  rig.wire.say({ op: 'error', id: initial.id, code: 'too_many_subscriptions', detail: 'capacity' });
+  expect(threadViewOf(preview).error).not.toBeNull();
+  other.unsubscribe(); const resumed = await rig.wire.subscriptions.next(); ack(rig.wire, resumed, preview);
+  expect(threadViewOf(preview).error).toBeNull();
+  expect(threadViewOf(preview).items).toBe(before.items); expect(current.follower.lastSeq()).toBe(20);
+  expect(server.calls).toHaveLength(1);
+});
+
+it('retries a failed incremental return without replacing the retained native history or its cut', async () => {
+  let fail = true;
+  const server = serve((request) => {
+    if (!new URL(request.url).pathname.endsWith('/sync')) return undefined;
+    if (fail) return Promise.resolve(Response.json({ code: 'validation', status: 400, title: 'Synthetic read failure', detail: 'Cannot read changes', request_id: 'synthetic' }, { status: 400 }));
+    return Promise.resolve(Response.json(snapshot({ ...projection(B, A, 2, false), execution_revision: 1 }, 20)));
+  });
+  const rig = setup(); selectThreadContinuation(preview, B);
+  const current = rig.follow(preview), initial = await rig.wire.subscriptions.next(); ack(rig.wire, initial, preview);
+  threadWriter.older(preview, [answer(OLDER, 'Older retained history', B, 5)], false, captureThreadRead(preview));
+  const before = captureThreadRead(preview);
+  rig.wire.say({ op: 'resync', id: initial.id, feed: initial.feed }); await vi.advanceTimersByTimeAsync(0);
+  expect(threadViewOf(preview).error).not.toBeNull(); expect(threadViewOf(preview).items.has(OLDER)).toBe(true);
+  fail = false; rig.reload(preview); await vi.advanceTimersByTimeAsync(0);
+  expect(threadViewOf(preview).error).toBeNull(); expect(threadViewOf(preview).items.has(OLDER)).toBe(true);
+  expect(isCurrentThreadRead(before)).toBe(true); expect(current.follower.lastSeq()).toBe(20);
+  expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/opening'))).toHaveLength(1);
+  expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/sync')).map((request) => new URL(request.url).searchParams.get('since'))).toEqual(['20', '20']);
+});
+
+it('reads older turn choices in their owned history without retaining old turn bodies or replacing the conversation', async () => {
+  const old = turn('old-empty-turn', { ordinal: 1, state: 'completed', inputId: 'old-input' });
+  const server = serve((request) => new URL(request.url).pathname.endsWith('/turns') ? Promise.resolve(Response.json({
+    projection: { ...projection(B, A, 2, false), execution_revision: 1 }, turns: [old], segments: [], seq: 20, next_before: null,
+  })) : undefined);
+  setup(); selectThreadContinuation(preview, B); await fetchThreadSync(preview, null);
+  const before = threadViewOf(preview), routeBefore = threadViewOf(route);
+  const data = await queryClient.infiniteQuery(turnChoicesQuery(preview));
+  expect(data.pages[0]).toEqual({ turns: [{ id: old.id, ordinal: 1 }], next_before: null });
+  expect(threadViewOf(preview).order).toBe(before.order);
+  expect(threadViewOf(preview).turns.has(old.id)).toBe(false);
+  expect(threadViewOf(route)).toBe(routeBefore);
+  const request = server.calls.find((request) => new URL(request.url).pathname.endsWith('/turns'));
+  expect(request).toBeDefined();
+  expect(new URL(request!.url).searchParams.get('continuation_id')).toBe(B);
+  expect(new URL(request!.url).searchParams.get('projection_revision')).toBe('2');
 });
 
 it('route A and frozen B use distinct subscriptions on one socket with only the actual native feed', async () => {
@@ -115,6 +187,29 @@ it('protocol rejection and explicit Retry affect only the refused active-follow 
   expect(server.calls.every((request) => request.method === 'GET')).toBe(true);
 });
 
+it('reconciles an ended feed while its current read waits and never retries the retired read', async () => {
+  const pending = deferred<Response>();
+  const server = serve((request) => new URL(request.url).pathname.endsWith('/sync') ? pending.promise : undefined);
+  const rig = setup(); selectThreadContinuation(preview, B); rig.follow(route); rig.follow(preview);
+  const one = await rig.wire.subscriptions.next(), two = await rig.wire.subscriptions.next();
+  const selected = one.continuation_id === B ? one : two, active = one.continuation_id === B ? two : one;
+  ack(rig.wire, active, route); ack(rig.wire, selected, preview);
+  const other = threadViewOf(route), old = captureThreadRead(preview);
+  rig.registry.refresh(threadReadRegistryKey(preview));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/sync'))).toHaveLength(1);
+  rig.wire.say({ op: 'closed', id: selected.id, feed: selected.feed, reason: 'revoked' });
+  expect(threadReadState(threadViewOf(preview)).readiness).toBe('closed');
+  expect(isCurrentThreadRead(old)).toBe(false);
+  pending.resolve(Response.json(snapshot({ ...projection(B, A, 2, false), execution_revision: 1 }, 99)));
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(threadReadState(threadViewOf(preview)).readiness).toBe('closed');
+  expect(threadViewOf(preview).error).toBeNull();
+  expect(threadViewOf(route)).toBe(other);
+  expect(server.calls).toHaveLength(3);
+  expect(rig.wire.sent.filter((frame) => frame.op === 'sub')).toHaveLength(2);
+});
+
 it('reconnect retains each independent selector/cursor on the same replacement connection', async () => {
   serve(); const rig = setup(); selectThreadContinuation(preview,B); rig.follow(route); rig.follow(preview);
   const one = await rig.wire.subscriptions.next(), two = await rig.wire.subscriptions.next();
@@ -188,4 +283,36 @@ it('retains the admitted prompt-status frame sequence without a thread row and o
   expect(threadViewOf(preview).viewedPrompt?.job?.id).toBe('newer-terminal-job');
   threadWriter.apply(preview, { seq: 21, viewed_prompt: failed }, captureThreadRead(preview));
   expect(threadViewOf(preview).viewedPrompt?.job?.id).toBe('newer-terminal-job');
+});
+
+it('shows a stopped turn\'s end from the live feed at once while the running page\'s read-again is still on its way', async () => {
+  const again = deferred<Response>();
+  const server = serve((request) => new URL(request.url).pathname.endsWith('/sync') ? again.promise : undefined);
+  const rig = setup(), current = rig.follow(route), sub = await rig.wire.subscriptions.next(); ack(rig.wire, sub, route);
+  const scope = threadViewOf(route).read?.projection, opened = threadViewOf(route).thread;
+  if (opened === null) throw new Error('The opening must hold its thread');
+  const stopped = turn('turn-stopped', { ordinal: 1, state: 'running', inputId: 'input-stopped' });
+  rig.wire.say({ op: 'sync', id: sub.id, feed: sub.feed, prev: 20, seq: 21, data: { projection: scope,
+    thread: { ...opened, seq: 21, state: 'running', current_turn_id: stopped.id }, turns: [{ ...stopped, seq_updated: 21 }] } });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(runningTurn(threadViewOf(route))?.id).toBe(stopped.id);
+  // While a turn is shown running the page reads the thread again by itself; this read has not answered.
+  rig.registry.refresh(threadReadRegistryKey(route));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(server.calls.filter((request) => new URL(request.url).pathname.endsWith('/sync'))).toHaveLength(1);
+  // The Stop ended the turn: its end comes on the live feed, and the composer's state says Send at once.
+  rig.wire.say({ op: 'sync', id: sub.id, feed: sub.feed, prev: 21, seq: 22, data: { projection: scope,
+    thread: { ...opened, seq: 22, state: 'idle', current_turn_id: null },
+    turns: [{ ...stopped, state: 'interrupted', completed_at: AT, seq_updated: 22 }] } });
+  await vi.advanceTimersByTimeAsync(0);
+  const ended = threadViewOf(route);
+  expect(ended.thread?.state).toBe('idle');
+  expect(runningTurn(ended)).toBeNull();
+  expect(stoppingSince(ended.thread, runningTurn(ended), ended.stopping)).toBeNull();
+  expect(current.follower.lastSeq()).toBe(22);
+  // The read-again answers with a cut the page already went past, and takes nothing back.
+  again.resolve(Response.json(snapshot(scope ?? null, 21)));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(threadViewOf(route).thread?.state).toBe('idle');
+  expect(current.follower.lastSeq()).toBe(22);
 });

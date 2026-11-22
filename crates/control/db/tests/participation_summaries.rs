@@ -78,7 +78,7 @@ async fn marks(conn: &mut Conn, f: &Fixture, focus: &Focus) -> BTreeSet<(String,
         .map(|id| PageKey::new("node", *id, "live"))
         .collect();
     pages.push(PageKey::new("document", f.document, "live"));
-    access::participation::marks(
+    let all: BTreeSet<_> = access::participation::marks(
         conn,
         f.person,
         &focus.groups,
@@ -96,7 +96,34 @@ async fn marks(conn: &mut Conn, f: &Fixture, focus: &Focus) -> BTreeSet<(String,
     .unwrap()
     .into_iter()
     .map(|m| (m.kind, m.id))
-    .collect()
+    .collect();
+    // The single-node page must reflect the same descendant grants as the full
+    // inventory through group changes, expiry, suspensions and transactional moves.
+    for node in [f.branch, f.destination] {
+        let selected = access::participation::marks(
+            conn,
+            f.person,
+            &focus.groups,
+            &[f.root],
+            focus.at.unwrap_or(f.at),
+            &[node],
+            &[PageKey::new("node", node, "live")],
+            focus.members.as_deref().unwrap_or(&[f.root]),
+            &focus.closed,
+            focus.subtree,
+            &[f.root],
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .any(|mark| mark.kind == "node" && mark.id == node),
+            all.contains(&("node".to_owned(), node))
+        );
+    }
+    all
 }
 fn expected(f: &Fixture, parent: Id) -> BTreeSet<(String, Id)> {
     [
@@ -108,6 +135,81 @@ fn expected(f: &Fixture, parent: Id) -> BTreeSet<(String, Id)> {
     .into_iter()
     .map(|(kind, id)| (kind.to_owned(), id))
     .collect()
+}
+
+#[tokio::test]
+async fn a_follow_returns_with_its_branch_while_a_role_elsewhere_stays_visible() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    sqlx::query("INSERT INTO subscriptions (user_id,node_id,level,source) VALUES ($1,$2,'important','manual')")
+        .bind(f.person).bind(f.deep).execute(&mut *conn).await.unwrap();
+    access::testing::give_role(
+        &mut conn,
+        f.destination,
+        "user",
+        f.person,
+        "viewer",
+        f.person,
+        None,
+    )
+    .await
+    .unwrap();
+    let focus = Focus::default();
+    let before = marks(&mut conn, &f, &focus).await;
+    let nodes = |ids: &[Id]| {
+        ids.iter()
+            .map(|id| ("node".to_owned(), *id))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(before, nodes(&[f.root, f.branch, f.deep, f.destination]));
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(f.branch)
+        .bind(f.at.get())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        marks(&mut conn, &f, &focus).await,
+        nodes(&[f.root, f.destination])
+    );
+    sqlx::query("UPDATE nodes SET deleted_at=NULL WHERE id=$1")
+        .bind(f.branch)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(marks(&mut conn, &f, &focus).await, before);
+}
+
+#[tokio::test]
+async fn a_tree_clock_and_document_edit_do_not_wait_for_unrelated_assignment_upkeep() {
+    let db = TestDb::fresh().await;
+    let mut conn = db.pool.acquire().await.unwrap();
+    let f = fixture(&mut conn).await;
+    let mut held = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT object_id FROM participation_object_facts ORDER BY object_kind,object_id FOR UPDATE")
+        .fetch_all(&mut *held).await.unwrap();
+    // The other transaction deliberately retains every projection row until this check ends.
+    // A lock timeout detects a dependency, independently of the runner's query execution speed.
+    sqlx::query("SET lock_timeout='1s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET tree_seq=tree_seq+1 WHERE id=$1")
+        .bind(f.deep)
+        .execute(&mut *conn)
+        .await
+        .expect("a tree clock changes no assignment or path");
+    sqlx::query("UPDATE documents SET doc_seq=doc_seq+1,title='An edited document' WHERE id=$1")
+        .bind(f.document)
+        .execute(&mut *conn)
+        .await
+        .expect("document content changes no assignment or home");
+    held.rollback().await.unwrap();
+    let facts: (Id, Id, bool) = sqlx::query_as(
+        "SELECT home_id,org_id,live FROM participation_object_facts WHERE object_kind='document' AND object_id=$1",
+    ).bind(f.document).fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(facts, (f.deep, f.root, true));
 }
 
 #[tokio::test]

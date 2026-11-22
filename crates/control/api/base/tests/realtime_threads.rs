@@ -1439,3 +1439,208 @@ async fn a_reader_that_takes_nothing_for_the_time_allowed_is_closed_with_4408_an
     follow(&mut again, &mut mirror, |view| completed(view) == 25).await;
     assert_eq!(mirror.text, rig.texts(thread).await);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_accepted_stop_reaches_another_person_and_api_process_before_the_busy_thread_row_is_free()
+ {
+    let rig = Rig::new().await;
+    let second = Server::over(
+        &rig.pool,
+        &rig.clock,
+        quick(&orch_config::ServerConfig::default()),
+    )
+    .await;
+    let thread = rig.thread("An accepted Stop is shared").await;
+    let started = rig.send(thread, "Work before Stop").await;
+    rig.begin_message(thread, &started, "working-before-stop")
+        .await;
+    let (bob, token) = rig.person("bobby").await;
+    rig.give(bob, "viewer").await;
+    let before = rig.rows(thread).await;
+    let mut local = Client::signed_in(rig.server.addr, &rig.token).await;
+    let mut other = Client::signed_in(second.addr, &token).await;
+    for client in [&mut local, &mut other] {
+        client.sub(1, &feed(thread), Some(before.seq)).await;
+        client.expect("subscribed").await;
+        client.expect("presence").await;
+    }
+    let mut holder = rig.pool.begin().await.unwrap();
+    orch_db::queries::threads::lock(&mut holder, thread)
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(3),
+        reqwest::Client::new()
+            .post(format!(
+                "http://{}/api/v1/threads/{thread}/interrupt",
+                rig.server.addr
+            ))
+            .bearer_auth(&rig.token)
+            .json(&json!({"turn_id":started.turn_id}))
+            .send(),
+    )
+    .await
+    .expect("Stop is answered before the row is released")
+    .unwrap();
+    assert!(answer.status().is_success());
+    let answer: serde_json::Value = answer.json().await.unwrap();
+    for client in [&mut local, &mut other] {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(realtime_support::Heard::Frame(frame)) =
+                    client.hear_within(Duration::from_millis(200)).await
+                    && frame["op"] == "event"
+                    && frame["feed"] == feed(thread)
+                    && frame["data"]["pending"] == true
+                {
+                    assert_eq!(frame["data"]["requested_at"], answer["requested_at"]);
+                    assert!(frame["data"]["version"].as_i64().unwrap() > 0);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("another reader sees accepted Stop without an ordinary sequence change");
+    }
+    assert_eq!(rig.rows(thread).await.seq, before.seq);
+    holder.commit().await.unwrap();
+}
+
+/// How soon after its commit a frame is on a reader's socket at the latest: the server's share of
+/// the second an act may take at a 200 ms round trip (the rest is the line's).
+const AT_ONCE: Duration = Duration::from_millis(250);
+
+/// The times and limits a deployment runs with, nothing shortened for a test.
+fn as_deployed(tuning: &mut orch_api_core::realtime::Tuning) {
+    *tuning = orch_api_core::realtime::Tuning::from_config(&orch_config::ServerConfig::default());
+}
+
+/// One step of a turn as the engine stores it: the thread's next number, a finished message of
+/// the agent in the thread's first segment, and the announcement, in one transaction. Returns the
+/// number and the moment the commit returned, from when the step's frame is owed to its readers.
+async fn commit_step(rig: &Rig, thread: Id, text: &str) -> (i64, Instant) {
+    let mut tx = rig.pool.begin().await.unwrap();
+    let seq = orch_db::sequences::next(&mut tx, thread)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO items(id,thread_id,segment_id,kind,status,payload,seq_created,seq_updated)
+         SELECT $1,$2,id,'agent_message','completed',
+                jsonb_build_object('text',$4::text,'text_len',char_length($4::text)),$3,$3
+           FROM segments WHERE thread_id=$2 ORDER BY ordinal LIMIT 1",
+    )
+    .bind(orch_types::new_id())
+    .bind(thread)
+    .bind(seq)
+    .bind(text)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    orch_db::sequences::notify(&mut tx, thread, seq)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (seq, Instant::now())
+}
+
+/// Takes in frames until the row frame that carries `seq` comes, for `wait` after `committed` at
+/// most: how long after the commit it came, or nothing when it did not come in that time.
+async fn frame_after(
+    client: &mut Client,
+    seq: i64,
+    committed: Instant,
+    wait: Duration,
+) -> Option<Duration> {
+    loop {
+        let left = (committed + wait).saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match client.hear_within(left).await {
+            Some(realtime_support::Heard::Frame(frame))
+                if frame["op"] == "sync" && frame["seq"].as_i64().is_some_and(|got| got >= seq) =>
+            {
+                return Some(committed.elapsed());
+            }
+            Some(realtime_support::Heard::Frame(_)) => {}
+            _ => return None,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_step_of_a_turn_reaches_the_open_page_at_once_while_the_agents_words_stream() {
+    let rig = Rig::tuned(as_deployed).await;
+    let thread = rig.thread("Live steps").await;
+    let loaded = rig.rows(thread).await.seq;
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed(thread), Some(loaded)).await;
+    client.expect("subscribed").await;
+    client.expect("presence").await;
+    let sink = rig.server.realtime.sink();
+    let mut late = Vec::new();
+    for step in 0..4 {
+        // The agent's words grow in the thread, handed over as a turn's are.
+        sink.delta(&LiveDelta {
+            thread_id: thread,
+            item_id: orch_types::new_id(),
+            turn_id: None,
+            stream: "main".to_owned(),
+            field: DeltaField::Text,
+            offset: 0,
+            len: 5,
+            data: "words".to_owned(),
+        });
+        // Two steps, the second right after the first's frame: it comes while the thread was
+        // just read for its reader.
+        for part in ["first", "second"] {
+            let (seq, committed) =
+                commit_step(&rig, thread, &format!("Step {step}, the {part} part")).await;
+            let after = frame_after(&mut client, seq, committed, Duration::from_secs(5)).await;
+            late.push((step, part, after));
+        }
+    }
+    drop(client);
+    rig.shutdown().await;
+    eprintln!("live steps after their commit: {late:?}");
+    assert!(
+        late.iter()
+            .all(|(_, _, after)| after.is_some_and(|after| after < AT_ONCE)),
+        "every step is on the open page within {AT_ONCE:?} of its commit: {late:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_step_reaches_the_open_page_at_once_while_another_request_changes_its_readers_session() {
+    let rig = Rig::tuned(as_deployed).await;
+    let thread = rig.thread("A session that changes").await;
+    let loaded = rig.rows(thread).await.seq;
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed(thread), Some(loaded)).await;
+    client.expect("subscribed").await;
+    client.expect("presence").await;
+    // Another request of the reader's changes this session's security and has not committed yet:
+    // it holds the session's row as such a change does.
+    let mut change = rig.pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT s.id FROM sessions s JOIN access_tokens a ON a.session_id = s.id
+          WHERE a.token_hash = $1 FOR UPDATE OF s",
+    )
+    .bind(orch_api_core::middleware::authentication::token_hash(
+        &rig.token,
+    ))
+    .fetch_one(&mut *change)
+    .await
+    .unwrap();
+    let (seq, committed) = commit_step(&rig, thread, "A step while the session changes").await;
+    let after = frame_after(&mut client, seq, committed, Duration::from_secs(3)).await;
+    change.rollback().await.unwrap();
+    drop(client);
+    rig.shutdown().await;
+    eprintln!("a step while the session changes, after its commit: {after:?}");
+    assert!(
+        after.is_some_and(|after| after < AT_ONCE),
+        "the step is on the open page within {AT_ONCE:?} of its commit: {after:?}"
+    );
+}

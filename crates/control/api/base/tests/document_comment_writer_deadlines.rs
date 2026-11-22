@@ -19,7 +19,7 @@ use orch_api_contract::documents::{
     DocumentDiscussionCreate, DocumentDiscussionCreateBody, DocumentDiscussionResolve,
     DocumentDiscussionResolveBody,
 };
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::{
     documents,
@@ -125,7 +125,7 @@ async fn deadline_over_real_row_wait(act: Act) {
         author.id()
     };
     let token_id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(token_id);
     let now = desk.world.now();
     // Exactly one logical clock step gives a strict initial-before/current-at-deadline pair.
     let until = now + chrono::Duration::seconds(1);
