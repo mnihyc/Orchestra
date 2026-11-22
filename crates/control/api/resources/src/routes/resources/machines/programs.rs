@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "programs/confirmations.rs"]
+pub(super) mod confirmations;
+
 use crate::key_operations::native;
 
 use crate::key_operations::native::Stored;
@@ -108,6 +111,8 @@ async fn projection_facts(
         }
         None => MachinePrograms::default(),
     };
+    // Reported display names are not evidence that a human made a decision.
+    programs.approvals = confirmations::projection(conn, machine, &facts).await?;
     programs.can_manage = orch_authz::resources::check_machine(
         conn,
         principal,
@@ -182,6 +187,29 @@ fn harness_version(facts: &Json, kind: &str, path: &str) -> String {
         .to_owned()
 }
 
+/// The system's deadline for a program to print its interface: a machine's own check of its program keeps to it as a
+/// host's check of a catalogue build does.
+async fn interface_timeout(conn: &mut Conn) -> ApiResult<u32> {
+    use orch_settings_contract::registry::{self, keys::AGENTS_HARNESS_INTERFACE_TIMEOUT_SECS};
+    let set = orch_settings::get::<i64>(
+        conn,
+        orch_settings::Place::System,
+        AGENTS_HARNESS_INTERFACE_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    set.or_else(|| {
+        registry::get(AGENTS_HARNESS_INTERFACE_TIMEOUT_SECS)
+            .and_then(|setting| setting.default_value())
+            .and_then(|value| value.as_i64())
+    })
+    .and_then(|secs| u32::try_from(secs).ok())
+    .filter(|secs| *secs > 0)
+    .ok_or_else(|| {
+        ApiError::internal("the interface check deadline is not a positive number of seconds")
+    })
+}
+
 fn receipt(id: Id) -> MachineProgramsResponse {
     MachineProgramsResponse::Receipt(MachineProgramsReceipt {
         projection: ReceiptProjection::Receipt,
@@ -239,9 +267,30 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
             Some(json!(kind)),
             Some((kind.as_str(), path.as_str(), false)),
         ),
+        MachineProgramsCommand::CheckHarness { kind, path } => (
+            "checked",
+            None,
+            Some(json!(kind)),
+            Some((kind.as_str(), path.as_str(), true)),
+        ),
         MachineProgramsCommand::Reload => ("reloaded", None, None, None),
     };
-    let command = Outgoing::new(orch_types::new_id(), id, SerialKey::Machine, &body)
+    let confirmation = matches!(&body, MachineProgramsCommand::ConfirmHarness { .. }).then(|| {
+        orch_agent_programs::confirmation::Confirmation {
+            by: guard.principal().user(),
+            at: ctx.app.clock.time(),
+        }
+    });
+    let interface_timeout_secs = match &body {
+        MachineProgramsCommand::CheckHarness { .. } => Some(interface_timeout(&mut conn).await?),
+        _ => None,
+    };
+    let native = orch_link_contract::commands::MachineProgramsRequest {
+        request: body.clone(),
+        confirmation,
+        interface_timeout_secs,
+    };
+    let command = Outgoing::new(orch_types::new_id(), id, SerialKey::Machine, &native)
         .map_err(ApiError::internal)?;
     let authority = MachineProgramsAuthority::capture(
         &mut conn,
@@ -260,6 +309,8 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         dispatcher
             .issue_stored_before(
                 crate::dispatch::StoredCommand {
+                    content_transit: false,
+                    native_target: command.native_target.clone(),
                     id: Some(command.id),
                     machine: id,
                     kind: command.kind.as_str().into(),
@@ -276,7 +327,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
             )
             .await?;
         dispatcher
-            .wait_for::<MachineProgramsCommand>(command.id)
+            .wait_for::<orch_link_contract::commands::MachineProgramsRequest>(command.id)
             .await
     }
     .await;
@@ -284,7 +335,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some() && refusal.code == "conflict" =>
         {
-            ApiError::new(ErrorCode::ConflictStaleRevision, &refusal.detail)
+            ApiError::new(ErrorCode::ConflictConcurrentChange, &refusal.detail)
         }
         RunError::Command(CommandFailure::Failed(refusal))
             if harness.is_some()
@@ -322,6 +373,7 @@ async fn change_on(ctx: Ctx, body: MachineProgramsCommand) -> ApiResult<MachineP
         })?;
     guard.check_deadline(&ctx)?;
     acknowledgement::deadline(&ctx, &accepted, until)?;
+    confirmations::complete_program(&mut tx, id, &body, confirmation, &written).await?;
     queries_set_facts(&mut tx, id, &written, &facts, ctx.app.clock.now()).await?;
     let who = actor_name(&ctx)?;
     let mut details = json!({"operation":operation,"name":name,"kind":kind});

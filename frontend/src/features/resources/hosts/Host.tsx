@@ -40,11 +40,13 @@ import { ReadOnlySettingsNotice } from '@/features/settings/ReadOnlyNotice';
 import { SettingsEditor } from '@/features/settings/Editor';
 import { SettingChanges } from '@/ui/SettingChanges';
 import { HostKept } from '@/features/trace/HostKept';
-import { declaredShare, usedShare } from '@/features/resources/hosts/words';
+import { declaredShare, freeCpuWords, hostFreeCpuMillis, placementStorage, usedShare } from '@/features/resources/hosts/words';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
 import type { Host, HostDriver, HostStorage, UnitKind, WhenFull } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
+import { useFormatContext } from '@/lib/appearance';
+import { RelativeTime } from '@/ui/RelativeTime';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -52,6 +54,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { CompleteCollection } from '@/ui/CompleteCollection';
 import { HelpHint } from '@/ui/HelpHint';
 import { Meter } from '@/ui/Meter';
 import { Select } from '@/ui/Select';
@@ -160,7 +163,7 @@ export function Storages({ host }: { host: Host }) {
   ];
   return (
     <Section id="host-storages" title={t('hosts.storages.title')} lead={t('hosts.storages.lead')}>
-      <Table label={t('hosts.storages.title')} columns={columns} rows={host.storages} rowKey={(storage) => storage.name} />
+      <CompleteCollection label={t('hosts.storages.title')} items={host.storages} textOf={(storage) => storage.name}>{(rows) => <Table virtual label={t('hosts.storages.title')} columns={columns} rows={rows} rowKey={(storage) => storage.name} />}</CompleteCollection>
     </Section>
   );
 }
@@ -191,20 +194,34 @@ export function Drivers({ host }: { host: Host }) {
     <Section id="host-drivers" title={t('hosts.drivers.title')} lead={t('hosts.drivers.lead')}
       action={<HelpHint term={t('hosts.driverFeatures.title')} what={t('hosts.driverFeatures.about')}
         guide={{ article: 'host-driver-features', heading: null }} more={{ label: t('help.hint.more'), onOpen: () => openHelp('host-driver-features') }} />}>
-      <Table label={t('hosts.drivers.title')} columns={columns} rows={host.drivers} rowKey={(driver) => driver.name} />
+      <CompleteCollection label={t('hosts.drivers.title')} items={host.drivers} textOf={(driver) => `${driver.title} ${driver.name} ${driver.runtime_classes.join(' ')}`}>{(rows) => <Table virtual label={t('hosts.drivers.title')} columns={columns} rows={rows} rowKey={(driver) => driver.name} />}</CompleteCollection>
     </Section>
   );
 }
 
-function Overview({ host }: { host: Host }) {
+/** A host that is online and has loaded no driver makes nothing: said first, with the way to allow one. Newly allowed drivers
+ * are loaded when the node starts, so the words say to restart it. */
+function NoDriver({ host, onPolicy }: { host: Host; onPolicy?: () => void }) {
+  const { t } = useTranslation();
+  if (host.drivers.length > 0 || !host.machine.online || !holds(host.access, 'host.view')) return null;
+  return <StateLine compact tone="warning" role="status" title={t('hosts.drivers.noneLoaded')} message={t('hosts.drivers.allowOne')}
+    action={onPolicy === undefined ? undefined : <Button size="sm" onClick={onPolicy}>{t('machinePrograms.openPolicy')}</Button>} />;
+}
+
+function Overview({ host, onPolicy }: { host: Host; onPolicy?: () => void }) {
   const { t } = useTranslation();
   const words = useAmountWords();
+  const {locale}=useFormatContext();
+  const usage=host.usage;
+  const storage=placementStorage(host.storages);
   return (
     <div className="flex flex-col gap-6">
+      <NoDriver host={host} onPolicy={onPolicy} />
       <Section id="host-about" title={t('hosts.overview.about')}>
         <Facts compact
           label={t('hosts.overview.about')}
           rows={[
+            ...(host.bundled_with_server ? [{ name: t('hosts.serverHost.installation'), value: <span className="inline-flex items-center gap-1">{t('hosts.serverHost.label')}<HelpHint term={t('hosts.serverHost.label')} what={t('hosts.serverHost.help')} /></span> }] : []),
             {
               name: t('hosts.overview.machine'),
               value: (
@@ -228,13 +245,14 @@ function Overview({ host }: { host: Host }) {
             },
             { name: t('hosts.overview.mine'), value: t('hosts.list.environments', { count: host.mine }) },
             { name: t('hosts.overview.whenFull'), value: <WhenFullWords host={host} /> },
-            { name: t('hosts.capacity.cpu'), value: t('hosts.capacity.declared', { declared: words.cpu(host.declared.cpu_millis), capacity: host.capacity.cpu_millis > 0 ? words.cpu(host.capacity.cpu_millis) : '–' }) },
-            { name: t('hosts.capacity.memory'), value: t('hosts.capacity.declared', { declared: words.memory(host.declared.memory_mb), capacity: host.capacity.memory_mb > 0 ? words.memory(host.capacity.memory_mb) : '–' }) },
-            { name: t('hosts.capacity.disk'), value: t('hosts.capacity.declared', { declared: words.disk(host.declared.disk_gb), capacity: host.capacity.disk_gb > 0 ? words.disk(host.capacity.disk_gb) : '–' }) },
+            { name: t('hosts.capacity.cpu'), value: freeCpuWords(hostFreeCpuMillis(host), t, locale) },
+            { name: t('hosts.capacity.memory'), value: usage?.memory_used_mb===null || usage?.memory_used_mb===undefined || host.capacity.memory_mb<=0 ? '–' : t('hosts.capacity.measuredMemory',{used:words.memory(usage.memory_used_mb),free:words.memory(Math.max(0,host.capacity.memory_mb-usage.memory_used_mb)),capacity:words.memory(host.capacity.memory_mb)}) },
+            { name: t('hosts.capacity.disk'), value: storage===undefined || storage.capacity_gb<=0 ? '–' : t('hosts.capacity.measuredStorage',{name:storage.name,free:words.disk(storage.free_gb),capacity:words.disk(storage.capacity_gb)}) },
+            ...(usage===null || usage===undefined?[]:[{name:t('resourceFacts.observed'),value:<RelativeTime at={usage.observed_at}/>}]),
           ]}
         />
       </Section>
-      <MachineGatewayStatus machineId={host.machine.id} online={host.machine.online} />
+      <MachineGatewayStatus key={host.machine.id} machineId={host.machine.id} online={host.machine.online} manage={holds(host.access,'host.manage')} />
       <ResourceDetails><Facts compact rows={[{ name: t('hosts.overview.address'), value: host.address }]} /><Capacity host={host} /><Drivers host={host} /></ResourceDetails>
     </div>
   );
@@ -346,7 +364,7 @@ function HostSettings({ host, manage }: { host: Host; manage: boolean }) {
       {revert.error !== null && <ErrorAlert error={revert.error} />}
       {stale && (
         <InlineAlert tone="warning" title={t('hosts.settings.changed')}>
-          {t('hosts.settings.changedLead', { revision: host.revision })}
+          {t('hosts.settings.changedLead')}
           <SettingChanges rows={[{ name: t('hosts.settings.name'), current: host.name, draft: name }, { name: t('hosts.settings.labels'), current: host.labels, draft: wanted }]}
             disabled={busy || host.revision <= base.revision} onKeep={() => { setBase(host); save.reset(); }} />
         </InlineAlert>
@@ -393,7 +411,7 @@ export function HostScreen({ hostId, tab, onTab }: HostScreenProps) {
   const settings = tab === 'policy' || tab === 'ports' ? tab : 'settings';
 
   const tabs = [
-    { value: 'overview' as const, label: t('hosts.tabs.overview'), panel: <Overview host={host} /> },
+    { value: 'overview' as const, label: t('hosts.tabs.overview'), panel: <Overview host={host} onPolicy={manage ? () => onTab('policy') : undefined} /> },
     ...(manage
       ? [
           { value: 'runtimes' as const, label: t('hosts.tabs.runtimes'), count: host.running.environment + host.running.provider, panel: <HostRuntimes host={host} /> },
@@ -418,9 +436,12 @@ export function HostScreen({ hostId, tab, onTab }: HostScreenProps) {
   const grouped = tab === 'policy' || tab === 'ports' ? 'settings' : tab;
   const shown = tabs.some((candidate) => candidate.value === grouped) ? grouped : 'overview';
 
+  const notices = <>
+    <UpdateNotice update={host.software_update} action={primary?.id === 'update-now' ? primary : null} />
+  </>;
   return (
     <Page>
-      <PageHeader
+      <PageHeader compactResource
         adminAccess={host.access.admin_access} ownership={host} opening={{ kind: 'host', id: host.id }}
         back={back}
         mark={
@@ -435,11 +456,11 @@ export function HostScreen({ hostId, tab, onTab }: HostScreenProps) {
           </Badge>,
           <StatusDot key="machine" tone={host.lost_at !== undefined ? 'warning' : host.machine.online ? 'success' : 'idle'} label={host.lost_at !== undefined ? t('loss.status') : host.machine.online ? t('machines.state.online') : t('machines.state.offline')} showLabel />,
         ]}
-        actions={<>{holds(host.access, 'host.use') && <Button icon={<Plus aria-hidden />} onClick={() => setMaking(true)}>{t('environments.make.here')}</Button>}<HeadingActs admin={adminSpec(host, 'host.manage')} name={host.name} primary={primary?.id === 'update-now' ? null : primary} edit={edit} menu={menu}
-          omit={[...(shown === 'settings' && settings === 'settings' ? ['pause', 'resume', 'edit', 'rename'] : []), ...(primary?.id === 'update-now' ? ['update-now'] : [])]} /></>}
+        actions={<HeadingActs admin={adminSpec(host, 'host.manage')} name={host.name} primary={primary?.id === 'update-now' ? null : primary} edit={edit} menu={menu}
+          omit={[...(shown === 'settings' && settings === 'settings' ? ['pause', 'resume', 'edit', 'rename'] : []), ...(primary?.id === 'update-now' ? ['update-now'] : [])]}
+          before={holds(host.access, 'host.use') ? <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setMaking(true)}>{t('environments.make.here')}</Button> : undefined} />}
       />
-      <UpdateNotice update={host.software_update} action={primary?.id === 'update-now' ? primary : null} />
-      <Tabs label={t('hosts.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-4" />
+      <Tabs frame={(navigation, panels) => <>{navigation}{notices}{panels}</>} label={t('hosts.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-4" />
       {acts.dialogs}
       {making && <MakeEnvironmentDialog hostId={host.id} onClose={() => setMaking(false)} />}
     </Page>

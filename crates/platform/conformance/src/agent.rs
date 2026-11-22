@@ -260,6 +260,7 @@ mod tests {
         let (thread, segment, turn) = (new_id(), new_id(), new_id());
         let event = |request| {
             AdapterEvent::ModelRequest(Box::new(ModelRequestReport {
+                native_opening_id: None,
                 thread_id: thread,
                 segment_id: segment,
                 turn_id: turn,
@@ -293,6 +294,7 @@ mod tests {
         };
         let event = |request| {
             AdapterEvent::ModelRequest(Box::new(ModelRequestReport {
+                native_opening_id: None,
                 thread_id: thread,
                 segment_id: segment,
                 turn_id: turn,

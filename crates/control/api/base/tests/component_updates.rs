@@ -51,6 +51,19 @@ async fn a_contended_physical_update_fence_returns_retry_without_waiting_in_a_tr
     assert!(matches!(attempted, Err(orch_db::DbError::Retry)));
 }
 
+#[test]
+fn the_system_states_that_a_connector_older_than_its_release_can_carry_has_to_update() {
+    use orch_link_contract::version::Standing;
+    let versions = orch_api_core::backplane::LinkSettings::from_config(
+        &orch_config::server::ServerConfig::default(),
+        "0.1.3",
+    )
+    .versions;
+    assert_eq!(versions.recommended, "0.1.3");
+    assert_eq!(versions.standing("0.1.2"), Ok(Standing::TooOld));
+    assert_eq!(versions.standing("0.1.3"), Ok(Standing::Current));
+}
+
 async fn physical(world: &World, owner: &Who, enabled: bool) -> Id {
     let mut conn = world.conn().await;
     let id = fixtures::insert_persons_machine(&mut conn, owner.id(), "workstation")
@@ -169,11 +182,18 @@ async fn machine_manage_requests_an_audited_update_and_views_keep_the_running_ve
 }
 
 #[tokio::test]
-async fn local_update_auto_off_is_a_visible_audited_refusal_without_a_drain_fence() {
+async fn explicit_update_is_audited_without_enabling_auto_or_waiting_for_an_old_session() {
     let world = World::new().await;
     let owner = person(&world, "owner").await;
     let machine = physical(&world, &owner, false).await;
-    let refused = world
+    let mut state = world.conn().await;
+    sqlx::query("UPDATE machines SET online=false WHERE id=$1")
+        .bind(machine)
+        .execute(&mut *state)
+        .await
+        .unwrap();
+    drop(state);
+    let requested = world
         .app
         .call(MachineUpdateNow, &[&machine])
         .token(&owner.token)
@@ -181,19 +201,26 @@ async fn local_update_auto_off_is_a_visible_audited_refusal_without_a_drain_fenc
         .await
         .ok()
         .into_full()
-        .expect("ordinary explicit update retains its complete native progress");
-    assert_eq!(refused.status, "refused");
-    assert!(refused.behind);
-    let detail = refused.detail.unwrap();
-    assert!(detail.contains("update.auto"));
-    assert!(detail.contains("orch-connector update"));
+        .expect("an explicit update keeps its ordinary progress response");
+    assert_eq!(requested.status, "queued");
+    assert!(requested.behind);
     let mut conn = world.conn().await;
-    assert!(
+    assert_eq!(
         orch_db::queries::component_updates::pending(&mut conn)
             .await
             .unwrap()
-            .is_empty()
+            .len(),
+        1
     );
+    let held: serde_json::Value =
+        sqlx::query_scalar("SELECT facts->'policy' FROM machines WHERE id=$1")
+            .bind(machine)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    let policy: LocalPolicy = serde_json::from_value(held).unwrap();
+    assert!(!policy.update_auto, "Update now never enables Auto");
+    drop(conn);
     let shown = world
         .app
         .call(MachineGet, &[&machine])
@@ -203,8 +230,7 @@ async fn local_update_auto_off_is_a_visible_audited_refusal_without_a_drain_fenc
         .ok()
         .software_update
         .unwrap();
-    assert_eq!(shown.status, "refused");
-    assert_eq!(shown.detail.as_deref(), Some(detail.as_str()));
+    assert_eq!(shown.status, "queued");
 }
 
 #[tokio::test]
@@ -243,7 +269,10 @@ async fn a_node_uses_its_host_manage_page_and_reports_its_own_version_and_comman
         .fetch_one(&mut *conn)
         .await
         .unwrap();
-    let policy = LocalPolicy::default();
+    let policy = LocalPolicy {
+        update_auto: false,
+        ..LocalPolicy::default()
+    };
     sqlx::query("UPDATE machines SET connector_version='0.0.0',online=true,roles=ARRAY['node'],facts=jsonb_build_object('policy',$2::jsonb) WHERE id=$1")
         .bind(machine).bind(serde_json::to_value(policy).unwrap()).execute(&mut *conn).await.unwrap();
     drop(conn);
