@@ -88,6 +88,54 @@ async fn a_sign_in_on_a_page_asks_for_a_text_and_is_answered() {
 }
 
 #[tokio::test]
+async fn a_harness_signed_in_is_still_signed_in_after_its_connector_restarts_and_one_signed_out_stays_out()
+ {
+    let mut p = ProviderRig::new().await;
+    p.start_harness().await;
+    start(&p, "fake_ask", json!(null)).await;
+    p.wait_provider_event("provider.login", 2).await;
+    let answer: ProviderLoginInput = serde_json::from_value(json!({
+        "provider_id": p.rig.provider, "agent_id": p.rig.agent, "values": { "answer": "the text the page showed" }
+    }))
+    .unwrap();
+    p.rig.succeed(&key(&p), &answer).await;
+    p.wait_provider_event("provider.login", 3).await;
+    let refresh: orch_link_contract::commands::ProviderRefresh =
+        serde_json::from_value(json!({ "provider_id": p.rig.provider })).unwrap();
+    let provider = SerialKey::Provider(p.rig.provider);
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(state["status"], "ready", "{state}");
+
+    // The connector restarts, as it does for a change of its policy, and the harness is started again.
+    p.rig.kill().await;
+    p.rig.start().await;
+    p.start_harness().await;
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(
+        state["status"], "ready",
+        "the sign-in is there after the restart: {state}"
+    );
+
+    p.rig
+        .succeed(
+            &key(&p),
+            &ProviderLogout {
+                provider_id: p.rig.provider,
+                agent_id: p.rig.agent,
+            },
+        )
+        .await;
+    p.rig.kill().await;
+    p.rig.start().await;
+    p.start_harness().await;
+    let state = p.rig.succeed(&provider, &refresh).await;
+    assert_eq!(
+        state["status"], "needs_setup",
+        "a sign-out is kept as well: {state}"
+    );
+}
+
+#[tokio::test]
 async fn a_sign_in_the_person_gives_up_is_cancelled_and_the_harness_signed_out_says_so() {
     let p = ProviderRig::new().await;
     p.start_harness().await;

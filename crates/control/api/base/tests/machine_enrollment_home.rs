@@ -33,7 +33,7 @@ async fn enroll(world: &World, token: &str, name: &str) -> Id {
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".into(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent, Role::Environment],
     };
     let router = orch_api_core::certificates::internal_routes()

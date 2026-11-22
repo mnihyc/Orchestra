@@ -16,7 +16,7 @@ use orch_api_contract::document_tree::*;
 use orch_api_contract::documents::DocumentDelete;
 use orch_api_contract::nodes::DeletedInspectionQuery;
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_db::queries::identity::{self, NewApiToken};
@@ -85,11 +85,12 @@ fn rule(operation: &str, kind: &str, id: Id, action: &str) -> Json {
 async fn key(desk: &Desk, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *desk.world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Typed entry scope control",
             token_hash: &token_hash(&secret),

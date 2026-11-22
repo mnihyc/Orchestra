@@ -18,10 +18,6 @@ use crate::upload_inventory::Entry;
 
 use crate::upload_inventory::Projection;
 
-use base64::Engine as _;
-
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
 use chrono::DateTime;
 
 use chrono::Utc;
@@ -34,7 +30,7 @@ use orch_access_contract::key_scope::KeyTargetKind;
 
 use orch_api_contract::common::Page;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::operation_sources::Declaration;
 
@@ -69,38 +65,15 @@ pub(super) fn mount(registry: &mut Registry) {
     );
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Cursor {
-    owner: Id,
-    at: DateTime<Utc>,
-    key: String,
+fn decode(query: &CollectionQuery, owner: Id) -> ApiResult<Option<(DateTime<Utc>, String)>> {
+    crate::collection::after(query, &format!("personal-uploads:{owner}"))
 }
-
-fn decode(query: &PageQuery, owner: Id) -> ApiResult<Option<(DateTime<Utc>, String)>> {
-    let Some(raw) = &query.cursor else {
-        return Ok(None);
-    };
-    let bad = || ApiError::invalid("cursor", "is not a cursor of this upload list");
-    if raw.len() > 8192 {
-        return Err(bad());
-    }
-    let bytes = URL_SAFE_NO_PAD.decode(raw).map_err(|_| bad())?;
-    let cursor: Cursor = serde_json::from_slice(&bytes).map_err(|_| bad())?;
-    if cursor.owner != owner {
-        return Err(bad());
-    }
-    Ok(Some((cursor.at, cursor.key)))
-}
-
-fn encode(owner: Id, entry: &Entry) -> ApiResult<String> {
-    Ok(URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(&Cursor {
-            owner,
-            at: entry.row.created_at,
-            key: entry.row.key.clone(),
-        })
-        .map_err(ApiError::internal)?,
-    ))
+fn encode(owner: Id, entry: &Entry, query: &CollectionQuery) -> ApiResult<String> {
+    crate::collection::cursor(
+        query,
+        &format!("personal-uploads:{owner}"),
+        (entry.row.created_at, entry.row.key.clone()),
+    )
 }
 
 pub(super) struct Uploads;
@@ -114,16 +87,17 @@ pub(super) struct Selected {
 
 impl native::Selected for Uploads {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = Arc<Selected>;
     type Reply = Page<UploadInventoryItem>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::OWN_LIST;
 
     fn select<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let owner = ctx.user()?.id();
@@ -150,14 +124,16 @@ impl native::Selected for Uploads {
                     &target,
                 )?;
             let mut after = decode(query, owner)?;
-            let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
+            let page_size = crate::collection::limit(query)?;
+            let limit = usize::try_from(page_size).map_err(ApiError::internal)?;
             let mut entries = Vec::new();
             loop {
-                let rows = inventory::list(
+                let rows = inventory::list_named(
                     conn,
                     Some(owner),
                     after.clone(),
-                    Some(i64::from(query.limit()) + 1),
+                    Some(i64::from(page_size) + 1),
+                    query.q.as_deref().unwrap_or(""),
                 )
                 .await?;
                 let exhausted = rows.len() < limit + 1;
@@ -169,9 +145,8 @@ impl native::Selected for Uploads {
                     .into_iter()
                     .filter(|row| row.kind != "machine")
                     .collect();
-                entries.extend(
-                    upload_inventory::prepare(conn, rows, Some(caller), query.limit()).await?,
-                );
+                entries
+                    .extend(upload_inventory::prepare(conn, rows, Some(caller), page_size).await?);
                 if entries.len() > limit || exhausted {
                     break;
                 }
@@ -181,7 +156,7 @@ impl native::Selected for Uploads {
             let next = if more {
                 entries
                     .last()
-                    .map(|entry| encode(owner, entry))
+                    .map(|entry| encode(owner, entry, query))
                     .transpose()?
             } else {
                 None
@@ -253,7 +228,7 @@ impl native::Selected for Uploads {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a Self::Value,
         fresh: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<bool>> {

@@ -1495,6 +1495,53 @@ impl DockerDriver {
         Ok(ranges)
     }
 
+    /// A bare work unit admits only its frozen provider endpoints, with no ordinary Orch allowance.
+    pub(crate) async fn prepare_work_egress(
+        &self,
+        name: &str,
+        work: orch_types::Id,
+        system: &str,
+        endpoints: &[NetworkTransport],
+    ) -> Result<(Private, Admission), DriverError> {
+        self.restricted_available()?;
+        if endpoints.iter().any(|endpoint| {
+            endpoint.purpose != orch_driver_contract::network::TransportPurpose::Model
+                || endpoint.port == 0
+                || !matches!(endpoint.protocol.as_str(), "https" | "http" | "wss" | "ws")
+                || endpoint.authority.is_empty()
+                || endpoint
+                    .authority
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '/' | '@' | '?' | '#' | '\\'))
+        }) {
+            return Err(DriverError::InvalidSpec(
+                "a capability unit admits exact provider endpoints only".into(),
+            ));
+        }
+        let dir = unit_dir(&self.config, name)?;
+        let private = ensure_network(&self.daemon, &self.config, name, work, Some(system)).await?;
+        let mut endpoints = endpoints.to_vec();
+        endpoints.sort();
+        endpoints.dedup();
+        let revision = always_revision(&endpoints);
+        let admission = Admission {
+            revision: revision.clone(),
+            always_revision: revision,
+            always: endpoints,
+            allowed_hosts: Vec::new(),
+            refused: self.refused_for(&private).await?,
+        };
+        write_orders(
+            &dir,
+            admission.clone(),
+            self.clock.as_ref(),
+            self.config.egress.parent_proxy.clone(),
+        )
+        .await?;
+        self.heartbeat.reconcile(name);
+        Ok((private, admission))
+    }
+
     /// Makes a restricted unit's own network and writes its proxy's orders, before the unit and its proxy are made.
     pub(crate) async fn prepare_egress(
         &self,
@@ -1654,6 +1701,17 @@ impl DockerDriver {
         let mut container = self.container_of(unit).await?.ok_or_else(|| {
             DriverError::NotFound(format!("there is no unit {} of this driver", unit.name))
         })?;
+        if container
+            .config
+            .as_ref()
+            .and_then(|config| config.labels.as_ref())
+            .is_some_and(|labels| labels.contains_key(crate::work_units::LABEL_WORK))
+        {
+            return Err(DriverError::Unsupported(
+                "a capability unit keeps its exact provider-only network for its whole lifetime"
+                    .into(),
+            ));
+        }
         if on_old_network(&container, &self.config) {
             container = self.remake_restricted(unit, &container).await?;
         }

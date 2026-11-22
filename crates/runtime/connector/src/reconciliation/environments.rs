@@ -43,7 +43,7 @@ fn unavailable() -> CommandError {
     )
 }
 
-fn target(command: &Command) -> Option<Id> {
+pub(crate) fn target(command: &Command) -> Option<Id> {
     match command {
         Command::EnvAttach(body) => Some(body.environment_id),
         Command::EnvDetach(body) => Some(body.environment_id),
@@ -177,6 +177,13 @@ impl Desired {
                 saved.servers.remove(&body.name);
             }
             Command::DisplayAdopt(body) => {
+                if matches!(
+                    body.target,
+                    orch_link_contract::display::DisplayTarget::Desktop
+                ) {
+                    // A later login on this machine needs a new desktop sharing decision.
+                    return Ok(());
+                }
                 saved.displays.insert(body.display_id, kept);
             }
             _ => return Ok(()),

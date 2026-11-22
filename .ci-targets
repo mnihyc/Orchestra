@@ -1,0 +1,2 @@
+test -p orch-adapter-fake --test harness
+test -p orch-connector-core --test sign_in
