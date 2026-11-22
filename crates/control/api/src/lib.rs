@@ -11,11 +11,12 @@
 #[cfg(feature = "test-observers")]
 pub use orch_api_base::test_observers;
 
+pub use orch_api_base::public_addresses;
+
 pub mod archives {
+    pub use orch_api_base::archives::{ArchiveRead, ArchiveReads};
 
     pub use orch_api_base::archives::READ_TIME;
-
-    pub use orch_api_base::archives::ZIP_ENTRIES_MAX;
 
     pub use orch_api_base::archives::ArchiveError;
 
@@ -458,9 +459,74 @@ pub mod backplane {
     }
     #[cfg(test)]
     mod session_source_tests {
+        #[tokio::test]
+        async fn a_tool_opening_and_a_stop_have_one_order_before_preparation_even_for_a_new_session()
+         {
+            orch_api_base::backplane::session_source_tests::runtime_stops::__api_run_a_tool_opening_and_a_stop_have_one_order_before_preparation_even_for_a_new_session().await
+        }
+
+        #[tokio::test]
+        async fn a_preparing_stop_withdraws_its_tool_channels_and_keeps_an_independent_session_usable()
+         {
+            orch_api_base::backplane::session_source_tests::runtime_stops::__api_run_a_preparing_stop_withdraws_its_tool_channels_and_keeps_an_independent_session_usable().await
+        }
+
+        #[tokio::test]
+        async fn an_old_stop_does_not_withdraw_tools_admitted_in_a_changed_home() {
+            orch_api_base::backplane::session_source_tests::runtime_stops::__api_run_an_old_stop_does_not_withdraw_tools_admitted_in_a_changed_home().await
+        }
+
+        #[tokio::test]
+        async fn a_close_addressed_to_another_machine_cannot_retire_the_original_opening() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_close_addressed_to_another_machine_cannot_retire_the_original_opening().await
+        }
+
+        #[tokio::test]
+        async fn binding_the_first_reported_machine_keeps_the_opening_already_admitted_on_it() {
+            orch_api_base::backplane::session_source_tests::__api_run_binding_the_first_reported_machine_keeps_the_opening_already_admitted_on_it().await
+        }
+
+        #[tokio::test]
+        async fn a_prepared_native_opening_keeps_its_own_tools_and_cancellation_before_its_segment_is_published()
+         {
+            orch_api_base::backplane::session_source_tests::__api_run_a_prepared_native_opening_keeps_its_own_tools_and_cancellation_before_its_segment_is_published().await
+        }
+        #[tokio::test]
+        async fn publishing_a_prepared_session_keeps_its_members_and_a_provider_pause_withdraws_them()
+         {
+            orch_api_base::backplane::session_source_tests::__api_run_publishing_a_prepared_session_keeps_its_members_and_a_provider_pause_withdraws_them().await
+        }
+
+        #[tokio::test]
+        async fn a_terminal_report_withdraws_later_mutable_observations_in_the_same_batch() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_terminal_report_withdraws_later_mutable_observations_in_the_same_batch().await
+        }
+        #[tokio::test]
+        async fn a_delayed_close_keeps_its_captured_absence_through_the_engine_dispatcher() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_delayed_close_keeps_its_captured_absence_through_the_engine_dispatcher().await
+        }
+        #[tokio::test]
+        async fn a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_command_reply_refused_by_storage_finishes_once_with_its_safe_gap_reason().await
+        }
+        #[tokio::test]
+        async fn a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues()
+         {
+            orch_api_base::backplane::session_source_tests::__api_run_a_rejected_native_value_is_acknowledged_once_with_a_gap_and_the_next_event_continues().await
+        }
         #[cfg(test)]
         mod port_creation_replays {
             #[cfg(test)]
+            #[tokio::test]
+            async fn an_admitted_provisional_opening_works_before_history_publication_and_its_removal_never_revives_the_predecessor()
+             {
+                orch_api_base::backplane::session_source_tests::__api_run_an_admitted_provisional_opening_works_before_history_publication_and_its_removal_never_revives_the_predecessor().await
+            }
+            #[tokio::test]
+            async fn a_tool_ticket_names_the_current_server_and_credential_keeper_even_after_a_stale_command_is_queued()
+             {
+                orch_api_base::backplane::session_source_tests::__api_run_a_tool_ticket_names_the_current_server_and_credential_keeper_even_after_a_stale_command_is_queued().await
+            }
             #[tokio::test]
             async fn signed_port_use_headers_keep_tcp_and_udp_admissions_without_a_second_proof_or_native_observation()
              {
@@ -477,6 +543,11 @@ pub mod backplane {
         #[tokio::test]
         async fn an_unbound_segment_accepts_nobody_until_the_server_assigns_its_source() {
             orch_api_base::backplane::session_source_tests::__api_run_an_unbound_segment_accepts_nobody_until_the_server_assigns_its_source().await
+        }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn a_signed_tool_ticket_ends_with_its_actual_opening_and_cannot_join_a_replacement() {
+            orch_api_base::backplane::session_source_tests::__api_run_a_signed_tool_ticket_ends_with_its_actual_opening_and_cannot_join_a_replacement().await
         }
         #[cfg(test)]
         #[tokio::test]
@@ -571,6 +642,12 @@ pub mod backplane {
         #[tokio::test]
         async fn a_runtime_network_report_obeys_the_runtime_hosts_source_binding() {
             orch_api_base::backplane::machine_report_tests::__api_run_a_runtime_network_report_obeys_the_runtime_hosts_source_binding().await
+        }
+        #[cfg(test)]
+        #[tokio::test]
+        async fn the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted()
+         {
+            orch_api_base::backplane::machine_report_tests::__api_run_the_reports_of_a_unit_that_enrolled_before_its_environment_names_it_are_held_not_refused_or_counted().await
         }
     }
     #[cfg(test)]
@@ -1082,6 +1159,10 @@ pub mod backplane {
     }
 }
 
+pub mod relay {
+    pub use orch_api_base::relay::{Input, Options, Read, Relay, RelayError, Relays};
+}
+
 pub mod blobs {
 
     pub use orch_api_base::blobs::UPLOADS_DIR;
@@ -1133,8 +1214,6 @@ pub mod cache {
 
     pub use orch_api_base::cache::MANIFEST_MAX_STORED_BYTES;
 
-    pub use orch_api_base::cache::STALE_UPLOAD_AGE;
-
     pub use orch_api_base::cache::EVICTION_EVERY;
 
     pub use orch_api_base::cache::COLLECTION_EVERY;
@@ -1150,6 +1229,8 @@ pub mod cache {
     pub use orch_api_base::cache::Samples;
 
     pub use orch_api_base::cache::Cache;
+
+    pub use orch_api_base::cache::{Purged, purge_relayed_caches};
 
     pub use orch_api_base::cache::Evicted;
 
@@ -1275,8 +1356,6 @@ pub mod content {
 }
 
 pub mod dispatch {
-
-    pub use orch_api_base::dispatch::KEY_MEMBER;
 
     pub use orch_api_base::dispatch::DispatchError;
 
@@ -2187,6 +2266,8 @@ pub mod middleware {
 
         pub use orch_api_base::middleware::authentication::new_token;
 
+        pub use orch_api_base::middleware::authentication::new_api_token;
+
         pub use orch_api_base::middleware::authentication::bearer;
 
         pub use orch_api_base::middleware::authentication::cookie;
@@ -2501,11 +2582,15 @@ pub mod previews {
 
     pub use orch_api_base::previews::serve;
 
-    pub use orch_api_base::previews::source_limit;
+    pub use orch_api_base::previews::{policy, serve_source};
 
     pub use orch_api_base::previews::unavailable;
     #[cfg(test)]
     mod tests {
+        #[tokio::test]
+        async fn a_refusal_keeps_its_particular_allowance_when_the_policy_later_changes() {
+            orch_api_base::previews::tests::__api_run_a_refusal_keeps_its_particular_allowance_when_the_policy_later_changes().await;
+        }
         #[cfg(test)]
         #[test]
         fn text_cards_share_the_reference_card_bound_even_for_one_very_long_line() {
@@ -2891,6 +2976,12 @@ pub mod realtime {
     }
     #[cfg(test)]
     mod epoch_handoff_tests {
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn()
+        -> ::orch_api_base::realtime::epoch_handoff_tests::Proof {
+            orch_api_base::realtime::epoch_handoff_tests::__api_run_subscription_news_reloads_the_current_own_source_and_stops_when_view_is_withdrawn().await
+        }
+
         #[cfg(test)]
         mod native_feed_keys {
             #[cfg(test)]
@@ -2991,6 +3082,12 @@ pub mod realtime {
         }
         #[cfg(test)]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn personal_admission_names_the_committed_shell_cut_without_a_second_http_read()
+        -> ::orch_api_base::realtime::epoch_handoff_tests::Proof {
+            orch_api_base::realtime::epoch_handoff_tests::__api_run_personal_admission_names_the_committed_shell_cut_without_a_second_http_read().await
+        }
+        #[cfg(test)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn metadata_hints_use_existing_personal_readers_and_keep_exact_session_fences()
         -> ::orch_api_base::realtime::epoch_handoff_tests::Proof {
             orch_api_base::realtime::epoch_handoff_tests::__api_run_metadata_hints_use_existing_personal_readers_and_keep_exact_session_fences().await
@@ -3084,9 +3181,9 @@ pub mod realtime {
         }
         #[cfg(test)]
         #[tokio::test]
-        async fn opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends()
+        async fn opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends()
         -> ::orch_api_base::realtime::history_read_tests::Proof {
-            orch_api_base::realtime::history_read_tests::__api_run_opening_outline_and_conversation_keep_the_same_cut_while_the_native_turn_ends().await
+            orch_api_base::realtime::history_read_tests::__api_run_opening_and_outline_use_their_own_coherent_cuts_while_the_native_turn_ends().await
         }
         #[cfg(test)]
         #[tokio::test]
@@ -3144,6 +3241,12 @@ pub mod realtime {
         async fn raw_session_expiry_cancels_an_unaccepted_real_socket_frame()
         -> ::orch_api_base::realtime::origin_read_tests::Proof {
             orch_api_base::realtime::origin_read_tests::__api_run_raw_session_expiry_cancels_an_unaccepted_real_socket_frame().await
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn capacity_returning_after_a_guard_releases_the_subscription_and_rechecks_its_access()
+        -> ::orch_api_base::realtime::origin_read_tests::Proof {
+            orch_api_base::realtime::origin_read_tests::__api_run_capacity_returning_after_a_guard_releases_the_subscription_and_rechecks_its_access().await
         }
         #[cfg(test)]
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3341,6 +3444,23 @@ pub mod realtime {
             -> ::orch_api_base::session_ticket_support::Proof {
                 orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_an_actual_zero_byte_queued_rfb_message_rechecks_manage_after_real_pending().await
             }
+            #[cfg(test)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_spurious_writer_wake_never_starts_rfb_authorization_before_actual_buffer_room()
+            -> ::orch_api_base::session_ticket_support::Proof {
+                orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_a_spurious_writer_wake_never_starts_rfb_authorization_before_actual_buffer_room().await
+            }
+            #[cfg(test)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn ending_manage_drops_the_next_rfb_message_while_the_existing_native_buffer_stays_full()
+            -> ::orch_api_base::session_ticket_support::Proof {
+                orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_ending_manage_drops_the_next_rfb_message_while_the_existing_native_buffer_stays_full().await
+            }
+            #[tokio::test(flavor = "multi_thread")]
+            async fn a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown()
+            -> ::orch_api_base::session_ticket_support::Proof {
+                orch_api_base::realtime::ticket_scope_tests::session_ticket_wire_tests::__api_run_a_permanently_blocked_rfb_input_still_observes_expiry_view_loss_and_shutdown().await
+            }
         }
         #[cfg(test)]
         #[tokio::test]
@@ -3502,6 +3622,11 @@ pub mod realtime {
             async fn a_writer_left_behind_by_a_reader_that_ended_holds_nothing_afterwards() {
                 orch_api_base::realtime::server::tests::__api_run_a_writer_left_behind_by_a_reader_that_ended_holds_nothing_afterwards().await
             }
+
+            #[tokio::test]
+            async fn controls_wait_for_space_and_leave_in_order_even_with_a_smaller_byte_budget() {
+                orch_api_base::realtime::server::tests::__api_run_controls_wait_for_space_and_leave_in_order_even_with_a_smaller_byte_budget().await
+            }
             #[cfg(test)]
             #[tokio::test]
             async fn a_reader_left_behind_by_a_writer_that_ended_holds_nothing_afterwards() {
@@ -3561,6 +3686,11 @@ pub mod registry {
     }
     #[cfg(test)]
     mod query_tests {
+        #[test]
+        fn public_request_text_is_repaired_without_changing_passwords_or_creation_keys()
+        -> ::orch_api_base::middleware::requests::ApiResult<()> {
+            orch_api_base::registry::query_tests::__api_run_public_request_text_is_repaired_without_changing_passwords_or_creation_keys()
+        }
         #[cfg(test)]
         #[test]
         fn storage_filters_and_flattened_paging_decode_through_the_real_query_adapter()
@@ -4036,6 +4166,41 @@ pub mod sign_in {
         pub use orch_api_base::sign_in::throttle::identity_account;
     }
 
+    pub mod human_check {
+
+        pub use orch_api_base::sign_in::human_check::SECRET_OWNER;
+
+        pub use orch_api_base::sign_in::human_check::SECRET_NAME;
+
+        pub use orch_api_base::sign_in::human_check::secret_owner_id;
+
+        pub use orch_api_base::sign_in::human_check::install_providers;
+
+        pub use orch_api_base::sign_in::human_check::install_edge_reader;
+
+        pub use orch_api_base::sign_in::human_check::forget_looks;
+
+        pub use orch_api_base::sign_in::human_check::edge_state;
+
+        pub use orch_api_base::sign_in::human_check::before_setting;
+
+        pub use orch_api_base::sign_in::human_check::WhenUnreachable;
+
+        pub use orch_api_base::sign_in::human_check::Policy;
+
+        pub use orch_api_base::sign_in::human_check::policy;
+
+        pub use orch_api_base::sign_in::human_check::open_secret;
+
+        pub use orch_api_base::sign_in::human_check::require;
+
+        pub use orch_api_base::sign_in::human_check::test;
+
+        pub use orch_api_base::sign_in::human_check::Act;
+
+        pub use orch_api_base::sign_in::human_check::switch_off;
+    }
+
     pub mod fresh {
 
         pub use orch_api_base::sign_in::fresh::Purpose;
@@ -4234,8 +4399,6 @@ pub mod routes {
         pub mod model_inputs {
 
             pub use orch_api_threads::routes::threads::model_inputs::PAGE_DEFAULT;
-
-            pub use orch_api_threads::routes::threads::model_inputs::PAGE_MAX;
 
             pub use orch_api_threads::routes::threads::model_inputs::mount;
             #[cfg(test)]
@@ -4749,13 +4912,32 @@ pub mod routes {
                 }
                 #[cfg(test)]
                 #[test]
-                fn what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled() {
-                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_none_of_it_is_enabled()
+                fn what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_what_a_suggestion_lists_is_on_offer_and_the_organizations_choice_switches_it_on()
                 }
                 #[cfg(test)]
                 #[test]
                 fn search_offers_never_enable_the_tool_or_its_default() {
                     orch_api_resources::routes::resources::models::tests::__api_run_search_offers_never_enable_the_tool_or_its_default()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_model_without_a_window_of_its_own_has_the_largest_context_its_source_reports()
+                }
+                #[cfg(test)]
+                #[test]
+                fn a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_a_name_the_catalogue_lists_is_added_with_what_the_catalogue_says_under_what_was_written()
+                }
+                #[cfg(test)]
+                #[test]
+                fn the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
+                 {
+                    orch_api_resources::routes::resources::models::tests::__api_run_the_organizations_choice_of_what_adding_switches_on_is_read_with_all_as_the_shipped_one()
                 }
             }
         }
@@ -6365,8 +6547,6 @@ pub mod routes {
 
     pub mod search {
 
-        pub use orch_api_collaboration::routes::search::NAME_BATCHES_MAX;
-
         pub use orch_api_collaboration::routes::search::mount;
         #[cfg(test)]
         mod content {
@@ -6718,11 +6898,7 @@ pub mod routes {
 
 pub mod uploads {
 
-    pub use orch_api_base::uploads::SESSION_LIFE;
-
     pub use orch_api_base::uploads::NAME_MAX_CHARS;
-
-    pub use orch_api_base::uploads::chunk_bytes;
 
     pub use orch_api_base::uploads::max_blob_bytes;
 
@@ -6736,6 +6912,8 @@ pub mod uploads {
 
     pub use orch_api_base::uploads::put_piece;
 
+    pub use orch_api_base::uploads::piece_limit;
+
     pub use orch_api_base::uploads::complete;
 
     pub use orch_api_base::uploads::register_whole;
@@ -6748,6 +6926,8 @@ pub mod testing {
     pub use orch_api_base::testing::machine_request_handler;
 
     pub use orch_api_base::testing::advance_component_updates;
+
+    pub use orch_api_base::testing::admit_stored_command;
 
     pub use orch_api_base::testing::authorize_machine;
 
@@ -6851,6 +7031,7 @@ pub mod machine_requests {
 pub mod harness_checks {
 
     pub use orch_api_base::harness_checks::check_waiting;
+    pub use orch_api_base::harness_checks::shipped;
 
     pub use orch_api_base::harness_checks::check;
 

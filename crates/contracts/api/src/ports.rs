@@ -264,6 +264,9 @@ pub enum PortTargetState {
 /// One stable environment port and its current observations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PortTarget {
+    /// This reader may personally forward this machine-declared TCP port on loopback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_loopback: bool,
     /// The owning environment.
     pub environment_id: Id,
     /// The target port number.
@@ -408,6 +411,9 @@ pub struct PortOpening {
     pub opened_at: Time,
     /// Its lapse, or null for an ordinary place or host opening.
     pub until: Option<Time>,
+    /// The stored end of refusal coalescing; no new decision is created before it for the same effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_until: Option<Time>,
     /// Its admission and current availability state.
     pub state: PortOpeningState,
     /// The safe state explanation.

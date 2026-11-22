@@ -53,27 +53,16 @@ pub fn is_diagnostic(kind: &str) -> bool {
     kind.starts_with(DIAGNOSTIC_PREFIX)
 }
 
-/// What a machine gives up, and in which order, when its spool is full.
-/// It frees space in this order and in no other way.
+/// Only waiting diagnostics give way under spool pressure. Authoritative events wait for ACK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpoolRelief {
-    /// Diagnostics.
+    /// Lossy diagnostic traffic, with its original capture numbers preserved.
     Diagnostics,
-    /// The growing text of an item whose completed form is spooled as
-    /// well, and carries the whole text.
-    SupersededDeltas,
-    /// The oldest events of the fullest stream; the system is then told
-    /// with a reset.
-    OldestEvents,
 }
 
 impl SpoolRelief {
-    /// The order in which space is freed.
-    pub const ORDER: [SpoolRelief; 3] = [
-        Self::Diagnostics,
-        Self::SupersededDeltas,
-        Self::OldestEvents,
-    ];
+    /// Diagnostics are the only class eligible for shedding.
+    pub const ORDER: [SpoolRelief; 1] = [Self::Diagnostics];
 }
 
 /// The kind of thing a stream reports about.
@@ -268,6 +257,9 @@ impl JsonSchema for Stream {
 /// One event of a stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Ev {
+    /// The physical producer captured before queuing; absent on non-session observations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_opening_id: Option<orch_types::Id>,
     /// The stream.
     #[serde(rename = "s")]
     pub stream: String,
@@ -287,6 +279,9 @@ pub struct Ev {
 /// One event of a batch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EvbEntry {
+    /// The original physical producer, independently retained for each event in a batch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_opening_id: Option<orch_types::Id>,
     /// The event's number in its stream.
     #[serde(rename = "q")]
     pub seq: Seq,
@@ -339,8 +334,19 @@ pub struct Nak {
 pub enum ResetReason {
     /// Its spool is gone or damaged.
     SpoolLost,
-    /// Its spool was full, and the oldest events made room.
-    SpoolOverflow,
+    /// An event was larger than a message of the session may be, and could not be sent.
+    TooLarge,
+}
+
+impl ResetReason {
+    /// The reason as a word, for a log and a count.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SpoolLost => "spool_lost",
+            Self::TooLarge => "too_large",
+        }
+    }
 }
 
 /// A machine's word that a stream goes on from a number, and that
@@ -376,6 +382,7 @@ pub struct Eph {
 impl From<Ev> for EvbEntry {
     fn from(event: Ev) -> Self {
         Self {
+            native_opening_id: event.native_opening_id,
             seq: event.seq,
             at: event.at,
             kind: event.kind,
@@ -795,11 +802,43 @@ mod tests {
         assert_eq!(batch.events.len(), 2);
         round_trip::<Ack>(json!({ "s": stream, "q": 43 }));
         round_trip::<Nak>(json!({ "s": stream, "expected": 44 }));
-        round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "spool_overflow" }));
+        round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "spool_lost" }));
+        round_trip::<Reset>(json!({ "s": stream, "from": 50, "reason": "too_large" }));
         round_trip::<Eph>(json!({
             "s": format!("env:{A}"), "k": "fs.changed", "at": "2026-10-08T17:04:05.000Z",
             "b": { "watch_id": B, "changed": [], "removed": ["tmp/a.txt"] }
         }));
+    }
+
+    #[test]
+    fn individual_and_batched_reports_keep_their_original_opening_on_the_same_stream() {
+        let stream = format!("session:{A}:{B}");
+        round_trip::<Ev>(json!({
+            "s":stream,"q":1,"at":"2026-10-08T17:04:05.000Z","native_opening_id":A,
+            "k":"session.title","b":{"title":"Original conversation"}
+        }));
+        let batch: Evb = round_trip(json!({"s":stream,"e":[
+            {"q":2,"at":"2026-10-08T17:04:05.100Z","native_opening_id":A,
+                "k":"turn.completed","b":{"turn_id":A,"status":"completed","error":null}},
+            {"q":3,"at":"2026-10-08T17:04:05.200Z","native_opening_id":B,
+                "k":"session.title","b":{"title":"Replacement conversation"}}
+        ]}));
+        assert_eq!(batch.stream, stream);
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn a_reason_for_a_reset_is_the_word_a_log_and_a_count_use() {
+        for reason in [ResetReason::SpoolLost, ResetReason::TooLarge] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
     }
 
     #[test]
@@ -858,17 +897,17 @@ mod tests {
     fn a_machine_that_lost_events_the_system_never_saw_says_so_with_a_reset() {
         let mut outbox = Outbox::restored(61, 41);
         assert_eq!(
-            outbox.dropped(49, ResetReason::SpoolOverflow),
+            outbox.dropped(49, ResetReason::SpoolLost),
             Some(Resume::Reset {
                 from: 50,
-                reason: ResetReason::SpoolOverflow
+                reason: ResetReason::SpoolLost
             })
         );
         assert_eq!(
             outbox.on_ready(Some(43)),
             Resume::Reset {
                 from: 50,
-                reason: ResetReason::SpoolOverflow
+                reason: ResetReason::SpoolLost
             },
             "the reason is still known when the session comes back"
         );
@@ -883,7 +922,7 @@ mod tests {
     fn dropping_what_was_acknowledged_needs_no_reset() {
         let mut outbox = Outbox::restored(61, 41);
         outbox.on_ack(50);
-        assert_eq!(outbox.dropped(45, ResetReason::SpoolOverflow), None);
+        assert_eq!(outbox.dropped(45, ResetReason::SpoolLost), None);
     }
 
     #[test]
@@ -1028,6 +1067,6 @@ mod tests {
         assert!(is_diagnostic("raw.frame"));
         assert!(!is_diagnostic("item.delta"));
         assert_eq!(SpoolRelief::ORDER[0], SpoolRelief::Diagnostics);
-        assert_eq!(SpoolRelief::ORDER[2], SpoolRelief::OldestEvents);
+        assert_eq!(SpoolRelief::ORDER.len(), 1);
     }
 }
