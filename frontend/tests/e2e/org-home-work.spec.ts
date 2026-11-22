@@ -54,7 +54,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await expect(approval.getByText('Deploy staging', { exact: true })).toBeVisible();
     await expect(approval.getByText(locale === 'en' ? 'Waiting for your approval' : '等待你批准', { exact: true })).toBeVisible();
     await expect(work.getByText(locale === 'en' ? 'Waiting for your answer' : '等待你回答', { exact: true })).toBeVisible();
-    await expect(work.getByText(locale === 'en' ? 'Blocked: no suitable sandbox' : '已阻塞：没有适用的沙箱', { exact: true })).toBeVisible();
+    await expect(work.getByText(locale === 'en' ? 'Blocked: no suitable environment' : '已阻塞：没有适用的环境', { exact: true })).toBeVisible();
     await expect(work.getByText(TITLE, { exact: true })).toHaveCount(1);
     await expect(work.getByText('Deploy staging', { exact: true })).toHaveCount(1);
     await expect(page.getByTestId('first-steps')).toHaveCount(0);

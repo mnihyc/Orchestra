@@ -100,6 +100,7 @@ async fn the_harness_gets_the_selected_servers_and_only_a_changed_set_reopens_it
         .unwrap();
     world.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".into(),
             descriptor: serde_json::from_value(descriptor.clone()).unwrap(),
@@ -319,6 +320,7 @@ async fn a_manager_restart_refreshes_live_tools_without_another_server_session_i
         .unwrap();
     world.machine.handler.on(CommandKind::AgentStart, move |_| {
         Ok(CommandResult::AgentStart(AgentStartResult {
+            home: None,
             reused: false,
             harness_version: "1.0.0".into(),
             descriptor: serde_json::from_value(descriptor.clone()).unwrap(),

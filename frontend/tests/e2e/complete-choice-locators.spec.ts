@@ -179,29 +179,25 @@ for (const mode of MODES) {
         const report = await response.json() as UsageAnalytics;
         // Thread is offered only at these native depths. The test does not grant itself reports.
         expect(['own', 'reports']).toContain(report.depth);
-        const input = page.getByRole('combobox', { name: words.usage.chart.splitBy, exact: true });
-        await expect(input).toHaveValue(words.usagePerf.choices.splits.model.name);
+        // Group by is a dropdown, as Measure and Interval beside it are.
+        const split = page.getByRole('combobox', { name: words.usage.chart.splitBy, exact: true });
+        await expect(split).toContainText(words.usagePerf.choices.splits.model.name);
+        expect(await split.evaluate((element) => element.tagName)).toBe('BUTTON');
         await expect(page.getByRole('button', { name: words.usagePerf.help, exact: true })).toHaveCount(1);
+        const option = (name: string) => page.getByRole('option', { name, exact: true });
         await noTypingIo(page, observed.calls, async () => {
-          await input.click();
-          const list = page.getByRole('listbox', { name: words.usage.chart.splitBy, exact: true });
+          await split.click();
           // Acme exposes twelve dimensions including Offering and Purpose, plus Thread and None; Performance also exposes Topic.
-          await expect(list.getByRole('option')).toHaveCount(view === 'usage' ? 14 : 15);
-          for (const dimension of ['offering', 'purpose'] as const) {
-            await expect(list.getByRole('option', { name: words.usagePerf.choices.splits[dimension].name, exact: true })).toBeVisible();
-          }
-          await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.thread.name, exact: true })).toBeVisible();
-          await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.model.name, exact: true })).toHaveAttribute('aria-selected', 'true');
-          await input.pressSequentially('program');
-          const programme = list.getByRole('option', { name: words.usagePerf.choices.splits.program.name, exact: true });
-          await expect(programme).toHaveAccessibleDescription(words.usagePerf.choices.splits.program.description);
-          await expect(list.getByRole('option')).toHaveCount(1);
-          await capture(page, info, `${view}-split-${mode.locale}-${mode.theme}-1440`, DESKTOP.width, list);
-          await input.press('Escape');
-          await expect(input).toHaveValue(words.usagePerf.choices.splits.model.name);
+          await expect(page.getByRole('option')).toHaveCount(view === 'usage' ? 14 : 15);
+          for (const dimension of ['offering', 'purpose', 'thread'] as const) await expect(option(words.usagePerf.choices.splits[dimension].name)).toBeVisible();
+          await expect(option(words.usagePerf.choices.splits.model.name)).toHaveAttribute('aria-selected', 'true');
+          await expect(option(words.usagePerf.choices.splits.program.name)).toHaveAccessibleDescription(words.usagePerf.choices.splits.program.description);
+          await capture(page, info, `${view}-split-${mode.locale}-${mode.theme}-1440`, DESKTOP.width, page.getByRole('listbox'));
+          await page.keyboard.press('Escape');
+          await expect(split).toContainText(words.usagePerf.choices.splits.model.name);
         });
         const selected = usageResponse('program');
-        await input.click(); await input.pressSequentially('program'); await input.press('Enter');
+        await split.click(); await option(words.usagePerf.choices.splits.program.name).click();
         const changed = await selected;
         expect(changed.status()).toBe(200);
         const query = new URL(changed.url()).searchParams;
@@ -209,7 +205,7 @@ for (const mode of MODES) {
         expect(query.get('series_by')).toBe('program');
         expect(query.get('from')).toBe(report.from); expect(query.get('to')).toBe(report.to);
         await expect.poll(() => new URL(page.url()).searchParams.get('series')).toBe('program');
-        await expect(input).toHaveValue(words.usagePerf.choices.splits.program.name);
+        await expect(split).toContainText(words.usagePerf.choices.splits.program.name);
         await expect(page.getByRole('button', { name: words.usagePerf.help, exact: true })).toHaveCount(1);
       }
 

@@ -2,13 +2,13 @@
 import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { expect, it, vi } from 'vitest';
 import { applyChanges, findAct } from '@/api/acts';
-import type { Destination } from '@/generated/api-types';
+import type { Destination, DestinationPage } from '@/generated/api-types';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
 function fixture() {
   const world = new World(), person = world.people.get('ada')!;
-  const list = () => structuredClone(world.settings.handle(person, 'GET', `/nodes/${ACME.web}/destinations`, new URLSearchParams(), {})!.body as Destination[]);
+  const list = () => structuredClone((world.settings.handle(person, 'GET', `/nodes/${ACME.web}/destinations`, new URLSearchParams(), {})!.body as DestinationPage).items);
   const make = () => world.settings.handle(person, 'POST', `/nodes/${ACME.web}/destinations`, new URLSearchParams(), {
     channel: 'webhook', name: 'Deploy room', config: { url: 'https://hooks.example/failing/deploy' }, kinds: [], level: 'important',
   })!.body as Destination;
@@ -62,4 +62,25 @@ it('retakes the persisted delivery state after a test receipt without reading an
     expect(cache.getQueryData(key)).toEqual(list());
     expect(read).toHaveBeenCalledTimes(1);
   } finally { stop(); cache.clear(); }
+});
+
+it('applies the accepted destination to a complete visible page and refreshes an incomplete search for that same owner', async () => {
+  const { list, make } = fixture();
+  const cache = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } });
+  const key = ['destinations', ACME.web, 'pages', ''];
+  const filtered = ['destinations', ACME.web, 'pages', 'Deploy'];
+  const page = () => ({pages:[{items:list(), next_cursor:null}],pageParams:[null]});
+  cache.setQueryData(key, page());
+  cache.setQueryData(filtered, {pages:[{items:[],next_cursor:'next'}],pageParams:[null]});
+  const completeRead = vi.fn(() => Promise.resolve(page())), filteredRead = vi.fn(() => Promise.resolve(page()));
+  const stop = new QueryObserver(cache, { queryKey:key, queryFn:completeRead }).subscribe(() => undefined);
+  const stopFilter = new QueryObserver(cache, { queryKey:filtered, queryFn:filteredRead }).subscribe(() => undefined);
+  try {
+    const created = make();
+    await applyChanges(findAct('POST', `/nodes/${ACME.web}/destinations`, {answer:created})!.changes, cache);
+    expect(cache.getQueryData(key)).toEqual(page());
+    expect(completeRead).not.toHaveBeenCalled();
+    expect(cache.getQueryData(filtered)).toEqual(page());
+    expect(filteredRead).toHaveBeenCalledOnce();
+  } finally { stop(); stopFilter(); cache.clear(); }
 });

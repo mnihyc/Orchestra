@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/resource-details.spec.ts tests/e2e/combobox-room.spec.ts tests/e2e/complete-choice-locators.spec.ts tests/e2e/usage-axis.spec.ts tests/e2e/uniform-places.spec.ts tests/e2e/topic-agents.spec.ts tests/e2e/provider-where-options.spec.ts tests/e2e/resource-picker-access.spec.ts tests/e2e/selector-layout.spec.ts tests/e2e/provider-status-layout.spec.ts tests/e2e/summary-box.spec.ts tests/e2e/usage-purpose-services.spec.ts tests/e2e/shared-resource-choices.spec.ts tests/e2e/start-choice-origins.spec.ts --project=chromium

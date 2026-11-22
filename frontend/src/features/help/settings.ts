@@ -41,6 +41,12 @@ export function settingDefinitionForKey(defs: readonly SettingDef[], key: string
   return defs.find((def) => def.key === key) ?? defs.filter((def) => key.startsWith(`${def.key}.`)).sort((one, other) => other.key.length - one.key.length)[0];
 }
 
+/** A control needs the title and description of its own setting, including its enclosing descriptor. */
+export function settingHelpEntry(instance: i18n, key: string): SettingDef | undefined {
+  const def = settingDefinitionForKey(SETTINGS_REGISTRY, key);
+  return def === undefined ? undefined : localizedSetting(def, instance);
+}
+
 /** Search names, explanations, keys and authored keywords; it never searches a person's values. */
 export function findSettingHelp(defs: readonly SettingDef[], query: string): SettingDef[] {
   const words = query.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);

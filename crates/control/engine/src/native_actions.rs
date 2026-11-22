@@ -37,16 +37,6 @@ pub enum NativeError {
     Internal(#[from] EngineError),
 }
 
-struct LocalOnly;
-impl jsonschema::Retrieve for LocalOnly {
-    fn retrieve(
-        &self,
-        _uri: &jsonschema::Uri<String>,
-    ) -> Result<orch_types::Json, Box<dyn std::error::Error + Send + Sync>> {
-        Err("a command's argument schema must resolve its references locally".into())
-    }
-}
-
 /// Resolves the actual currently available selector from the stored session catalogue and
 /// verifies its binding, revision and delivery path. This supplies operation facts, not authority;
 /// the ordinary permission and argument checks still run in `validate_selected`.
@@ -66,6 +56,9 @@ pub async fn selected_action(
     let Some((Some(segment), Some(raw))) = stored else {
         return Err(NativeError::Unavailable);
     };
+    let raw = orch_types::storable::decode_exact(raw)
+        .map_err(DbError::from)
+        .map_err(EngineError::from)?;
     let catalog: NativeCatalog =
         serde_json::from_value(raw).map_err(|_| NativeError::Unavailable)?;
     if catalog.state != NativeCatalogState::Ready {
@@ -124,16 +117,11 @@ pub async fn validate_selected(
     {
         return Err(NativeError::Denied(Box::new(refusal)));
     }
-    let validator = jsonschema::options()
-        .with_retriever(LocalOnly)
-        .with_pattern_options(jsonschema::PatternOptions::regex())
-        .should_validate_formats(true)
-        .build(&action.arguments_schema)
-        .map_err(|_| NativeError::Unavailable)?;
-    if !validator.is_valid(&selection.arguments) {
-        return Err(NativeError::InvalidArguments);
+    match orch_types::schema::validate(&action.arguments_schema, &selection.arguments) {
+        Ok(()) => Ok(action),
+        Err(orch_types::schema::Error::Schema { .. }) => Err(NativeError::Unavailable),
+        Err(orch_types::schema::Error::Value { .. }) => Err(NativeError::InvalidArguments),
     }
-    Ok(action)
 }
 
 /// Each accepted input origin must still pass the same ordinary native-action check.
@@ -178,7 +166,7 @@ pub(crate) async fn hold_invalid(
     match validation {
         Ok(action) => {
             sqlx::query("UPDATE thread_inputs SET native_action_info=$2 WHERE id=$1")
-                .bind(input.id).bind(serde_json::json!({"action_id":action.id,"kind":action.kind,"origin":action.origin}))
+                .bind(input.id).bind(orch_types::storable::encode_exact(&serde_json::json!({"action_id":action.id,"kind":action.kind,"origin":action.origin})))
                 .execute(&mut *unit.conn).await.map_err(DbError::from)?;
             Ok(false)
         }
@@ -318,7 +306,7 @@ impl Engine {
         )
         .bind(thread)
         .bind(segment)
-        .bind(value)
+        .bind(orch_types::storable::encode_exact(&value))
         .execute(&mut *conn)
         .await
         .map_err(DbError::from)?;
@@ -345,6 +333,7 @@ pub(crate) async fn invoked(
     let Some((author, Some(info))) = raw else {
         return Ok(());
     };
+    let info = orch_types::storable::decode_exact(info).map_err(DbError::from)?;
     let already:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_log WHERE action='native_action.invoked' AND node_id=$1 AND details->>'input'=$2)")
         .bind(turn.thread_id).bind(input.to_string()).fetch_one(&mut *unit.conn).await.map_err(DbError::from)?;
     if already {

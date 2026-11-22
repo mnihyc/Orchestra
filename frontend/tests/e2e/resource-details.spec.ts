@@ -1,8 +1,9 @@
 /** Seven ordinary detail pages stay within two screens, with visible tabs and quiet unopened panels. */
 import { expect, type Page, type Request, test } from '@playwright/test';
+import { resourceFixtures } from '../../e2e/layout-fixtures';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { RUNS_ON, id } from '../doubles/fixtures';
+import { ACME, RUNS_ON, id } from '../doubles/fixtures';
 import { scenario, signIn } from './support';
 
 const pages = [
@@ -113,3 +114,57 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect(page).toHaveURL(/tab=policy/);
   });
 }
+
+for (const [width, height] of [[400, 860], [1440, 900]] as const) {
+  test(`resource tabs start in the top quarter of the main area at ${width} by ${height}`, async ({ page }) => {
+    test.setTimeout(150_000);
+    await scenario();
+    await page.setViewportSize({ width, height });
+    await signIn(page);
+    await resourceFixtures(page);
+    // A topic, where Home and Sign in land, opens with the same one-row header as the resources.
+    for (const [kind, path] of [...pages, ['provider', `/resources/providers/${RUNS_ON.openAiKey}`], ['skill', '/resources/skills'], ['topic', `/topic/${ACME.fixLogin}`]] as const) {
+      await page.goto(path);
+      if (kind === 'skill') await page.getByRole('link', { name: 'pdf-tools', exact: true }).first().click();
+      const main = page.locator('[data-main-area]:visible').first();
+      const tabs = main.getByRole('tablist').filter({ has: page.getByRole('tab', { name: 'Overview', exact: true }) }).first();
+      await expect(tabs).toBeVisible();
+      const geometry = await tabs.evaluate((element) => {
+        const pane = element.closest('[data-main-area]')!.getBoundingClientRect();
+        return { top: element.getBoundingClientRect().top - pane.top, height: pane.height };
+      });
+      expect(geometry.height).toBeGreaterThan(0);
+      expect(geometry.top, kind).toBeGreaterThanOrEqual(0);
+      expect(geometry.top, kind).toBeLessThan(geometry.height / 4);
+      // The name has the room first: the state and the acts beside it give way (to a second row) before it is cut.
+      const name = main.getByRole('heading', { level: 1 }).first();
+      const cut = await name.evaluate((element) => ({ text: element.textContent, over: element.scrollWidth - element.clientWidth, row: element.parentElement?.closest('header')?.clientWidth ?? 0 }));
+      expect(cut.over, `${kind}: "${cut.text}" is shown whole in a ${String(cut.row)} px header`).toBeLessThanOrEqual(1);
+    }
+  });
+}
+
+test('a compact header gives the name its room first at 400, the state and acts moving under it', async ({ page }) => {
+  await scenario();
+  await page.setViewportSize({ width: 400, height: 860 });
+  await signIn(page);
+  await resourceFixtures(page);
+  // A name that fits the row by itself, but was cut ("Lab workspa…") beside Running, Edit and Details.
+  await page.route((url) => url.pathname === `/api/v1/environments/${RUNS_ON.workspace}/sync`, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as { environment: Record<string, unknown> };
+    await route.fulfill({ response, json: { ...body, environment: { ...body.environment, name: 'Lab workspace on ada-laptop' } } });
+  });
+  await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
+  const main = page.locator('[data-main-area]:visible').first();
+  const name = main.getByRole('heading', { level: 1, name: 'Lab workspace on ada-laptop' });
+  await expect(name).toBeVisible();
+  expect(await name.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+  // The state and the primary act are still there, whole, and the tabs stay in the top quarter.
+  const header = main.locator('header').first();
+  await expect(header.getByRole('button', { name: english.common.details, exact: true })).toBeVisible();
+  const tabs = main.getByRole('tablist').filter({ has: page.getByRole('tab', { name: 'Overview', exact: true }) }).first();
+  const geometry = await tabs.evaluate((element) => ({ top: element.getBoundingClientRect().top - element.closest('[data-main-area]')!.getBoundingClientRect().top, height: element.closest('[data-main-area]')!.getBoundingClientRect().height }));
+  expect(geometry.top).toBeLessThan(geometry.height / 4);
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
