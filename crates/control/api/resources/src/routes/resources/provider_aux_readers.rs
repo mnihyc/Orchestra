@@ -29,8 +29,6 @@ use crate::routes::access::page::NameSources;
 
 use crate::routes::access::page::same;
 
-use crate::routes::nodes::invalid;
-
 use crate::routes::nodes::view as node_view;
 
 use orch_access_contract::decisions::ObjectRef;
@@ -43,7 +41,7 @@ use orch_access_contract::permissions::ObjectKind;
 
 use orch_access_contract::permissions::Permission;
 
-use orch_api_contract::common::PageQuery;
+use orch_api_contract::common::CollectionQuery;
 
 use orch_api_contract::nodes::NodeKind;
 
@@ -109,7 +107,7 @@ struct Settings {
 struct Threads {
     rows: Vec<ThreadRow>,
     hidden: i64,
-    next_cursor: Option<String>,
+    query: CollectionQuery,
     names: NameBounds,
 }
 
@@ -241,7 +239,7 @@ pub(super) fn threads<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    query: PageQuery,
+    query: CollectionQuery,
     (): (),
 ) -> OperationFuture<'a> {
     Box::pin(async move {
@@ -286,24 +284,7 @@ pub(super) fn threads<'a>(
                 visible.push((row, target));
             }
         }
-        let after = query
-            .cursor
-            .as_deref()
-            .map(|cursor| {
-                cursor
-                    .parse::<Id>()
-                    .map_err(|_| invalid("cursor", "is not a cursor this list gave"))
-            })
-            .transpose()?;
-        let limit = usize::try_from(query.limit()).unwrap_or(usize::MAX);
-        let mut rest = visible
-            .into_iter()
-            .filter(|(row, _)| after.is_none_or(|after| row.thread_id > after));
-        let page: Vec<_> = rest.by_ref().take(limit).collect();
-        let next_cursor = rest
-            .next()
-            .and_then(|_| page.last().map(|(row, _)| row.thread_id.to_string()));
-        let (rows, targets): (Vec<ThreadRow>, Vec<KeyResolvedTarget>) = page.into_iter().unzip();
+        let (rows, targets): (Vec<ThreadRow>, Vec<KeyResolvedTarget>) = visible.into_iter().unzip();
         if targets.is_empty() {
             plan.bind_empty(1)?;
         } else {
@@ -320,7 +301,7 @@ pub(super) fn threads<'a>(
         Ok(plan.with_data(Threads {
             rows,
             hidden,
-            next_cursor,
+            query,
             names,
         }))
     })
@@ -329,7 +310,7 @@ pub(super) fn threads<'a>(
 /// Same ordinary visible-thread projection; only admitted results enter the existing page.
 pub(super) async fn threads_get(
     ctx: Ctx,
-    _query: PageQuery,
+    _query: CollectionQuery,
     (): (),
 ) -> ApiResult<ProviderThreadListReply> {
     crate::key_operations::snapshot_read::run(ctx, threads_snapshot).await
@@ -392,9 +373,25 @@ async fn threads_snapshot(ctx: Ctx) -> ApiResult<ProviderThreadListReply> {
         })
         .collect::<ApiResult<Vec<_>>>()?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(ProviderThreadListReply {
+    let page = crate::collection::snapshot(
+        &prepared.query,
+        &format!("provider-threads:{}:{}", principal.user(), ctx.id("id")?),
         items,
+        |row| row.thread.id,
+        |row| {
+            let names = [&row.thread, &row.topic, &row.org]
+                .into_iter()
+                .filter(|node| !node.redacted)
+                .filter_map(|node| node.name.as_deref())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{names} {} {}", row.owner.display_name, row.owner.username)
+        },
+        false,
+    )?;
+    Ok(ProviderThreadListReply {
+        items: page.items,
         hidden: prepared.hidden,
-        next_cursor: prepared.next_cursor.clone(),
+        next_cursor: page.next_cursor,
     })
 }

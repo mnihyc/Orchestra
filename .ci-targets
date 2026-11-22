@@ -1,0 +1,23 @@
+fmt
+clippy
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test bound
+test -p orch-api-core --test everything_scale -- resource_lists restoring_the_team_members_session --nocapture --test-threads=1
+test -p orch-api-core --test everything_resources
+test -p orch-api-core --test resource_groups
+test -p orch-api-core --test org_contents
+test -p orch-api-core --test chats_resource_homes
+test -p orch-api-core --test chats_resource_visibility
+test -p orch-api-core --test admin_mode
+test -p orch-api-core --test native_resource_family_scopes
+test -p orch-api-core --test everything_operation_scopes
+test -p orch-api-core --test search_names
+test -p orch-api-core --test access_everything
+test -p orch-api-core --test nodes_lists
+test -p orch-api-core --test hierarchy_native_scopes
+test -p orch-api-core --test hidden_rows
+test -p orch-api-core --test folders
+test -p orch-api-core --test node_presentation
+test -p orch-api-core --test org_home_work
+test -p orch-api-core --test screen_openings
+test -p orch-api-core --test realtime_feeds
