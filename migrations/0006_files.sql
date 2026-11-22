@@ -4,14 +4,23 @@ CREATE TABLE blob_uploads (
     hash bytea NOT NULL,
     size bigint NOT NULL,
     received bigint DEFAULT 0 NOT NULL,
+    received_ranges int8multirange DEFAULT '{}' NOT NULL,
+    transfer_policy jsonb NOT NULL DEFAULT '{}',
     machine_id uuid,
     user_id uuid,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     command_id uuid,
+    idle_retention_secs bigint,
+    retention_default boolean,
+    expires_at timestamp with time zone,
     CONSTRAINT blob_uploads_pkey PRIMARY KEY (hash),
     CONSTRAINT blob_uploads_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE INDEX blob_uploads_expiry_idx ON blob_uploads USING btree (expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE INDEX blob_uploads_unreported_idle_idx ON blob_uploads USING btree (updated_at) WHERE expires_at IS NULL;
 
 CREATE INDEX blob_uploads_machine_command_idx ON blob_uploads USING btree (machine_id, command_id, hash) WHERE (command_id IS NOT NULL);
 
@@ -20,9 +29,12 @@ CREATE INDEX blob_uploads_machine_updated_idx ON blob_uploads USING btree (machi
 CREATE TABLE blobs (
     hash bytea NOT NULL,
     size bigint NOT NULL,
+    text_characters bigint,
+    text_ascii_characters bigint,
     stored_at timestamp with time zone DEFAULT now() NOT NULL,
     last_access_at timestamp with time zone DEFAULT now() NOT NULL,
     pin_count integer DEFAULT 0 NOT NULL,
+    relay_only boolean DEFAULT true NOT NULL,
     CONSTRAINT blobs_pkey PRIMARY KEY (hash)
 );
 
@@ -46,6 +58,7 @@ CREATE INDEX completed_uploads_hash_idx ON completed_uploads USING btree (hash);
 CREATE INDEX completed_uploads_owner_recent_idx ON completed_uploads USING btree (user_id, created_at DESC, id DESC);
 
 CREATE TABLE file_cache (
+    minimum_reach text DEFAULT 'roots' NOT NULL CHECK (minimum_reach IN ('roots','machine')),
     environment_id uuid NOT NULL,
     path text NOT NULL,
     size bigint NOT NULL,
@@ -69,6 +82,7 @@ CREATE TABLE snapshots (
     tree_ref text,
     repository_head text,
     unavailable_reason text,
+    recording_indexing jsonb,
     expires_at timestamp with time zone,
     label text DEFAULT ''::text NOT NULL,
     selection jsonb NOT NULL,
@@ -90,6 +104,7 @@ CREATE TABLE snapshots (
 );
 
 CREATE INDEX snapshots_environment_exports_idx ON snapshots (environment_id, created_at DESC, id DESC) WHERE thread_id IS NULL;
+CREATE INDEX snapshots_label_search_idx ON snapshots USING gin (label gin_trgm_ops);
 
 CREATE TABLE upload_sessions (
     id uuid NOT NULL,
@@ -97,15 +112,40 @@ CREATE TABLE upload_sessions (
     name text NOT NULL,
     media_type text,
     size bigint NOT NULL,
+    idle_secs bigint NOT NULL CHECK (idle_secs > 0),
     received bigint DEFAULT 0 NOT NULL,
+    received_ranges int8multirange DEFAULT '{}' NOT NULL,
+    transfer_policy jsonb NOT NULL DEFAULT '{}',
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     cancelled_at timestamp with time zone,
     completed_at timestamp with time zone,
+    completion jsonb,
     CONSTRAINT upload_sessions_pkey PRIMARY KEY (id),
     CONSTRAINT upload_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+-- A target is immutable even when its logical environment is moved or removed.
+-- Native cleanup still needs its original machine/root until the upload session ends.
+CREATE TABLE upload_session_targets (
+    session_id uuid PRIMARY KEY REFERENCES upload_sessions(id) ON DELETE CASCADE,
+    environment_id uuid NOT NULL,
+    machine_id uuid,
+    generation integer NOT NULL,
+    workspace_root text NOT NULL,
+    path text NOT NULL,
+    thread_id uuid,
+    relayed boolean NOT NULL,
+    receiving_command uuid,
+    verifying_command uuid,
+    aborting_command uuid,
+    verified_hash bytea,
+    written_job uuid,
+    CHECK (verified_hash IS NULL OR octet_length(verified_hash) = 32),
+    CHECK (NOT relayed OR machine_id IS NOT NULL)
+);
+
 
 CREATE TABLE snapshot_blob_refs (
     snapshot_id uuid NOT NULL,
@@ -114,3 +154,32 @@ CREATE TABLE snapshot_blob_refs (
     CONSTRAINT snapshot_blob_refs_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash),
     CONSTRAINT snapshot_blob_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
 );
+
+-- Personal upload names are selected before custody and reference pages are projected.
+CREATE INDEX completed_uploads_name_search_idx ON completed_uploads USING gin (name gin_trgm_ops) WHERE name IS NOT NULL;
+CREATE INDEX upload_sessions_name_search_idx ON upload_sessions USING gin (name gin_trgm_ops) WHERE cancelled_at IS NULL AND completed_at IS NULL;
+
+-- Content that the machine of a transfer uploaded, or was told the system holds, for a command of a job: held for
+-- the job until it ends, so that another transfer's release of the same content does not remove what this one needs.
+
+CREATE TABLE command_transfers (
+    command_id uuid PRIMARY KEY,
+    owner_process uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    released_at timestamp with time zone
+);
+
+CREATE TABLE command_blob_pins (
+    command_id uuid NOT NULL,
+    blob bytea NOT NULL,
+    job_id uuid,
+    pinned_at timestamp with time zone NOT NULL,
+    CONSTRAINT command_blob_pins_pkey PRIMARY KEY (command_id, blob),
+    CONSTRAINT command_blob_pins_blob_fkey FOREIGN KEY (blob) REFERENCES blobs(hash) ON DELETE CASCADE
+);
+
+CREATE INDEX command_blob_pins_job_idx ON command_blob_pins USING btree (job_id);
+CREATE INDEX command_blob_pins_at_idx ON command_blob_pins USING btree (pinned_at);
+
+COMMENT ON TABLE command_blob_pins IS 'One pin of blobs.pin_count for each blob a job''s command held for the job; released with the job''s end.';

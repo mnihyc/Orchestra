@@ -3,7 +3,7 @@ import { expect, type Locator, type Page, test, type TestInfo } from '@playwrigh
 import { askConversation, ASK_ID } from '../unit/ask-fixtures';
 import { fixture, language } from './ask-support';
 import { begin, MAIN } from './inspector-support';
-import { ACME, DOUBLE, emit, PEOPLE, scenario } from './support';
+import { ACME, DOUBLE, emit, PEOPLE, readsOneByOne, scenario } from './support';
 
 async function photograph(page: Page, info: TestInfo, name: string) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -16,6 +16,7 @@ test('Ask opened while the initial frame loads survives frame admission', async 
   await page.setViewportSize({ width: 400, height: 900 });
   let release: () => void = () => undefined;
   const ready = new Promise<void>((resolve) => { release = resolve; });
+  await readsOneByOne(page);
   await page.route('**/api/v1/me/bootstrap', async (route) => { await ready; await route.fallback(); });
   const opening = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/v1/me/bootstrap');
   try {
