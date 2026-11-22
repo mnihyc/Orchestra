@@ -1,4 +1,5 @@
 /** Agents available to a new thread here, and its current defaults, from the same authorized answer as Start. */
+import { PathLink } from '@/shell/TrailLink';
 import { Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -44,7 +45,7 @@ export function TopicAgents({ topic }: { topic: Topic }) {
   const effort = defaults.effort ?? model?.parameters.default_effort ?? null;
   const effortName = effort === null || !efforts.includes(effort) ? null : offeredChoice(t, 'effort', effort)?.name ?? t('changeCompact.otherEffort');
   const incomplete = provider === undefined || agent === undefined || model === undefined;
-  const settings = <Button size="sm" variant="ghost" asChild><a href={`/topic/${topic.id}?tab=settings&section=defaults`}>{t('topicAgents.defaults')}</a></Button>;
+  const settings = <Button size="sm" variant="ghost" asChild><PathLink href={`/topic/${topic.id}?tab=settings&section=defaults`}>{t('topicAgents.defaults')}</PathLink></Button>;
   if (agents.length === 0) return <EmptyState compact icon={<Bot aria-hidden />} title={t('topicAgents.empty')} action={settings} />;
 
   return <div data-topic-agents className="flex min-w-0 flex-col gap-4">
@@ -52,7 +53,7 @@ export function TopicAgents({ topic }: { topic: Topic }) {
       {agents.map((entry) => <li key={entry.id} className="flex min-w-0 items-start gap-3 px-3 py-2">
         <span className="flex h-6 shrink-0 items-center"><Bot aria-hidden className="size-4 text-text-muted" /></span>
         <span className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 gap-y-1">
-          <a href={`/resources/agents/${entry.id}`} className="focus-inset min-w-0 max-w-full rounded-sm font-medium wrap-anywhere hover:underline">{entry.name}</a>
+          <PathLink href={`/resources/agents/${entry.id}`} className="focus-inset min-w-0 max-w-full rounded-sm font-medium wrap-anywhere hover:underline">{entry.name}</PathLink>
           {agent?.agent.id === entry.id && <span className="text-sm text-text-muted">{t('topicAgents.defaultAgent')}</span>}
         </span>
       </li>)}
@@ -61,7 +62,7 @@ export function TopicAgents({ topic }: { topic: Topic }) {
       <span className="text-text-muted">{t('topicAgents.providers')}</span>
       <ul className="flex min-w-0 flex-1 flex-wrap items-start gap-x-4 gap-y-2">
         {providers.map((entry) => <li key={entry.provider.id} className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <a href={`/resources/providers/${entry.provider.id}`} className="focus-inset rounded-sm wrap-anywhere hover:underline">{entry.provider.name}</a>
+          <PathLink href={`/resources/providers/${entry.provider.id}`} className="focus-inset rounded-sm wrap-anywhere hover:underline">{entry.provider.name}</PathLink>
           {provider?.provider.id === entry.provider.id && <span className="text-text-muted">{t('topicAgents.defaultProvider')}</span>}
         </li>)}
       </ul>

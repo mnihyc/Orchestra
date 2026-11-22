@@ -2,26 +2,48 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { ApiError } from '@/api/client';
+import { ApiError, client } from '@/api/client';
+import type * as EverythingApi from '@/api/everything';
+import type * as PoolsApi from '@/api/pools';
+import type { EverythingRowPage, Pool } from '@/generated/api-types';
+import { inventoryRow } from '../doubles/everything-row';
+import { deferred } from './deferred';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
 import { i18n, setLocale } from '@/i18n';
 import { useSelectedOrg } from '@/shell/org';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
 import { detailHost, detailTemplate } from './resource-detail-fixtures';
+
+skipOverflowFallback();
 
 const server = vi.hoisted(() => ({
   create: vi.fn<(body: Record<string, unknown>, key: string) => Promise<{ id: string; name: string }>>(),
   navigate: vi.fn(), close: vi.fn(),
-  withoutHosts: vi.fn<() => boolean>(),
+  withoutHosts: vi.fn<() => boolean | Promise<boolean>>(),
+  poolChoices: vi.fn<() => Promise<EverythingRowPage>>(),
+  pool: vi.fn<(id: string) => Promise<Pool>>(),
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => server.navigate, useLocation: () => ({ pathname: '/resources/environments', search: {}, searchStr: '' }) }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/environments/DataSources', () => ({
   DataSourcesEditor: () => null,
   madeDataSources: () => ({ workspace: { kind: 'made_by_orch' }, home: { kind: 'made_by_orch' } }),
   borrowsData: () => false,
 }));
+vi.mock('@/api/everything', async (original) => {
+  const actual = await original<typeof EverythingApi>();
+  return { ...actual, everythingQuery: (...args: Parameters<typeof actual.everythingQuery>) => ({
+    ...actual.everythingQuery(...args), queryFn: server.poolChoices,
+  }) };
+});
+vi.mock('@/api/pools', async (original) => {
+  const actual = await original<typeof PoolsApi>();
+  return { ...actual, poolQuery: (...args: Parameters<typeof actual.poolQuery>) => ({
+    ...actual.poolQuery(...args), queryFn: () => server.pool(args[0]),
+  }) };
+});
 vi.mock('@/api/environments', async (original) => ({ ...await original<object>(), createEnvironment: server.create }));
 vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(),
   orgsQuery: { queryKey: ['make-test-orgs'], queryFn: () => Promise.resolve([
@@ -36,17 +58,18 @@ vi.mock('@/api/resources', async (original) => ({ ...await original<object>(),
     { ...detailTemplate, id: 'template-two', name: 'Rust', driver: 'docker', enabled: true, description: '', access: { ...detailTemplate.access, permissions: [...detailTemplate.access.permissions, 'template.use'] } },
     { ...detailTemplate, id: 'disabled-template', name: 'Disabled recipe', driver: 'docker', enabled: false, description: '' },
   ]) }),
-  hostsQuery: () => ({ queryKey: ['make-test-hosts'], queryFn: () => Promise.resolve(server.withoutHosts() ? [] : [
+  hostsQuery: () => ({ queryKey: ['make-test-hosts'], queryFn: async () => await server.withoutHosts() ? [] : [
     { ...detailHost, id: 'host-one', name: 'Docker one', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-one' }, address: 'one', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
     { ...detailHost, id: 'host-two', name: 'Docker two', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-two' }, address: 'two', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
     { ...detailHost, id: 'read-only-host', name: 'Read-only host', access: { ...detailHost.access, permissions: ['host.view'] } },
-  ]) }),
+  ] }),
 }));
 
 beforeEach(async () => {
   await setLocale('en');
   vi.clearAllMocks();
   server.withoutHosts.mockReturnValue(false);
+  server.poolChoices.mockResolvedValue({ items: [], next_cursor: null });
   server.create.mockReset().mockResolvedValue({ id: 'made', name: 'New work' });
   useSelectedOrg.setState({ orgId: 'beta' });
 });
@@ -127,7 +150,44 @@ it('preserves the template and host selected by Add environment', async () => {
   expect(screen.getByRole('combobox', { name: 'Template' })).toHaveValue('Rust');
   expect(screen.getByRole('combobox', { name: 'Host' })).toHaveValue('Docker two');
   await user.click(screen.getByRole('button', { name: 'Add environment' }));
-  await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ template_id: 'template-two', host_id: 'host-two' }), expect.any(String)));
+  await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ template_id: 'template-two', host_id: { type: 'single', resource: { kind: 'host', id: 'host-two' } } }), expect.any(String)));
+});
+
+it('creates through a shared host pool while the individual host list is unavailable', async () => {
+  const pool: Pool = {
+    id: 'shared-hosts', kind: 'host', name: 'Shared build hosts', target: { type: 'pool', kind: 'host', id: 'shared-hosts' },
+    enabled: true, policy: { type: 'ordered' }, lend_members: true, revision: 1,
+    address: '', description: '', owner: null, home: null, settings: [],
+    grouping: { home: null, home_path: [], origin_machine: null, availability: [] },
+    access: { permissions: ['pool.view', 'pool.use'], administers: false, through: [] },
+  };
+  const hosts = deferred<boolean>();
+  server.withoutHosts.mockReturnValue(hosts.promise);
+  server.poolChoices.mockResolvedValue({
+    items: [inventoryRow({ id: pool.id, kind: 'pool', name: pool.name, resource: { kind: 'pool', value: pool } })],
+    next_cursor: null,
+  });
+  server.pool.mockResolvedValue(pool);
+  const before = client.session.getState();
+  client.session.setState({ status: 'signed_in', userId: 'pool-member' });
+  try {
+    const user = userEvent.setup();
+    show(<MakeEnvironmentDialog home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
+    const field = await screen.findByRole('combobox', { name: i18n.t('environments.make.host') });
+    expect(server.poolChoices).not.toHaveBeenCalled();
+    await user.click(field);
+    await user.click(await screen.findByRole('option', { name: pool.name }));
+    hosts.reject(new Error('The individual hosts could not be listed.'));
+    await screen.findByRole('alert');
+    expect(field).toHaveDisplayValue(pool.name);
+    expect(screen.queryByText(i18n.t('environments.make.noHost'))).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
+    await waitFor(() => expect(server.create).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ template_id: 'template-one', host_id: pool.target }), expect.any(String),
+    ));
+  } finally {
+    client.session.setState(before);
+  }
 });
 
 it('puts a refused home at Belongs to and scrolls and focuses the invalid control', async () => {
@@ -185,4 +245,12 @@ for (const locale of ['en', 'zh-CN'] as const) it(`retains an unavailable preset
   expect(within(host).getByText(i18n.t('resourceChoices.hostUse'))).toBeVisible();
   await user.click(host);
   expect(server.create).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names the new resource before its other setup choices in %s', async (locale) => {
+  await setLocale(locale);
+  show(<MakeEnvironmentDialog onClose={server.close} />);
+  const name = await screen.findByRole('textbox', { name: i18n.t('environments.make.name') });
+  expect(screen.getByRole('dialog').querySelector('input:not([type="hidden"]),textarea,[role="combobox"],select')).toBe(name);
 });

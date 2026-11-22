@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises';
 import type { Environment, EnvironmentUpdatePlan, HarnessBuild, Job, ProgramDetail, ResolvedSetting } from '../../src/generated/api-types';
 import { SETTINGS_REGISTRY } from '../../src/generated/settings-registry';
 import { RUNS_ON } from '../doubles/fixtures';
-import { ACME, scenario } from './support';
+import { ACME, readsOneByOne, scenario } from './support';
 import { signInForManagement } from './admin-mode-support';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 
@@ -24,6 +24,7 @@ function build(version: string): HarnessBuild {
 
 async function fixture(page: Page) {
   // Reopen the page through the session cookie and use the same current bearer as its bootstrap reader.
+  await readsOneByOne(page);
   const bootstrap = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/bootstrap' && response.ok());
   await page.reload();
   const headers = await (await bootstrap).request().allHeaders();

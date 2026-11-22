@@ -46,6 +46,8 @@ use orch_realtime_contract::feeds::Feed;
 
 use orch_realtime_contract::frames::DeltaFrame;
 
+use orch_realtime_contract::frames::PongFrame;
+
 use orch_realtime_contract::frames::ResyncFrame;
 
 use orch_realtime_contract::frames::ServerFrame;
@@ -135,6 +137,7 @@ pub struct PendingFrame {
     pub(super) tag: Option<Tag>,
     pub(super) event: bool,
     pub(super) resource: bool,
+    pub(super) heartbeat: bool,
 }
 
 #[derive(Debug)]
@@ -261,6 +264,7 @@ impl Queue {
 pub struct Outbox {
     queue: Mutex<Queue>,
     wake: Notify,
+    heartbeat: Notify,
     clock: Arc<dyn Clock>,
 }
 
@@ -343,6 +347,7 @@ impl Outbox {
                 closing: None,
             }),
             wake: Notify::new(),
+            heartbeat: Notify::new(),
             clock,
         }
     }
@@ -512,17 +517,20 @@ impl Outbox {
         self.after_push(&mut queue);
     }
 
-    /// Queues a frame that leaves before everything that waits, such as the
-    /// answer to a ping, whose delay would be taken for the line's.
-    pub fn push_urgent(&self, text: String) {
+    /// Only a heartbeat may bypass projection guards while a data frame waits on the database.
+    pub(super) fn push_pong(&self, pong: PongFrame) {
+        let Ok(text) = ServerFrame::Pong(pong).encode() else {
+            return;
+        };
         let mut queue = lock(&self.queue);
         if queue.closing.is_some() {
             return;
         }
         queue.bytes = queue.bytes.saturating_add(bytes_of(&text));
         queue.urgent.push_back(text);
+        self.after_push(&mut queue);
         drop(queue);
-        self.wake.notify_one();
+        self.heartbeat.notify_one();
     }
 
     /// Takes everything that waits for one subscription out of the queue: it
@@ -598,6 +606,7 @@ impl Outbox {
                     CloseCode::NotKeepingUp.code(),
                     "the connection did not keep up",
                 );
+                self.heartbeat.notify_one();
             }
         }
         action
@@ -673,6 +682,7 @@ impl Outbox {
         Self::close_in(&mut queue, code, reason);
         drop(queue);
         self.wake.notify_one();
+        self.heartbeat.notify_one();
     }
 
     /// Why and with what code the connection is to be closed, where it is.
@@ -703,7 +713,7 @@ impl Outbox {
             let size = bytes_of(&text);
             queue.bytes = queue.bytes.saturating_sub(size);
             queue.in_flight = size;
-            let frame = Self::track_frame(&mut queue, tracked, None, false, false);
+            let frame = Self::track_frame(&mut queue, tracked, None, false, false, true);
             return Some((Next::Frame(text), frame));
         }
         while let Some(entry) = queue.entries.pop_front() {
@@ -747,7 +757,7 @@ impl Outbox {
                 }
             };
             queue.in_flight = bytes_of(&text);
-            let frame = Self::track_frame(&mut queue, tracked, tag, event, resource);
+            let frame = Self::track_frame(&mut queue, tracked, tag, event, resource, false);
             return Some((Next::Frame(text), frame));
         }
         None
@@ -759,6 +769,7 @@ impl Outbox {
         tag: Option<Tag>,
         event: bool,
         resource: bool,
+        heartbeat: bool,
     ) -> Option<PendingFrame> {
         if !tracked {
             queue.flight = None;
@@ -770,6 +781,7 @@ impl Outbox {
             tag,
             event,
             resource,
+            heartbeat,
         };
         queue.flight = Some(Flight {
             frame,
@@ -803,6 +815,39 @@ impl Outbox {
             }
             notified.await;
         }
+    }
+
+    /// A separate wake lets the writer retain a cancellable data flight during a slow check.
+    pub(super) async fn heartbeat_available(&self) {
+        loop {
+            let notified = self.heartbeat.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let queue = lock(&self.queue);
+                if queue.closing.is_some() || !queue.urgent.is_empty() {
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// Called after socket capacity, without replacing the waiting data frame's cancellation
+    /// ticket or accounting. Heartbeats contain only the client's number, never projected data.
+    pub(super) fn accept_heartbeat<E>(
+        &self,
+        send: impl FnOnce(String) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let mut queue = lock(&self.queue);
+        if queue.closing.is_some() || queue.urgent.is_empty() {
+            return Ok(false);
+        }
+        let Some(text) = queue.urgent.pop_front() else {
+            return Ok(false);
+        };
+        queue.bytes = queue.bytes.saturating_sub(bytes_of(&text));
+        send(text)
     }
 
     /// Called only after the real sink reported capacity. Existing purge/reset can still cancel it.
@@ -1327,10 +1372,34 @@ pub mod tests {
         let clock = clock();
         let outbox = outbox(&clock, 1 << 20, 30);
         outbox.push_sync(tag(1), row(1), &[]);
-        outbox.push_urgent("{\"op\":\"pong\",\"n\":3}".to_owned());
+        outbox.push_pong(PongFrame { n: 3 });
         let taken = drain(&outbox);
         assert_eq!(taken[0]["op"], "pong");
         assert_eq!(taken[1]["op"], "sync");
+
+        outbox.push_sync(tag(1), row(2), &[]);
+        let (_, pending) = outbox.take_pending().unwrap();
+        let pending = pending.unwrap();
+        let in_flight = outbox.waiting_bytes();
+        outbox.push_pong(PongFrame { n: 4 });
+        assert!(
+            outbox
+                .accept_heartbeat::<std::convert::Infallible>(|text| {
+                    let pong: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_eq!(pong["n"], 4);
+                    Ok(true)
+                })
+                .unwrap()
+        );
+        assert_eq!(outbox.waiting_bytes(), in_flight);
+        outbox.purge(1);
+        assert!(
+            !outbox
+                .accept::<std::convert::Infallible>(pending, || {
+                    panic!("a heartbeat must not replace a data frame's cancellation ticket")
+                })
+                .unwrap()
+        );
     }
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
