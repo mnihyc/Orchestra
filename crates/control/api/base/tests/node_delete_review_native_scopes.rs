@@ -12,7 +12,7 @@ use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::documents::{NodeDocumentCreate, NodeDocumentCreateBody};
 use orch_api_contract::ownership::{NodeDelete, NodeDeleteBody, NodeDeletePreview};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_authz::CapturedOperation;
 use orch_db::queries::identity;
@@ -31,8 +31,8 @@ fn rule(operation: &str, action: &str, kind: &str, id: Id) -> Json {
 async fn key(world: &World, actor: Id, rules: Vec<Json>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
