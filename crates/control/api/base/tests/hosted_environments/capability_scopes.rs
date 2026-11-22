@@ -51,11 +51,12 @@ fn receipt(s: &Scene) -> Json {
 }
 
 async fn legacy_ports_key(s: &Scene) -> String {
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = orch_api_core::middleware::authentication::new_api_token(issued_key_id);
     identity::create_api_token(
         &mut *s.world.conn().await,
         &identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: s.team.c.admin.id(),
             name: "Native ports-only fixture",
             token_hash: &token_hash(&secret),

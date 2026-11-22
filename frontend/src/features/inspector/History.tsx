@@ -4,12 +4,15 @@ import { useInfiniteQuery } from '@tanstack/react-query';
 import { History as HistoryIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { usePickerCursorRestart } from '@/lib/pickerPages';
 import { historyQuery } from '@/api/access';
 import { ApiError } from '@/api/client';
 import { openAccess } from '@/features/access/AccessDialog';
 import { openFile } from '@/features/files/FileTabs';
 import { PlaceLink } from '@/features/navigation/places';
-import { kindOf } from '@/features/trace/catalogue';
+import { AUDIT_KINDS } from '@/features/trace/params';
 import { PersonLocator } from '@/features/people/PersonLocator';
 import type { AuditKind, Thread, UserRef } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
@@ -27,13 +30,17 @@ function History({ thread }: { thread: Thread }) {
   const [depth, setDepth] = useListChoice<'summary' | 'every'>('inspector-history', 'depth', 'summary');
   const [kind, setKind] = useListChoice<AuditKind | ''>('inspector-history', 'kind', '');
   const [person, setPerson] = useListChoice<UserRef | null>('inspector-history', 'person', null);
-  const query = useInfiniteQuery(historyQuery({ kind: 'thread', id: thread.id }, depth, person?.id));
+  const search = useCollectionSearch(`history:${thread.id}`);
+  const source = historyQuery({ kind: 'thread', id: thread.id }, depth, person?.id, kind === '' ? undefined : kind, search.q);
+  const query = useInfiniteQuery(source);
+  usePickerCursorRestart(query, source.queryKey);
   if (query.error instanceof ApiError && (query.error.status === 403 || query.error.status === 404)) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const lines = query.data?.pages.flatMap((page) => page.items) ?? [];
-  const actions = [...new Set([...(kind === '' ? [] : [kind]), ...lines.flatMap((line) => { const kind = kindOf(line.action); return kind === undefined ? [] : [kind]; })])];
-  const shown = lines.filter((line) => kind === '' || kindOf(line.action) === kind);
+  const actions = AUDIT_KINDS;
+  const shown = lines;
   return <div className="flex h-full min-h-0 flex-col" data-testid="thread-history">
     <div className="flex flex-wrap gap-2 border-b border-border p-3">
+      <CollectionSearch name={t('threadViews.history.title')} {...search} />
       <SegmentedControl label={t('places.activity.depth')} value={depth} onValueChange={setDepth} segments={[{ value: 'summary', ...choiceOption(t, 'activityDepth.summary') }, { value: 'every', ...choiceOption(t, 'activityDepth.every') }]} />
       <Select<AuditKind | ''> label={t('threadViews.history.kind')} value={kind} onValueChange={setKind} options={[{ value: '', ...choiceOption(t, 'statusFilter.any') }, ...actions.map((action) => ({ value: action, ...choiceOption(t, 'dynamic.value', { name: t(`trace.kinds.${action}`), context: t('threadViews.history.kind') }) }))]} />
       {/* A directly shared thread does not confer View of its org; use the current reader's normal people lookup. */}
@@ -41,7 +48,7 @@ function History({ thread }: { thread: Thread }) {
     </div>
     <div className="min-h-0 flex-1 overflow-auto p-3">
       {query.data === undefined ? query.error === null ? <SkeletonRows read={query} rows={5} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} retrying={query.isRefetching} /> : <>
-      {shown.length === 0 && <EmptyState compact icon={<HistoryIcon aria-hidden />} title={t(person !== null || kind !== '' ? 'threadViews.noMatches' : 'threadViews.history.empty')} />}
+      {shown.length === 0 && <EmptyState compact icon={<HistoryIcon aria-hidden />} title={t(person !== null || kind !== '' || search.q !== '' ? 'threadViews.noMatches' : 'threadViews.history.empty')} />}
       <HistoryLines lines={shown} hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.error} onMore={() => void query.fetchNextPage()} renderDetails={(line) => {
         const other = line.about?.thread;
         const path = line.about?.path;

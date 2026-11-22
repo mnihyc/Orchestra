@@ -14,9 +14,9 @@ type End = Pick<Job, 'state' | 'error'>;
 const calls = vi.hoisted(() => ({ fork: vi.fn<typeof Forks.forkNow>(), wait: vi.fn<(...args: unknown[]) => Promise<End>>(),
   navigate: vi.fn<(_destination: unknown) => Promise<void>>(), toast: vi.fn<(_notice: unknown) => void>(), change: vi.fn<(...args: unknown[]) => void>() }));
 vi.mock('@/api/forks', async (original) => ({ ...await original<object>(), forkNow: calls.fork }));
-vi.mock('@/features/change/target', () => ({ openChange: calls.change }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: calls.change }));
 vi.mock('@/realtime/queryFeeds', async (original) => ({ ...await original<object>(), waitForJob: calls.wait }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => calls.navigate }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNavigate: () => calls.navigate }));
 vi.mock('@/ui/Toast', async (original) => ({ ...await original<object>(), toast: calls.toast }));
 function Fork() {
   const fork = useForkNow('source');

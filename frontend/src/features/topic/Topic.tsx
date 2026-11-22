@@ -1,7 +1,8 @@
 /** Topic header and tab selection.
  *
- * A topic is one piece of work. Its header has its name and description, its status, its tags, its star
- * and its bell, and its menu; under it are its tabs: the overview, its threads, its environments, its
+ * A topic is one piece of work. Its header is one row, as a resource's page has: its name, its status, its
+ * announcements, its star, its bell and its menu, and Details with its description and tags; its summary, while it
+ * has none yet, is one closed row. Under them are its tabs: the overview, its threads, its environments, its
  * files and documents, its Activity and its settings. The status and the tags are set by whoever may
  * start work in the topic; the bell and the star are each person's own and show at once.
  *
@@ -25,7 +26,7 @@ import { placeOfNode } from '@/features/navigation/places';
 import { TopicActivity } from '@/features/topic/Activity';
 import { TopicEnvironments } from '@/features/topic/Environments';
 import { TopicOverview } from '@/features/topic/Overview';
-import { useUsageBoardParams } from '@/features/usage/Board';
+import { useUsageBoardParams } from '@/features/usage/useBoardParams';
 import type { TopicSection } from '@/features/settings/ScopeSettings';
 import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { TopicSettings } from '@/features/topic/Settings';
@@ -75,12 +76,14 @@ export interface TopicProps {
   topicId: string;
   tab: TopicTab;
   onTab: (tab: TopicTab) => void;
+  q?: string | undefined;
+  onThreadQuery?: ((query: string) => void) | undefined;
   /** The section of the Settings tab in view. */
   section: string;
   onSection: (section: TopicSection) => void;
 }
 
-export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
+export function Topic({ topicId, tab, onTab, section, onSection, q, onThreadQuery }: TopicProps) {
   const { t } = useTranslation();
   const focusedContent = useContentFocused();
   const userId = useStore(client.session, (state) => state.userId);
@@ -119,7 +122,8 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
 
   return (
     <Page>
-      <PageHeader
+      {/* One row, as a resource's page has: its name, its status, its acts and Details, where its description and tags are. */}
+      <PageHeader compactResource
         adminAccess={data.access.admin_access} private={data.page === 'restricted'} opening={{ kind: 'topic', id: data.id }}
         mark={
           <PlaceMark {...(mayManage ? { label: t('places.colour.change', { name: data.name }), onPress: () => openNodeDialog({ type: 'colour', node: place }) } : {})}>
@@ -142,7 +146,7 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
         ]}
         actions={
           <>
-            <PlaceAnnouncements place={data} />
+            <PlaceAnnouncements place={data} compact />
             <StarButton place={place} />
             <SubscriptionBell thread={data} label={t('places.topic.bell')} />
             <TopicHeaderMenu topic={data} />
@@ -150,7 +154,7 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
         }
       />
 
-      <ResourceSummary target={{ kind: 'topic', id: data.id }} reference={`/topic/${data.id}`} />
+      <ResourceSummary target={{ kind: 'topic', id: data.id }} reference={`/topic/${data.id}`} foldWhenEmpty />
 
       {data.archived && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-base text-text">
@@ -165,19 +169,19 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
         </div>
       )}
 
-      {data.readme !== null && <PlaceReadme readme={data.readme} />}
+      {data.readme !== null && <PlaceReadme readme={data.readme} nodeId={data.id} />}
 
       <Tabs
         label={t('places.topic.sections')}
         value={tab}
         onValueChange={onTab}
         tabs={[
-          { value: 'overview', label: t('places.topic.tabs.overview'), panel: <TopicOverview topic={data} place={place} /> },
+          { value: 'overview', label: t('places.topic.tabs.overview'), panel: <TopicOverview topic={data} place={place} q={q} onQuery={onThreadQuery} /> },
           {
             value: 'threads',
             label: t('places.topic.tabs.threads'),
             count: tree.loaded ? threadCount : undefined,
-            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={canCreateIn('topic', data.access)} owner={data.owner} />,
+            panel: <TopicThreads orgId={data.org_id} topicId={data.id} topic={place} allowed={canCreateIn('topic', data.access)} owner={data.owner} q={q} onQuery={onThreadQuery} />,
           },
           { value: 'environments', label: t('places.topic.tabs.environments'), count: data.environments.length, panel: <TopicEnvironments topic={data} /> },
           { value: 'documents', label: t('places.topic.tabs.documents'), panel: <TopicDocuments topic={data} /> },
