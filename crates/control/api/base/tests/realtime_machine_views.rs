@@ -42,6 +42,7 @@ fn scripts(rig: &Rig) -> Seen {
             Ok(match command {
                 Command::WatchSet(_) => CommandResult::WatchSet(Empty {}),
                 Command::FsList(_) => CommandResult::FsList(FsListResult {
+                    facts: None,
                     entries: Vec::new(),
                     truncated: false,
                     watch_instance: None,
@@ -168,8 +169,8 @@ async fn grant(rig: &Rig, person: Id, kind: &str, object: Id, permission: &str) 
 }
 
 fn sample(rig: &Rig, cpu: f64) -> Json {
-    json!({"at":rig.clock.time(),"cpu_percent":cpu,"cpu_limit_millis":null,"memory_bytes":123,
-        "memory_limit_bytes":null,"disk_used_bytes":null,"disk_limit_bytes":null,"net_rx_bps":0,"net_tx_bps":0,"pids":1})
+    json!({"generation":1,"cpu_interval_started_at":null,"sample":{"at":rig.clock.time(),"cpu_percent":cpu,"cpu_limit_millis":null,"memory_bytes":123,
+        "memory_limit_bytes":null,"disk_used_bytes":null,"disk_limit_bytes":null,"net_rx_bps":0,"net_tx_bps":0,"pids":1}})
 }
 
 fn entry(rig: &Rig, name: &str) -> Json {
@@ -237,6 +238,7 @@ async fn a_visible_directory_sends_a_reset_then_deltas_seeds_its_current_entries
             unreachable!()
         };
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: vec![serde_json::from_value(listed.clone()).unwrap()],
             truncated: false,
             watch_instance: body.watch_instance,
@@ -320,6 +322,7 @@ async fn a_paged_watch_exposes_its_http_cursor_and_invalidates_changes_outside_t
             unreachable!()
         };
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: vec![serde_json::from_value(listed.clone()).unwrap()],
             truncated: true,
             watch_instance: body.watch_instance,
@@ -407,6 +410,7 @@ async fn failed_directory_activation_is_scoped_and_retries_only_for_fresh_demand
             ));
         }
         Ok(CommandResult::FsList(FsListResult {
+            facts: None,
             entries: Vec::new(),
             truncated: false,
             watch_instance: body.watch_instance,
@@ -616,7 +620,7 @@ async fn terminal_host(rig: &Rig) {
     .unwrap();
     // A unit uses its physical host's ceiling, not the unit connector's harness facts.
     // Establish it before any terminal exists, so even the first keeper pass sees a valid shell.
-    sqlx::query("UPDATE environments SET config=config || jsonb_build_object('env.host_id',$2::text) WHERE id=$1")
+    sqlx::query("UPDATE environments SET config=config || jsonb_build_object('env.host_id',jsonb_build_object('type','single','resource',jsonb_build_object('kind','host','id',$2::text))) WHERE id=$1")
         .bind(rig.environment).bind(host.to_string()).execute(&mut *conn).await.unwrap();
     let facts = environment_facts::of(&mut conn, rig.environment)
         .await

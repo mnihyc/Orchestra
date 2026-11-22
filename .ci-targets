@@ -1,0 +1,4 @@
+test -p orch-node --test conformance -- a_bundled_node_whose_own_program_its_daemon_cannot_see_runs_the_check_from_its_data_directory
+test -p orch-api-core --test harness_checks -- a_claimed_check_says_when_it_began_also_for_a_build_never_checked_before
+test -p orch-api-core --test threads_settings -- a_running_auto_check_and_why_the_last_one_did_not_pass_come_with_the_choice_in_the_chip_and_setting an_unchecked_or_failed_build_has_the_same_exact_auto_reason_in_the_chip_and_setting
+web test -- tests/component/composer-approval-mode.test.tsx tests/component/harness-build-status.test.tsx
