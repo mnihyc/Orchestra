@@ -65,6 +65,49 @@ pub(crate) async fn project(
     feed: &Feed,
     legacy: &Json,
 ) -> Result<Option<Json>, Fail> {
+    if let Feed::ProviderRow(id) = feed {
+        let Some(app) = inner.app() else {
+            return Ok(Some(legacy.clone()));
+        };
+        let mut conn = inner.db.acquire().await?;
+        let Some((principal, authed)) =
+            super::subscriptions::reader_for_connection(inner, &mut conn, connection).await?
+        else {
+            return Ok(None);
+        };
+        let ctx = Ctx::for_tool(
+            app,
+            Caller::User(Arc::new(authed)),
+            orch_api_contract::resources::ProviderGet::ROUTE,
+            *id,
+        )
+        .with_admitted_caller(principal.caller().clone())
+        .map_err(Fail::other)?;
+        let value = async {
+            resources::require(
+                &mut conn,
+                &principal,
+                AccessKind::Provider,
+                *id,
+                Permission::ProviderView,
+            )
+            .await?;
+            let prepared =
+                providers::prepare_readable_projection(&ctx, &mut conn, &principal, *id).await?;
+            providers::show_thread_prepared(&ctx, &mut conn, &principal, &prepared).await
+        }
+        .await;
+        let provider = match value {
+            Ok(provider) => Some(Box::new(provider)),
+            Err(error) if error.code() == ErrorCode::Internal => return Err(Fail::other(error)),
+            Err(_) => None,
+        };
+        return serde_json::to_value(orch_realtime_contract::feeds::ProviderRowEvent::Changed {
+            provider,
+        })
+        .map(Some)
+        .map_err(Fail::other);
+    }
     let Feed::Resource { kind, id } = feed else {
         return Ok(None);
     };
