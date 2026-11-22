@@ -8,8 +8,7 @@ summary: Choose a program sign-in for an image service and follow the private he
 
 # Delegate a capability to another program
 
-A thread can use another program's native capability through an explicitly selected
-service. In the thread's capability settings, choose **Service** and its delegated
+A thread can use the capability that another program has built in, through a service you choose on purpose. In the thread's capability settings, choose **Service** and its delegated
 session backend. For example, a Claude Code thread can ask Codex on an eligible
 ChatGPT sign-in to generate an image. Choosing a backend is separate from enabling
 the service; an inherited default remains a choice within the place's policies.
@@ -22,7 +21,7 @@ The selected provider needs Use and an allowed model. Any sign-in the requesting
 person may use can serve the helper, including their own or one shared through
 subscription sharing or a Use entry. Orch does not check or enforce a provider's
 terms of service. Using a plan this way is the users' responsibility. A missing capability or ineligible plan is shown as unavailable; it does
-not silently use another sign-in. A native allowance failure keeps its reported
+not silently use another sign-in. A failure of the program's own allowance keeps its reported
 limit and reset time for the existing call-recovery rules.
 
 Orch creates a short **Helper turn** and links it from the image call. Its owner is
@@ -44,7 +43,7 @@ A repeated result or file-delivery retry uses those retained pixels without
 starting another paid helper. A failed file write keeps the produced image so
 that a different destination can be chosen.
 
-Native use is recorded on the selected provider and helper turn, with the
+Use of the program's own capability is recorded on the selected provider and helper turn, with the
 requester's governing place and image-generation purpose for caps. Linking or
 copying the result into the requesting thread adds no generation charge. Missing
 model or price observations remain unknown. Cancelling the source stops its owned

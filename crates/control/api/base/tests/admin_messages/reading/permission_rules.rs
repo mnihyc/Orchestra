@@ -36,9 +36,9 @@ async fn message_and_sent_list_bodies_keep_their_current_read_until_the_first_fr
                 org_rule(operation, c.acme, &["read"])
             };
             let reader = key(&world, owner, vec![rule]).await;
-            let query = PageQuery {
+            let query = CollectionQuery {
                 limit: Some(1),
-                cursor: None,
+                ..CollectionQuery::default()
             };
             let response = match operation {
                 "MessageGet" => {

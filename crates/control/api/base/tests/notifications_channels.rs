@@ -37,6 +37,62 @@ use std::collections::BTreeMap;
 
 const PASSWORD: &str = "hunter2-the-password";
 
+#[tokio::test]
+async fn channel_search_reaches_late_names_and_keeps_the_complete_visible_kind_facts() {
+    let o = Outside::new().await;
+    let far = FarSide::taking().await;
+    o.world
+        .set("outbound.allowed_private_hosts", json!(["127.0.0.1"]))
+        .await;
+    for index in 0..13 {
+        make_own(&o, &o.cai, &format!("Hook {index:02}"), &far.url, None)
+            .await
+            .ok();
+    }
+    let found = o
+        .world
+        .app
+        .call(NotificationChannelList, &[])
+        .token(&o.cai.token)
+        .query(&NotificationChannelListQuery {
+            q: Some("Hook 12".into()),
+            limit: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].name, "Hook 12");
+    assert!(found.kinds.iter().any(|kind| kind == "webhook"));
+    let mut cursor = None;
+    let mut ids = std::collections::HashSet::new();
+    loop {
+        let page = o
+            .world
+            .app
+            .call(NotificationChannelList, &[])
+            .token(&o.cai.token)
+            .query(&NotificationChannelListQuery {
+                q: Some("Hook".into()),
+                limit: Some(3),
+                cursor,
+                ..Default::default()
+            })
+            .send()
+            .await
+            .ok();
+        for row in page.items {
+            assert!(ids.insert(row.id));
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 13);
+}
+
 async fn make_system(
     o: &Outside,
     by: &Who,
@@ -1299,7 +1355,7 @@ async fn the_channels_of_a_root_org_are_listed_to_look_after_for_whoever_may_and
                 .await
         }
     };
-    let theirs = listed(&o.bea, o.acme).await.ok();
+    let theirs = listed(&o.bea, o.acme).await.ok().items;
     assert_eq!(
         theirs.iter().map(|each| each.id).collect::<Vec<_>>(),
         [orgs.id]

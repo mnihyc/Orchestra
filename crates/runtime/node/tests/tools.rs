@@ -854,3 +854,52 @@ async fn a_linked_cache_root_is_unknown_and_never_cleared_or_purged_as_owned_dat
         b"borrowed partial"
     );
 }
+
+#[tokio::test]
+async fn cancelling_a_queued_build_does_not_wait_for_an_unrelated_download_to_finish() {
+    let payload = b"#!/bin/sh\nexit 0\n";
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server_entered = entered.clone();
+    let server_release = release.clone();
+    let router = Router::new().route(
+        "/tool",
+        axum::routing::get(move || {
+            let entered = server_entered.clone();
+            let release = server_release.clone();
+            async move {
+                entered.notify_one();
+                release.notified().await;
+                payload.to_vec()
+            }
+        }),
+    );
+    let listener = listener().await;
+    let address = format!("http://{}/tool", listener.local_addr().unwrap());
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let (cache, _directory) = cache();
+    let cache = Arc::new(cache);
+    let first_cache = cache.clone();
+    let first = ask("first", "1", address.clone(), payload);
+    let downloading =
+        tokio::spawn(async move { first_cache.ensure(&first, &CancellationToken::new()).await });
+    tokio::time::timeout(common::PATIENCE, entered.notified())
+        .await
+        .unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let second = ask("second", "1", address, payload);
+    let answer = tokio::time::timeout(common::PATIENCE, cache.ensure(&second, &cancelled))
+        .await
+        .expect("cancelling a queued build waited for another download");
+    assert!(matches!(
+        answer,
+        Err(orch_node_core::tools::ToolError::Cancelled)
+    ));
+    assert!(!cache.path_of("second", "1").exists());
+    release.notify_one();
+    downloading.await.unwrap().unwrap();
+    serving.abort();
+}

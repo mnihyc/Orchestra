@@ -264,7 +264,7 @@ pub(super) fn get<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a Caller,
-    (): (),
+    _query: orch_api_contract::chats::ChatGetQuery,
     (): (),
 ) -> OperationFuture<'a> {
     Box::pin(prepare_http(ctx, conn, caller, None))
