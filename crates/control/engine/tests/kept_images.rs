@@ -113,6 +113,60 @@ async fn a_same_image_replacement_reviews_the_recording_cost_and_creates_from_th
 }
 
 #[tokio::test]
+async fn a_removal_whose_unit_is_already_gone_finishes_and_keeps_its_volumes() {
+    let (world, host, environment, old, _, _unit) = fixture().await;
+    // The unit was removed on its host by hand: its host finds it gone, and has nothing of it left to keep or remove.
+    host.tell(old, "failed", Some("the unit is gone")).await;
+    eventually("the environment to say its unit is gone", || async {
+        hosting::status(&world, environment).await.0 == "failed"
+    })
+    .await;
+    for _ in 0..20 {
+        for kind in [CommandKind::NodeKeepFiles, CommandKind::NodeRuntimeRemove] {
+            host.refuse(
+                kind,
+                CommandError::new(ErrorCode::NotFound, "the owned unit is absent"),
+            );
+        }
+    }
+    world
+        .set(world.root, "env.removed_keep_days", json!(1))
+        .await;
+    sqlx::query("UPDATE environments SET remove_at = now() WHERE id = $1")
+        .bind(environment)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    eventually("the environment to be removed", || async {
+        world
+            .scalar::<Option<chrono::DateTime<chrono::Utc>>>(
+                "SELECT deleted_at FROM environments WHERE id = $1",
+                environment,
+            )
+            .await
+            .is_some()
+    })
+    .await;
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM jobs WHERE environment_id = $1 AND kind = 'environment_remove' ORDER BY created_at, id",
+    )
+    .bind(environment)
+    .fetch_all(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(states, ["succeeded"], "the first removal finished");
+    assert_eq!(host.count(CommandKind::NodeKeepFiles), 1);
+    let kept: bool = world
+        .scalar(
+            "SELECT volumes_purge_at > deleted_at FROM environments WHERE id = $1",
+            environment,
+        )
+        .await;
+    assert!(kept, "its volumes stay for the removal window");
+    world.engine().stop();
+}
+
+#[tokio::test]
 async fn a_failed_successor_removes_its_capture_and_restores_the_original_unit() {
     let (world, host, environment, old, _, _unit) = fixture().await;
     host.refuse(
