@@ -26,6 +26,7 @@ async fn put(world: &World, who: &Who, at: Id, key: &str, value: Json, locked: b
         .call(NodeSettingSet, &[&at, &key])
         .token(&who.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,
@@ -173,21 +174,22 @@ async fn an_ignored_wider_minimum_is_not_an_override_and_a_tighter_one_is() {
     let project = make_project(&world, &owner, org, "Web").await.base.id;
     let topic = make_topic(&world, &owner, project, "Login").await.base.id;
     thread(&world, &owner, topic).await;
-    put(
-        &world,
-        &owner,
-        org,
-        "agents.subagents_at_once",
-        json!(4),
-        false,
-    )
-    .await;
+    // The project's wider minimum was chosen before the org's ceiling, which only narrows it.
     put(
         &world,
         &owner,
         project,
         "agents.subagents_at_once",
         json!(8),
+        false,
+    )
+    .await;
+    put(
+        &world,
+        &owner,
+        org,
+        "agents.subagents_at_once",
+        json!(4),
         false,
     )
     .await;

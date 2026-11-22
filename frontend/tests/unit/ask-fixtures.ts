@@ -20,14 +20,17 @@ export function askMessage(more: Partial<AskMessage> = {}): AskMessage {
 export function askSnapshot(more: Partial<AskGetReply> = {}): AskGetReply {
   return { conversation: askConversation(), messages: [askMessage({ id: ASK_USER, role: 'user', content: [{ type: 'text', text: 'What changed?' }] }), askMessage()], previous_cursor: null, ...more };
 }
+export function apiAskModel(provider: string, model: string) {
+  return { backend: { route: 'provider.generate', offering: { provider, offering: model }, config: null } };
+}
 export function askModels(root = ACME.org, more: Partial<AskModelsReply> = {}): AskModelsReply {
   const provider: ProviderRef = { id: RUNS_ON.openAiKey, name: 'Team API', address: 'team-api', kind: 'api', harness: null, harness_kind: null, placement: 'managed', status: 'ready' };
   const model: ModelOption = { ...MODEL_ESTIMATE, model_name: 'ask-readable', display_name: 'Readable API model', parameters: { input_images: true },
     groups: [], option_constraints: {}, allowed: true, reason: null };
-  const selection = { provider_id: provider.id, model: model.model_name };
+  const selection = apiAskModel(provider.id, model.model_name);
   return { root_org_id: root, default_model: selection, blocked_reason: null, writable: false, models: [
     { selection, provider, model, request_option_schema: null, allowed: true, is_default: true, unavailable_reason: null },
-    { selection: { provider_id: provider.id, model: 'ask-excluded' }, provider,
+    { selection: apiAskModel(provider.id, 'ask-excluded'), provider,
       model: { ...model, model_name: 'ask-excluded', display_name: 'Excluded API model', allowed: false, reason: 'excluded_by_entry' },
       request_option_schema: null, allowed: false, is_default: false, unavailable_reason: 'no_use' },
   ], ...more };
