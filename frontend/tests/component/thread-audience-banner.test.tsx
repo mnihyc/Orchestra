@@ -1,12 +1,15 @@
 /** One visible audience follows native page grants; it never changes a personal-read option. */
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { act, cleanup, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Access from '@/api/access';
+import type * as ThreadsApi from '@/api/threads';
 import { client } from '@/api/client';
-import type { Holder, PermissionPage, ResolvedSetting, Thread } from '@/generated/api-types';
+import { LiveQueryClient } from '@/api/query';
+import type { Holder, PermissionPage, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { KeptQueryScope, useViewReadsReady } from '@/features/workbench/KeptQueries';
 import { AudienceBanner } from '@/features/thread/AudienceBanner';
 import { audienceDismissal, audienceGrew, threadAudience } from '@/features/thread/audience';
 import { PersonalReads } from '@/features/inspector/PersonalReads';
@@ -20,8 +23,21 @@ vi.mock('@/api/access', async (load) => ({ ...await load<typeof Access>(),
     queryFn: () => { source.read(); return source.failed ? Promise.reject(new Error('Audience refused')) : Promise.resolve(source.page); } }),
   permissionsQuery: { queryKey: ['permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
 }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: source.share }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: source.share }));
 vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => source.settingsFailed ? Promise.reject(new Error('Settings refused')) : Promise.resolve(source.settings) }) }));
+vi.mock('@/api/threads', async (load) => {
+  const actual = await load<typeof ThreadsApi>();
+  return { ...actual, parametersQuery: (id: string) => ({ ...actual.parametersQuery(id), queryFn: (): Promise<ThreadParameters> => source.settingsFailed
+    ? Promise.reject(new Error('Composer controls refused'))
+    : Promise.resolve({
+      model: { value: null, options: [], writable: false, source: { scope: 'default', node: null } },
+      effort: { value: null, supported: false, writable: false, source: { scope: 'default', node: null } },
+      parameters: [], approval_mode: 'on_request', approval_reviewer: null,
+      composer: { default_delivery: 'queue', paste_inline_context_share: 25, plan_first: false,
+        auto_unavailable: false, approval_default: false, sandbox_mode: null, sandbox_default: false,
+        owner_reads: source.settings.some((row) => row.key === 'orch_tools.owner_reads' && row.value === true) },
+    }) }) };
+});
 
 const before = client.session.getState();
 beforeEach(() => {
@@ -114,6 +130,18 @@ describe('the existing native permission-page projection', () => {
 for (const locale of ['en', 'zh-CN'] as const) describe(`thread audience in ${locale}`, () => {
   beforeEach(async () => { await setLocale(locale); });
 
+  it('can paint the addressed conversation before starting its secondary permission read', async () => {
+    const page = grant(privatePage(), 'thread.view', { kind: 'user', user: BEA });
+    source.page = page;
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const thread = { id: page.object.id, name: page.object.name, owner: ADA };
+    const banner = (enabled: boolean) => <QueryClientProvider client={cache}><AudienceBanner thread={thread} enabled={enabled} /></QueryClientProvider>;
+    const view = show(banner(false));
+    expect(source.read).not.toHaveBeenCalled();
+    view.rerender(banner(true));
+    await waitFor(() => expect(source.read).toHaveBeenCalledTimes(1));
+  });
+
   it('hides an owner-only audience and updates add, sender and removal through the native page cache', async () => {
     const page = privatePage(); const { cache } = draw(page);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
@@ -197,17 +225,17 @@ for (const locale of ['en', 'zh-CN'] as const) describe(`thread audience in ${lo
     await screen.findByRole('status');
     expect(screen.queryByText(i18n.t('thread.audience.personal'))).not.toBeInTheDocument();
     source.settings = source.settings.map((row) => ({ ...row, value: true }));
-    await act(() => view.cache.invalidateQueries({ queryKey: ['settings'] }));
+    await act(() => view.cache.invalidateQueries({ queryKey: ['thread-parameters'] }));
     await screen.findByText(i18n.t('thread.audience.personal'));
     source.settings = [];
-    await act(() => view.cache.invalidateQueries({ queryKey: ['settings'] }));
+    await act(() => view.cache.invalidateQueries({ queryKey: ['thread-parameters'] }));
     await waitFor(() => expect(screen.queryByText(i18n.t('thread.audience.personal'))).not.toBeInTheDocument());
     expect(screen.getByRole('status')).toBeVisible();
     source.settings = [{ key: 'orch_tools.owner_reads', value: true, own: null, writable: false, locked_by: null, source: { scope: 'default', node: null }, parts: [] }];
-    await act(() => view.cache.invalidateQueries({ queryKey: ['settings'] }));
+    await act(() => view.cache.invalidateQueries({ queryKey: ['thread-parameters'] }));
     await screen.findByText(i18n.t('thread.audience.personal'));
     source.settingsFailed = true;
-    await act(() => view.cache.invalidateQueries({ queryKey: ['settings'] }));
+    await act(() => view.cache.invalidateQueries({ queryKey: ['thread-parameters'] }));
     await waitFor(() => expect(screen.queryByText(i18n.t('thread.audience.personal'))).not.toBeInTheDocument());
     expect(screen.getByRole('status')).toBeVisible();
   });
@@ -226,6 +254,63 @@ for (const locale of ['en', 'zh-CN'] as const) describe(`thread audience in ${lo
     await userEvent.setup().click(control);
     expect(screen.getByRole('dialog', { name: i18n.t('thread.audience.title') })).toHaveTextContent('Long role path');
     expect(screen.getByRole('dialog', { name: i18n.t('thread.audience.title') })).toHaveTextContent(i18n.t('thread.audience.canSend'));
+  });
+
+  it('looks up a retained pane’s cached answer once without searching unrelated queries', () => {
+    const cache = new QueryClient();
+    const key = ['permissions'] as const;
+    cache.setQueryData(key, { held: true });
+    const { result, unmount } = renderHook(() => useQueryClient(), {
+      wrapper: ({ children }) => <QueryClientProvider client={cache}><KeptQueryScope shown><KeptQueryScope shown>{children}</KeptQueryScope></KeptQueryScope></QueryClientProvider>,
+    });
+    const defaults = vi.spyOn(cache, 'defaultQueryOptions');
+    const search = vi.spyOn(cache.getQueryCache(), 'find');
+    try {
+      expect(result.current.defaultQueryOptions({ queryKey: key }).enabled).not.toBe(false);
+      expect(defaults).toHaveBeenCalledTimes(1);
+      expect(search).not.toHaveBeenCalled();
+    } finally { defaults.mockRestore(); search.mockRestore(); unmount(); cache.clear(); }
+  });
+
+  it('keeps each open pane’s visibility separate when both use the same prepared query', () => {
+    const cache = new LiveQueryClient();
+    const prepared = cache.defaultQueryOptions({ queryKey: ['audience', 'shared'], staleTime: Infinity, retry: false });
+    const pane = () => renderHook(() => useQueryClient(), {
+      wrapper: ({ children }) => <QueryClientProvider client={cache}><KeptQueryScope shown>{children}</KeptQueryScope></QueryClientProvider>,
+    });
+    const first = pane(), second = pane();
+    try {
+      const one = first.result.current.defaultQueryOptions(prepared);
+      const two = second.result.current.defaultQueryOptions(prepared);
+      expect(one.queryHash).toBe(two.queryHash);
+      // Each observer's options identify its visibility to the shared transport.
+      expect(one).not.toBe(two);
+    } finally { first.unmount(); second.unmount(); cache.clear(); }
+  });
+
+  it('uses the current audience when returning to a kept thread and reads a changed audience once', async () => {
+    const page = grant(privatePage(), 'thread.view', { kind: 'user', user: BEA });
+    source.page = page;
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const thread = { id: page.object.id, name: page.object.name, owner: ADA };
+    function Audience() {
+      const ready = useViewReadsReady();
+      return <div data-testid="audience-view" data-ready={ready}><AudienceBanner thread={thread} /></div>;
+    }
+    const pane = (shown: boolean) => <QueryClientProvider client={cache}><KeptQueryScope shown={shown}><Audience /></KeptQueryScope></QueryClientProvider>;
+    const view = show(pane(true));
+    await screen.findByRole('status');
+    expect(source.read).toHaveBeenCalledTimes(1);
+    view.rerender(pane(false));
+    view.rerender(pane(true));
+    await waitFor(() => expect(screen.getByTestId('audience-view')).toHaveAttribute('data-ready', 'true'));
+    expect(source.read).toHaveBeenCalledTimes(1);
+    view.rerender(pane(false));
+    await refresh(cache, grant(page, 'thread.interact', { kind: 'user', user: BEA }, 3));
+    expect(source.read).toHaveBeenCalledTimes(1);
+    view.rerender(pane(true));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(i18n.t('thread.audience.canSend')));
+    expect(source.read).toHaveBeenCalledTimes(2);
   });
 
   it('remembers closing for this person and thread, returns for a new sender and keeps the inspector', async () => {

@@ -1,0 +1,2 @@
+web build
+web-e2e tests/e2e/zz-tree-route.spec.ts --repeat-each=12 --retries=0 --workers=1

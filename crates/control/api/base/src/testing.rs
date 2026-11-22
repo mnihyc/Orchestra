@@ -56,9 +56,23 @@ use tower::ServiceExt;
 /// says so, and that record is filled by whichever thread reaches the callsite first, which in a process of many tests
 /// that set their own subscribers need not be a thread that has this test's. A request has been found at the row the
 /// case holds, with its two first boundaries behind it, and the log of events held none of them.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Boundaries {
     entered: std::sync::Mutex<Vec<(&'static str, &'static str, std::time::Instant)>>,
+    held: std::sync::Mutex<Option<Hold>>,
+}
+
+/// What a case runs where the followed request waits for it: told the operation and the phase.
+type Hold = Arc<
+    dyn Fn(&'static str, &'static str) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
+>;
+
+impl std::fmt::Debug for Boundaries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Boundaries")
+            .field("entered", &self.entered)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Boundaries {
@@ -66,6 +80,22 @@ impl Boundaries {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::default()
+    }
+
+    /// Runs `hold` where the followed request reaches a place that waits for a case (a read that is about to
+    /// check what it read again): the request goes on when it is done. A case that moves what a read showed
+    /// between its read and its check does it there, so that it happens at that moment and not near it.
+    pub fn hold(
+        &self,
+        hold: impl Fn(&'static str, &'static str) -> futures::future::BoxFuture<'static, ()>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        *self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(hold));
     }
 
     /// Whether the followed request has entered `phase` of `operation`'s native boundary.
@@ -109,8 +139,30 @@ pub async fn follow<F: std::future::Future>(log: Arc<Boundaries>, work: F) -> F:
     FOLLOWED.scope(log, work).await
 }
 
+/// Lets a case that holds this place run before the followed request goes on; no case holds it in service.
+pub async fn hold_boundary(operation: &'static str, phase: &'static str) {
+    let held = FOLLOWED
+        .try_with(|log| {
+            log.held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .ok()
+        .flatten();
+    if let Some(held) = held {
+        held(operation, phase).await;
+    }
+}
+
+/// Whether a case follows the request this task serves: no request in service is followed.
+#[must_use]
+pub fn followed() -> bool {
+    FOLLOWED.try_with(|_| ()).is_ok()
+}
+
 /// Writes a native boundary entered by the request that is being followed, if one is.
-pub(crate) fn note_boundary(operation: &'static str, phase: &'static str) {
+pub fn note_boundary(operation: &'static str, phase: &'static str) {
     let _ = FOLLOWED.try_with(|log| {
         log.entered
             .lock()
@@ -131,6 +183,28 @@ pub fn machine_request_handler(app: &App, handler: Arc<dyn crate::machine_reques
 /// Run one existing physical update coordinator pass for native control tests.
 pub async fn advance_component_updates(app: &App) -> Result<(), crate::dispatch::DispatchError> {
     app.link.advance_component_updates().await
+}
+
+/// Drive the production first-wire check of a stored native command without a vendor endpoint.
+pub async fn admit_stored_command(app: &App, id: orch_types::Id) -> Result<bool, String> {
+    let row = orch_db::queries::link::command(
+        &mut *app.db.acquire().await.map_err(|error| error.to_string())?,
+        id,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or("the stored command is absent")?;
+    let entry = app
+        .link
+        .entry(row.machine_id)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    let command = crate::dispatch::cmd_of(&row);
+    app.link
+        .admit_wire_command(&entry, &command, command.clone())
+        .await
+        .map(|checked| checked.is_some())
+        .map_err(|error| format!("{error:?}"))
 }
 
 /// Exercise the real certificate/session authorization supplier, including minimum recovery.
@@ -267,7 +341,7 @@ pub fn current_identity_query_pattern(
 ) -> &'static str {
     match surface {
         orch_api_contract::surface::HttpSurface::Browser => {
-            r"WITH watched AS MATERIALIZED (%FROM marked CROSS JOIN users u%JOIN sessions s%a.token\_hash = $3%FOR SHARE OF s, a"
+            r"WITH watched AS MATERIALIZED (%FROM marked CROSS JOIN users u%JOIN sessions s%a.token\_hash = $3%FOR KEY SHARE OF s FOR SHARE OF a"
         }
         orch_api_contract::surface::HttpSurface::Key => {
             r"WITH watched AS MATERIALIZED (%FROM marked CROSS JOIN users u%JOIN api\_tokens t%t.token\_hash = $3%FOR SHARE OF t"
@@ -357,6 +431,7 @@ impl TestApp {
         let cache = crate::cache::Cache::new(&config);
         let realtime = crate::realtime::Realtime::new(&db, &clock_handle, &config);
         let app: App = Arc::new(AppState {
+            metrics_listener_failed: Default::default(),
             host_ports: Default::default(),
             db,
             config,
@@ -763,41 +838,34 @@ impl TestApp {
                         });
                     let (app, behaviour) = (Arc::clone(&app), Arc::clone(&behaviour));
                     tokio::spawn(async move {
-                        let outcome = behaviour.run(&cmd).await;
-                        let Ok(mut conn) = app.db.acquire().await else {
-                            return;
-                        };
-                        let now = app.clock.now();
-                        let written = match &outcome {
-                            Ok(result) => {
-                                rows::finish_command(
-                                    &mut conn,
-                                    row.id,
-                                    &rows::Ending::Succeeded(result),
-                                    now,
-                                )
-                                .await
-                            }
-                            Err(error) => {
-                                let error = serde_json::to_value(error).unwrap_or_default();
-                                rows::finish_command(
-                                    &mut conn,
-                                    row.id,
-                                    &rows::Ending::Failed(&error),
-                                    now,
-                                )
-                                .await
-                            }
-                        };
-                        drop(conn);
-                        // A played command uses the same atomic receipt/stop boundary as its real machine.
-                        let _ = async {
+                        let written = async {
+                            let outcome = behaviour.run(&cmd).await;
+                            let now = app.clock.now();
                             let mut tx = app.db.begin().await?;
-                            if let Ok(result) = &outcome {
-                                orch_engine::jobs::workspace_upload::retain_native_result(
-                                    &mut tx, machine, row.id, result, now,
-                                )
-                                .await?;
+                            crate::backplane::retain_native_reply(
+                                &mut tx, machine, row.id, &outcome, now,
+                            )
+                            .await?;
+                            match &outcome {
+                                Ok(result) => {
+                                    rows::finish_command(
+                                        &mut tx,
+                                        row.id,
+                                        &rows::Ending::Succeeded(result),
+                                        now,
+                                    )
+                                    .await?;
+                                }
+                                Err(error) => {
+                                    let error = serde_json::to_value(error).unwrap_or_default();
+                                    rows::finish_command(
+                                        &mut tx,
+                                        row.id,
+                                        &rows::Ending::Failed(&error),
+                                        now,
+                                    )
+                                    .await?;
+                                }
                             }
                             sqlx::query("UPDATE commands SET stop_confirmed_at=$2 WHERE id=$1 AND machine_id=$3 AND stop_confirmed_at IS NULL")
                                 .bind(row.id).bind(now).bind(machine).execute(&mut *tx).await?;
