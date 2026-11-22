@@ -132,17 +132,18 @@ jobs:
     timeout-minutes: 310
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.gate.outputs.commit }}
-      - name: Wait for the exact ref and commit's full CI
+      - name: Check full CI for the release commit
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_MODE: ${{ inputs.rehearsal && '--same-ref' || '--start-missing' }}
           CI_REF: ${{ needs.gate.outputs.ci_ref }}
           COMMIT: ${{ needs.gate.outputs.commit }}
-        run: python3 .github/scripts/release_ci.py --ref "$CI_REF" --commit "$COMMIT"
+        run: python3 .github/scripts/release_ci.py --ref "$CI_REF" --commit "$COMMIT" "$CI_MODE"
 
   native:
     needs: gate

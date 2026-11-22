@@ -1,0 +1,5 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-connector-core --lib

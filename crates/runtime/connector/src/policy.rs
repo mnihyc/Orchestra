@@ -173,12 +173,22 @@ pub fn inspect_environment_path(
             return Ok(orch_driver_contract::runtime::DirectoryBinding {
                 path: real.to_string_lossy().into_owned(),
                 device: Some(stat.st_dev),
-                inode: Some(stat.st_ino),
+                inode: Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    stat.st_ino,
+                )),
             });
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = real;
+    if directory || real.is_dir() {
+        let roots: Vec<_> = policy.environment_roots.iter().map(PathBuf::from).collect();
+        return orch_envhost::paths::Workspace::directory_binding(&real, &roots).map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("environment.roots: {error}"),
+            )
+        });
+    }
     Err(CommandError::new(
         ErrorCode::Unsupported,
         "this platform cannot verify an existing directory beneath environment.roots",
@@ -194,13 +204,14 @@ pub fn writable_environment_directory(path: &Path) -> Result<(), CommandError> {
             .map_err(|_| CommandError::new(ErrorCode::PolicyRootNotAllowed, format!("this machine's owners must make {} writable and searchable for user id {} (Orch will not change its owner or mode)", path.display(), rustix::process::geteuid().as_raw())))?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = path;
-        Err(CommandError::new(
-            ErrorCode::Unsupported,
-            "directory writability has not been verified on this platform",
-        ))
+        orch_envhost::paths::Workspace::require_directory_write(path).map_err(|error| {
+            CommandError::new(
+                ErrorCode::PolicyRootNotAllowed,
+                format!("the connector cannot write this directory: {error}"),
+            )
+        })
     }
 }
 
@@ -236,6 +247,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
         local_values: BTreeMap::new(),
         hooks: config.hooks.clone(),
         environment_roots: config.environment.roots.clone(),
+        environment_files_reach: config.environment.files_reach,
         environment_remote_write: config.environment.remote_write,
         environment_terminal: config.environment.terminal,
         environment_after_up: config.environment.after_up,
@@ -244,6 +256,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
         ports: config.ports.clone(),
         mcp_import: config.mcp.import,
         mcp_add: config.mcp.add,
+        exec_platform: config.exec.platform.clone(),
         exec_offers: config.exec.offers.clone(),
         environment_deliver_files: config.environment.deliver_files,
         agent_max_sandbox,
@@ -257,6 +270,7 @@ pub fn policy_of(config: &ConnectorConfig) -> Result<LocalPolicy, PolicyError> {
             .map(|harness| PolicyHarness {
                 kind: harness.kind.clone(),
                 path: harness.path.clone(),
+                confirmation: None,
             })
             .collect(),
         tools_fetch: config.tools.fetch,
@@ -283,6 +297,7 @@ pub fn put_policy(config: &mut ConnectorConfig, policy: &LocalPolicy) {
         .environment
         .roots
         .clone_from(&policy.environment_roots);
+    config.environment.files_reach = policy.environment_files_reach;
     config.environment.remote_write = policy.environment_remote_write;
     config.environment.terminal = policy.environment_terminal;
     config.environment.after_up = policy.environment_after_up;
@@ -293,6 +308,7 @@ pub fn put_policy(config: &mut ConnectorConfig, policy: &LocalPolicy) {
     config.mcp.import = policy.mcp_import;
     config.mcp.add = policy.mcp_add;
     config.exec.offers.clone_from(&policy.exec_offers);
+    config.exec.platform.clone_from(&policy.exec_platform);
     config.agent.max_sandbox = policy.agent_max_sandbox.as_str().to_owned();
     config.agent.programs = policy.agent_programs;
     config.provider.programs = policy.provider_programs;
@@ -333,10 +349,7 @@ pub fn explicit_local_keys(text: &str) -> Result<Vec<String>, toml::de::Error> {
         .filter(|key| **key != PolicyKey::PolicyDelegated)
         .filter(|key| match key.as_str().split_once('.') {
             Some((section, member)) => written.get(section).and_then(|v| v.get(member)).is_some(),
-            None => {
-                written.get(key.as_str()).is_some()
-                    || (**key == PolicyKey::Storages && written.get("storage").is_some())
-            }
+            None => written.get(key.as_str()).is_some(),
         })
         .map(|key| key.as_str().into())
         .collect())
@@ -461,7 +474,85 @@ fn refused(code: ErrorCode, key: &str, why: &str) -> CommandError {
     error
 }
 
-fn harness_change_policy(policy: Option<&LocalPolicy>) -> Result<&LocalPolicy, CommandError> {
+/// What permits what a refusal refused, which its advice names as the exact command to run.
+enum Permit {
+    /// The key with this value.
+    Value(Json),
+    /// The key handed to the machine's managers, for a change the system asks of it.
+    HandOver,
+}
+
+/// Notes on a refusal what would permit it.
+fn permitting(mut error: CommandError, permit: Option<Permit>) -> CommandError {
+    if let Some(details) = error.details.as_mut().and_then(Json::as_object_mut) {
+        match permit {
+            Some(Permit::Value(value)) => {
+                details.insert("permits".into(), value);
+            }
+            Some(Permit::HandOver) => {
+                details.insert("permits_hand_over".into(), Json::Bool(true));
+            }
+            None => {}
+        }
+    }
+    error
+}
+
+/// The key's list with `member` in it, as it permits what needs it.
+fn listing(policy: &LocalPolicy, key: PolicyKey, member: &str) -> Option<Permit> {
+    let mut list = policy.get(key).as_array().cloned().unwrap_or_default();
+    let member = Json::String(member.to_owned());
+    if !list.contains(&member) {
+        list.push(member);
+    }
+    Some(Permit::Value(Json::Array(list)))
+}
+
+/// The directories offered with `directory` among them; a relative or climbing path names no directory to offer.
+fn offering(policy: &LocalPolicy, directory: &str) -> Option<Permit> {
+    let path = Path::new(directory);
+    if !path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    listing(policy, PolicyKey::EnvironmentRoots, directory)
+}
+
+/// The ceilings raised to what was asked; nothing permits asking for none or less.
+fn raised(
+    policy: &LocalPolicy,
+    requested: Option<&orch_driver_contract::runtime::Resources>,
+) -> Option<Permit> {
+    let asked = serde_json::to_value(requested?).ok()?;
+    let mut ceilings = policy.get(PolicyKey::ResourceMax);
+    let mut changed = false;
+    for (field, ceiling) in ceilings.as_object_mut()? {
+        let (Some(limit), Some(wanted)) =
+            (ceiling.as_i64(), asked.get(field).and_then(Json::as_i64))
+        else {
+            continue;
+        };
+        if wanted <= 0 {
+            return None;
+        }
+        if wanted > limit {
+            *ceiling = Json::from(wanted);
+            changed = true;
+        }
+    }
+    changed.then_some(Permit::Value(ceilings))
+}
+
+fn harness_change_policy<'a>(
+    policy: Option<&'a LocalPolicy>,
+    operator: &str,
+) -> Result<&'a LocalPolicy, CommandError> {
     let key = PolicyKey::AgentHarnesses;
     let policy = policy.ok_or_else(|| {
         refused(
@@ -473,19 +564,28 @@ fn harness_change_policy(policy: Option<&LocalPolicy>) -> Result<&LocalPolicy, C
     if !policy.delegates(key) {
         return Err(refusal_authority(
             policy,
-            refused(
-                ErrorCode::Unsupported,
-                key.as_str(),
-                "the harness selection is kept locally",
+            permitting(
+                refused(
+                    ErrorCode::Unsupported,
+                    key.as_str(),
+                    "the harness selection is kept locally",
+                ),
+                Some(Permit::HandOver),
             ),
+            operator,
         ));
     }
     Ok(policy)
 }
 
-/// Turns the code a check of the policy answers into the error of the command.
-fn check(result: Result<(), ErrorCode>, key: &str, why: &str) -> Result<(), CommandError> {
-    result.map_err(|code| refused(code, key, why))
+/// Turns the code a check of the policy answers into the error of the command, with what would permit it.
+fn check(
+    result: Result<(), ErrorCode>,
+    key: &str,
+    why: &str,
+    permit: impl FnOnce() -> Option<Permit>,
+) -> Result<(), CommandError> {
+    result.map_err(|code| permitting(refused(code, key, why), permit()))
 }
 
 fn mode_name(mode: SandboxMode) -> String {
@@ -499,7 +599,27 @@ fn harness_is_here(executor: Option<&String>) -> bool {
     executor.is_none()
 }
 
-fn refusal_authority(policy: &LocalPolicy, mut error: CommandError) -> CommandError {
+/// The program alone, with its policy command, where nothing names this installation's instance.
+fn bare_operator(policy: &LocalPolicy) -> String {
+    let program = if policy
+        .roles
+        .as_ref()
+        .is_some_and(|roles| roles.contains(&orch_link_contract::session::Role::Node))
+    {
+        "orch-node"
+    } else {
+        "orch-connector"
+    };
+    format!("{program} policy")
+}
+
+/// Says who decides a refused key: its managers in Orch for a key handed over, else the machine's operator, with
+/// `operator`'s exact command that permits what was refused where one does.
+fn refusal_authority(
+    policy: &LocalPolicy,
+    mut error: CommandError,
+    operator: &str,
+) -> CommandError {
     let key = error
         .details
         .as_ref()
@@ -513,14 +633,21 @@ fn refusal_authority(policy: &LocalPolicy, mut error: CommandError) -> CommandEr
         } else {
             "machine_operator"
         };
-        let program = if policy
-            .roles
-            .as_ref()
-            .is_some_and(|roles| roles.contains(&orch_link_contract::session::Role::Node))
+        let details = error.details.as_ref();
+        let command = if let Some(value) = details.and_then(|details| details.get("permits")) {
+            Some(format!(
+                "{operator} set {} {}",
+                key.as_str(),
+                crate::installation::command_value(value)
+            ))
+        } else if details
+            .and_then(|details| details.get("permits_hand_over"))
+            .and_then(Json::as_bool)
+            == Some(true)
         {
-            "orch-node"
+            Some(format!("{operator} delegate {}", key.as_str()))
         } else {
-            "orch-connector"
+            None
         };
         let why = error
             .detail
@@ -529,11 +656,10 @@ fn refusal_authority(policy: &LocalPolicy, mut error: CommandError) -> CommandEr
             .unwrap_or(&error.detail);
         error.detail = if handed {
             format!("{why}; the machine's managers control this handed-over key in Orch")
+        } else if let Some(command) = command {
+            format!("{why}; the machine's operator keeps this key: `{command}`")
         } else {
-            format!(
-                "{why}; the machine's operator keeps this key: `{program} policy set {} …`",
-                key.as_str()
-            )
+            format!("{why}; the machine's operator keeps this key")
         };
         if let Some(details) = error.details.as_mut().and_then(Json::as_object_mut) {
             details.insert("decides".into(), Json::String(decides.into()));
@@ -547,7 +673,12 @@ fn refusal_authority(policy: &LocalPolicy, mut error: CommandError) -> CommandEr
 ///
 /// What a key governs is stated beside the check. Commands no key concerns pass.
 pub fn gate(policy: &LocalPolicy, command: Command) -> Result<Gated, CommandError> {
-    gate_command(policy, command).map_err(|error| refusal_authority(policy, error))
+    gate_as(policy, command, &bare_operator(policy))
+}
+
+/// [`gate`], with the refusal's advice naming `operator`, this installation's exact policy command.
+fn gate_as(policy: &LocalPolicy, command: Command, operator: &str) -> Result<Gated, CommandError> {
+    gate_command(policy, command).map_err(|error| refusal_authority(policy, error, operator))
 }
 
 #[allow(
@@ -621,9 +752,13 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
     match &mut command {
         Command::AgentStart(start) => {
             if let Some(runtime) = &mut start.runtime {
-                runtime.resources = policy
-                    .bounded_resources_optional(runtime.resources)
-                    .map_err(|reason| refused(ErrorCode::Unsupported, "resources.max", &reason))?;
+                let asked = runtime.resources;
+                runtime.resources = policy.bounded_resources_optional(asked).map_err(|reason| {
+                    permitting(
+                        refused(ErrorCode::Unsupported, "resources.max", &reason),
+                        raised(policy, asked.as_ref()),
+                    )
+                })?;
             }
         }
         Command::PortPublish(body) => {
@@ -631,36 +766,59 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                 .ports
                 .permits(orch_api_contract::ports::PortOpeningKind::Host)
             {
-                return Err(refused(
-                    ErrorCode::Unsupported,
-                    "ports",
-                    "publishing on this machine's address is off",
+                // An address to publish on is the operator's own; with one, letting its audience in permits it.
+                let opened = policy.ports.publish.is_some().then(|| {
+                    let mut ports = policy.get(PolicyKey::Ports);
+                    if let Some(allowed) = ports.get_mut("allowed").and_then(Json::as_array_mut) {
+                        let host = Json::String("host".into());
+                        if !allowed.contains(&host) {
+                            allowed.push(host);
+                        }
+                    }
+                    Permit::Value(ports)
+                });
+                return Err(permitting(
+                    refused(
+                        ErrorCode::Unsupported,
+                        "ports",
+                        "publishing on this machine's address is off",
+                    ),
+                    opened,
                 ));
             }
             crate::host_ports::permitted(&crate::host_ports::policy_listeners(&policy.ports), body)
                 .map_err(|reason| refused(ErrorCode::Unsupported, "ports", &reason))?;
         }
         Command::UnitAfterUp(_) if !policy.environment_after_up => {
-            return Err(refused(
-                ErrorCode::Unsupported,
-                "environment.after_up",
-                "commands after start or attach are off",
+            return Err(permitting(
+                refused(
+                    ErrorCode::Unsupported,
+                    "environment.after_up",
+                    "commands after start or attach are off",
+                ),
+                Some(Permit::Value(Json::Bool(true))),
             ));
         }
         Command::BrowserOpen(_) | Command::BrowserAdopt(_) | Command::BrowserProfile(_)
             if !policy.environment_browser =>
         {
-            return Err(refused(
-                ErrorCode::Unsupported,
-                "environment.browser",
-                "browser operations are off",
+            return Err(permitting(
+                refused(
+                    ErrorCode::Unsupported,
+                    "environment.browser",
+                    "browser operations are off",
+                ),
+                Some(Permit::Value(Json::Bool(true))),
             ));
         }
         Command::DisplayOpen(_) | Command::DisplayAdopt(_) if !policy.environment_vnc => {
-            return Err(refused(
-                ErrorCode::Unsupported,
-                "environment.vnc",
-                "display operations are off",
+            return Err(permitting(
+                refused(
+                    ErrorCode::Unsupported,
+                    "environment.vnc",
+                    "display operations are off",
+                ),
+                Some(Permit::Value(Json::Bool(true))),
             ));
         }
         Command::SessionOpen(open) => {
@@ -682,6 +840,7 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                         policy.check_root(Path::new(directory)),
                         "environment.roots",
                         &format!("{directory} is outside the directories this machine offers"),
+                        || offering(policy, directory),
                     )?;
                 }
             }
@@ -693,6 +852,13 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                         "the login kept on this machine is not to be used in {} arrangements",
                         open.arrangement.as_str()
                     ),
+                    || {
+                        listing(
+                            policy,
+                            PolicyKey::ProviderArrangements,
+                            open.arrangement.as_str(),
+                        )
+                    },
                 )?;
             }
         }
@@ -708,9 +874,13 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             }
         }
         Command::EnvAttach(attach) => {
-            attach.resources = policy
-                .bounded_resources_optional(attach.resources)
-                .map_err(|reason| refused(ErrorCode::Unsupported, "resources.max", &reason))?;
+            let asked = attach.resources;
+            attach.resources = policy.bounded_resources_optional(asked).map_err(|reason| {
+                permitting(
+                    refused(ErrorCode::Unsupported, "resources.max", &reason),
+                    raised(policy, asked.as_ref()),
+                )
+            })?;
             if let Some(sources) = &attach.data_sources {
                 for path in [sources.workspace.directory(), sources.home.directory()]
                     .into_iter()
@@ -720,6 +890,7 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                         policy.check_root(Path::new(path)),
                         "environment.roots",
                         &format!("{path} is outside the directories this machine offers"),
+                        || offering(policy, path),
                     )?;
                 }
             }
@@ -740,10 +911,15 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                     policy.check_root(Path::new(directory)),
                     "environment.roots",
                     &format!("{directory} is outside the directories this machine offers"),
+                    || offering(policy, directory),
                 )?;
             }
         }
         Command::FsWrite(_)
+        | Command::FsRelayReceive(_)
+        | Command::FsRelayVerify(_)
+        | Command::FsRelayPrepare(_)
+        | Command::FsRelayCommit(_)
         | Command::FsMkdir(_)
         | Command::FsDataImport(_)
         | Command::FsRename(_)
@@ -760,21 +936,32 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             policy.check_remote_write(),
             "environment.remote_write",
             "this machine accepts no file written from outside",
+            || Some(Permit::Value(Json::Bool(true))),
         )?,
+        // An existing directory needs no write; the native conditional publisher enforces remote-write immediately before any namespace effect.
+        Command::FsMaterializeIfAbsent(_) => {}
         Command::FsMaterialize(materialize) => match materialize.purpose {
             MaterializePurpose::Delivery => check(
                 policy.check_deliver_files(),
                 "environment.deliver_files",
                 "this machine does not write the files that arrive with a message",
+                || Some(Permit::Value(Json::Bool(true))),
             )?,
             // An exact copy of files written into the environment from outside is a remote write like a move.
             MaterializePurpose::Move | MaterializePurpose::Exact => check(
                 policy.check_remote_write(),
                 "environment.remote_write",
                 "this machine accepts no file written from outside",
+                || Some(Permit::Value(Json::Bool(true))),
             )?,
         },
         Command::PtyOpen(_) => {
+            if policy.environment_files_reach != orch_link_contract::policy::FileReach::Machine {
+                return Err(CommandError::new(
+                    ErrorCode::FileReachDenied,
+                    "this machine limits file reach to roots; an unrestricted shell cannot stay within it",
+                ));
+            }
             if !policy.environment_terminal {
                 return Err(CommandError::new(
                     ErrorCode::Unsupported,
@@ -795,6 +982,7 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                     policy.check_mcp_add(),
                     "mcp.add",
                     "this machine lets no tool server be written from outside",
+                    || Some(Permit::Value(Json::Bool(true))),
                 )?;
             }
         }
@@ -802,6 +990,7 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
             policy.check_mcp_import(),
             "mcp.import",
             "this machine lets no tool server be imported",
+            || Some(Permit::Value(Json::Bool(true))),
         )?,
         Command::ExecStart(exec) => {
             // An executor that has tool sets is offered when any of its sets is.
@@ -809,6 +998,7 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                 policy.check_offer(&exec.executor),
                 "exec.offers",
                 &format!("this machine does not offer {}", exec.executor),
+                || listing(policy, PolicyKey::ExecOffers, &exec.executor),
             )?;
         }
         Command::ProviderStart(start) => {
@@ -820,21 +1010,32 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                         "model calls are not to be forwarded to {}",
                         upstream.base_url
                     ),
+                    || listing(policy, PolicyKey::ProviderUpstreams, &upstream.base_url),
                 )?;
             }
         }
         Command::LeaseOpen(lease) => {
-            let allowed = match lease.mode {
-                LeaseMode::Forwarded => policy
-                    .check_arrangement(ArrangementType::Separated)
-                    .or_else(|_| policy.check_arrangement(ArrangementType::KeySeparated)),
-                LeaseMode::Shared => policy.check_arrangement(ArrangementType::CredentialShared),
-                LeaseMode::Handover => policy.check_arrangement(ArrangementType::HandedOver),
+            let (allowed, needs) = match lease.mode {
+                LeaseMode::Forwarded => (
+                    policy
+                        .check_arrangement(ArrangementType::Separated)
+                        .or_else(|_| policy.check_arrangement(ArrangementType::KeySeparated)),
+                    ArrangementType::Separated,
+                ),
+                LeaseMode::Shared => (
+                    policy.check_arrangement(ArrangementType::CredentialShared),
+                    ArrangementType::CredentialShared,
+                ),
+                LeaseMode::Handover => (
+                    policy.check_arrangement(ArrangementType::HandedOver),
+                    ArrangementType::HandedOver,
+                ),
             };
             check(
                 allowed,
                 "provider.arrangements",
                 "the credential kept on this machine is not to be used in that arrangement",
+                || listing(policy, PolicyKey::ProviderArrangements, needs.as_str()),
             )?;
         }
         _ => {}
@@ -854,9 +1055,12 @@ struct State {
 /// The local policy of this connector: read from its file, kept in it, changed by its owner, and by the
 /// system for the keys that were handed over.
 pub struct PolicyStore {
+    platform_revision: std::sync::atomic::AtomicU64,
     state: Mutex<State>,
     path: Option<PathBuf>,
     changed: watch::Sender<u64>,
+    /// This installation's exact policy command, as its installation names it.
+    operator: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for PolicyStore {
@@ -946,6 +1150,7 @@ impl PolicyStore {
 
     fn build(config: ConnectorConfig, policy: Option<LocalPolicy>, path: Option<PathBuf>) -> Self {
         Self {
+            platform_revision: std::sync::atomic::AtomicU64::new(1),
             state: Mutex::new(State {
                 config,
                 policy,
@@ -953,6 +1158,7 @@ impl PolicyStore {
             }),
             path,
             changed: watch::channel(0).0,
+            operator: Mutex::new(None),
         }
     }
 
@@ -960,10 +1166,86 @@ impl PolicyStore {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Names this installation's exact policy command (its `commands.policy`) in the advice of every refusal of a
+    /// key its operator keeps, as its page names it.
+    pub fn operated_by(&self, command: &str) {
+        *self.operator.lock().unwrap_or_else(PoisonError::into_inner) = Some(command.to_owned());
+    }
+
+    /// This installation's exact policy command: the one its installation names, else that of the connector whose
+    /// data directory holds this policy's file, else the program alone.
+    fn operator(&self, policy: &LocalPolicy) -> String {
+        if let Some(command) = self
+            .operator
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        {
+            return command;
+        }
+        let node = policy
+            .roles
+            .as_ref()
+            .is_some_and(|roles| roles.contains(&orch_link_contract::session::Role::Node));
+        match self.path.as_deref().and_then(Path::parent) {
+            Some(directory) if !node => crate::installation::policy_command(directory, None),
+            _ => bare_operator(policy),
+        }
+    }
+
+    pub(crate) fn platform_review(&self) -> Option<u64> {
+        if orch_envhost::RUNTIME_VERIFIED {
+            return None;
+        }
+        let state = self.state();
+        if !state
+            .policy
+            .as_ref()
+            .is_some_and(crate::installation::runtime_reviewed)
+        {
+            return None;
+        }
+        Some(
+            self.platform_revision
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn changed_platform(&self, previous: Option<&LocalPolicy>, next: Option<&LocalPolicy>) {
+        if previous.and_then(|p| p.exec_platform.build())
+            != next.and_then(|p| p.exec_platform.build())
+        {
+            self.platform_revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Whether the system made this machine, so that it has no local policy.
     #[must_use]
     pub fn is_managed(&self) -> bool {
         self.state().policy.is_none()
+    }
+
+    /// Check the current declaration on every personal channel use and at the carrier tick.
+    pub(crate) fn permits_port_ticket(
+        &self,
+        claims: &orch_link_contract::ports::PortTicketClaims,
+    ) -> bool {
+        let state = self.state();
+        if claims.machine_reach {
+            return claims.transport == orch_api_contract::ports::PortTransport::Tcp
+                && claims.opening_id.is_none()
+                && claims.audience.is_none()
+                && matches!(&claims.source.caller, orch_api_contract::ports::PortCaller::Person { user } if user.kind == orch_api_contract::users::UserKind::Human)
+                && state
+                    .policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.ports.loopback_tcp.contains(&claims.port));
+        }
+        state
+            .policy
+            .as_ref()
+            .is_none_or(|policy| policy.permits_port(claims.audience))
     }
 
     /// The policy now in force; `None` for a machine the system made.
@@ -979,11 +1261,15 @@ impl PolicyStore {
             Some(policy) if policy.tools_fetch => Ok(()),
             Some(policy) => Err(refusal_authority(
                 policy,
-                refused(
-                    ErrorCode::Unsupported,
-                    "tools.fetch",
-                    "fetching builds is off",
+                permitting(
+                    refused(
+                        ErrorCode::Unsupported,
+                        "tools.fetch",
+                        "fetching builds is off",
+                    ),
+                    Some(Permit::Value(Json::Bool(true))),
                 ),
+                &self.operator(policy),
             )),
             None => Err(refused(
                 ErrorCode::Unsupported,
@@ -997,6 +1283,30 @@ impl PolicyStore {
     #[must_use]
     pub fn config(&self) -> ConnectorConfig {
         self.state().config.clone()
+    }
+
+    /// Keep gateway selection in the same locked configuration as policy, roles and programs.
+    pub fn change_gateway(
+        &self,
+        choice: &orch_link_contract::gateways::GatewayChoice,
+    ) -> Result<bool, PolicyFault> {
+        let mut state = self.state();
+        if state.config.connector.gateway == *choice {
+            return Ok(false);
+        }
+        let mut config = state.config.clone();
+        config.connector.gateway = choice.clone();
+        orch_config::loader::Validate::validate(&config)
+            .map_err(|error| PolicyFault::Config(error.to_string()))?;
+        let next = State {
+            config,
+            policy: state.policy.clone(),
+            active_roles: state.active_roles.clone(),
+        };
+        self.persist(&next)?;
+        *state = next;
+        self.changed.send_modify(|count| *count += 1);
+        Ok(true)
     }
 
     /// The one file owns both policy provenance and runtime program registrations; a policy save
@@ -1025,11 +1335,15 @@ impl PolicyStore {
         {
             return Err(refusal_authority(
                 policy,
-                refused(
-                    ErrorCode::Unsupported,
-                    key.as_str(),
-                    "runtime program registration is kept locally or switched off",
+                permitting(
+                    refused(
+                        ErrorCode::Unsupported,
+                        key.as_str(),
+                        "runtime program registration is kept locally or switched off",
+                    ),
+                    Some(Permit::HandOver),
                 ),
+                &self.operator(policy),
             ));
         }
         let word = match kind {
@@ -1080,7 +1394,12 @@ impl PolicyStore {
     /// Reads the current selection only after the machine authorizes a remote harness change.
     pub(crate) fn harness_selection(&self, kind: &str) -> Result<Option<String>, CommandError> {
         let state = self.state();
-        let policy = harness_change_policy(state.policy.as_ref())?;
+        let operator = state
+            .policy
+            .as_ref()
+            .map(|policy| self.operator(policy))
+            .unwrap_or_default();
+        let policy = harness_change_policy(state.policy.as_ref(), &operator)?;
         Ok(policy.harness(kind).map(|entry| entry.path.clone()))
     }
 
@@ -1090,9 +1409,23 @@ impl PolicyStore {
         kind: &str,
         expected: Option<&str>,
         replacement: Option<&str>,
+        confirmation: Option<orch_agent_programs::confirmation::Confirmation>,
     ) -> Result<(), CommandError> {
         let mut state = self.state();
-        let mut policy = harness_change_policy(state.policy.as_ref())?.clone();
+        let operator = state
+            .policy
+            .as_ref()
+            .map(|policy| self.operator(policy))
+            .unwrap_or_default();
+        let mut policy = harness_change_policy(state.policy.as_ref(), &operator)?.clone();
+        if replacement.is_some() != confirmation.is_some()
+            || confirmation.is_some_and(|decision| decision.by.is_nil())
+        {
+            return Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "a remote program confirmation needs its original manager and recorded time",
+            ));
+        }
         if kind.is_empty() || replacement.is_some_and(str::is_empty) {
             return Err(CommandError::new(
                 ErrorCode::Unsupported,
@@ -1110,6 +1443,7 @@ impl PolicyStore {
             policy.agent_harnesses.push(PolicyHarness {
                 kind: kind.to_owned(),
                 path: path.to_owned(),
+                confirmation,
             });
         }
         let before = state.config.policy.values.clone();
@@ -1144,11 +1478,15 @@ impl PolicyStore {
         if !policy.delegates(PolicyKey::MachineRoles) || !policy.machine_roles {
             return Err(refusal_authority(
                 policy,
-                refused(
-                    ErrorCode::Unsupported,
-                    "machine.roles",
-                    "changing the offered roles is kept locally or switched off",
+                permitting(
+                    refused(
+                        ErrorCode::Unsupported,
+                        "machine.roles",
+                        "changing the offered roles is kept locally or switched off",
+                    ),
+                    Some(Permit::HandOver),
                 ),
+                &self.operator(policy),
             ));
         }
         let names = roles
@@ -1184,7 +1522,10 @@ impl PolicyStore {
     /// are its template's.
     pub fn gate(&self, command: Command) -> Result<Gated, CommandError> {
         match self.policy() {
-            Some(policy) => gate(&policy, command),
+            Some(policy) => {
+                let operator = self.operator(&policy);
+                gate_as(&policy, command, &operator)
+            }
             None => Ok(Gated {
                 command,
                 clamps: Vec::new(),
@@ -1230,6 +1571,7 @@ impl PolicyStore {
             active_roles: state.active_roles.clone(),
         };
         self.persist(&next)?;
+        self.changed_platform(state.policy.as_ref(), next.policy.as_ref());
         *state = next;
         self.changed.send_modify(|count| *count += 1);
         Ok(())
@@ -1314,6 +1656,7 @@ impl PolicyStore {
         {
             return Ok(false);
         }
+        self.changed_platform(state.policy.as_ref(), Some(&found));
         state.config = read;
         state.policy = Some(found);
         self.changed.send_modify(|count| *count += 1);
@@ -1337,7 +1680,20 @@ impl PolicyStore {
                 None,
             ));
         };
-        let change = policy.apply(values);
+        let previous_system = policy.exec_platform.clone();
+        let mut change = policy.apply(values);
+        let key = PolicyKey::ExecPlatform.as_str();
+        if change.applied.iter().any(|applied| applied == key)
+            && let orch_agent_programs::confirmation::PlatformConsent::Approved {
+                build,
+                confirmation,
+            } = &policy.exec_platform
+            && (confirmation.is_none() || Some(build) != crate::installation::reviewable_platform())
+        {
+            policy.exec_platform = previous_system;
+            change.applied.retain(|applied| applied != key);
+            change.refused.push(key.into());
+        }
         if !change.applied.is_empty() {
             let before = state.config.policy.values.clone();
             for key in &change.applied {
@@ -1467,39 +1823,114 @@ mod tests {
         let error = policy.require_tools_fetch().unwrap_err();
         assert!(
             error.detail.contains("tools.fetch")
-                && error.detail.contains("agent role")
+                && error.detail.contains("(agent, node role)")
                 && error.detail.contains("operator")
         );
     }
     use super::*;
     use std::sync::Arc;
 
+    fn program_confirmation() -> orch_agent_programs::confirmation::Confirmation {
+        orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        }
+    }
+
     #[test]
     fn individual_harness_changes_replace_one_kind_and_refuse_stale_captures() {
         let store = PolicyStore::connected(ConnectorConfig::default(), None).unwrap();
         store.offered_roles(&[orch_link_contract::session::Role::Environment]);
         assert!(store.harness_selection("codex").is_err());
-        assert!(store.change_harness("codex", None, Some("/one")).is_err());
+        assert!(
+            store
+                .change_harness("codex", None, Some("/one"), Some(program_confirmation()))
+                .is_err()
+        );
         store.delegate(&["agent.harnesses".into()]).unwrap();
-        store.change_harness("codex", None, Some("/one")).unwrap();
         store
-            .change_harness("claude-code", None, Some("/two"))
+            .change_harness("codex", None, Some("/one"), Some(program_confirmation()))
+            .unwrap();
+        store
+            .change_harness(
+                "claude-code",
+                None,
+                Some("/two"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         let captured = store.harness_selection("codex").unwrap();
         store
-            .change_harness("codex", captured.as_deref(), Some("/replacement"))
+            .change_harness(
+                "codex",
+                captured.as_deref(),
+                Some("/replacement"),
+                Some(program_confirmation()),
+            )
             .unwrap();
         assert!(
             store
-                .change_harness("codex", captured.as_deref(), None)
+                .change_harness("codex", captured.as_deref(), None, None)
                 .is_err()
         );
         assert_eq!(store.harness("codex").unwrap().path, "/replacement");
         store
-            .change_harness("codex", Some("/replacement"), None)
+            .change_harness("codex", Some("/replacement"), None, None)
             .unwrap();
         assert!(store.harness("codex").is_none());
         assert_eq!(store.harness("claude-code").unwrap().path, "/two");
+    }
+
+    #[test]
+    fn a_remote_program_confirmation_keeps_its_manager_after_restart_and_revocation_removes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let store = PolicyStore::connected(ConnectorConfig::default(), Some(path.clone())).unwrap();
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        let confirmation = orch_agent_programs::confirmation::Confirmation {
+            by: orch_types::new_id(),
+            at: "2026-10-31T00:00:00.000Z".parse().unwrap(),
+        };
+        assert!(
+            store
+                .change_harness("codex", None, Some("/codex"), None)
+                .is_err()
+        );
+        assert!(store.harness("codex").is_none());
+        store
+            .change_harness("codex", None, Some("/codex"), Some(confirmation))
+            .unwrap();
+        assert_eq!(
+            store.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        let config: ConnectorConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let restarted = PolicyStore::connected(config, Some(path.clone())).unwrap();
+        assert_eq!(
+            restarted.harness("codex").unwrap().confirmation,
+            Some(confirmation)
+        );
+        restarted
+            .change_harness("codex", Some("/codex"), None, None)
+            .unwrap();
+        let config: ConnectorConfig =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let revoked = PolicyStore::connected(config, Some(path)).unwrap();
+        assert!(revoked.harness("codex").is_none());
+    }
+
+    #[test]
+    fn a_local_program_selection_has_no_invented_human_approver() {
+        let text = "[[agent.harnesses]]\nkind = 'codex'\npath = '/operator/codex'\n";
+        let mut config: ConnectorConfig =
+            orch_config::load_text(text, "connector.toml", |_| None).unwrap();
+        config.policy.local_keys = Some(explicit_local_keys(text).unwrap());
+        let store = PolicyStore::connected(config, None).unwrap();
+        let selected = store.harness("codex").unwrap();
+        assert_eq!(selected.path, "/operator/codex");
+        assert!(selected.confirmation.is_none());
     }
 
     #[test]
@@ -1514,7 +1945,9 @@ mod tests {
                 let ready = Arc::clone(&ready);
                 scope.spawn(move || {
                     ready.wait();
-                    store.change_harness(kind, None, Some(path)).unwrap();
+                    store
+                        .change_harness(kind, None, Some(path), Some(program_confirmation()))
+                        .unwrap();
                 });
             }
         });
@@ -1533,6 +1966,8 @@ mod tests {
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            program_work: None,
+            output_capture_bytes: 67_108_864,
             native_model: None,
             transport_only: false,
             turn_changes_require_restart: false,
@@ -1559,6 +1994,7 @@ mod tests {
             subagent_limits: Default::default(),
             prompt_cache_ttl: None,
             background_wake: true,
+            web_action_wait_secs: 120,
             image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
@@ -1593,6 +2029,45 @@ mod tests {
             environment_roots: vec!["/srv/work".to_owned()],
             ..LocalPolicy::default()
         }
+    }
+
+    // Written with Unix directories (`/srv/work`), which Windows reads as relative to the current drive.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_keys_refusal_names_the_exact_command_of_this_installation_that_permits_what_was_refused()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = ConnectorConfig::default();
+        config.environment.roots = vec!["/srv/work".into()];
+        config.policy.local_keys = Some(vec!["environment.roots".into()]);
+        let policy =
+            PolicyStore::connected(config, Some(directory.path().join("config.toml"))).unwrap();
+        let program = crate::installation::program_path().unwrap();
+        let operator = format!(
+            "'{}' --data-dir '{}' policy",
+            program.display(),
+            directory.path().display()
+        );
+        let fetch = policy.require_tools_fetch().unwrap_err();
+        assert!(
+            fetch.detail.ends_with(&format!(
+                "the machine's operator keeps this key: `{operator} set tools.fetch true`"
+            )),
+            "{}",
+            fetch.detail
+        );
+        // A list names what is listed with what the refused command needs.
+        let outside = policy
+            .gate(Command::SessionOpen(open("/etc", None)))
+            .unwrap_err();
+        assert!(
+            outside.detail.ends_with(&format!(
+                "the machine's operator keeps this key: `{operator} set environment.roots '[\"/srv/work\",\"/etc\"]'`"
+            )),
+            "{}",
+            outside.detail
+        );
+        assert!(!fetch.detail.contains('…') && !outside.detail.contains('…'));
     }
 
     #[test]
@@ -1926,6 +2401,7 @@ mod tests {
     fn nothing_is_written_from_outside_until_the_owner_allows_it() {
         let mut policy = here();
         let write = Command::FsWrite(FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             path: "a.txt".into(),
@@ -1940,6 +2416,7 @@ mod tests {
         policy.environment_remote_write = true;
         assert!(gate(&policy, write).is_ok());
         let delivery = Command::FsMaterialize(FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             job_id: None,
@@ -1957,6 +2434,7 @@ mod tests {
             "policy.deliver_files_disabled"
         );
         let moved = Command::FsMaterialize(FsMaterialize {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: new_id(),
             job_id: None,
@@ -1977,6 +2455,8 @@ mod tests {
         let policy = here();
         let attach = |root: &str| {
             Command::EnvAttach(EnvAttach {
+                workspace: Default::default(),
+
                 resources: None,
                 data_generation: None,
                 storage: None,
