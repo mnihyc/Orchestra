@@ -423,7 +423,7 @@ async fn append_placed(
     .bind(event.org)
     .bind(entry.environment_id)
     .bind(entry.summary)
-    .bind(&entry.details)
+    .bind(orch_types::storable::json(&entry.details).as_ref())
     .bind(origin.ip.map(|ip| ip.to_string()))
     .bind(origin.user_agent.as_deref())
     .bind(origin.request_id.as_deref())

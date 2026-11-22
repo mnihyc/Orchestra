@@ -13,6 +13,8 @@ import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusChip } from '@/ui/StateChip';
@@ -33,7 +35,8 @@ function SnapshotRows({ id }: { id: string }) {
   const { locale } = useFormatContext();
   const me = useQuery(meQuery), mode = useAdminMode();
   const admin = me.data?.is_system_admin !== false && mode.data?.as_admin === true;
-  const list = useInfiniteQuery(environmentSnapshotsQuery(id, admin));
+  const search = useCollectionSearch('environment-snapshots:' + id);
+  const list = useInfiniteQuery(environmentSnapshotsQuery(id, admin, search.q));
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const columns: Column<Snapshot>[] = [
     { id: 'name', header: t('storage.name'), grow: true, cell: (row, shown) => {
@@ -52,8 +55,9 @@ function SnapshotRows({ id }: { id: string }) {
     { id: 'act', header: t('temporary.download'), hideHeader: true, align: 'end', cell: (row) => row.state === 'complete' || row.state === 'partial' ? <SnapshotDownloadButton id={row.id} admin={row.admin_access !== undefined && row.admin_access !== null} name={row.label || t('storage.kinds.snapshot')} /> : null },
   ];
   return <section className="flex min-w-0 flex-col gap-3" aria-label={t('adminArtifacts.snapshots')}><div className="flex flex-wrap items-center justify-between gap-2"><span /><Button size="sm" disabled={list.isFetching} onClick={() => void list.refetch()}>{t('operationKeys.activity.refresh')}</Button></div>
+    <CollectionSearch name={t('adminArtifacts.snapshots')} {...search} />
     {list.isPending ? <SkeletonRows read={list} rows={2} /> : list.isError && !list.isFetchNextPageError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      : rows.length === 0 ? <EmptyState compact title={t('adminArtifacts.noSnapshots')} /> : <Table label={t('adminArtifacts.snapshots')} rows={rows} rowKey={(row) => row.id} columns={columns} />}
+      : rows.length === 0 ? <EmptyState compact title={t('adminArtifacts.noSnapshots')} /> : <Table key={search.q} virtual label={t('adminArtifacts.snapshots')} rows={rows} rowKey={(row) => row.id} columns={columns} />}
     <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
   </section>;
 }

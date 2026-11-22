@@ -561,6 +561,73 @@ async fn a_provider_asked_about_alone_offers_the_types_that_every_model_chosen_l
 }
 
 #[tokio::test]
+async fn ask_and_ordinary_work_each_select_only_the_entry_that_pays_for_its_model() {
+    use orch_access_contract::permissions::UsagePurpose;
+    use orch_authz::options::Wanted;
+
+    let s = setting().await;
+    let ask_entry =
+        s.w.put(
+            "provider",
+            s.provider,
+            P::ProviderUse,
+            Holder::User { id: s.bea },
+            json!({"models":["small"],"purposes":["ask"]}),
+        )
+        .await;
+    let work_entry =
+        s.w.put(
+            "provider",
+            s.provider,
+            P::ProviderUse,
+            Holder::Everyone,
+            json!({"models":["big"],"purposes":["work"]}),
+        )
+        .await;
+    let principal = s.w.principal(Caller::session(s.bea)).await;
+    let mut conn = s.w.conn().await;
+    let Usable::Yes(granted) = usable::usable(
+        &mut conn,
+        &principal,
+        s.provider,
+        Some(s.thread),
+        &Policies::default(),
+    )
+    .await
+    .unwrap() else {
+        panic!("both provider entries are available");
+    };
+    for (purpose, model, expected) in [
+        (UsagePurpose::Ask, "small", Some(ask_entry)),
+        (UsagePurpose::Ask, "big", None),
+        (UsagePurpose::Turn, "small", None),
+        (UsagePurpose::Turn, "big", Some(work_entry)),
+    ] {
+        let wanted = Wanted {
+            purpose,
+            model: Some((model, &[])),
+            ..Wanted::default()
+        };
+        assert_eq!(
+            granted.allows(&wanted),
+            expected.is_some(),
+            "{purpose} {model}"
+        );
+        let selected = granted.allowing(&wanted);
+        assert_eq!(
+            selected.len(),
+            usize::from(expected.is_some()),
+            "{purpose} {model}"
+        );
+        assert_eq!(
+            granted.entry_among(&selected),
+            expected,
+            "{purpose} {model}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_place_of_one_entry_does_not_join_the_models_of_another() {
     let s = setting().await;
     // Her own entry allows `small` anywhere, the one everyone has allows `big` in the first

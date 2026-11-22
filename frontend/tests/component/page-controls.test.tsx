@@ -122,7 +122,7 @@ it.each(modes)('keeps every section link visible and every status in words exact
   expect(within(nav).getAllByRole('link')).toHaveLength(pages.length);
   expect(within(nav).getByRole('link', { name: i18n.t('screens.security.title') })).toHaveAttribute('aria-current', 'page');
   for (const id of pages) expect(within(nav).getByRole('link', { name: i18n.t(`screens.${id}.title`) })).toHaveAttribute('href', `/settings/${id}`);
-  expect(within(nav).getByRole('combobox', { name: i18n.t('settings.personal.nav') })).toHaveValue(i18n.t('screens.security.title'));
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
   for (const key of ['state.running', 'state.done', 'componentUpdates.available'] as const) expect(screen.getAllByText(i18n.t(key))).toHaveLength(1);
   expect(screen.getByText('7')).toBeVisible();
 });
