@@ -31,8 +31,13 @@ pub struct HostStorage {
 /// Local host-process configuration, chosen only by the node operator.
 #[derive(Debug, Clone)]
 pub struct HostConfig {
-    /// The protected directory of host-driver records and default volumes.
+    /// The node's private directory of host-driver records, which no unit's account reaches.
     pub base: PathBuf,
+    /// The directory beside the node's data directory that other accounts may pass through but not list
+    /// (0711): each unit's own directory, owned by its account and private to it (0700), with the connector it
+    /// runs, the harness builds it is given and its launch files, and the default storage's volumes, each owned
+    /// by its unit's account the same way.
+    pub units: PathBuf,
     /// The connector from the node's verified current tool build.
     pub connector: PathBuf,
     /// The verified tools cache, read by name and version.
@@ -69,6 +74,73 @@ pub struct HostDriver {
     locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+/// The directory of the default storage's volumes, in the units directory.
+pub(crate) const DEFAULT_VOLUMES: &str = "volumes";
+/// The connector a unit runs, in its own directory.
+const CONNECTOR: &str = "orch-connector";
+/// The harness builds a unit is given, in its own directory, as `<tool>/` the way a container sees them.
+const TOOLS: &str = "tools";
+
+/// Places `source` at `target` for a unit: a link to the same verified file where the filesystem allows, else a
+/// copy with its mode. Nothing that is at `target` is followed.
+fn place_file(source: &Path, target: &Path) -> Result<(), DriverError> {
+    if std::fs::hard_link(source, target).is_ok() {
+        return Ok(());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mode = std::fs::metadata(source)
+            .map_err(io_error)?
+            .permissions()
+            .mode();
+        options.mode(mode & 0o755);
+    }
+    let mut written = options.open(target).map_err(io_error)?;
+    let mut read = std::fs::File::open(source).map_err(io_error)?;
+    std::io::copy(&mut read, &mut written).map_err(io_error)?;
+    written.sync_all().map_err(io_error)
+}
+
+/// Places the tree of a harness build at `target`, which must not exist yet: directories made anew, files
+/// placed as [`place_file`] does, links kept as links.
+fn place_tree(source: &Path, target: &Path) -> Result<(), DriverError> {
+    std::fs::create_dir(target).map_err(io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+            .map_err(io_error)?;
+    }
+    for entry in std::fs::read_dir(source).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let kind = entry.file_type().map_err(io_error)?;
+        let to = target.join(entry.file_name());
+        if kind.is_dir() {
+            place_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            place_file(&entry.path(), &to)?;
+        } else if kind.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(std::fs::read_link(entry.path()).map_err(io_error)?, &to)
+                .map_err(io_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes what is at `path` without following it.
+fn clear(path: &Path) -> Result<(), DriverError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path).map_err(io_error),
+        Ok(_) => std::fs::remove_file(path).map_err(io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 pub(crate) fn io_error(error: std::io::Error) -> DriverError {
     match error.kind() {
         std::io::ErrorKind::StorageFull | std::io::ErrorKind::OutOfMemory => {
@@ -89,7 +161,10 @@ fn verify_directory(
         let metadata = std::fs::metadata(&directory.path).map_err(io_error)?;
         if !metadata.is_dir()
             || directory.device != Some(metadata.dev())
-            || directory.inode != Some(metadata.ino())
+            || directory.inode
+                != Some(orch_driver_contract::runtime::FileNumber::from_u64(
+                    metadata.ino(),
+                ))
         {
             return Err(DriverError::InvalidSpec("the existing directory changed after environment.roots was checked; recreate with an allowed directory".into()));
         }
@@ -161,26 +236,23 @@ impl HostDriver {
                 "the built-in host driver currently verifies process identities on Linux".into(),
             ));
         }
-        crate::volumes::directory(&config.base)?;
-        for name in ["units", "volume-records", "runs", "volumes"] {
-            crate::volumes::directory(&config.base.join(name))?;
+        // The node's records stay private; only the units directory is passed through by other accounts.
+        let layout = [
+            (config.base.clone(), 0o700),
+            (config.base.join("units"), 0o700),
+            (config.base.join("volume-records"), 0o700),
+            (config.units.clone(), 0o711),
+            (config.units.join(DEFAULT_VOLUMES), 0o711),
+        ];
+        for (directory, _) in &layout {
+            crate::volumes::directory(directory)?;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&config.base, std::fs::Permissions::from_mode(0o711))
-                .map_err(io_error)?;
-            for (name, mode) in [
-                ("units", 0o700),
-                ("volume-records", 0o700),
-                ("runs", 0o711),
-                ("volumes", 0o711),
-            ] {
-                std::fs::set_permissions(
-                    config.base.join(name),
-                    std::fs::Permissions::from_mode(mode),
-                )
-                .map_err(io_error)?;
+            for (directory, mode) in &layout {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(*mode))
+                    .map_err(io_error)?;
             }
         }
         let controls = if config.prefer_scopes {
@@ -270,6 +342,71 @@ impl HostDriver {
         crate::identity::own(path, identity)
     }
 
+    /// Puts the unit's connector (the node's current verified build), the harness builds it is given and its
+    /// launch files in its own directory, while the node holds that directory, so that nothing the unit's account
+    /// left there can turn a write of the node's into one elsewhere. [`Self::hand_over`] gives it back.
+    fn prepare(&self, unit: &Unit, spec: &RuntimeSpec) -> Result<(), DriverError> {
+        let connector = std::fs::canonicalize(&self.config.connector).map_err(io_error)?;
+        let placed = unit.paths.run.join(CONNECTOR);
+        clear(&placed)?;
+        place_file(&connector, &placed)?;
+        let tools = unit.paths.run.join(TOOLS);
+        clear(&tools)?;
+        std::fs::create_dir(&tools).map_err(io_error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o755))
+                .map_err(io_error)?;
+        }
+        for tool in &spec.tools {
+            crate::volumes::check_name(&tool.name)?;
+            crate::volumes::check_name(&tool.version)?;
+            let build =
+                std::fs::canonicalize(self.config.tools.join(&tool.name).join(&tool.version))
+                    .map_err(|_| {
+                        DriverError::NotFound(format!(
+                            "{} {} is not in the tool cache of this host",
+                            tool.name, tool.version
+                        ))
+                    })?;
+            place_tree(&build, &tools.join(&tool.name))?;
+        }
+        self.prepare_files(unit, spec)
+    }
+
+    /// Takes the unit's own directory back from its account before the node writes in it again. The
+    /// directory's own path is the node's (the units directory is not writable by other accounts).
+    fn reclaim(run: &Path) -> Result<(), DriverError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let node = Identity {
+                name: String::new(),
+                uid: nix::unistd::Uid::effective().as_raw(),
+                gid: nix::unistd::Gid::effective().as_raw(),
+            };
+            crate::identity::own(run, &node)?;
+            std::fs::set_permissions(run, std::fs::Permissions::from_mode(0o700))
+                .map_err(io_error)?;
+        }
+        #[cfg(not(unix))]
+        let _ = run;
+        Ok(())
+    }
+
+    /// Gives the unit's own directory to its account, private to it.
+    fn hand_over(run: &Path, identity: &Identity) -> Result<(), DriverError> {
+        crate::identity::own(run, identity)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(run, std::fs::Permissions::from_mode(0o700))
+                .map_err(io_error)?;
+        }
+        Ok(())
+    }
+
     fn prepare_files(&self, unit: &Unit, spec: &RuntimeSpec) -> Result<(), DriverError> {
         self.file(
             &unit.paths.run.join("ca.pem"),
@@ -290,7 +427,7 @@ impl HostDriver {
     }
 
     fn command(&self, unit: &Unit) -> Result<tokio::process::Command, DriverError> {
-        let connector = std::fs::canonicalize(&self.config.connector).map_err(io_error)?;
+        let connector = unit.paths.run.join(CONNECTOR);
         let arguments = vec!["run".into(), "--managed".into()];
         let mut command = crate::identity::launch(&unit.identity, &connector, &arguments);
         if self.controls.any() {
@@ -336,7 +473,7 @@ impl HostDriver {
             .env("ORCH_CA_FILE", unit.paths.run.join("ca.pem"))
             .env("ORCH_ENROLL_FILE", unit.paths.run.join("enroll"))
             .env("ORCH_DATA_DIR", &unit.paths.state)
-            .env("ORCH_TOOLS_DIR", &self.config.tools);
+            .env("ORCH_TOOLS_DIR", unit.paths.run.join(TOOLS));
         if let Some(workspace) = &unit.paths.workspace {
             command
                 .env("ORCH_WORKSPACE_DIR", workspace)
@@ -417,10 +554,20 @@ impl EnvironmentDriver for HostDriver {
             kind: spec.kind,
         };
         if let Some(mut existing) = self.read(&reference)? {
+            if spec
+                .labels
+                .contains_key(orch_driver_contract::runtime::LABEL_BIRTH)
+            {
+                return Err(DriverError::InvalidSpec(
+                    "the requested birth requires a new unit; the existing host unit was left unchanged".into(),
+                ));
+            }
             if existing.process.is_some_and(crate::stats::alive) {
                 return Ok(reference);
             }
-            self.prepare_files(&existing, spec)?;
+            Self::reclaim(&existing.paths.run)?;
+            self.prepare(&existing, spec)?;
+            Self::hand_over(&existing.paths.run, &existing.identity)?;
             existing.spec = spec.clone();
             existing.spec.enroll_token = "".into();
             existing.state = UnitState::of(UnitStateKind::Stopped);
@@ -456,16 +603,10 @@ impl EnvironmentDriver for HostDriver {
             })?,
             workspace: role(VolumeRole::Workspace)?,
             home: role(VolumeRole::Home)?,
-            run: self.config.base.join("runs").join(&spec.name),
+            run: self.config.units.join(&spec.name),
         };
         crate::volumes::directory(&paths.run)?;
-        crate::identity::own(&paths.run, &identity)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&paths.run, std::fs::Permissions::from_mode(0o700))
-                .map_err(io_error)?;
-        }
+        Self::reclaim(&paths.run)?;
         let mut unit = Unit {
             reference: reference.clone(),
             spec: spec.clone(),
@@ -474,7 +615,8 @@ impl EnvironmentDriver for HostDriver {
             process: None,
             state: UnitState::of(UnitStateKind::Stopped),
         };
-        self.prepare_files(&unit, spec)?;
+        self.prepare(&unit, spec)?;
+        Self::hand_over(&unit.paths.run, &unit.identity)?;
         unit.spec.enroll_token = "".into();
         self.save(&unit)?;
         Ok(reference)
@@ -674,6 +816,17 @@ impl EnvironmentDriver for HostDriver {
 }
 
 impl HostDriver {
+    /// Stops and removes every unit this driver keeps, whatever system it was made for, each with its own
+    /// directory: an uninstall's purge. Its volumes stay until their directories are removed. Answers how many
+    /// units were removed.
+    pub async fn remove_all(&self) -> Result<usize, DriverError> {
+        let units = self.list_all()?;
+        for unit in &units {
+            self.remove(unit).await?;
+        }
+        Ok(units.len())
+    }
+
     fn list_all(&self) -> Result<Vec<UnitRef>, DriverError> {
         std::fs::read_dir(self.config.base.join("units"))
             .map_err(io_error)?

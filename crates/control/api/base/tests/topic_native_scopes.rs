@@ -10,7 +10,7 @@ mod support;
 use orch_access_contract::key_scope::KeyScope;
 use orch_api_contract::environment::PlaceListQuery;
 use orch_api_contract::topics::{TopicEnvironmentList, TopicPlaceList};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_db::queries::resources::access_fixtures as fixtures;
 use orch_types::{Id, Json, Time, new_id};
@@ -19,11 +19,12 @@ use support::World;
 async fn key(world: &World, user: Id, rules: Vec<Json>) -> String {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: user,
             name: "Native topic sources",
             token_hash: &token_hash(&secret),
@@ -44,6 +45,13 @@ fn rule(kind: &str, id: Id, operation: &str) -> Json {
 fn value(reply: orch_api_core::testing::RawReply) -> Json {
     assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.raw));
     serde_json::from_slice(&reply.raw).unwrap()
+}
+fn environment_page(reply: orch_api_core::testing::RawReply) -> Json {
+    let value = value(reply);
+    let page: orch_api_contract::common::Page<orch_api_contract::environment::Environment> =
+        serde_json::from_value(value).unwrap();
+    assert!(page.next_cursor.is_none());
+    serde_json::to_value(page.items).unwrap()
 }
 async fn topic(world: &World, c: &resources::Company) -> Id {
     orch_api_core::routes::install_master_key(&orch_db::secrets::MasterKey::new([7; 32]));
@@ -127,7 +135,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
     let topic = topic(&world, &c).await;
     let (first, template) = environment(&world, &c, topic, "Whole environment").await;
     let (other, _) = environment(&world, &c, topic, "Other environment").await;
-    let ordinary = value(
+    let ordinary = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -152,7 +160,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
     )
     .await;
     assert_eq!(
-        value(
+        environment_page(
             world
                 .app
                 .call(TopicEnvironmentList, &[&topic])
@@ -172,7 +180,7 @@ async fn topic_environment_whole_style_keeps_its_real_template_and_native_defaul
         ],
     )
     .await;
-    let result = value(
+    let result = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -236,7 +244,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
             .await
             .unwrap();
     }
-    let ordinary = value(
+    let ordinary = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -253,7 +261,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
         vec![rule("environment", env, "TopicEnvironmentList")],
     )
     .await;
-    let result = value(
+    let result = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -276,7 +284,7 @@ async fn topic_environment_through_thread_style_needs_no_unemitted_template_or_m
         ],
     )
     .await;
-    let same = value(
+    let same = environment_page(
         world
             .app
             .call(TopicEnvironmentList, &[&topic])
@@ -432,6 +440,7 @@ async fn topic_places_bind_the_actual_template_and_heterogeneous_rows_before_nat
         )
         .token(&c.admin.token)
         .body(&orch_api_contract::settings::NodeSettingSetBody {
+            model_choice: None,
             value: json!(chosen),
             locked: None,
             expected_revision: None,
@@ -514,7 +523,7 @@ async fn topic_environment_publication_keeps_the_original_native_reference_after
             );
             assert!(!String::from_utf8_lossy(&reply.raw).contains("Held environment"));
         } else {
-            let result = value(reply);
+            let result = environment_page(reply);
             assert_eq!(result[0]["id"], json!(env));
             assert_eq!(result[0]["template"]["id"], json!(old_template));
         }

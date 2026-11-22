@@ -1,6 +1,6 @@
 /** Documented wire fields are editing suggestions; native model/endpoint constraints still decide each request. */
 export type OptionKind = 'boolean' | 'string' | 'strings' | 'object' | 'objects';
-export type OptionId = 'safetyIdentifier' | 'user' | 'metadata' | 'cacheKey' | 'cacheRetention' | 'cacheMode' | 'cacheLifetime' | 'routingOrder' | 'routingOnly' | 'routingIgnore' | 'routingFallbacks' | 'routingRequired' | 'routingData' | 'routingSort' | 'models' | 'plugins' | 'transforms' | 'tier' | 'verbosity' | 'store' | 'googleSafety' | 'googleCache' | 'speed' | 'cacheType' | 'metadataUser';
+export type OptionId = 'safetyIdentifier' | 'user' | 'metadata' | 'cacheKey' | 'cacheRetention' | 'cacheMode' | 'cacheLifetime' | 'routingOrder' | 'routingOnly' | 'routingIgnore' | 'routingFallbacks' | 'routingRequired' | 'routingData' | 'routingSort' | 'models' | 'plugins' | 'transforms' | 'tier' | 'verbosity' | 'store' | 'googleSafety' | 'googleCache' | 'speed' | 'cacheType' | 'metadataUser' | 'commonCache' | 'schemaOutput' | 'outputSchema' | 'schemaName' | 'strictOutput';
 export interface DocumentedOption {
   id: OptionId;
   path: readonly string[];
@@ -24,6 +24,12 @@ const routing = [
 ];
 const openaiTiers = ['auto', 'default', 'flex', 'scale', 'priority', 'fast'];
 const catalogue: Readonly<Record<string, readonly DocumentedOption[]>> = {
+  common: [
+    field('commonCache','cache','object'),field('cacheKey','cache.key','string',{identifier:true}),
+    field('cacheRetention','cache.retention','string',{values:['5m','1h','in_memory','24h']}),
+    field('schemaOutput','structured_output','object'),field('outputSchema','structured_output.schema','object'),
+    field('schemaName','structured_output.name','string',{identifier:true}),field('strictOutput','structured_output.strict','boolean'),
+  ],
   'openai-responses': [
     field('tier', 'service_tier', 'string', { values: [...openaiTiers, 'ultrafast'] }),
     field('verbosity', 'text.verbosity', 'string', { values: ['low', 'medium', 'high'] }),

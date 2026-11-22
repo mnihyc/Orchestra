@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-driver-host --test lifecycle
+test -p orch-node --test uninstall
+test -p orch-node --test drivers
+test -p orch-node --test program
+test -p orch-node --lib -- composition::
+web test -- tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts
