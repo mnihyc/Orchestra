@@ -14,6 +14,8 @@ import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { StateLine } from '@/ui/StateLine';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { MeasurementFacts } from './WorkFacts';
+import { RelativeTime } from '@/ui/RelativeTime';
 
 export interface PlanCounts { files?: FilesPlan | null; mounts?: readonly { copy?: PlanMount['copy']; fingerprint_measurement?: PlanMount['fingerprint_measurement'] }[]; measurements?: readonly Measurement[]; plans?: readonly PlanCounts[]; homeFallback?: boolean }
 interface Counted { measurement: Measurement; home: boolean; fallback: boolean; fingerprint?: boolean }
@@ -134,13 +136,15 @@ export function MeasurementSize({ size }: { size: MeasurementSizeData }) {
   ].filter((part) => part !== null).join(' · ');
   const directories = activity?.directories_done;
   const title = directories === null || directories === undefined ? undefined : t('liveWork.directories', { count: directories, value: formatNumber(directories, format.locale) });
-  if (bytes !== undefined) return <span className="text-sm text-text-muted tabular-nums" data-measured-size>{total(files, bytes)}</span>;
+  const measuredAt = size.reference.measured_at ?? (job?.state === 'succeeded' ? job.finished_at : null);
+  if (bytes !== undefined) return <span className="inline-flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted tabular-nums" data-measured-size>{total(files, bytes)}{measuredAt !== null && <> · {t('liveWork.countedAt')} <RelativeTime at={measuredAt} /></>}<MeasurementFacts reference={size.reference} job={job} /></span>;
   if (job?.state === 'succeeded' || size.reference.measured_at !== null) return <span className="text-sm text-text-muted">{t('liveWork.notCounted')}</span>;
   const retry = counts === null ? undefined : <Button size="sm" variant="ghost" onClick={counts.retry}>{t('liveWork.retry')}</Button>;
   if (job?.state === 'cancelled') return <StateLine compact role="status" className="inline-flex max-w-full text-text-muted [&_[data-state-copy]]:basis-auto [&_[data-state-copy]]:flex-none" message={t('liveWork.countStopped')} action={retry} />;
   if (view?.failed === true || job?.state === 'failed') return <ErrorAlert className="inline-flex max-w-full [&_[data-state-copy]]:basis-auto [&_[data-state-copy]]:flex-none" error={view?.error ?? job?.error ?? new Error(t('liveWork.countFailed'))} message={t('liveWork.countFailed')} action={retry} />;
   return <span className="inline-flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted" data-counting-size title={title}>
     <span id={id} aria-live="polite" className="tabular-nums">{t(stopping ? 'liveWork.stopping' : 'liveWork.counting')}{!stopping && job !== undefined ? ' ' + total(job.progress.files_done, job.progress.bytes_done) : ''}</span>
+    <MeasurementFacts reference={size.reference} job={job} />
     {stalled && !stopping && <span className="text-warning-text">{' · '}{t('liveWork.unchanged', { time: formatTimeOfDay(activity.updated_at, format, now) })}</span>}
     <IconButton size="sm" action="cancel" icon={<X aria-hidden />} label={t(stopping ? 'liveWork.stopping' : 'liveWork.cancelCount')} aria-describedby={id} pending={currentCancel && cancel.isPending} disabled={stopping} reason={currentCancel && cancel.isError ? t('liveWork.stopFailed') : undefined} onClick={() => cancel.mutate(size.reference.job_id)} />
   </span>;
