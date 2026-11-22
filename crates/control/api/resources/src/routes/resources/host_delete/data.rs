@@ -263,6 +263,7 @@ pub(super) async fn plan(
                                 principal,
                                 &source,
                                 destination.machine_id,
+                                Some(orch_api_contract::forks::CopyInto::NewLocation),
                                 ctx.now,
                             )
                             .await

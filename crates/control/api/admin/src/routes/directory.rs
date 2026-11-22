@@ -46,6 +46,8 @@ use orch_access_contract::audit::AuditAction;
 
 use orch_access_contract::permissions::Permission;
 
+use orch_api_contract::common::CollectionQuery;
+
 use orch_api_contract::common::ErrorCode;
 
 use orch_api_contract::common::Page;
@@ -327,7 +329,11 @@ async fn shown(
 }
 
 /// A node's own tags and those of the orgs above it.
-async fn tag_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Tag>> {
+async fn tag_list(
+    ctx: Ctx,
+    query: orch_api_contract::directory::NodeTagListQuery,
+    (): (),
+) -> ApiResult<Page<Tag>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
@@ -340,7 +346,45 @@ async fn tag_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Tag>> {
     let mut tags = hierarchy::tags_of(&mut conn, &defining).await?;
     // From the root org down, then in the order they were defined.
     tags.sort_by_key(|tag| defining.iter().position(|place| *place == tag.node_id));
-    shown(&mut conn, &principal, &tags).await
+    let rows = shown(&mut conn, &principal, &tags).await?;
+    let picker = query.picker.unwrap_or(false);
+    let text = query.q.as_deref().unwrap_or("").trim().to_lowercase();
+    let recent = if picker && text.is_empty() {
+        orch_api_base::picker_recents::read(&mut conn, principal.user())
+            .await?
+            .choices
+            .remove("tag")
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let recent_revision =
+        orch_types::Hash::of(&serde_json::to_vec(&recent).map_err(ApiError::internal)?);
+    let source = serde_json::to_string(&("tags", principal.user(), id, picker, recent_revision))
+        .map_err(ApiError::internal)?;
+    let query = CollectionQuery {
+        q: query.q,
+        limit: query.limit,
+        cursor: query.cursor,
+    };
+    orch_api_base::collection::snapshot(
+        &query,
+        &source,
+        rows,
+        |row| {
+            (
+                !text.is_empty() && row.name.to_lowercase() != text,
+                recent
+                    .iter()
+                    .position(|key| *key == row.id.to_string())
+                    .unwrap_or(usize::MAX),
+                defining.iter().position(|place| *place == row.node.id),
+                row.id,
+            )
+        },
+        |row| row.name.clone(),
+        false,
+    )
 }
 
 /// Requires what defining a tag on the node `id` takes: Manage of the org or
@@ -735,7 +779,7 @@ async fn group_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 }
 
 /// The people in a group.
-async fn group_member_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<UserRef>> {
+async fn group_member_list(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<UserRef>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = ctx.operation_principal(&mut conn).await?;
@@ -750,7 +794,15 @@ async fn group_member_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<UserRef>> 
     let mut people =
         crate::routes::access::page::user_refs_at(&mut conn, &principal, Some(place.org), &ids)
             .await?;
-    Ok(ids.iter().filter_map(|user| people.remove(user)).collect())
+    let rows = ids.iter().filter_map(|user| people.remove(user)).collect();
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("group-members:{id}"),
+        rows,
+        |row: &UserRef| (row.display_name.clone(), row.id),
+        |row| row.display_name.clone(),
+        false,
+    )
 }
 
 fn group_holder(row: &access::GroupHolderRow) -> ApiResult<orch_access_contract::pages::Holder> {
@@ -1273,12 +1325,20 @@ async fn member_resume(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 }
 
 /// Everybody who is held out of an org now.
-async fn suspension_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Suspension>> {
+async fn suspension_list(ctx: Ctx, query: CollectionQuery, (): ()) -> ApiResult<Page<Suspension>> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     the_org(&mut conn, id).await?;
     let rows = access::suspensions_in(&mut conn, id, None).await?;
-    suspensions_shown(&mut conn, &rows).await
+    let rows = suspensions_shown(&mut conn, &rows).await?;
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("suspensions:{id}"),
+        rows,
+        |row| (row.user.display_name.clone(), row.user.id),
+        |row| row.user.display_name.clone(),
+        false,
+    )
 }
 
 // ---- service identities ----
@@ -1333,10 +1393,21 @@ async fn services_shown(
 /// The service identities an org keeps.
 async fn service_list(
     ctx: Ctx,
+    query: CollectionQuery,
     (): (),
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::directory::ServiceAccount>> {
-    crate::key_operations::native::selected_read::<native::ServiceRows>(ctx, (), ()).await
+) -> ApiResult<Page<orch_api_contract::directory::ServiceAccount>> {
+    let source = format!("service-accounts:{}", ctx.id("id")?);
+    let rows =
+        crate::key_operations::native::selected_read::<native::ServiceRows>(ctx, query.clone(), ())
+            .await?;
+    orch_api_base::collection::snapshot(
+        &query,
+        &source,
+        rows,
+        |row| (row.user.display_name.clone(), row.user.id),
+        |row| row.user.display_name.clone(),
+        false,
+    )
 }
 
 /// A service identity of the caller's reach, and the org that keeps it.
@@ -1415,7 +1486,7 @@ fn service_token_list_operation<'a>(
     ctx: &'a Ctx,
     conn: &'a mut Conn,
     caller: &'a orch_authz::Caller,
-    (): (),
+    _query: CollectionQuery,
     (): (),
 ) -> crate::registry::OperationFuture<'a> {
     Box::pin(async move {
@@ -1441,9 +1512,9 @@ fn service_token_list_operation<'a>(
 
 async fn service_token_list(
     ctx: Ctx,
+    query: CollectionQuery,
     (): (),
-    (): (),
-) -> ApiResult<Vec<orch_api_contract::auth::ApiTokenInfo>> {
+) -> ApiResult<Page<orch_api_contract::auth::ApiTokenInfo>> {
     use crate::key_operations::credentials::{self, Read};
     let mut tx = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
     let principal = ctx.operation_principal(&mut tx).await?;
@@ -1453,7 +1524,14 @@ async fn service_token_list(
     let read = ctx.operation_data::<Read<Vec<orch_api_contract::auth::ApiTokenInfo>>>()?;
     let data = credentials::complete(&ctx, &mut tx, &principal, read.as_ref()).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(data)
+    orch_api_base::collection::snapshot(
+        &query,
+        &format!("service-tokens:{}", ctx.id("id")?),
+        data,
+        |row| (row.created_at.unix_millis().saturating_neg(), row.id),
+        |row| row.name.clone(),
+        false,
+    )
 }
 
 /// Preserve the historical legacy-key refusal before generic catalogue admission.
@@ -1502,7 +1580,7 @@ async fn service_token_create_in(
     ctx: Ctx,
     body: orch_api_contract::auth::ApiTokenCreateBody,
 ) -> ApiResult<Answer<orch_api_contract::auth::TokenCreateResponse>> {
-    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use crate::middleware::authentication::{new_api_key, token_hash};
     use crate::routes::auth::tokens;
     use crate::sign_in::fresh::{self, Purpose};
     let authed = std::sync::Arc::clone(ctx.user()?);
@@ -1569,8 +1647,7 @@ async fn service_token_create_in(
             .spend(&ctx, &mut tx, authed.id(), Purpose::TokenCreate)
             .await?;
     }
-    let token_id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let (token_id, secret) = new_api_key();
     let name = asked.name.clone();
     identity::create_api_token_scoped(
         &mut tx,

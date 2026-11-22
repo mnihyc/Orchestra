@@ -1,11 +1,47 @@
-// The service worker of the application: Web Push only. No offline application caching is planned.
-//
-// It does two things and nothing else: it shows what the server pushes, and it opens what is
-// pressed. It caches nothing and answers no request, so the application is never served from here.
+// The build pins the public thread document to this worker. Development uses the normal page.
+const threadShell = null;
 
-self.addEventListener('install', () => {
-  // A new worker takes over at once: there is nothing in flight that an older one holds.
-  self.skipWaiting();
+function readShell() {
+  return fetch(threadShell.url, { credentials: 'omit', cache: 'force-cache', integrity: threadShell.integrity, redirect: 'error' });
+}
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    if (threadShell) {
+      // A failed warmup leaves normal navigation and push available.
+      try { await (await readShell()).arrayBuffer(); } catch { /* The next navigation can try again. */ }
+    }
+    await self.skipWaiting();
+  })());
+});
+
+async function threadDocument(request) {
+  try {
+    const source = await readShell();
+    const headers = new Headers(source.headers);
+    const policy = headers.get('content-security-policy') || '';
+    const original = /(?:^|;)\s*script-src\s+[^;]*?'nonce-([a-f0-9]{32})'/.exec(policy);
+    if (source.ok && headers.get('content-type')?.split(';')[0] === 'application/json' && original) {
+      const template = await source.json();
+      if (typeof template === 'string' && template.includes('nonce="__ORCH_CSP_NONCE__"')) {
+        const nonce = crypto.randomUUID().replaceAll('-', '');
+        headers.set('content-security-policy', policy.replaceAll("'nonce-" + original[1] + "'", "'nonce-" + nonce + "'"));
+        headers.set('content-type', 'text/html; charset=utf-8');
+        headers.set('cache-control', 'no-store');
+        for (const header of ['content-encoding', 'content-length', 'etag', 'last-modified']) headers.delete(header);
+        return new Response(template.replaceAll('__ORCH_CSP_NONCE__', nonce), { headers });
+      }
+    }
+  } catch { /* Normal navigation also works when an installation does not serve the pinned shell. */ }
+  return fetch(request);
+}
+
+self.addEventListener('fetch', (event) => {
+  if (!threadShell || event.request.method !== 'GET' || event.request.mode !== 'navigate') return;
+  const address = new URL(event.request.url);
+  if (address.origin === self.location.origin && /^\/thread\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(address.pathname)) {
+    event.respondWith(threadDocument(event.request));
+  }
 });
 
 self.addEventListener('activate', (event) => {

@@ -171,6 +171,8 @@ async fn revoked_first_wire(push: bool) -> Proof {
             token: Some(key),
             creator_origin: None,
             scheduled_input: None,
+            workspace_edits: Vec::new(),
+            prepared_source: None,
             action,
         },
         fixture.clock.now(),
@@ -203,6 +205,8 @@ async fn revoked_first_wire(push: bool) -> Proof {
     tx.commit().await?;
     let id = command.id;
     let original = StoredCommand {
+        content_transit: false,
+        native_target: None,
         authority: None,
         id: Some(id),
         machine: command.machine,

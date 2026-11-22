@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** One cell of the full form: a row of the page with whom it names and whom it follows from a place, the lock that decides it, and the acts on it.
  *
  * A cell shows the holders its row names itself and those it follows from the place above (quietly,
@@ -13,8 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { type AccessRowTarget, permissionsQuery } from '@/api/access';
 import { choiceOption } from '@/i18n/choices';
 import { meQuery } from '@/api/auth';
-import type { Holder, NodeOrSystem, PermissionRow, RowProfile } from '@/generated/api-types';
-import { Combobox } from '@/ui/Combobox';
+import type { FileReachFacts, Holder, NodeOrSystem, PermissionRow, RowProfile } from '@/generated/api-types';
 import { DateField } from '@/ui/DateField';
 import { IconButton } from '@/ui/IconButton';
 import { LockBadge } from '@/ui/LockBadge';
@@ -27,13 +27,15 @@ import { useCandidates, useTargetOrg } from './candidates';
 import type { Asked } from './ChangePreview';
 import type { Changes, PageSource } from './changes';
 import { gaveText, HolderView, holderName, placeName } from './holders';
-import { useAppearance } from '@/lib/appearance';
+import { useAppearance, useFormatContext } from '@/lib/appearance';
+import { formatDateTime } from '@/lib/time';
 import { addToRowChange, type Cell, cellHolders, followChange, forkRowChange, lockChange, removeChange } from './model';
 import { permissionNameOf } from './names';
-import { EntryOptions, optionFields } from './EntryOptions';
+import { EntryOptions, optionFields, fileReachWords } from './EntryOptions';
 
 export interface RowCellProps {
   cell: Cell;
+  fileReach?: FileReachFacts | null | undefined;
   /** What the page is of. */
   target: AccessRowTarget;
   source: PageSource;
@@ -79,7 +81,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
   const chooseRole = (key: string) => {
     const role = catalogue.data?.roles.find((entry) => entry.key === key);
     if (role === undefined) return;
-    const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+    const expires = until === '' ? null : new Date(until).toISOString();
     setOpen(false);
     void changes.run({ label: t('access.cell.adding', { name: choiceOption(t, `accessRole.${role.key}`).name, permission: label }),
       make: (page) => addToRowChange(page, row.permission, profile, { kind: 'role', role: role.key }, { expires_at: expires }) });
@@ -104,7 +106,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
           options={(catalogue.data?.roles ?? []).map((entry) => ({ value: entry.key, ...choiceOption(t, `accessRole.${entry.key}`) }))}
           onValueChange={chooseRole} />}
         {candidates.placePicker}
-        <Combobox
+        <CandidatePicker candidates={candidates}
           label={t('access.cell.addTo', { permission: label })}
           placeholder={t('access.add.placeholder')}
           query={query}
@@ -116,7 +118,7 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
           onSelect={(option) => {
             const found = candidates.byValue.get(option.value);
             if (found === undefined) return;
-            const expires = until === '' ? null : new Date(`${until}T23:59:59`).toISOString();
+            const expires = until === '' ? null : new Date(until).toISOString();
             setOpen(false);
             void changes.run({
               label: t('access.cell.adding', { name: found.name, permission: label }),
@@ -124,13 +126,13 @@ function Add({ cell, target, changes, outsiderOff, profile }: Pick<RowCellProps,
             });
           }}
         />
-        <DateField label={t('access.cell.until')} optional value={until} onValueChange={setUntil} />
+        <DateField type="datetime-local" label={t('access.cell.until')} optional value={until} onValueChange={setUntil} />
       </div>
     </Popover>
   );
 }
 
-export function RowCell({ cell, target, source, changes, ask, place, profile, onOpenLock, outsiderOff, aside }: RowCellProps) {
+export function RowCell({ cell, fileReach, target, source, changes, ask, place, profile, onOpenLock, outsiderOff, aside }: RowCellProps) {
   const { t } = useTranslation();
   const { def, row } = cell;
   const label = permissionNameOf(def);
@@ -142,6 +144,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
   const canAdd = row.can_give && !decidedAbove;
   const me = useQuery(meQuery).data;
   const locale = useAppearance((state) => state.locale);
+  const format = useFormatContext();
   const mayTakeBack = (entry: { created_by: { id: string } | null }) => canChange || (canAdd && me !== undefined && entry.created_by?.id === me.id);
   const [editing, setEditing] = useState<{ id: string; holder: Holder; followed: boolean } | null>(null);
   const hasOptions = optionFields(def.options_schema).length > 0;
@@ -206,6 +209,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
 
   return (
     <div data-access-permission={row.permission} tabIndex={-1} className="flex min-w-0 flex-wrap items-center gap-1" role="group" aria-label={label}>
+      {fileReachWords(t, row.permission, fileReach) !== null && <span className="basis-full text-sm text-text-muted">{fileReachWords(t, row.permission, fileReach)}</span>}
       {holders.map((holder) => (
         <HolderView
           key={`${holder.key}:${holder.entry?.id ?? 'follows'}`}
@@ -219,7 +223,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
               <FollowMark place={holder.from} />
             ) : (
               <span className="text-text-muted">
-                {[gaveText(t, locale, holder.entry), holder.entry.expires_at === null ? null : t('access.holder.until', { date: new Date(holder.entry.expires_at).toLocaleDateString(locale) })]
+                {[gaveText(t, locale, holder.entry), holder.entry.expires_at === null ? null : t('access.holder.until', { date: formatDateTime(holder.entry.expires_at, format) })]
                   .filter((text) => text !== null)
                   .join(t('startFlow.separator'))}
               </span>
@@ -268,6 +272,7 @@ export function RowCell({ cell, target, source, changes, ask, place, profile, on
           holder={holderName(t, editing.holder, target.name)}
           {...(editing.followed ? { followedHolder: editing.holder } : {})}
           changes={changes}
+          fileReach={fileReach}
         />
       )}
       {(canChange || canAdd) && (
