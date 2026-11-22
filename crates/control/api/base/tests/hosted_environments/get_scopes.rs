@@ -451,3 +451,56 @@ async fn retained_environment_get_retries_a_changed_identity_snapshot_before_its
         "only the successful fresh snapshot invokes the native inspection observation"
     );
 }
+
+#[tokio::test]
+async fn an_environments_bound_thread_search_finds_a_later_visible_name_before_its_page() {
+    let s = Scene::new().await;
+    for position in 0..13 {
+        let id = new_id();
+        let mut conn = s.world.conn().await;
+        orch_db::queries::hierarchy::testing::insert_node(
+            &mut conn,
+            id,
+            "thread",
+            Some(s.team.topic),
+            &format!("Bound research {position}"),
+            s.team.c.admin.id(),
+        )
+        .await
+        .unwrap();
+        orch_authz::pages::start(
+            &mut conn,
+            orch_access_contract::pages::StoredKind::Node,
+            id,
+            s.team.c.admin.id(),
+            orch_types::Time::new(s.world.now()),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE threads SET environment_id=$2 WHERE node_id=$1")
+            .bind(id)
+            .bind(s.first.base.id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let all = shown(&s, &s.team.c.admin.token, false).await;
+    assert_eq!(all.threads.len(), 13);
+    let wanted = all.threads.last().unwrap();
+    let reply = s
+        .world
+        .app
+        .call(EnvironmentGet, &[&s.first.base.id])
+        .token(&s.team.c.admin.token)
+        .query(&json!({"threads_q": wanted.thread.name,"threads_limit":1}))
+        .send_bytes()
+        .await;
+    assert_eq!(
+        reply.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    let page: Environment = serde_json::from_slice(&reply.raw).unwrap();
+    assert_eq!(page.threads, vec![wanted.clone()]);
+}

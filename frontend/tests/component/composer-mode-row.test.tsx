@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Settings from '@/api/settings';
 import type * as Threads from '@/api/threads';
-import { ConfinementPicker } from '@/features/composer/ApprovalMode';
+import { ApprovalModePicker, ConfinementPicker } from '@/features/composer/ApprovalMode';
 import { ComposerControls } from '@/features/composer/Controls';
 import { PlanSwitch } from '@/features/composer/PlanSwitch';
 import { ViewCompactContext } from '@/features/workbench/Narrow';
@@ -19,7 +19,7 @@ import { show } from './support';
 
 const wire = vi.hoisted(() => ({ rows: [] as ResolvedSetting[], settings: vi.fn(), parameters: vi.fn(), write: vi.fn<typeof Threads.setThreadSetting>() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<typeof Settings>(), settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => { wire.settings(); return Promise.resolve(wire.rows); }, staleTime: Infinity }) }));
-vi.mock('@/api/threads', async (original) => ({ ...await original<typeof Threads>(), parametersQuery: (id: string) => ({ queryKey: ['thread-parameters', id], queryFn: () => { wire.parameters(); return Promise.resolve(modeParameters()); }, staleTime: Infinity }), setThreadSetting: wire.write }));
+vi.mock('@/api/threads', async (original) => ({ ...await original<typeof Threads>(), parametersQuery: (id: string) => ({ queryKey: ['thread-parameters', id], queryFn: () => { wire.parameters(); return Promise.resolve(modeParameters('on_request', {}, wire.rows)); }, staleTime: Infinity }), setThreadSetting: wire.write }));
 vi.mock('@/features/composer/ModelEffort', () => ({ ModelEffort: () => <button>Model and effort</button> }));
 vi.mock('@/features/usage/context/ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), refreshThread: vi.fn() }));
@@ -37,16 +37,22 @@ function nativeThread(): Thread {
   ids.push(thread.id); threadWriter.reset(thread.id, { ...source, thread }, false); return thread;
 }
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
-  it(`keeps approval, sandbox and Plan together with actual defaults and one reader at ${locale}/${theme}/${width}`, async () => {
+  it(`keeps approval with the sandbox inside it, and Plan, with actual defaults and one reader at ${locale}/${theme}/${width}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark'); const thread = nativeThread();
     const view = show(<ViewCompactContext.Provider value={width === 400}><div style={{ width }}><ComposerControls thread={thread} attachment={<button>Attach</button>} delivery={<button>Send</button>} plan={<PlanSwitch on={false} defaulted onChange={() => undefined} />} /></div></ViewCompactContext.Provider>);
-    const sandbox = await screen.findByRole('button', { name: i18n.t('composer.confinement.label', { mode: i18n.t('choiceCatalog.sandboxLevel.workspace.name') }) });
-    expect(screen.getByRole('button', { name: i18n.t('composer.mode.label', { mode: i18n.t('composer.mode.labels.on_request') }) })).toBeVisible();
+    const approval = await screen.findByRole('button', { name: i18n.t('composer.mode.label', { mode: i18n.t('composer.mode.labels.on_request') }) });
+    expect(approval).toBeVisible();
     const order = Array.from(view.container.querySelectorAll<HTMLElement>('[data-composer-control]')).map((node) => node.dataset.composerControl);
-    expect(order.slice(order.indexOf('mode'), order.indexOf('mode') + 3)).toEqual(['mode', 'sandbox', 'plan']);
-    for (const key of ['composer.mode.placeDefault', 'composer.confinement.placeDefault', 'composer.plan.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toBeVisible();
+    // The sandbox is no control of the row: it is the second level of the approval list.
+    expect(order.slice(order.indexOf('mode'), order.indexOf('mode') + 2)).toEqual(['mode', 'plan']);
+    expect(order).not.toContain('sandbox');
+    for (const key of ['composer.mode.placeDefault', 'composer.plan.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toBeVisible();
     // A narrow cell cuts the note of a place default instead of letting it run past its button.
-    for (const key of ['composer.mode.placeDefault', 'composer.confinement.placeDefault'] as const) expect(screen.getByText(i18n.t(key))).toHaveClass('min-w-0', 'truncate');
+    expect(screen.getByText(i18n.t('composer.mode.placeDefault'))).toHaveClass('min-w-0', 'truncate');
+    expect(wire.settings).not.toHaveBeenCalled();
+    await userEvent.click(approval);
+    const sandbox = await screen.findByRole('button', { name: i18n.t('composer.confinement.label', { mode: i18n.t('choiceCatalog.sandboxLevel.workspace.name') }) });
+    expect(screen.getByText(i18n.t('composer.confinement.placeDefault'))).toHaveClass('min-w-0', 'truncate');
     await userEvent.click(sandbox); const picker = screen.getByRole('dialog', { name: i18n.t('composer.confinement.title') });
     expect(within(picker).queryByRole('button', { name: i18n.t('choiceCatalog.sandboxLevel.open.name') })).toBeNull();
     const read = within(picker).getByRole('button', { name: i18n.t('choiceCatalog.sandboxLevel.read_only.name') });
@@ -63,7 +69,7 @@ for (const reason of ['viewer', 'locked'] as const) it(`retains the sandbox valu
   const thread = nativeThread();
   if (reason === 'locked') wire.rows[1] = nativeModeSetting('sandbox.mode', 'workspace', 1, { available_values: ['read_only', 'workspace'], writable: false, locked_by: { scope: 'org', node: { id: 'org', kind: 'org', name: 'Acme', redacted: false } } });
   show(<ConfinementPicker thread={thread} readOnly={reason === 'viewer'} />);
-  await userEvent.click(await screen.findByRole('button', { name: 'Sandbox: Workspace writes' }));
+  await userEvent.click(await screen.findByRole('button', { name: 'Tool access: Workspace writes' }));
   const choice = await screen.findByRole('button', { name: 'Read only' });
   await waitFor(() => expect(choice).toBeDisabled()); expect(choice).toHaveAttribute('aria-description', reason === 'viewer' ? i18n.t('composer.row.readOnly') : 'Decided by Acme');
   await userEvent.click(choice); expect(wire.write).not.toHaveBeenCalled();
@@ -80,4 +86,17 @@ it('shows only the latest actual native divergence in this session, and retires 
   expect(await screen.findByText('Codex: Read only')).toBeVisible();
   act(() => threadWriter.apply(thread.id, { items: [report('current-agrees', 'workspaceWrite', false, 'mode-session', 3)] }));
   expect(view.container.querySelector('[data-native-mode-report]')).toBeNull();
+});
+it('shows a reported approval mode in the chip by its name alone, and keeps the program\'s own value for the tooltip', async () => {
+  const thread = nativeThread();
+  const report = { ...marker('approval-report', { marker: 'harness_changed', data: {
+    program: 'Claude Code', change: 'approval_mode', value: { native_mode: 'acceptEdits' }, previous: { state: 'unsupported' },
+    expected: { state: 'told', value: { native_mode: 'default' } }, changed: true, diverged: true, next_turn: true, turn_id: null, reported_at: '2026-11-07T20:00:00Z',
+  } }), thread_id: thread.id, segment_id: 'mode-session', seq_created: 1, seq_updated: 1 };
+  act(() => threadWriter.apply(thread.id, { items: [report] }));
+  const view = show(<ApprovalModePicker thread={thread} />);
+  await waitFor(() => expect(view.container.querySelector('[data-native-mode-report]')).not.toBeNull());
+  const chip = view.container.querySelector('[data-native-mode-report]');
+  expect(chip).toHaveTextContent(`Claude Code: ${i18n.t('choiceCatalog.approvalMode.on_request.name')}`);
+  expect(chip).not.toHaveTextContent('its own value');
 });
