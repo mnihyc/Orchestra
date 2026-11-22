@@ -392,9 +392,8 @@ async fn provider_health(
     now: DateTime<Utc>,
 ) -> ApiResult<orch_api_contract::usage::UsageDegradation> {
     let since = now - Duration::minutes(HEALTH_MINUTES);
-    let recent = rollup::window(conn, since, now + Duration::milliseconds(1), filter)
+    let recent = rollup::performance_window(conn, since, now + Duration::milliseconds(1), filter)
         .await?
-        .performance
         .figures();
     let baseline = rollup::performance_of(
         conn,

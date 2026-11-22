@@ -54,6 +54,7 @@ async fn list(site: &Site, by: &Who) -> Reply<DirListing> {
         .call(EnvironmentFileList, &[&site.environment])
         .token(&by.token)
         .query(&EnvironmentFileListQuery {
+            prefix: None,
             thread: None,
             path: "web".to_owned(),
             source: None,
@@ -312,6 +313,7 @@ async fn a_thread_gives_none_of_the_doors_whatever_is_held_on_it() {
         .call(EnvironmentFileList, &[&site.environment])
         .token(&guest.token)
         .query(&EnvironmentFileListQuery {
+            prefix: None,
             thread: Some(site.thread),
             path: "web".to_owned(),
             source: None,

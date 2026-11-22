@@ -67,21 +67,21 @@ export function Setup() {
         })}
       >
         <Input
+          label={t('auth.fields.displayName')}
+          hint={t('auth.fields.displayNameHint')}
+          autoComplete="name"
+          autoFocus
+          {...form.field('display_name')}
+        />
+        <Input
           label={t('auth.fields.username')}
           hint={t('auth.fields.usernameHint')}
           autoComplete="username"
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          autoFocus
           {...username}
           onChange={(event) => form.set('username', event.target.value.toLowerCase())}
-        />
-        <Input
-          label={t('auth.fields.displayName')}
-          hint={t('auth.fields.displayNameHint')}
-          autoComplete="name"
-          {...form.field('display_name')}
         />
         <PasswordInput
           label={t('auth.fields.password')}

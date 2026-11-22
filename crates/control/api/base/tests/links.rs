@@ -61,6 +61,7 @@ async fn set(s: &Scene, node: Id, key: &str, value: Json, locked: bool) {
         .call(NodeSettingSet, &[&node, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: Some(locked),
             expected_revision: None,
@@ -72,6 +73,7 @@ async fn set(s: &Scene, node: Id, key: &str, value: Json, locked: bool) {
 
 fn ask(direction: LinkDirection) -> DocumentReferencesListQuery {
     DocumentReferencesListQuery {
+        q: None,
         direction,
         limit: None,
         cursor: None,
@@ -426,6 +428,7 @@ async fn a_cursor_never_names_a_hidden_source_and_pages_over_them_deliver_each_r
             target,
             &s.cai.token,
             &DocumentReferencesListQuery {
+                q: None,
                 direction: LinkDirection::In,
                 limit: Some(1),
                 cursor: cursor.clone(),
@@ -456,6 +459,7 @@ async fn a_cursor_never_names_a_hidden_source_and_pages_over_them_deliver_each_r
             .call(DocumentReferencesList, &[&target])
             .token(&s.dan.token)
             .query(&DocumentReferencesListQuery {
+                q: None,
                 direction: LinkDirection::In,
                 limit: Some(1),
                 cursor: Some(first.clone()),
@@ -551,6 +555,7 @@ async fn graph_pairs_keep_duplicate_mentions_live_history_and_private_boundaries
         .call(ThreadSideCreate, &[&side_parent])
         .token(&s.ada.token)
         .body(&ThreadSideCreateBody {
+            acting: false,
             content: vec![ContentPart::Text {
                 text: format!("Side [Hub](/documents/{hub})"),
             }],
@@ -1052,6 +1057,7 @@ async fn the_mentions_of_one_source_go_on_with_their_own_cursor() {
             target,
             &s.cai.token,
             &DocumentReferencesListQuery {
+                q: None,
                 direction: LinkDirection::In,
                 limit: None,
                 cursor: Some(next),
@@ -1273,4 +1279,214 @@ async fn related_items_page_on_with_a_cursor_that_holds_nothing_hidden() {
         let text = String::from_utf8_lossy(&bytes).to_string();
         assert!(owner_names.iter().all(|name| !text.contains(name)));
     }
+}
+
+#[tokio::test]
+async fn reference_names_are_searched_before_paging_and_a_written_label_never_reveals_a_private_name()
+ {
+    let s = Scene::new().await;
+    let node = s.tree.topic.base.id;
+    let target = document(&s, node, "Searched target", "", false).await;
+    let mut sources = Vec::new();
+    for index in 0..13 {
+        let name = format!("Source {index:02}");
+        let source = document(
+            &s,
+            node,
+            &name,
+            &format!("[Plan](/documents/{target})"),
+            false,
+        )
+        .await;
+        sources.push((source, name));
+    }
+    let mut first_query = ask(LinkDirection::In);
+    first_query.limit = Some(1);
+    let first = list(&s, target, &s.cai.token, &first_query).await;
+    let late = sources
+        .iter()
+        .find(|(id, _)| *id != first.items[0].id)
+        .unwrap();
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("direction", "in")
+        .append_pair("q", &late.1)
+        .append_pair("limit", "1");
+    let found = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&target])
+        .token(&s.cai.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        found.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [late.0]
+    );
+    let hidden = document(&s, node, "Private title sentinel", "", true).await;
+    let public = document(&s, node, "Public target", "", false).await;
+    let from = document(
+        &s,
+        node,
+        "Outgoing",
+        &format!("[Written clue](/documents/{hidden}) and [Public alias](/documents/{public})"),
+        false,
+    )
+    .await;
+    let written = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Written%20clue&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(written.items.len(), 1);
+    assert_eq!(written.items[0].id, hidden);
+    assert!(written.items[0].name.is_none());
+    assert!(!written.items[0].readable);
+    let hidden_name = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Private%20title%20sentinel&limit=1")
+        .send()
+        .await
+        .ok();
+    assert!(hidden_name.items.is_empty());
+    let named = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&from])
+        .token(&s.cai.token)
+        .raw_query("direction=out&q=Public%20target&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        named.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [public]
+    );
+}
+
+#[tokio::test]
+async fn searching_mentions_reaches_beyond_the_preview_and_never_reuses_another_search_cursor() {
+    let s = Scene::new().await;
+    let node = s.tree.topic.base.id;
+    let target = document(&s, node, "Target", "", false).await;
+    let text = (0..13)
+        .map(|index| format!("Mention {index:02}: [Target](/documents/{target})"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let from = document(&s, node, "Source", &text, false).await;
+    let opening = list(&s, target, &s.cai.token, &ask(LinkDirection::In)).await;
+    let source = opening.items.iter().find(|row| row.id == from).unwrap();
+    let word = (0..13)
+        .map(|index| format!("Mention {index:02}"))
+        .find(|word| {
+            !source
+                .occurrences
+                .iter()
+                .any(|row| row.line.before.contains(word))
+        })
+        .unwrap();
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("direction", "in")
+        .append_pair("of", &format!("document:{from}"))
+        .append_pair("q", &word)
+        .append_pair("limit", "1");
+    let found = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&target])
+        .token(&s.cai.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.items[0].occurrences.len(), 1);
+    assert!(found.items[0].occurrences[0].line.before.contains(&word));
+    let cursor = source.next_mentions.as_ref().unwrap();
+    let mut changed = form_urlencoded::Serializer::new(String::new());
+    changed
+        .append_pair("direction", "in")
+        .append_pair("of", &format!("document:{from}"))
+        .append_pair("q", &word)
+        .append_pair("cursor", cursor);
+    let denied = s
+        .rig
+        .world
+        .app
+        .call(DocumentReferencesList, &[&target])
+        .token(&s.cai.token)
+        .raw_query(&changed.finish())
+        .send()
+        .await
+        .problem();
+    assert_eq!(denied.code, ErrorCode::RequestInvalid);
+}
+
+#[tokio::test]
+async fn related_names_are_filtered_before_the_ranked_page_without_changing_the_native_reasons() {
+    let s = Scene::new().await;
+    let node = s.tree.topic.base.id;
+    let target = document(&s, node, "Related source", "A source", false).await;
+    let mut peers = Vec::new();
+    for index in 0..13 {
+        let name = format!("Related peer {index:02}");
+        peers.push((
+            document(
+                &s,
+                node,
+                &name,
+                &format!("[Source](/documents/{target})"),
+                false,
+            )
+            .await,
+            name,
+        ));
+    }
+    let first = s
+        .rig
+        .world
+        .app
+        .call(DocumentRelatedList, &[&target])
+        .token(&s.cai.token)
+        .raw_query("limit=1")
+        .send()
+        .await
+        .ok();
+    let late = peers
+        .iter()
+        .find(|(id, _)| *id != first.items[0].id)
+        .unwrap();
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query.append_pair("q", &late.1).append_pair("limit", "1");
+    let found = s
+        .rig
+        .world
+        .app
+        .call(DocumentRelatedList, &[&target])
+        .token(&s.cai.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        found.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [late.0]
+    );
+    assert_eq!(found.items[0].name, late.1);
+    assert!(!found.items[0].related_by.is_empty());
 }

@@ -9,7 +9,7 @@ import { EditDialog } from '@/features/resources/EditDialog';
 import { requestOptions } from '@/features/resources/providers/entry';
 import type { Provider, ProviderRef } from '@/generated/api-types';
 import { adminSpec } from '@/ui/AdminAct';
-import { Textarea } from '@/ui/Textarea';
+import { OptionSchemaEditor } from '@/features/models/OptionSchemaEditor';
 import { toast } from '@/ui/Toast';
 
 export function GroupOptionsDialog({ provider, revision, group, options, onClose }: {
@@ -41,8 +41,8 @@ export function GroupOptionsDialog({ provider, revision, group, options, onClose
   });
   return <EditDialog admin={adminSpec(provider, 'provider.manage')} title={t('models.groups.optionsTitle', { name: group })}
     changed={changed} valid={valid} pending={save.isPending} error={save.error} onSave={() => save.mutate()} onClose={onClose}>
-    <div className="flex justify-end"><ArticleGuideLink article="provider-details" heading="request-options" title={t('models.groups.optionsGuide')} /></div>
-    <Textarea label={t('providerOptions.schemaTitle')} rows={7} className="font-mono" value={text} disabled={save.isPending}
-      error={valid ? undefined : t('providerOptions.invalidSchema')} onChange={(event) => setText(event.target.value)} />
+    <OptionSchemaEditor protocols={[]} value={text} disabled={save.isPending} onChange={setText}
+      error={valid ? undefined : t('providerOptions.invalidSchema')}
+      guide={<ArticleGuideLink article="provider-details" heading="request-options" title={t('models.groups.optionsGuide')} />} />
   </EditDialog>;
 }
