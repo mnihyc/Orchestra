@@ -2,18 +2,26 @@
 import { createMemoryHistory, createRoute, createRouter, RouterProvider } from '@tanstack/react-router';
 import { act, cleanup, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import { Suspense, type ReactNode } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
 import { i18n, setLocale } from '@/i18n';
 import { Route } from '@/routes/__root';
+import { loadShellFrame, ShellFrame } from '@/shell/shellFrame';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { show } from './support';
 
 vi.mock('@/shell/Shell', () => ({ Shell: ({ children }: { children: ReactNode }) => <><nav aria-label="Rail"><input aria-label="Frame draft" defaultValue="" /></nav><main>{children}</main></> }));
-vi.mock('@/routes/-access', () => ({ admit: () => Promise.resolve({}) }));
+vi.mock('@/routes/-access', async (loadOriginal) => ({ ...await loadOriginal<object>(), admit: () => Promise.resolve({}) }));
 vi.mock('@/shell/screenCode', () => ({ useScreenCodePrefetch: () => undefined }));
 afterEach(async () => { cleanup(); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
+
+it('draws the returning reader’s thread on the first render when the shell code has arrived', async () => {
+  await loadShellFrame();
+  show(<Suspense fallback={<ScreenLoading />}><ShellFrame leavingAdmin={false}><p>Latest answer</p></ShellFrame></Suspense>);
+  expect(screen.getByText('Latest answer')).toBeVisible();
+  expect(document.querySelector('[data-screen-loading]')).toBeNull();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark']) {
   it(`retains the frame and puts a skeleton only in main in ${locale}/${theme}`, async () => {
