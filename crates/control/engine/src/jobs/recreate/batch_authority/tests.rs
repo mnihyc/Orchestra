@@ -247,7 +247,7 @@ impl Fixture {
         );
         sqlx::query("UPDATE providers SET status='ready',runtime_config=$2 WHERE id=$1")
             .bind(world.provider)
-            .bind(json!({"runtime.host_id":selected_host,"runtime.template_id":selected_template}))
+            .bind(json!({"runtime.host_id":orch_provider_contract::pools::Target::host(selected_host),"runtime.template_id":selected_template}))
             .execute(&mut *tx)
             .await?;
         let hash = crate::updates::definition_hash("test", &definition, &json!({}), &[]);
@@ -838,7 +838,12 @@ async fn lost_member_authority_does_not_prevent_owned_candidate_cleanup_and_old_
         .machine
         .handler
         .on(CommandKind::NodeRuntimeStart, |_| {
-            Ok(CommandResult::NodeRuntimeStart(Empty {}))
+            Ok(CommandResult::NodeRuntimeStart(
+                orch_link_contract::commands::NodeRuntimeStartResult {
+                    source: orch_link_contract::native_target::RuntimeSource::untracked(),
+                    reused: false,
+                },
+            ))
         });
     let recreate = Recreating::of(&s.job.row().await?)?;
     assert_eq!(

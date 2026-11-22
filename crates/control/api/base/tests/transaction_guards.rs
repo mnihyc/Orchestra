@@ -15,7 +15,7 @@ use futures::stream;
 use http::{Request, StatusCode};
 use orch_api_contract::auth::{AdminModeSetBody, MeAdminModeSet};
 use orch_api_contract::nodes::{Node, NodeUpdate, NodeUpdateBody, Project};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, new_token, token_hash};
 use orch_api_core::middleware::requests::ApiError;
 use orch_api_core::middleware::{authorization, transaction_guard};
 use orch_api_core::registry::{Ctx, Registry};
@@ -29,6 +29,86 @@ use std::future::Future;
 use std::time::{Duration as WaitDuration, Instant};
 use support::World;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn a_page_write_refused_at_commit_is_decided_again_without_repeating_its_effect() {
+    use orch_api_contract::access::{
+        PageChange, PermissionPageUpdate, PermissionPageWriteReceipt, PermissionPageWriteResponse,
+    };
+    use orch_api_contract::common::ReceiptProjection;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let world = World::new().await;
+    let owner = person(&world, "page-writer").await;
+    let org = make_org(&world, &owner, "Pages", "pages").await.base.id;
+    let project = make_project(&world, &owner, org, "Plans").await.base.id;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&attempts);
+    let mut registry = Registry::new();
+    registry.on(PermissionPageUpdate,move |ctx:Ctx,():(),_body:PageChange| {
+        let calls=Arc::clone(&calls);
+        async move {
+            let (mut tx,guard)=transaction_guard::begin(&ctx).await?;
+            let id=ctx.id("id")?;
+            authorization::require(&mut tx,guard.principal(),id,authorization::MANAGE,orch_authz::Act::Use,orch_authz::Policy::default()).await?;
+            let seq:i64=sqlx::query_scalar("UPDATE user_inboxes SET inbox_seq=inbox_seq+1 WHERE user_id=$1 RETURNING inbox_seq")
+                .bind(guard.user().id()).fetch_one(&mut *tx).await.map_err(orch_db::DbError::from)?;
+            if calls.fetch_add(1,Ordering::SeqCst)==0 {
+                // One committed authority refresh lands after the native decisions, as a first
+                // provider refresh does. The refused transaction owns its whole database effect.
+                let database=ctx.app.db.clone();
+                tokio::spawn(async move {
+                    let mut changed=database.begin().await?;
+                    access::bump_epoch(&mut changed).await?;
+                    changed.commit().await.map_err(orch_db::DbError::from)?;
+                    Ok::<(),orch_db::DbError>(())
+                }).await.map_err(ApiError::internal)??;
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            Ok::<_,ApiError>(PermissionPageWriteResponse::Receipt(PermissionPageWriteReceipt {
+                projection:ReceiptProjection::Receipt,object_id:id,kind:"project".into(),revision:seq,defaults:false,
+            }))
+        }
+    });
+    let app = orch_api_core::testing::TestApp::new(
+        world.app.app.db.clone(),
+        world.app.clock.clone(),
+        registry,
+    );
+    let before: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
+        .bind(owner.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    let reply = app
+        .call(PermissionPageUpdate, &[&"nodes", &project])
+        .token(&owner.token)
+        .body(&PageChange::default())
+        .send()
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{}",
+        String::from_utf8_lossy(&reply.raw)
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        2,
+        "authority is decided under the new snapshot"
+    );
+    let after: i64 = sqlx::query_scalar("SELECT inbox_seq FROM user_inboxes WHERE user_id=$1")
+        .bind(owner.id())
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after,
+        before + 1,
+        "only the successful database effect commits"
+    );
+}
 
 #[tokio::test]
 async fn revoking_manage_while_a_body_arrives_prevents_the_rename() {
@@ -498,7 +578,7 @@ async fn current_token_revocation_expiry_scopes_and_subtree_bound_the_write() {
             "Outside",
         )
         .await;
-        scenario.writer.token = new_token(API_TOKEN_PREFIX);
+        scenario.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scenario.world.conn().await,
             &NewApiToken {
@@ -733,7 +813,7 @@ async fn revocation_cannot_commit_between_the_guard_and_its_write() {
 async fn a_guard_waiting_for_revocation_reads_the_new_token_scopes() {
     let mut scenario = Scenario::new().await;
     let token = new_id();
-    scenario.writer.token = new_token(API_TOKEN_PREFIX);
+    scenario.writer.token = new_api_token(token);
     identity::create_api_token(
         &mut *scenario.world.conn().await,
         &NewApiToken {
@@ -1016,7 +1096,7 @@ async fn guarded_change(ctx: &Ctx, after_write: impl Future<Output = ()>) {
     let (mut tx, guard) = transaction_guard::begin(ctx).await.unwrap();
     // A real non-authority write used by messages and notifications. Its user
     // counter must coexist with identity protection; it is not a suspension.
-    sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+    sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
         .bind(guard.user().id())
         .execute(&mut *tx)
         .await
@@ -1200,7 +1280,7 @@ async fn all_sixteen_guards_can_reach_their_write_before_any_commits() {
         let release = release.clone();
         tasks.spawn(async move {
             let (mut tx, guard) = transaction_guard::begin(&ctx).await.unwrap();
-            sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+            sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
                 .bind(guard.user().id())
                 .execute(&mut *tx)
                 .await
@@ -1239,8 +1319,8 @@ async fn all_sixteen_guards_can_reach_their_write_before_any_commits() {
 async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     let world = World::new().await;
     let mut who = person(&world, "tokenwriter").await;
-    who.token = new_token(API_TOKEN_PREFIX);
     let token = new_id();
+    who.token = new_api_token(token);
     identity::create_api_token(
         &mut *world.conn().await,
         &NewApiToken {
@@ -1262,7 +1342,7 @@ async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     let hash = token_hash(&who.token);
     let now = world.now();
     let authenticate = tokio::spawn(async move {
-        identity::api_token_by_hash(&mut pool.acquire().await.unwrap(), &hash, now)
+        identity::api_token_by_identity(&mut pool.acquire().await.unwrap(), token, &hash, now)
             .await
             .unwrap()
             .unwrap()
@@ -1277,10 +1357,15 @@ async fn authenticating_the_same_api_token_does_not_wait_for_an_open_action() {
     // Once free, another authentication records last use as before.
     world.advance(Duration::seconds(1));
     let later = world.now();
-    identity::api_token_by_hash(&mut *world.conn().await, &token_hash(&who.token), later)
-        .await
-        .unwrap()
-        .unwrap();
+    identity::api_token_by_identity(
+        &mut *world.conn().await,
+        token,
+        &token_hash(&who.token),
+        later,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let last_used: chrono::DateTime<chrono::Utc> =
         sqlx::query_scalar("SELECT last_used_at FROM api_tokens WHERE id = $1")
             .bind(token)
@@ -1306,7 +1391,7 @@ async fn prepare_loss(scenario: &mut Scenario, loss: AuthorityLoss) -> Id {
         AuthorityLoss::ScopeNarrowed | AuthorityLoss::TokenExpired | AuthorityLoss::TokenRevoked
     ) {
         let token = new_id();
-        scenario.writer.token = new_token(API_TOKEN_PREFIX);
+        scenario.writer.token = new_api_token(token);
         identity::create_api_token(
             &mut *scenario.world.conn().await,
             &NewApiToken {
@@ -1700,7 +1785,7 @@ async fn an_unannounced_authority_change_moves_the_systems_epoch_at_its_commit()
         .await
         .unwrap();
     assert_eq!(after, before + 1, "the system's epoch moved once");
-    sqlx::query("UPDATE users SET inbox_seq = inbox_seq + 1 WHERE id = $1")
+    sqlx::query("UPDATE user_inboxes SET inbox_seq = inbox_seq + 1 WHERE user_id = $1")
         .bind(scenario.writer.id())
         .execute(&mut *other)
         .await
@@ -1744,7 +1829,124 @@ async fn a_suspension_waits_for_the_users_key_share_even_without_an_epoch_bump()
 }
 
 #[tokio::test]
-async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_action() {
+async fn session_renewal_finishes_while_its_own_action_and_old_access_token_are_still_open() {
+    for token_expires_during_action in [false, true] {
+        let scenario = Scenario::new().await;
+        let cookie = new_token(orch_api_core::middleware::authentication::SESSION_PREFIX);
+        let session = identity::session_by_access_token(
+            &mut *scenario.world.conn().await,
+            &token_hash(&scenario.writer.token),
+            scenario.world.now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        sqlx::query("UPDATE sessions SET refresh_hash=$2 WHERE id=$1")
+            .bind(session.session_id)
+            .bind(token_hash(&cookie))
+            .execute(&scenario.world.db.pool)
+            .await
+            .unwrap();
+        if token_expires_during_action {
+            sqlx::query("UPDATE access_tokens SET expires_at=$2 WHERE token_hash=$1")
+                .bind(token_hash(&scenario.writer.token))
+                .bind(scenario.world.now() + Duration::seconds(1))
+                .execute(&scenario.world.db.pool)
+                .await
+                .unwrap();
+        }
+        let ctx = context(&scenario).await;
+        let (action, guard) = transaction_guard::begin(&ctx).await.unwrap();
+        if token_expires_during_action {
+            scenario.world.app.clock.advance(Duration::seconds(2));
+        }
+        let mut registry = Registry::new();
+        orch_api_core::routes::mount(&mut registry);
+        let response = tokio::time::timeout(
+            OVERLAP_PATIENCE,
+            registry
+                .into_router()
+                .with_state(scenario.world.app.app.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/auth/refresh")
+                        .header("cookie", format!("orch_session={cookie}"))
+                        .header(orch_api_contract::common::CSRF_HEADER, "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+        )
+        .await
+        .expect("renewal and expired-token housekeeping do not wait for this session's action")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        if token_expires_during_action {
+            assert_eq!(
+                guard.check_deadline(&ctx).unwrap_err().code(),
+                orch_api_contract::common::ErrorCode::AuthInvalidToken,
+                "renewal cannot extend the old access token's deadline"
+            );
+            action.rollback().await.unwrap();
+        } else {
+            guard.check_deadline(&ctx).unwrap();
+            action.commit().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn changing_a_sessions_authority_still_waits_for_the_action_it_admitted() {
+    for assignment in [
+        "revoked_at=$2",
+        "as_admin=true,last_used_at=$2",
+        "second_step_at=$2",
+        "expires_at=$2",
+    ] {
+        let scenario = Scenario::new().await;
+        let ctx = context(&scenario).await;
+        let session = identity::session_by_access_token(
+            &mut *scenario.world.conn().await,
+            &token_hash(&scenario.writer.token),
+            scenario.world.now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (action, _) = transaction_guard::begin(&ctx).await.unwrap();
+        let database = scenario.world.db.pool.clone();
+        let now = scenario.world.now();
+        let (started, started_read) = tokio::sync::oneshot::channel();
+        let change = tokio::spawn(async move {
+            let mut tx = database.begin().await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            started.send(pid).unwrap();
+            // Every assignment above is fixed fixture text, never transport input.
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE sessions SET {assignment} WHERE id=$1"
+            )))
+            .bind(session.session_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        });
+        waiting_for_a_lock(&scenario.world.db.pool, started_read.await.unwrap()).await;
+        assert!(!change.is_finished(), "{assignment}");
+        action.commit().await.unwrap();
+        tokio::time::timeout(OVERLAP_PATIENCE, change)
+            .await
+            .expect("the session authority change proceeds after the action commits")
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_and_drafts_finish_while_account_and_action_writes_are_open() {
     use orch_db::queries::transaction_guard::{self as locks, Scope};
     let world = concurrent_world().await;
     let contexts = concurrent_contexts(&world).await;
@@ -1799,18 +2001,11 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
             .await
             .unwrap()
     });
-    // Prove the actual refresh reached its person lock, rather than merely
-    // leaving an unpolled future while the other requests run.
-    tokio::time::timeout(LOCK_WAIT_BOUND, async {
-        loop {
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
-                   AND query = 'SELECT * FROM users WHERE id = $1 FOR UPDATE' AND wait_event_type = 'Lock')",
-            ).fetch_one(&world.db.pool).await.unwrap();
-            if waiting { break; }
-            tokio::task::yield_now().await;
-        }
-    }).await.expect("the refresh waits for its own person");
+    let own_response = tokio::time::timeout(OVERLAP_PATIENCE, own_refresh)
+        .await
+        .expect("renewal also finishes while this same person's account write remains open")
+        .unwrap();
+    assert_eq!(own_response.status(), StatusCode::OK);
     let mut tasks = tokio::task::JoinSet::new();
     for index in 1..contexts.len() - 1 {
         let ctx = &contexts[index];
@@ -1859,13 +2054,8 @@ async fn concurrent_refreshes_and_drafts_pass_another_persons_held_refresh_and_a
     tokio::time::timeout(OVERLAP_PATIENCE, async {
         while let Some(done) = tasks.join_next().await { done.unwrap(); }
     }).await.expect("all other people's refreshes and drafts finish while both original transactions remain open");
-    assert!(
-        !own_refresh.is_finished(),
-        "the same person's refresh still waits"
-    );
     action.commit().await.unwrap();
     personal.commit().await.unwrap();
-    assert_eq!(own_refresh.await.unwrap().status(), StatusCode::OK);
 }
 
 #[tokio::test]

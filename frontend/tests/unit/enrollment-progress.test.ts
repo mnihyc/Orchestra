@@ -186,3 +186,20 @@ it('repairs a metadata-only notice through one exact visible receipt, never a li
     expect(wantedResourceFeeds(cache)).toEqual(new Set(['machine:recovered']));
   } finally { for (const off of stops) off(); cache.clear(); }
 });
+
+it.each(['machine', 'host'] as const)('settles the open %s enrollment when first connection races its resource snapshot', async (kind) => {
+  const cache = new QueryClient(), key = enrollmentProgressKey(RECEIPT);
+  const machine = enrollmentMachine('fresh', false), host = enrollmentHost('fresh-host', false);
+  const offline = kind === 'machine' ? progress(machine) : { receipt: RECEIPT, machine: null, host };
+  const online = kind === 'machine' ? progress({ ...machine, online: true }) : { receipt: RECEIPT, machine: null, host: { ...host, machine: { ...host.machine, online: true } } };
+  const id = kind === 'machine' ? machine.id : host.id;
+  const read = vi.fn(() => Promise.resolve(online));
+  const observer = new QueryObserver(cache, { queryKey: key, initialData: offline, staleTime: Infinity, queryFn: read });
+  const off = observer.subscribe(() => undefined);
+  try {
+    setResourceFollowing(kind, id, true);
+    await applyChanges(event(online), cache);
+    expect(cache.getQueryData(key)).toEqual(online);
+    expect(read).toHaveBeenCalledOnce();
+  } finally { setResourceFollowing(kind, id, false); off(); cache.clear(); }
+});
