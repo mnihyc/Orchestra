@@ -294,7 +294,11 @@ async fn role_rows(conn: &mut Conn, ids: &[Id]) -> ApiResult<Vec<access::RoleRow
 }
 
 /// Who holds which role in a place and above it.
-async fn role_list(ctx: Ctx, (): (), (): ()) -> ApiResult<api::NodeRoleListReply> {
+async fn role_list(
+    ctx: Ctx,
+    query: orch_api_contract::common::CollectionQuery,
+    (): (),
+) -> ApiResult<api::NodeRoleListReply> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
@@ -339,9 +343,37 @@ async fn role_list(ctx: Ctx, (): (), (): ()) -> ApiResult<api::NodeRoleListReply
         &owner_holders,
     )
     .await?;
+    let assignments = crate::collection::snapshot(
+        &query,
+        &format!("place-roles:{}:{id}", principal.user()),
+        pick(&here.own),
+        |row| (row.created_at, row.id),
+        |row| {
+            let who = &row.subject;
+            format!(
+                "{} {} {} {} {} {:?}",
+                who.user
+                    .as_ref()
+                    .map_or("", |user| user.display_name.as_str()),
+                who.user.as_ref().map_or("", |user| user.username.as_str()),
+                who.group.as_ref().map_or("", |group| group.name.as_str()),
+                who.org
+                    .as_ref()
+                    .and_then(|node| node.name.as_deref())
+                    .unwrap_or(""),
+                who.at
+                    .as_ref()
+                    .and_then(|node| node.name.as_deref())
+                    .unwrap_or(""),
+                row.role
+            )
+        },
+        false,
+    )?;
     Ok(api::NodeRoleListReply {
+        next_cursor: assignments.next_cursor,
         owners,
-        own: pick(&here.own),
+        own: assignments.items,
         above: pick(&here.above),
         can_give: standing.roles().iter().filter_map(same).collect(),
     })
@@ -1001,6 +1033,11 @@ async fn change_page(
         Vec::new()
     };
     link_origin::check(&mut tx, &principal, body.link_origin).await?;
+    let server_hosts = if matches!(which, Which::Defaults) {
+        Some(crate::server_host_use::Before::defaults(&mut tx, &principal, Some(id), body).await?)
+    } else {
+        None
+    };
     let prepared = guard.operation_data::<page_operations::PreparedTarget>()?;
     let disclosure = &prepared.disclosure;
     let accepted_revision;
@@ -1056,6 +1093,9 @@ async fn change_page(
         Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
     }
     disclosure.require(ctx, &mut tx).await?;
+    if let Some(before) = server_hosts {
+        before.require(ctx, &mut tx, &principal).await?;
+    }
     if !people.is_empty() {
         crate::routes::notifications::person::tell(
             ctx,

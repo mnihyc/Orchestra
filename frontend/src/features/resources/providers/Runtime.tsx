@@ -7,14 +7,15 @@ import { RotateCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
-import { client } from '@/api/client';
+import { client, ReceiptAcknowledged } from '@/api/client';
 import { providerQuery, restartHarness } from '@/api/resources';
 import { Facts } from '@/features/resources/Facts';
 import { MachineLimits } from '@/features/resources/machines/Policy';
 import { MachineLink } from '@/features/resources/machines/MachineList';
 import type { HarnessState, Provider } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { formatDateTime, useNow } from '@/lib/time';
+import { formatDateTime, formatSpan, useNow } from '@/lib/time';
+import { holds, denial } from '@/lib/permissions';
 import { Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -34,6 +35,8 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { useState, type ReactNode } from 'react';
 import { ResourceDetails } from '@/features/resources/DetailSections';
 import { RuntimeChange } from '@/features/resources/TechnicalValue';
+import { runtimeDetail } from '@/features/resources/runtimeDetail';
+import { canForce, stepWords } from '@/features/resources/runtimeForce';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 import { UserChip } from '@/ui/UserChip';
 
@@ -65,6 +68,8 @@ function Harness({ provider, reports }: { provider: Provider; reports: ProfileRe
   const reportedHere = provider.machine === null || current !== undefined;
   const harness = current
     ?? reports.reduce((best, report) => priority[report.status] < priority[best.status] || priority[report.status] === priority[best.status] && (report.last_active_at ?? '') > (best.last_active_at ?? '') ? report : best, reports[0]);
+  const executionMachine = provider.machine?.id;
+  const keeperMachine = provider.credential_keeper?.id ?? executionMachine;
   const sessions = reports.reduce((count, report) => count + report.sessions_open, 0);
   const lastActive = reports.map((report) => report.last_active_at).filter((at): at is string => at !== null).sort().at(-1);
   const lastError = reports.flatMap((report) => report.last_error ? [{ ...report.last_error, machine: report.machine }] : []).sort((a, b) => b.at.localeCompare(a.at))[0];
@@ -87,6 +92,11 @@ function Harness({ provider, reports }: { provider: Provider; reports: ProfileRe
             {t('providers.runtime.lastActive')} <RelativeTime at={lastActive} />
           </span>
         )}
+        {reports.filter((report) => report.machine.id === executionMachine || report.machine.id === keeperMachine).map((report) => <span key={`home:${report.machine.id}`} className="min-w-0 wrap-anywhere text-sm text-text-muted">
+          {t(report.machine.id === executionMachine && report.machine.id === keeperMachine ? 'providers.runtime.homeBoth' : report.machine.id === executionMachine ? 'providers.runtime.homeExecution' : 'providers.runtime.homeCredential', {
+            home: report.home === undefined || report.home === null ? t('providers.runtime.homeUnreported') : report.home.source === 'native' && report.home.path === null ? t('providers.runtime.homeNative') : `${report.home.path ?? t('providers.runtime.homeUnreported')} · ${t(`providers.runtime.homeSource.${report.home.source}`)}`,
+          })}
+        </span>)}
         <Button admin={adminSpec(provider, 'provider.manage')} size="sm" className="ml-auto" icon={<RotateCw aria-hidden />} pending={restart.isPending} onClick={() => restart.mutate()}>
           {t('providers.runtime.restart')}
         </Button>
@@ -109,9 +119,18 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
   const now = useNow();
   const userId = useStore(client.session, (state) => state.userId);
   const { machine, runtime } = provider;
+  const manage = holds(provider.access, 'provider.manage');
+  const manageReason = manage ? undefined : denial(t, 'provider.manage', provider.name, provider.owner);
   const [stopping, setStopping] = useState(false);
   const cache=useQueryClient();
-  const control = useMutation({ mutationFn: (action:'start'|'stop') => action === 'start' ? startRuntime(provider.id) : stopRuntime(provider.id, true), onSuccess: (updated) => { setStopping(false);cache.setQueryData(providerQuery(provider.id).queryKey,updated); } });
+  // The plain stop was refused for a reason that doing it by force changes: it is offered by force, until the dialog is closed.
+  const [forcing, setForcing] = useState(false);
+  const control = useMutation({
+    mutationFn: (action:'start'|'stop'|'force') => action === 'start' ? startRuntime(provider.id) : stopRuntime(provider.id, true, action === 'force'),
+    onSuccess: (updated) => { setStopping(false);setForcing(false);cache.setQueryData(providerQuery(provider.id).queryKey,updated); },
+    onError: (error, action) => { if (error instanceof ReceiptAcknowledged) { setStopping(false); setForcing(false); } else if (action === 'stop' && canForce(error)) setForcing(true); },
+  });
+  const stopLabel = t(forcing ? 'providerRuntime.stopForce' : runtime?.state === 'stopping' ? 'providerRuntime.retryStop' : 'providerRuntime.stop');
 
   if (provider.runtime_support?.lifecycle === 'attach' && machine !== null) {
     return (
@@ -127,12 +146,12 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
             </>
           )}
         </InlineAlert>
-        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} disabled={!machine.online} onClick={()=>control.mutate('start')}>{t('providers.runtime.attach')}</Button><Button disabled={!provider.harnesses.some((harness)=>harness.machine.id===machine.id && harness.status==='online')} onClick={()=>setStopping(true)}>{t('providers.runtime.detach')}</Button></div>
+        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} blocked={!manage} reason={manageReason} pending={control.isPending} disabled={!machine.online} onClick={()=>control.mutate('start')}>{t('providers.runtime.attach')}</Button><Button admin={adminSpec(provider, 'provider.manage')} blocked={!manage} reason={manageReason} disabled={!provider.harnesses.some((harness)=>harness.machine.id===machine.id && harness.status==='online')} onClick={()=>setStopping(true)}>{t('providers.runtime.detach')}</Button></div>
         {control.error && <ErrorAlert error={control.error} />}
         {children}
         <MachineLimits machineId={machine.id} bounds="provider" id="provider-limits" title={t('providers.runtime.limits')} lead={t('providers.runtime.limitsLead')} />
         {configuration && <RuntimeConfiguration provider={provider} />}
-        <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={setStopping} title={t('providers.runtime.detach')} confirmLabel={t('providers.runtime.detach')} pending={control.isPending} error={control.error} onConfirm={()=>control.mutate('stop')}>{t('providerRuntime.stopHelp',{count:provider.running_threads})}</ConfirmDialog>
+        <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={setStopping} title={t('providers.runtime.detach')} confirmLabel={t('providers.runtime.detach')} pending={control.isPending} disabled={!manage} error={control.error} onConfirm={()=>control.mutate('stop')}>{t('providerRuntime.stopHelp',{count:provider.running_threads})}</ConfirmDialog>
       </div>
     );
   }
@@ -144,14 +163,18 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
         icon={<PlugZap aria-hidden />}
         title={t('providers.runtime.none')}
       />
+      {provider.status === 'needs_setup' && provider.status_detail !== null && <InlineAlert tone="warning">{provider.status_detail}</InlineAlert>}
       {configuration && <RuntimeConfiguration key={provider.id} provider={provider} />}
-      {(provider.runtime_support?.lifecycle==='unit' || machine===null && provider.runtime_support?.lifecycle!=='attach') && <Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button>}
+      {(provider.runtime_support?.lifecycle==='unit' || machine===null && provider.runtime_support?.lifecycle!=='attach') && <Button admin={adminSpec(provider, 'provider.manage')} blocked={!manage} reason={manageReason} pending={control.isPending} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button>}
       {control.error && <ErrorAlert error={control.error} />}
       {children}
       </div>
     );
   }
 
+  const ownProvision = runtime.state === 'creating' && runtime.job?.kind === 'provider_provision'
+    && (runtime.job.state === 'queued' || runtime.job.state === 'running');
+  const canStopRuntime = runtime.state === 'running' || runtime.state === 'stopping' || ownProvision;
   const context = { locale, timeZone };
   return (
     <div className="flex flex-col gap-6">
@@ -159,11 +182,13 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
         <Facts
           label={t('providers.runtime.title')}
           rows={[
-            { name: t('providers.runtime.state'), value: providerRuntimeState(runtime.state,t) },
+            { name: t('providers.runtime.state'), value: <>{providerRuntimeState(runtime.state,t)}{runtime.state === 'stopped' && provider.status !== 'disabled' && <> · {t(provider.kind === 'subscription' && provider.runtime_support?.sign_in?.allowed === true ? runtime.renew_at !== null ? 'providers.runtime.wakesForRenewal' : 'providers.runtime.wakesForSignIn' : 'providers.runtime.wakesFor')}</>}{runtime.state === 'failed' && provider.runtime_support?.retry_after_secs !== undefined && provider.runtime_support.retry_after_secs !== null && <> · {t('providers.runtime.retryDelay', {time:formatSpan(provider.runtime_support.retry_after_secs * 1000, {locale,timeZone})})}</>}</> },
+            ...(runtime.job === null ? [] : [{ name: t('providers.runtime.now'), value: t('providers.runtime.step', { step: stepWords(runtime.job.kind === 'environment_remove', runtime.job.phase, t), percent: runtime.job.percent }) }]),
+            ...(runtime.detail === null ? [] : [{ name: t('providers.runtime.reason'), value: runtimeDetail(runtime.detail, t) }]),
             { name: t('providers.runtime.host'), value: runtime.host === null ? t('providers.runtime.noHost') : <ResourceChip subject={{ kind: 'host', host: runtime.host }} /> },
             { name: t('providers.runtime.template'), value: <span className="flex flex-wrap items-center gap-1"><ResourceChip subject={{ kind: 'template', template: runtime.template }} hint={false} />{runtime.template.owner !== null && <UserChip user={runtime.template.owner} />}</span> },
             ...(runtime.idle_stop_at === null ? [] : [{ name: t('providers.runtime.idleStop'), value: formatDateTime(runtime.idle_stop_at, context, now) }]),
-            ...(runtime.renew_at === null ? [] : [{ name: t('providers.runtime.renew'), value: formatDateTime(runtime.renew_at, context, now) }]),
+            ...(runtime.renew_at === null ? [] : [{ name: t('providers.runtime.renew'), value: <>{formatDateTime(runtime.renew_at, context, now)}{(provider.facts.credential?.expires_at ?? null) === null && <> · {t('providers.runtime.renewUnknown')}</>}{provider.runtime_support?.sign_in?.allowed === false && <> · {t('providers.runtime.renewBlocked')}</>}</> }]),
           ]}
         />
         {runtime.update_required && <Badge tone="warning">{t('providers.phrase.updateRequired')}</Badge>}
@@ -174,12 +199,12 @@ function RuntimeDetails({ provider, configuration, children }: { provider: Provi
             ))}
           </ul>
         )}
-        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} pending={control.isPending} disabled={runtime.state !== 'stopped' && runtime.state !== 'failed'} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button><Button disabled={runtime.state !== 'running'} onClick={() => setStopping(true)}>{t('providerRuntime.stop')}</Button></div>
+        <div className="flex flex-wrap gap-2"><Button admin={adminSpec(provider, 'provider.manage')} blocked={!manage} reason={manageReason} pending={control.isPending} disabled={runtime.state !== 'stopped' && runtime.state !== 'failed'} onClick={() => control.mutate('start')}>{t('providerRuntime.start')}</Button><Button admin={adminSpec(provider, 'provider.manage')} blocked={!manage} reason={manageReason} disabled={control.isPending || !canStopRuntime} onClick={() => setStopping(true)}>{stopLabel}</Button></div>
         {control.error && <ErrorAlert error={control.error} />}
       </Section>
       {children}
       {configuration && <RuntimeConfiguration key={provider.id} provider={provider} />}
-      <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={setStopping} title={t('providerRuntime.stop')} confirmLabel={t('providerRuntime.stop')} pending={control.isPending} error={control.error} onConfirm={() => control.mutate('stop')}>{t('providerRuntime.stopHelp', { count:provider.running_threads })}</ConfirmDialog>
+      <ConfirmDialog admin={adminSpec(provider, 'provider.manage')} open={stopping} onOpenChange={(open) => { setStopping(open); if (!open) setForcing(false); }} title={t('providerRuntime.stop')} confirmLabel={stopLabel} pending={control.isPending} disabled={!manage} error={control.error} onConfirm={() => control.mutate(forcing ? 'force' : 'stop')}>{forcing ? t('providerRuntime.forceHelp') : t('providerRuntime.stopHelp', { count:provider.running_threads })}</ConfirmDialog>
     </div>
   );
 }

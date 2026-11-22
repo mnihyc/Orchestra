@@ -1,0 +1,5 @@
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts tests/e2e/first-wave-edge.spec.ts tests/e2e/last-place.spec.ts

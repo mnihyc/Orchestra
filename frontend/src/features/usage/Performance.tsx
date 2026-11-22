@@ -1,4 +1,5 @@
 /** Request performance figures and a sortable comparison in the current usage scope. */
+import { mapDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useListChoice } from '@/lib/listState';
 import { ArrowDownUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -122,11 +123,11 @@ export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: re
     },
   }));
   return <Section id="usage-models" title={t('usagePerf.sections.models')} action={<>
-    <Select size="sm" label={t('usagePerf.sort')} value={sort.key} onValueChange={(key)=>setSort({key,descending:key!=='model'})} options={(Object.keys(labels) as Sort[]).map((key)=>({value:key,name:t('usagePerf.choices.comparisonSort.name',{name:labels[key]}),description:t('usagePerf.choices.comparisonSort.description',{name:labels[key]})}))} />
+    <Select size="sm" label={t('usagePerf.sort')} value={sort.key} onValueChange={mapDeviceChoice((key: Sort)=>setSort({key,descending:key!=='model'}), setSort, (value) => typeof value === 'object' && value !== null ? Reflect.get(value, 'key') : undefined)} options={(Object.keys(labels) as Sort[]).map((key)=>({value:key,name:t('usagePerf.choices.comparisonSort.name',{name:labels[key]}),description:t('usagePerf.choices.comparisonSort.description',{name:labels[key]})}))} />
     <Button size="sm" variant="ghost" icon={<ArrowDownUp aria-hidden />} onClick={()=>setSort((before)=>({...before,descending:!before.descending}))}>{t('usagePerf.reverseSort')}</Button>
   </>}>
     <p aria-live="polite" className="sr-only">{t('usagePerf.sorted',{column:labels[sort.key],direction:t(sort.descending ? 'usagePerf.descending' : 'usagePerf.ascending')})}</p>
-    <Table label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.tier_unknown === true,row.effort,row.program])} />
+    <Table virtual label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.tier_unknown === true,row.effort,row.program])} />
   </Section>;
 }
 
