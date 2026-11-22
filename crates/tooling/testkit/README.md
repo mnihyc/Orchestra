@@ -32,7 +32,12 @@ Each fixture reserves 32 connections, including secondary pools: a server with
 `ORCH_TEST_DATABASE_CONNECTIONS_PER_FIXTURE` can increase the reservation per
 fixture. Cooperating processes must agree on these values while fixtures are
 active. Capacity discovery is serialized across processes and closes its one
-administrative connection before waiting for admission. The capacity regressions
+administrative connection before waiting for admission. Numbered, locked tickets
+keep waiters in arrival order across processes. Cancellation removes a ticket;
+a stopped process releases its kernel lock so the next waiter can discard it.
+Long-running fixtures retain their reservations through cleanup, without making
+queued tests fail on an admission deadline. The test job runner bounds a hung
+program. The capacity regressions
 run disposable PostgreSQL 17 containers through Docker using the locally
 available `postgres:17-alpine` image.
 

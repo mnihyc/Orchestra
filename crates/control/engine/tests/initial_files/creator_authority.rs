@@ -77,11 +77,12 @@ impl Fixture {
             now,
             &principal,
             &Request {
+                identity: None,
                 owner: world.ada,
                 name: Some("Creator initial files"),
                 home: world.topic,
                 template: Some(template),
-                host: Some(Some(host.id)),
+                host: Some(Some(orch_provider_contract::pools::Target::host(host.id))),
                 config: &json!({}),
             },
         )
