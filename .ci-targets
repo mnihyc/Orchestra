@@ -1,0 +1,3 @@
+web typecheck
+web lint
+web-e2e tests/e2e/frame-review.spec.ts --grep "startup keeps one baseline"

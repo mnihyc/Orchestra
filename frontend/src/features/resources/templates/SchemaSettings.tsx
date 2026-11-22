@@ -178,7 +178,7 @@ export function SchemaForm({ schema, spec, driver, disabled = false, readOnly = 
     {leadingContent}
     {tokens.length > 0 && problems.length > 0 && suppliedSearch === undefined && <Button size="sm" className="self-start" onClick={() => setSearch('')}>{t('templateSettings.showAll')}</Button>}
     {tokens.length > 0 && matchingCount === 0 && !otherMatches && (leadingContent === null || leadingContent === undefined) && <EmptyState compact title={t('templateSettings.noMatch')} />}
-    {compact ? <DetailSections label={t('templates.spec.title')} blocked={blocked} sections={rows.filter((section) => section.fields.some((field) => visible(field, section.title)) || section.id === 'image' && imageVisible).map((section) => ({ value: section.id, label: section.title,
+    {compact ? <DetailSections stacked label={t('templates.spec.title')} blocked={blocked} sections={rows.filter((section) => section.fields.some((field) => visible(field, section.title)) || section.id === 'image' && imageVisible).map((section) => ({ value: section.id, label: section.title,
       panel: <DetailPages blocked={blocked} items={section.fields.filter((field) => visible(field, section.title))}>{(page) => renderSection({ ...section, fields: [...page] })}</DetailPages>,
     }))} /> : rows.map(renderSection)}
     {Object.keys(unknown).length > 0 && <div hidden={!otherMatches}>{readOnly ? <SettingRow as="div" name={t('templates.editor.other')} readOnly reason={<Badge>{t('templateSettings.source.template')}</Badge>} value={<ValueSummary value={unknown} />} />

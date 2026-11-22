@@ -243,6 +243,8 @@ pub struct Ctx {
     retained_source: Arc<crate::key_operations::resolver::RetainedSource>,
     /// Final transport lifetime and immutable native-source checks, independent of replanning.
     pub publication: Arc<crate::key_operations::publication::State>,
+    /// Entry into the HTTP request, before authentication or database reads.
+    pub arrived: std::time::Instant,
     /// The request's identifier, as in its answer.
     pub request_id: String,
     /// The moment the handler was prepared, after JSON decoding; action checks
@@ -258,6 +260,30 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Ordinary browser openings have a read-only projection and independent visit bookkeeping.
+    pub fn ordinary_browser_opening(&self) -> bool {
+        self.route.name == "ThreadOpeningGet"
+            && self.operation_ceiling().is_none()
+            && self.ordinary_browser()
+    }
+
+    pub(crate) fn browser_page_projection(&self) -> bool {
+        matches!(
+            self.route.name,
+            "MeBootstrapGet" | "OrgTreeGet" | "ThreadOutlineGet"
+        ) && self.ordinary_browser()
+    }
+
+    fn ordinary_browser(&self) -> bool {
+        self.surface == Some(HttpSurface::Browser)
+            && self.ask_read.is_none()
+            && !self.inspect_deleted
+            && self.inspection.is_none()
+            && self
+                .user()
+                .is_ok_and(|user| user.is_session() && !user.as_admin)
+    }
+
     /// Retain this authenticated entry's restrictions for a native preparation source.
     /// This is not a complete operation capture or a business-effect checkpoint.
     pub async fn capture_http_preparation(
@@ -307,6 +333,7 @@ impl Ctx {
             operation_initial: Arc::default(),
             retained_source: Arc::default(),
             publication: Arc::default(),
+            arrived: std::time::Instant::now(),
             request_id: format!("tool:{id}"),
             now,
             headers: HeaderMap::new(),
@@ -477,14 +504,14 @@ impl Ctx {
             .is_some_and(|read| read.native_identity().is_some())
             && orch_db::queries::transaction_guard::in_transaction(conn);
         let http = if self.surface.is_some() || native_snapshot {
-            Some(
-                transaction_guard::current_http_identity(
-                    self,
-                    conn,
-                    transaction_guard::HttpIdentityMode::Read,
-                )
-                .await?,
-            )
+            let mode = if self.route.name == "ThreadOutlineGet"
+                && orch_db::queries::transaction_guard::in_transaction(conn)
+            {
+                transaction_guard::HttpIdentityMode::PageProjection
+            } else {
+                transaction_guard::HttpIdentityMode::Read
+            };
+            Some(transaction_guard::current_http_identity(self, conn, mode).await?)
         } else {
             None
         };
@@ -744,6 +771,7 @@ pub(crate) fn changes_authority(route: &Route) -> bool {
         "ChatMemberAdd" | "ChatMemberRemove" | "ChatAgentPostingSet" | "ChatPersonGrant" |
         // Shared resources, their home, availability and permission policies.
         "ProviderUpdate" | "ProviderDelete" |
+        "PoolDelete" | "PoolUpdate" | "PoolMemberPut" | "PoolMemberMetadata" | "PoolMemberDelete" | "PoolLendingPut" |
         "ProviderDisable" | "ProviderEnable" |
         // Credentials, their reported expiry and hosted availability can change what work may run.
         "ProviderKeySet" | "ProviderSecretSet" | "ProviderFactsOverridesSet" | "ProviderSourcesSet" |
@@ -756,6 +784,7 @@ pub(crate) fn changes_authority(route: &Route) -> bool {
         "AgentUpdate" | "AgentDelete" |
         "TemplateUpdate" | "TemplateDelete" |
         "McpServerUpdate" | "McpServerDelete" | "McpServerReimport" |
+        "MountDelete" |
         "SkillUpdate" | "SkillDelete" |
         "HostEnrollmentTokenCreate" | "HostUpdate" | "HostDelete" | "HostDeleteCreate" | "LossDeclare" | "EnvironmentRecoverCreate" | "McpOfferingUse" |
         "MachineRevoke" | "MachinePolicyUpdate" | "MachineProbe" |
@@ -798,6 +827,7 @@ pub(crate) fn changes_one_place(route: &Route) -> bool {
                 | "ThreadForkCreate"
                 | "ForkBatchCreate"
                 | "InvitationAccept"
+                | "MountDelete"
         )
 }
 
@@ -833,8 +863,8 @@ pub(crate) fn changes_standing(route: &Route) -> bool {
     )
 }
 
-// Credential changes conflict with their own person's actions. A fresh child
-// cannot revoke authority on an existing object, and pins its parent instead.
+// Personal writers order changes to the account's credentials. Each changed credential
+// orders the actions using it. A fresh child pins its parent.
 fn lock_scope(ctx: &Ctx) -> orch_db::queries::transaction_guard::Scope {
     use orch_db::queries::transaction_guard::Scope;
     if changes_authority(&ctx.route) {
@@ -962,11 +992,50 @@ impl<T> Answer<T> {
     }
 }
 
+// Concurrent ordinary thread openings can carry their already encoded, authorized projection.
+pub(crate) enum JsonBody<T> {
+    Typed(T),
+    Opening(Arc<crate::key_operations::native::thread_openings::EncodedOpening>),
+}
+
+impl<T> JsonBody<T> {
+    fn creation_body(&self) -> ApiResult<&T> {
+        match self {
+            Self::Typed(body) => Ok(body),
+            Self::Opening(_) => Err(ApiError::internal("an opening cannot complete a creation")),
+        }
+    }
+}
+
+/// Complete request-local bookkeeping against the actual JSON projection before delivery.
+async fn json_response(
+    ctx: &Ctx,
+    status: StatusCode,
+    mut value: std::borrow::Cow<'_, serde_json::Value>,
+    opening: Option<&crate::key_operations::native::thread_openings::EncodedOpening>,
+) -> ApiResult<Response> {
+    if status.is_success() {
+        crate::middleware::admin_openings::finish_json(ctx, &value).await?;
+        let _ = crate::routes::personal::viewed::record(ctx, &value).await;
+    }
+    let bytes = match (&ctx.inspection, opening) {
+        (None, Some(body)) => body.bytes_for(&value)?,
+        (inspection, _) => {
+            if let Some(info) = inspection {
+                crate::middleware::inspection::banner(value.to_mut(), Some(info));
+            }
+            bytes::Bytes::from(serde_json::to_vec(&*value).map_err(ApiError::internal)?)
+        }
+    };
+    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
 /// The requests the application serves.
 #[derive(Debug, Default)]
 pub struct Registry {
     router: axum::Router<App>,
     key_router: axum::Router<App>,
+    landing_reads: axum::Router<App>,
     bound: Vec<Route>,
     creations: Arc<idempotency::Creations>,
     creation_claims: Arc<idempotency::Claims>,
@@ -1104,19 +1173,42 @@ pub(crate) fn decode_body<B: DeserializeOwned>(route: &Route, bytes: &[u8]) -> A
     } else {
         bytes
     };
-    let mut json = serde_json::Deserializer::from_slice(bytes);
+    let normalized = if bytes.windows(6).any(|part| part == b"\\u0000") {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| faults_of("", &error.to_string()))?;
+        if storable_body::normalize(route, &mut value) != 0 {
+            Some(serde_json::to_vec(&value).map_err(ApiError::internal)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut json = serde_json::Deserializer::from_slice(normalized.as_deref().unwrap_or(bytes));
     serde_path_to_error::deserialize(&mut json)
         .map_err(|error| faults_of(&error.path().to_string(), &error.inner().to_string()))
 }
 
+fn source_text_replacements(route: &Route, bytes: &[u8]) -> u64 {
+    if !bytes.windows(6).any(|part| part == b"\\u0000") {
+        return 0;
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .map(|mut value| storable_body::normalize(route, &mut value))
+        .unwrap_or_default()
+}
+
 /// Whether a request whose commit was refused because who may do what changed meanwhile is
 /// served once more, deciding again under the new authority: an ordinary write or a change that only
-/// grants, which has done nothing outside its transaction that a second serving would repeat. Any other
-/// change of authority, a personal credential and a raw body are answered as they failed
-/// (`conflict.stale_revision`).
+/// grants, or a permission-page writer whose effects all belong to its refused transaction.
+/// These do nothing outside that transaction that a second serving would repeat. Other
+/// changes of authority, personal credentials and raw bodies are answered as they failed
+/// (`conflict.concurrent_change`).
 fn retried_after_refusal(route: &Route) -> bool {
     route.method.as_str() != "GET"
-        && (!changes_authority(route) || only_grants(route))
+        && (!changes_authority(route)
+            || only_grants(route)
+            || matches!(route.name, "PermissionPageUpdate" | "NodeDefaultsUpdate"))
         && matches!(
             route.access,
             Access::User | Access::Session | Access::Permission(_) | Access::Rule(_)
@@ -1131,6 +1223,21 @@ async fn open(
     typed_operation: bool,
     deferred_creation: bool,
 ) -> ApiResult<Ctx> {
+    let arrived = std::time::Instant::now();
+    // A TLS resumption replay may repeat a safe read, never an act. Refuse before authentication,
+    // activity, body parsing or the handler can make an effect; a completed handshake can retry.
+    if (!parts.method.is_safe() || route.path.starts_with("/auth/oidc/"))
+        && parts.headers.get_all("early-data").iter().any(|value| {
+            value
+                .to_str()
+                .is_ok_and(|value| value.split(',').any(|part| part.trim() == "1"))
+        })
+    {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::RequestTooEarly,
+            "the secure handshake must finish before this action; retry without early data",
+        ));
+    }
     let ask_read = parts
         .extensions
         .get::<Arc<crate::ask::tools::ReadRequest>>()
@@ -1180,6 +1287,7 @@ async fn open(
             return Err(error);
         }
     };
+    let mut opening_deadline = None;
     let caller = match route.access {
         Access::Public => Caller::Anonymous,
         Access::Cookie => {
@@ -1200,6 +1308,11 @@ async fn open(
                 };
                 user.as_admin = false;
                 Caller::User(Arc::new(user))
+            } else if route.name == "ThreadOpeningGet" && surface == Some(HttpSurface::Browser) {
+                let (caller, deadline) =
+                    authentication::opening_sessions::at_entry(app, &parts.headers).await?;
+                opening_deadline = deadline;
+                caller
             } else {
                 authentication::authenticate_on(http_surface()?, app, &parts.headers, now).await?
             };
@@ -1265,6 +1378,7 @@ async fn open(
         operation_initial: Arc::default(),
         retained_source: Arc::default(),
         publication: Arc::default(),
+        arrived,
         request_id: request_id.to_owned(),
         now,
         headers: parts.headers.clone(),
@@ -1272,6 +1386,7 @@ async fn open(
         route,
         params,
     };
+    ctx.publication.retain_deadline(opening_deadline)?;
     if let Some(origin) = &ask_read {
         ctx = ctx.with_operation_ceiling(origin.ceiling())?;
     }
@@ -1947,6 +2062,63 @@ impl Registry {
         Fut: Future<Output = ApiResult<R>> + Send + 'static,
         R: Into<Answer<E::Reply>>,
     {
+        self.on_json_body(endpoint, initial, operation, move |ctx, query, body| {
+            let work = handler(ctx, query, body);
+            async move {
+                let Answer {
+                    body,
+                    status,
+                    headers,
+                } = work.await?.into();
+                Ok(Answer {
+                    body: JsonBody::Typed(body),
+                    status,
+                    headers,
+                })
+            }
+        })
+    }
+
+    /// A typed JSON opening can share its encoded body through the usual request bookkeeping and publication checks.
+    pub fn on_thread_opening<S>(
+        &mut self,
+        openings: Arc<crate::key_operations::native::thread_openings::Openings>,
+    ) -> &mut Self
+    where
+        S: crate::key_operations::native::Selected<
+                Query = orch_api_contract::threads::ThreadOpeningGetQuery,
+                Reply = orch_api_contract::threads::ThreadOpening,
+            >,
+    {
+        use crate::key_operations::native::selected;
+        self.on_json_body(
+            orch_api_contract::threads::ThreadOpeningGet,
+            None,
+            Some(ConfiguredOperation::SnapshotOptional(selected::<S>)),
+            move |ctx, query, ()| {
+                let openings = openings.clone();
+                async move {
+                    let body = openings.read::<S>(ctx, query).await?;
+                    Ok(Answer::from(body).header(header::CACHE_CONTROL, crate::sign_in::NOT_KEPT))
+                }
+            },
+        )
+    }
+
+    fn on_json_body<E, F, Fut>(
+        &mut self,
+        endpoint: E,
+        initial: Option<OperationInitial<E::Query, E::Body>>,
+        operation: Option<ConfiguredOperation<E::Query, E::Body>>,
+        handler: F,
+    ) -> &mut Self
+    where
+        E: Endpoint,
+        E::Body: DeserializeOwned,
+        E::Reply: Serialize,
+        F: Fn(Ctx, E::Query, E::Body) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = ApiResult<Answer<JsonBody<E::Reply>>>> + Send + 'static,
+    {
         let _ = endpoint;
         let route = E::ROUTE;
         let unguarded = self.unguarded;
@@ -2020,7 +2192,7 @@ impl Registry {
                                     let code:ErrorCode=serde_json::from_value(serde_json::Value::String(record.failure.ok_or_else(||ApiError::internal("a completed creation has no outcome"))?)).map_err(ApiError::internal)?;
                                     let mut error=ApiError::new(code,"the first creating request was refused");error.problem.status=status.as_u16();return Err(error);
                                 };
-                                (Answer {body,status:Some(status),headers:idempotency::replay_headers()},false,true,reply_ctx)
+                                (Answer {body:JsonBody::Typed(body),status:Some(status),headers:idempotency::replay_headers()},false,true,reply_ctx)
                             }
                             pending => {
                                 let pending = match pending {Some(Claim::New(pending))=>Some(pending),None=>None,_=>unreachable!()};
@@ -2089,8 +2261,9 @@ impl Registry {
                                 let ctx: Ctx = $ctx;
                                 let scope = lock_scope(&ctx);
                                 let work = Box::pin(handler(ctx, $query, $body));
-                                orch_db::pool::serving_watched(
+                                orch_db::pool::serving_watched_with_text(
                                     route.name,
+                                    source_text_replacements(&route,&body_bytes),
                                     transaction_guard::watch(orch_db::audit::scope_origin(
                                         audit_origin.clone(),
                                         orch_db::queries::transaction_guard::request_scope(
@@ -2114,7 +2287,6 @@ impl Registry {
                         let ((answer, guarded), refused) = serve_once!(ctx, query, body);
                         let reply_ctx=reply_ctx.with_snapshot_inspection()?;
                         // The handler's own result is turned into the answer at once: only that is kept across a wait.
-                        let answer: ApiResult<Answer<E::Reply>> = answer.map(Into::into);
                         let (answer, guarded) = if refused
                             && answer.is_err()
                             && let Some(mut ctx) = retry_ctx
@@ -2136,11 +2308,11 @@ impl Registry {
                                 .await?;
                             }
                             let ((again, guarded), _) = serve_once!(ctx, query, body);
-                            (again.map(Into::into), guarded)
+                            (again, guarded)
                         } else {
                             (answer, guarded)
                         };
-                        let answer: Answer<E::Reply> = answer?;
+                        let answer = answer?;
                                     Ok::<_,ApiError>((answer,guarded,reply_ctx))
                                 };
                                 let command_capture = idempotency::commands::capture(
@@ -2155,7 +2327,7 @@ impl Registry {
                                     let binding=creation.as_ref().ok_or_else(||ApiError::internal("a native continuation lost its binding"))?;
                                     let replay=binding.replay.ok_or_else(||ApiError::internal("a native continuation lost its projector"))?;
                                     outcome=replay(finish_ctx.clone(),read_query(&route,query.as_deref())?,decode_body(&route,&bytes)?,created).await
-                                        .map(|body|(Answer {body,status:Some(status),headers:idempotency::replay_headers()},false,finish_ctx.clone()));
+                                        .map(|body|(Answer {body:JsonBody::Typed(body),status:Some(status),headers:idempotency::replay_headers()},false,finish_ctx.clone()));
                                     race_replayed=outcome.is_ok();
                                     if race_replayed {crate::key_operations::activity::replayed();}
                                 }
@@ -2169,14 +2341,14 @@ impl Registry {
                                         let replay=binding.replay.ok_or_else(||ApiError::internal("a public creation has no native replay"))?;
                                         let body=replay(finish_ctx.clone(),read_query(&route,uri.query())?,decode_body(&route,&bytes)?,created).await?;
                                         crate::key_operations::activity::replayed();
-                                        outcome=Ok((Answer {body,status:Some(status),headers:idempotency::replay_headers()},false,finish_ctx.clone()));
+                                        outcome=Ok((Answer {body:JsonBody::Typed(body),status:Some(status),headers:idempotency::replay_headers()},false,finish_ctx.clone()));
                                         race_replayed=true;
                                     }
                                 }
                                 if let Some(pending) = pending {
                                     let (status,identity,failure) = match &outcome {
                                         Ok((answer,_,_)) => (answer.status.unwrap_or_else(||StatusCode::from_u16(route.status).unwrap_or(StatusCode::OK)),
-                                            creation.as_ref().ok_or_else(||ApiError::internal("a creation has no native identity binding"))?.identity.map(|identity|identity(&answer.body)).transpose()?,None),
+                                            creation.as_ref().ok_or_else(||ApiError::internal("a creation has no native identity binding"))?.identity.map(|identity|identity(answer.body.creation_body()?)).transpose()?,None),
                                         Err(error) => (StatusCode::from_u16(error.problem.status).map_err(ApiError::internal)?,None,Some(error.code())),
                                     };
                                     pending.finish(&finish_ctx,status,identity,failure).await?;
@@ -2221,31 +2393,16 @@ impl Registry {
                         let mut response = if matches!(route.reply, Shape::None) {
                             status.into_response()
                         } else {
-                            let mut value =
-                                serde_json::to_value(&answer.body).map_err(ApiError::internal)?;
-                            if status.is_success() {
-                                Box::pin(crate::middleware::admin_openings::finish_json(
-                                    &reply_ctx, &value,
-                                ))
-                                .await?;
-                                // The handler has completed and released its transaction. Bookkeeping
-                                // reuses the authorized projection and cannot turn a good page into an error.
-                                let _ = Box::pin(crate::routes::personal::viewed::record(
-                                    &reply_ctx, &value,
-                                ))
-                                .await;
+                            match answer.body {
+                                JsonBody::Typed(body) => {
+                                    let value = serde_json::to_value(body).map_err(ApiError::internal)?;
+                                    Box::pin(json_response(&reply_ctx,status,std::borrow::Cow::Owned(value),None)).await?
+                                }
+                                JsonBody::Opening(shared) => {
+                                    let value = shared.value_for(&reply_ctx.request_id)?;
+                                    Box::pin(json_response(&reply_ctx,status,value,Some(&shared))).await?
+                                }
                             }
-                            crate::middleware::inspection::banner(
-                                &mut value,
-                                reply_ctx.inspection.as_ref(),
-                            );
-                            let bytes = serde_json::to_vec(&value).map_err(ApiError::internal)?;
-                            let mut response = (status, bytes).into_response();
-                            response.headers_mut().insert(
-                                header::CONTENT_TYPE,
-                                HeaderValue::from_static("application/json"),
-                            );
-                            response
                         };
                         response.headers_mut().extend(answer.headers);
                         crate::middleware::inspection::headers(&mut response, &reply_ctx)?;
@@ -2300,8 +2457,9 @@ impl Registry {
         Fut: Future<Output = ApiResult<Response>> + Send + 'static,
     {
         assert!(
-            E::ROUTE.method != Method::GET && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw),
-            "a raw changing query operation retains its actual raw body declaration"
+            E::ROUTE.method != Method::GET
+                && matches!(E::ROUTE.body, Shape::Bytes | Shape::Raw | Shape::Json(_)),
+            "a raw changing query operation retains its actual body declaration"
         );
         self.on_raw_configured(
             endpoint,
@@ -2712,6 +2870,12 @@ impl Registry {
 
     fn add(&mut self, route: Route, method_router: axum::routing::MethodRouter<App>) -> &mut Self {
         if HttpSurface::Browser.serves(&route) {
+            if route.name == orch_api_contract::auth::MeBootstrapGet::ROUTE.name
+                || route.name == orch_api_contract::threads::ThreadOpeningGet::ROUTE.name
+            {
+                let reads = std::mem::take(&mut self.landing_reads);
+                self.landing_reads = reads.route(route.path, method_router.clone());
+            }
             let router = std::mem::take(&mut self.router);
             self.router = router.route(route.path, method_router.clone());
         }
@@ -2733,6 +2897,20 @@ impl Registry {
     /// Its caller must mount it under the browser/public path; account keys are never accepted.
     pub fn into_router(self) -> axum::Router<App> {
         self.into_router_for(HttpSurface::Browser)
+    }
+
+    /// Bind the shell and thread's two native services to the caller without rebuilding the entire API router on sign-in.
+    pub(crate) fn take_landing_reads(&mut self) -> axum::Router<App> {
+        Self::mounted(
+            std::mem::take(&mut self.landing_reads),
+            HttpSurface::Browser,
+        )
+    }
+
+    /// Every browser route bound so far, for answering a page's first reads inside one request exactly as each of them
+    /// answers on its own.
+    pub(crate) fn browser_read_routes(&self) -> axum::Router<App> {
+        Self::mounted(self.router.clone(), HttpSurface::Browser)
     }
 
     /// One explicitly selected surface, for limited protocol subtrees such as internal downloads.
@@ -2769,6 +2947,9 @@ impl Registry {
 
 #[path = "registry/contextual_read.rs"]
 pub mod contextual_read;
+
+#[path = "registry/storable_body.rs"]
+mod storable_body;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "registry/action_guard_state_tests.rs"]
