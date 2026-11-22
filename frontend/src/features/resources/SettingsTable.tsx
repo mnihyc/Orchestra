@@ -41,6 +41,7 @@ export function SettingsTable({ settings, label, target, place, runtime, effectF
     const note = effectFor === undefined ? effect === null ? null : <span className="text-xs text-text-muted">{t(`runtimeChanges.${effect}`)}</span> : effectFor(setting.key);
     if (def === undefined || target === undefined) {
       return <SettingRowLayout key={setting.key} name={def?.title ?? t('settings.compact.definitionMissing')} description={def?.description} settingKey={setting.key}
+        status={note}
         value={<SettingSummary def={def ?? { key: setting.key }} value={setting.value} />} readOnly
         reason={t(def === undefined ? 'settings.compact.definitionMissingReason' : 'settings.compact.readOnly')}
         actions={def === undefined && target !== undefined ? <Button size="sm" pending={registry.isFetching} onClick={() => void registry.refetch()}>{t('common.tryAgain')}</Button> : undefined} />;

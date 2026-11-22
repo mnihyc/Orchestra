@@ -94,6 +94,33 @@ pub fn needs_of(spec: &Json, own: Option<&Json>, limits: Option<&Json>) -> Needs
     }
 }
 
+/// Provenance from the very same member order as needs_of, without reading another setting.
+#[must_use]
+pub fn need_sources(
+    spec: &Json,
+    own: Option<&Json>,
+    limits: Option<&Json>,
+) -> std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource> {
+    use orch_api_contract::environment::PlacementNeedSource as Source;
+    ["cpu_millis", "memory_mb", "disk_gb"]
+        .into_iter()
+        .map(|key| {
+            let source = if number(own, key).is_some() {
+                Source::ResolvedNeeds
+            } else if number(spec.get("needs"), key).is_some() {
+                Source::TemplateNeeds
+            } else if number(limits, key).is_some() {
+                Source::ResolvedResources
+            } else if number(spec.get("resources"), key).is_some() {
+                Source::TemplateResources
+            } else {
+                Source::NotReported
+            };
+            (key.to_owned(), source)
+        })
+        .collect()
+}
+
 /// The limits an environment's unit is made with: the template's `resources`, each member raised or
 /// lowered by the environment's own `env.resources`, within the template's `resources_max`.
 #[must_use]
@@ -139,6 +166,9 @@ pub fn source_of(spec: &Json) -> &'static str {
 /// What a new environment would be made with, worked out from its template and its own values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wanted {
+    /// Actual branches of the needs resolver used for this proposal.
+    pub need_sources:
+        std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource>,
     /// The template.
     pub template: TemplateState,
     /// What it declares it needs.
@@ -235,6 +265,7 @@ pub async fn wanted(
         })
         .unwrap_or_default();
     Ok(Wanted {
+        need_sources: need_sources(&template.spec, needs_own.as_ref(), Some(&limits)),
         needs,
         limits,
         source: source_of(&template.spec),
@@ -373,6 +404,130 @@ pub fn declared_with_overhead(loads: &[LoadRow], drivers: &Json) -> Amounts {
         declared.memory_mb = declared.memory_mb.saturating_add(overhead.max(0));
     }
     declared
+}
+
+/// The inputs already read by a placement decision; explanation performs no additional I/O.
+pub(crate) struct CalculationInput<'a> {
+    pub host: &'a HostState,
+    pub template: &'a TemplateState,
+    pub runtime: Option<&'a str>,
+    pub needs: &'a Needs,
+    pub need_sources:
+        std::collections::BTreeMap<String, orch_api_contract::environment::PlacementNeedSource>,
+    pub declared: Amounts,
+    pub applied: Amounts,
+    pub full_percent: i64,
+    pub when_full: WhenFull,
+    pub now: DateTime<Utc>,
+}
+
+/// Captures the scheduler's actual arithmetic and declaration resolution, without changing placement.
+pub(crate) fn capture_calculation(
+    input: CalculationInput<'_>,
+) -> orch_api_contract::environment::PlacementCalculation {
+    use orch_api_contract::environment::{
+        PlacementCalculation, PlacementCalculationSources, PlacementRuntimeOverhead,
+        PlacementSettingSource, PlacementThresholds,
+    };
+    use orch_driver_contract::isolation::{Boundary, RuntimeAssumptionSource, class_in};
+    let descriptor = input.host.drivers.get(&input.template.driver);
+    let class = descriptor.and_then(|descriptor| class_in(descriptor, input.runtime));
+    let isolation = descriptor.map(|descriptor| {
+        let title = descriptor
+            .get("title")
+            .and_then(Json::as_str)
+            .unwrap_or(&input.template.driver);
+        let fallback = if descriptor.get("confinement").and_then(Json::as_str) == Some("isolated") {
+            Boundary::SharedKernel
+        } else {
+            Boundary::Unbounded
+        };
+        let runtime = input
+            .runtime
+            .or_else(|| descriptor.get("default_runtime").and_then(Json::as_str));
+        let mut isolation = crate::isolation::isolation_of(
+            &input.template.driver,
+            title,
+            class.as_ref(),
+            runtime,
+            fallback,
+            &[],
+        );
+        isolation.assumptions = Some(crate::isolation::assumption_sources(descriptor, runtime));
+        isolation
+    });
+    PlacementCalculation {
+        captured_at: Time::new(input.now),
+        runtime_overhead: PlacementRuntimeOverhead {
+            existing_memory_mb: input
+                .applied
+                .memory_mb
+                .saturating_sub(input.declared.memory_mb)
+                .max(0),
+            incoming_memory_mb: class
+                .as_ref()
+                .filter(|_| {
+                    isolation
+                        .as_ref()
+                        .and_then(|isolation| isolation.assumptions.as_ref())
+                        .is_some_and(|assumptions| {
+                            assumptions.overhead_source
+                                == RuntimeAssumptionSource::RuntimeDeclaration
+                        })
+                })
+                .map(|class| class.memory_overhead_mb.max(0)),
+            incoming_included: false,
+            source: isolation
+                .as_ref()
+                .and_then(|isolation| isolation.assumptions.as_ref())
+                .map_or(
+                    RuntimeAssumptionSource::UnknownRuntimeFallback,
+                    |assumptions| assumptions.overhead_source,
+                ),
+        },
+        capacities: capacity_of(input.host),
+        capacities_as_of: input.host.capacity_at.map(Time::new),
+        thresholds: PlacementThresholds {
+            full_percent: input.full_percent,
+            incoming_memory_mb: input.needs.memory_mb,
+        },
+        consequence: input.when_full,
+        sources: PlacementCalculationSources {
+            needs: input.need_sources,
+            capacity_unreported: ["cpu_millis", "memory_mb", "disk_gb"]
+                .into_iter()
+                .filter(|key| {
+                    if *key == "cpu_millis" {
+                        input
+                            .host
+                            .capacity
+                            .get("cpu_millis")
+                            .and_then(Json::as_i64)
+                            .is_none()
+                            && input
+                                .host
+                                .capacity
+                                .get("cpus")
+                                .and_then(Json::as_f64)
+                                .is_none()
+                    } else {
+                        number(Some(&input.host.capacity), key).is_none()
+                    }
+                })
+                .map(str::to_owned)
+                .collect(),
+            template_revision: input.template.revision,
+            full_percent: PlacementSettingSource::System,
+            consequence: if input.host.when_full.is_some() {
+                PlacementSettingSource::Host
+            } else {
+                PlacementSettingSource::System
+            },
+        },
+        declared_totals: input.declared,
+        applied_totals: input.applied,
+        isolation,
+    }
 }
 
 // Group current units once; visiting every unit for each host multiplies scheduling work.
@@ -561,9 +716,35 @@ pub async fn host_places_among(
     .await
 }
 
+/// Judge one factual pool member through the ordinary native host/template admission.
+pub async fn host_places_at_pool(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    selection: orch_authz::pools::Selection<'_>,
+    registered: Option<Id>,
+) -> Result<Vec<HostPlace>, EngineError> {
+    if selection.path.is_empty() {
+        return Err(EngineError::unreadable(
+            "the host pool has no current membership path",
+        ));
+    }
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        None,
+        None,
+        Some(HostSelection::Pool(selection, registered)),
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
 enum HostSelection<'a> {
     Capped(&'a [Id]),
     Window(&'a [Id]),
+    Pool(orch_authz::pools::Selection<'a>, Option<Id>),
 }
 
 /// Plans placement of this current environment, retaining only its own existing capacity slot.
@@ -574,6 +755,25 @@ pub async fn host_places_for_environment(
     environment: Id,
 ) -> Result<Vec<HostPlace>, EngineError> {
     host_places_inner(conn, principal, ask, Some(environment), None, None).await
+}
+
+/// Recheck an accepted host window while retaining this new registration's own capacity slot.
+pub async fn host_places_for_environment_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    environment: Id,
+    hosts: &[Id],
+) -> Result<Vec<HostPlace>, EngineError> {
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        Some(environment),
+        None,
+        Some(HostSelection::Window(hosts)),
+    )
+    .await
 }
 
 /// A completed environment may retain its exact published host/template through
@@ -625,12 +825,26 @@ async fn host_places_inner(
     retained_host: Option<Id>,
     selected: Option<HostSelection<'_>>,
 ) -> Result<Vec<HostPlace>, EngineError> {
+    let (pool, registered) = match selected {
+        Some(HostSelection::Pool(selection, registered)) => (Some(selection), registered),
+        _ => (None, None),
+    };
     let may_use = if let Some(host) = retained_host {
         vec![host]
+    } else if let Some(selection) = pool {
+        match selection.leaf {
+            orch_provider_contract::pools::Leaf::Host { id } => vec![*id],
+            _ => return Err(EngineError::unreadable("the selected member is not a host")),
+        }
     } else if let Some(selection) = selected {
         let (ids, capped) = match selection {
             HostSelection::Capped(ids) => (ids, true),
             HostSelection::Window(ids) => (ids, false),
+            HostSelection::Pool(..) => {
+                return Err(EngineError::unreadable(
+                    "the host pool selection was not prepared",
+                ));
+            }
         };
         let mut allowed = resources::effective_among(conn, principal, ids, Policy::default())
             .await?
@@ -694,7 +908,14 @@ async fn host_places_inner(
     let mut loads = loads_by_host(rows::loads(conn, &may_use).await?);
     let system_when_full = system_when_full(conn).await?;
     let full_percent = system_full_percent(conn).await?;
-    let policies = policies_at(conn, ask.home).await?;
+    let policies = if let Some(selection) = pool {
+        let mut ids = ask.wanted.mounts.clone();
+        ids.extend(may_use.iter().copied());
+        ids.push(ask.wanted.template.id);
+        crate::access::resource_policies_for_choice(conn, &ids, selection.path).await?
+    } else {
+        policies_at(conn, ask.home).await?
+    };
     let wanted = ask.wanted;
     let mut places: Vec<HostPlace> = Vec::new();
     for host in hosts {
@@ -716,9 +937,10 @@ async fn host_places_inner(
             |policy| {
                 let capabilities=orch_driver_contract::capabilities::CapabilityState {base:wanted.capabilities.clone(),..Default::default()};
                 let template=wanted.template.id.to_string();
+                // A host without the template's driver cannot make it at all, which its Driver reason below says;
+                // a policy refusal is only what the policy of a driver that is there refuses.
                 host.drivers.get(&wanted.template.driver)
-                    .and_then(|descriptor| policy_descriptor(&wanted.template.driver, descriptor))
-                    .map_or_else(|| Some("the host has not reported a complete driver descriptor".into()), |descriptor| policy.drivers.check(&descriptor,&wanted.template.spec,Some(&template),&capabilities).err())
+                    .and_then(|descriptor| policy_descriptor(&wanted.template.driver, descriptor).map_or_else(|| Some("the host has not reported a complete driver descriptor".into()), |descriptor| policy.drivers.check(&descriptor,&wanted.template.spec,Some(&template),&capabilities).err()))
                     .or_else(||serde_json::from_value(wanted.limits.clone()).ok().and_then(|limits|policy.bounded_resources(limits).err()))
             });
         if policy_refusal.is_some() {
@@ -817,7 +1039,28 @@ async fn host_places_inner(
                     )
                     .await?
                 }
-                None => check_creation(conn, principal, &request, &policies).await?,
+                None => match pool {
+                    Some(selection) => match registered {
+                        Some(environment) => {
+                            orch_authz::environments::check_registered_creation_at_pool(
+                                conn,
+                                principal,
+                                &request,
+                                &policies,
+                                selection,
+                                environment,
+                            )
+                            .await?
+                        }
+                        None => {
+                            orch_authz::environments::check_creation_at_pool(
+                                conn, principal, &request, &policies, selection,
+                            )
+                            .await?
+                        }
+                    },
+                    None => check_creation(conn, principal, &request, &policies).await?,
+                },
             };
             match decision {
                 Creating::Allowed(created) => Some(*created),
@@ -869,6 +1112,20 @@ async fn host_places_inner(
             mount_sources: names.iter().map(|(id, _)| *id).collect(),
             owner: host.owner_id,
             place: PlaceHost {
+                room: None,
+                running_threads: None,
+                calculation: Some(Box::new(capture_calculation(CalculationInput {
+                    host: &host,
+                    template: &wanted.template,
+                    runtime: wanted.runtime_class.as_deref(),
+                    needs: &wanted.needs,
+                    need_sources: wanted.need_sources.clone(),
+                    declared: declared_of(&held),
+                    applied: declared.clone(),
+                    full_percent,
+                    when_full,
+                    now: ask.now,
+                }))),
                 grouping: Default::default(),
                 host: HostRef {
                     id: host.id,

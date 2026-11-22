@@ -152,7 +152,7 @@ async fn set_build(ctx: Ctx, (): (), body: HarnessBuild) -> ApiResult<HarnessBui
 
 async fn check_build(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramBuildCheckReply> {
     Ok(ProgramBuildCheckReply {
-        queued: super::catalogue::queue_check(ctx).await?,
+        queued: super::catalogue::queue_check(ctx, Default::default()).await?,
     })
 }
 
@@ -193,8 +193,10 @@ pub(super) async fn exact_builds(
         .as_ref()
         .map_or_else(|| Programs::builtin().clone(), registry);
     let expected = expected(&programs, kind);
-    let shipped = json!(super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await);
+    let shipped =
+        json!(crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await);
     let selection = BuildSelection {
+        patterns: &[],
         kind,
         shipped: &shipped,
         trust_mirror: crate::harness_channels::trusts_mirror(conn).await?,
@@ -457,7 +459,7 @@ async fn list(ctx: Ctx, query: AdminProgramListQuery, (): ()) -> ApiResult<Page<
     let more = found.len() > size;
     found.truncate(size);
     let found: Vec<_> = found.into_iter().map(normalized).collect();
-    let shipped = super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await;
+    let shipped = crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await;
     let trust = crate::harness_channels::trusts_mirror(&mut conn).await?;
     let platforms = rows::platforms(
         &mut conn,
@@ -557,7 +559,7 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramDetail> {
         .ok_or_else(ApiError::not_found)?;
     let row = normalized(row);
     let programs = registry(&row);
-    let shipped = super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await;
+    let shipped = crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await;
     let trust = crate::harness_channels::trusts_mirror(&mut conn).await?;
     let platforms = rows::platforms(
         &mut conn,
@@ -619,6 +621,7 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramDetail> {
     let expected = expected(&programs, kind);
     let shipped_json = json!(shipped);
     let selection = BuildSelection {
+        patterns: &[],
         kind,
         shipped: &shipped_json,
         trust_mirror: trust,
@@ -716,12 +719,21 @@ async fn builds(
 ) -> ApiResult<Page<HarnessBuild>> {
     admin_of(&ctx)?;
     let kind = ctx.param("kind")?;
-    let scope =
-        json!({"list":"builds","kind":kind,"os":query.os,"arch":query.arch,"status":query.status});
+    let scope = json!({"list":"builds","kind":kind,"os":query.os,"arch":query.arch,"status":query.status,"q":query.q.as_deref().unwrap_or("").trim()});
     let mut conn = ctx.app.db.acquire().await?;
     let now = rows::snapshot(&mut conn).await?;
     let mut cursor = decode(query.cursor.as_deref(), scope, now)?;
-    let size = page_size(query.limit);
+    let size = usize::try_from(
+        query
+            .limit
+            .unwrap_or(orch_api_contract::common::DEFAULT_LIMIT),
+    )
+    .map_err(ApiError::internal)?;
+    if size == 0 {
+        return Err(ApiError::invalid("limit", "must be greater than zero"));
+    }
+    let patterns =
+        orch_db::queries::search::Query::parse(query.q.as_deref().unwrap_or("")).like_patterns();
     let row = rows::page(&mut conn, &builtin_manifests(), "", "", now, 1, Some(kind))
         .await?
         .pop()
@@ -729,12 +741,14 @@ async fn builds(
     let row = normalized(row);
     let programs = registry(&row);
     let expected = expected(&programs, kind);
-    let shipped = json!(super::catalogue::release_builds(&payload_dir(&ctx.app.config)).await);
+    let shipped =
+        json!(crate::harness_checks::shipped::manifest(&payload_dir(&ctx.app.config)).await);
     let word = |v: Json| v.as_str().map(str::to_owned);
     let os = query.os.and_then(|v| word(json!(v)));
     let arch = query.arch.and_then(|v| word(json!(v)));
     let status = query.status.and_then(|v| word(json!(v)));
     let selection = BuildSelection {
+        patterns: &patterns,
         kind,
         shipped: &shipped,
         trust_mirror: crate::harness_channels::trusts_mirror(&mut conn).await?,
