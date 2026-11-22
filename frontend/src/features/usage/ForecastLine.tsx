@@ -18,6 +18,15 @@ export function forecastTime(at: number, now: number, format: TimeContext): stri
   return near ? formatTimeOfDay(rounded,format,now) : formatDateTime(rounded,format,now);
 }
 
+/** Whether a window or a cap stands at its limit now: all of it used, its reset still ahead, and a reading recent enough to say so.
+ * Its line says "Limit reached", and a provider whose plan window it is says it takes no turn until then. */
+export function limitReachedNow(usedPercent: number, resetsAt: string | null, lastAt: string | null | undefined, now: number): boolean {
+  const reset = resetsAt === null ? null : Date.parse(resetsAt);
+  const last = lastAt === undefined || lastAt === null ? null : Date.parse(lastAt);
+  const stale = last !== null && now - last > PLAN_READING_MAX_AGE;
+  return !stale && usedPercent >= 100 && reset !== null && reset > now;
+}
+
 export interface ForecastLineProps {
   forecast?: UsageForecast | null | undefined;
   usedPercent: number;
@@ -33,7 +42,7 @@ export function ForecastLine({ forecast, usedPercent, resetsAt, lastAt, cap = fa
   const reset = resetsAt === null ? null : Date.parse(resetsAt);
   const last = lastAt === undefined || lastAt === null ? null : Date.parse(lastAt);
   const stale = last !== null && now - last > PLAN_READING_MAX_AGE;
-  const reached = !stale && usedPercent >= 100 && reset !== null && reset > now;
+  const reached = limitReachedNow(usedPercent, resetsAt, lastAt, now) && reset !== null;
   const usable = !stale && reset !== null && reset > now ? forecast ?? null : null;
   const warning = reached || usable!==null && usable.runs_out_at!==null;
   const text = stale

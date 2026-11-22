@@ -102,7 +102,25 @@ it('keeps settings and transient picker folds on this device without publishing 
   expect(transient.result.current[0]).toEqual([]); act(() => transient.result.current[1](['home-two']));
   expect(transient.result.current[0]).toEqual(['home-two']); expect(navigate).not.toHaveBeenCalled();
 });
-it('puts a list control into the address while it is on screen, and never the default of a drawer that is closed', () => {
+it('leaves a newly opened list address bare while its controls show their defaults', () => {
+  const navigate = vi.fn<PageContextValue['navigate']>().mockResolvedValue(undefined);
+  const target: PageContextValue['target'] = { route: '/org/$slug/', pathname: '/org/acme', params: { slug: 'acme' }, search: {}, hash: '' };
+  const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: 'fresh-org-page', target, navigate }}>{children}</PageContext>;
+  const page = renderHook(() => usePageListSearch(target.route, target.pathname, target.search, (value) => value));
+  const controls = renderHook(() => ({
+    period: useListChoice('usage-board', 'period', 'week'),
+    group: useListChoice('usage-board', 'other', 'model'),
+    hidden: useListChoice('history', 'author', 'all', 'address', false),
+  }), { wrapper });
+  // The internal complete-state marker does not navigate or become part of a bare URL.
+  expect(page.result.current).toEqual({ _list: true });
+  expect(controls.result.current.period[0]).toBe('week');
+  expect(controls.result.current.group[0]).toBe('model');
+  expect(navigate).not.toHaveBeenCalled();
+  act(() => controls.result.current.period[1]('month'));
+  expect(addressOf(navigate, target)).toEqual({ _list: true, list: { 'usage-board.period': 'month' } });
+});
+it('keeps a drawer default out of the address until the person chooses', () => {
   const navigate = vi.fn<PageContextValue['navigate']>().mockResolvedValue(undefined);
   const target: PageContextValue['target'] = { route: '/doc/$documentId/', pathname: '/doc/one', params: { documentId: 'one' }, search: { block: 'found' }, hash: '' };
   const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: 'document-page', target, navigate }}>{children}</PageContext>;
@@ -110,9 +128,26 @@ it('puts a list control into the address while it is on screen, and never the de
   expect(drawer.result.current[0]).toBe('all');
   expect(navigate).not.toHaveBeenCalled();
   drawer.rerender({ open: true });
+  expect(navigate).not.toHaveBeenCalled();
+  act(() => drawer.result.current[1]('chosen-author'));
   const search = navigate.mock.calls[0]?.[0].search;
   if (typeof search !== 'function') throw new Error('An open drawer publishes its list state');
-  expect(search(target.search)).toEqual({ block: 'found', _list: true, list: { 'document-history.author': 'all' } });
+  expect(search(target.search)).toEqual({ block: 'found', _list: true, list: { 'document-history.author': 'chosen-author' } });
+});
+
+it('leaves a fallback address bare and the unavailable saved choice intact until the person chooses', () => {
+  const key = 'orch.list-reader.choices.page./everything.filters.view', saved = JSON.stringify(JSON.stringify({ unavailable: true }));
+  localStorage.setItem(key, saved);
+  const navigate = vi.fn<PageContextValue['navigate']>().mockResolvedValue(undefined);
+  const target: PageContextValue['target'] = { route: '/everything/', pathname: '/everything', params: {}, search: {}, hash: '' };
+  const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: 'unavailable-saved-list', target, navigate }}>{children}</PageContext>;
+  const choice = renderHook(() => useListChoice('filters', 'view', 'overview'), { wrapper });
+  expect(choice.result.current[0]).toBe('overview');
+  expect(localStorage.getItem(key)).toBe(saved);
+  expect(navigate).not.toHaveBeenCalled();
+  act(() => choice.result.current[1]('threads'));
+  expect(localStorage.getItem(key)).toBe(JSON.stringify(JSON.stringify('threads')));
+  expect(addressOf(navigate, target)).toEqual({ _list: true, list: { 'filters.view': 'threads' } });
 });
 // The rule of the address: the choices of the controls on the screen it names, each when chosen or shown, always with the marker; no other screen's.
 const topicSettings = (section: string): PageContextValue['target'] => ({ route: '/topic/$topicId/', pathname: '/topic/one', params: { topicId: 'one' }, search: { tab: 'settings', section }, hash: '' });
@@ -134,10 +169,10 @@ it('takes an act of the finder to a screen with a list without any choice of ano
   }), { wrapper });
   expect(arrived.result.current.period[0]).toBe('week');
   const address = addressOf(navigate, target);
-  expect(address).toEqual({ tab: 'settings', section: 'audit', _list: true, list: { 'trace.group': 'day', 'trace.filters': true } });
+  expect(address).toEqual({ tab: 'settings', section: 'audit' });
   // A choice made on the screen goes in beside them, and the marker stays.
   act(() => arrived.result.current.group[1]('month'));
-  expect(addressOf(navigate, target)).toMatchObject({ _list: true, list: { 'trace.group': 'month', 'trace.filters': true } });
+  expect(addressOf(navigate, target)).toMatchObject({ _list: true, list: { 'trace.group': 'month' } });
   expect(addressOf(navigate, target).list).not.toHaveProperty('usage-board.period');
 });
 
@@ -180,11 +215,12 @@ it('writes one order whatever the order the parts of a list state were given in'
 it('has every writer of an address give the same one for the same state, in whatever sequence its choices came', () => {
   const route = '/topic/$topicId/';
   const written = (sequence: readonly (readonly [string, string, unknown])[]): string => {
-    // A control at a time comes on screen and puts its choice in beside the others, as the page's navigation hands the search back.
+    // Deliberate choices join the address, in whatever order the controls are used.
     const navigate = vi.fn<PageContextValue['navigate']>().mockResolvedValue(undefined);
     const target = topicSettings('audit');
     const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: `sequence-${sequence.map(([, key]) => key).join('')}`, target, navigate }}>{children}</PageContext>;
     const controls = renderHook(() => sequence.map(([list, key, fallback]) => useListChoice<unknown>(list, key, fallback)), { wrapper });
+    act(() => { controls.result.current.forEach(([, choose], index) => choose(sequence[index]?.[2])); });
     const search = addressOf(navigate, target);
     controls.unmount();
     return canonicalStringifySearch(search);

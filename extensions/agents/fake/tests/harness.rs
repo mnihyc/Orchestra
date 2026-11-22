@@ -456,6 +456,43 @@ async fn a_credential_the_person_brings_is_taken_from_its_text_or_its_file_and_e
     assert!(!format!("{events:?}").contains("tok-from-a-file"));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_built_in_agent_stays_signed_in_after_its_connector_restarts_and_a_sign_out_stays_out() {
+    let mut fake = Fake::start().await;
+    fake.adapter
+        .login(login("fake_ask", json!({})))
+        .await
+        .unwrap();
+    fake.login_state("awaiting_user").await;
+    fake.adapter
+        .login_input(serde_json::from_value(json!({ "answer": "yes" })).unwrap())
+        .await
+        .unwrap();
+    fake.until(|e| e.is("provider.facts")).await;
+    let signed = fake.adapter.provider_facts().await.unwrap();
+    assert_eq!(signed.identity.as_deref(), Some("account@acme"));
+    // The connector restarts: its harness stops, and a new one starts on the same home.
+    fake.adapter.stop().await.unwrap();
+    let Fake { home, .. } = fake;
+    let mut restarted = Fake::start_in(home, json!({})).await;
+    let kept = restarted.adapter.provider_facts().await.unwrap();
+    assert_eq!(
+        kept.identity, signed.identity,
+        "the sign-in is still there after the restart"
+    );
+    restarted.adapter.logout().await.unwrap();
+    restarted.adapter.stop().await.unwrap();
+    let Fake { home, .. } = restarted;
+    let mut again = Fake::start_in(home, json!({})).await;
+    assert!(
+        matches!(
+            again.adapter.provider_facts().await.unwrap_err(),
+            AdapterError::LoginRequired
+        ),
+        "a sign-out is kept as well"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // The credential a harness runs on
 

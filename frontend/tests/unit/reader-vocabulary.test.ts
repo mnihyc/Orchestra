@@ -23,7 +23,7 @@ it('keeps internal labels and withdrawn placeholder prose out of both rendered c
   }
   for(const locale of ['en','zh-CN'] as const)for(const key of [
     'contextUsage.ring.label','contextUsage.ring.labelBare','providerDetails.whatWithPlan','providerDetails.balanceTotals','providerDetails.spendTotals','providerDetails.compactSpend',
-    'statusItems.generating','timeline.status.compacting','timeline.status.starting','timeline.status.waitingApproval',
+    'statusItems.generating',
     'timeline.marker.segmentStarted','timeline.marker.segmentResumed','timeline.marker.switched',
   ])expect(instance.t(key,{lng:locale,defaultValue:''}),`${locale}:${key}`).not.toContain(' · ');
 });

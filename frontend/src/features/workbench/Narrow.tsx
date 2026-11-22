@@ -16,47 +16,13 @@ import { viewOf } from '@/features/workbench/views';
 import { X } from 'lucide-react';
 import { IconButton } from '@/ui/IconButton';
 import { useChromeBottom } from '@/features/workbench/chrome';
-
-export type Shape =
-  /** Every area beside the others. */
-  | 'wide'
-  /** The right bar over the main area. */
-  | 'medium'
-  /** No areas: one view at a time. */
-  | 'small';
-
-/** The widths, as written in the tokens of the page; the fallbacks are what they come to at the usual text size. */
-function query(token: '--screen-md' | '--screen-lg' | '--breakpoint-sm', fallback: string): MediaQueryList | null {
-  if (typeof matchMedia !== 'function') return null;
-  const width = getComputedStyle(document.documentElement).getPropertyValue(token).trim() || fallback;
-  return matchMedia(`(min-width: ${width})`);
-}
-
-let medium: MediaQueryList | null | undefined;
-let large: MediaQueryList | null | undefined;
-
-function shape(): Shape {
-  medium ??= query('--screen-md', '900px');
-  large ??= query('--screen-lg', '1200px');
-  // Where the page cannot be asked (a test without a window to measure), everything has room.
-  if (medium === null || large === null) return 'wide';
-  return large.matches ? 'wide' : medium.matches ? 'medium' : 'small';
-}
-
-function subscribe(listener: () => void): () => void {
-  shape();
-  medium?.addEventListener('change', listener);
-  large?.addEventListener('change', listener);
-  return () => {
-    medium?.removeEventListener('change', listener);
-    large?.removeEventListener('change', listener);
-  };
-}
+import { viewportQuery, viewportShape, watchViewportShape, type Shape } from './viewport';
+export type { Shape } from './viewport';
 
 export const ViewShapeContext = createContext<Shape | null>(null);
 export const ViewCompactContext = createContext<boolean | null>(null);
 let controls: MediaQueryList | null | undefined;
-function compactControls(): boolean { controls ??= query('--breakpoint-sm', '640px'); return controls !== null && !controls.matches; }
+function compactControls(): boolean { controls ??= viewportQuery('--breakpoint-sm', '640px'); return controls !== null && !controls.matches; }
 function watchControls(listener: () => void): () => void {
   compactControls(); controls?.addEventListener('change', listener);
   return () => controls?.removeEventListener('change', listener);
@@ -76,7 +42,7 @@ export function useShape(): Shape {
   return cell ?? windowShape;
 }
 /** Device-wide interaction rules, such as phone file editing, do not change when a desktop cell is resized. */
-export function useViewportShape(): Shape { return useSyncExternalStore<Shape>(subscribe, shape, () => 'wide'); }
+export function useViewportShape(): Shape { return useSyncExternalStore<Shape>(watchViewportShape, viewportShape, () => 'wide'); }
 
 export interface OverMainProps {
   open: boolean;
