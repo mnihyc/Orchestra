@@ -2,104 +2,75 @@
 group: access
 title: How approvals work
 screens: /thread/$threadId, /approvals, /resources/environments/$id, /topic/$topicId, /project/$projectId
-keywords: how do I approve, approvals, permission, request, approval.mode, approval.allowed_modes, requests.expiry_hours, ask, on request, auto, bypass, reviewer, capability.policy, rules
+keywords: how do I approve, approvals, permission, request, approval.mode, approval.allowed_modes, requests.expiry_minutes, ask, on request, auto, bypass, reviewer, capability.policy, rules
 summary: Read a request’s effects and authority before approving work or changing a boundary.
 ---
 
 # How approvals work
 
-A request says what would happen, who can decide, and what each choice permits.
-Read those consequences before answering. Two kinds of authority are involved.
+A request says what would happen, who can decide it and what each choice allows. Read those consequences before you answer. Two kinds of permission are involved: the one for work inside the environment, and the one to change its boundary.
 
 ## Work inside the environment
 
-An agent program asking to run a command or change a file needs a person who may
-manage the thread. Its mode applies to work inside the environment's existing
-boundary. **On request** asks when the agent program needs to or its file access
-rules block an action. **Ask** asks before actions the agent program does not already trust.
+When an agent program asks to run a command or change a file, a person who may manage the thread decides. The approval mode of the thread applies to work inside the existing boundary of the environment. There are four modes:
 
-A new thread uses its place's approval mode when the selected program offers it.
-Otherwise it starts with the program's default, such as **Ask** for DeepSeek Harness.
-The place's allowed modes and the environment's boundaries still apply.
+- **Ask** asks before actions that the agent program does not already trust.
+- **On request** asks when the agent program needs to, or when its rules for file access block an action.
+- **Auto** uses the reviewer of the agent program itself. An action that is allowed runs, and one that is denied does not. The review shows its model and its outcome in the thread. Auto is never the default.
+- **Bypass** lets the agent do anything in its environment without asking, and whoever chooses it answers for it. It needs another boundary that confines the agent, and a program that runs without root privileges. Questions and proposed plans still need your answer.
 
-**Auto** uses the agent program's own reviewer. A program offers it when it has a trial
-of its model, permissions and behavior for that program and provider, and a build of the
-program keeps it until a check of that exact build runs the trial and the trial fails. An
-allowed action runs; a denied one does not, and the reported review shows its
-model and outcome in the thread. Auto is never the default. Its reviewer may
-use another model and consume provider use. Separately reported review usage
-belongs to the thread. When it is not reported separately, displayed totals are
-those reported by the agent program; they do not establish the reviewer's usage.
+A new thread uses the mode of its place when the chosen program offers it. Otherwise it starts with the default of the program, such as **Ask** for DeepSeek Harness. The modes the place allows, and the boundaries of the environment, still apply.
 
-Codex offers Auto for every build, checked or not, unless a check of its installed build ran
-Auto's trial and it failed, and when your provider access permits the selected reviewer model. For a forwarded
-session, the admitted catalogue contains the thread's model, so Codex reviews with
-that model. A native sign-in keeps its declared preferred reviewer. The thread shows
-the selected model; a name supplied by Codex is marked as reported. An action that
-needs no approval runs without an extra review. Claude Code's Auto remains unavailable.
+To offer **Auto**, the selected build must pass its Auto approval check on this machine. If the check is missing or has failed, the
+approval picker shows the reason. A system administrator can choose **Check** there
+when the build has a check available.
 
-**Bypass** lets the agent do anything in its environment without asking; whoever chooses it answers for it.
-It requires another boundary that confines the agent and a program running without
-root privileges. Questions and proposed plans still need your response.
+Claude Code uses its native Auto permission mode. Its check verifies that the
+classifier lets an allowed action run, stops a denied action, and leaves the action
+undone if the reviewer is unavailable. Your provider access and the place's
+approval policy still apply after the check passes.
 
-For example, an On request thread may run its ordinary tests and then ask to
-write a protected file. Allow once answers that request. A question asking
-“Which branch should I use?” still needs your answer in every mode.
+For a forwarded session, Codex reviews with the thread's model. A native sign-in
+keeps its declared preferred reviewer. The thread shows the selected model and
+marks a name supplied by Codex as reported. The reviewer can use provider quota.
+Separately reported review usage belongs to the thread. Otherwise the totals are
+those reported by the agent program. An action that needs no approval runs without
+an extra review. Provider access must allow the reviewer’s model.
+
+For example, a thread in **On request** may run its usual tests, then ask to write a protected file. **Allow once** answers that request. A question such as "Which branch should I use?" still needs your answer in every mode.
 
 ## Changes to the boundary
 
-A KVM, port or access request needs the authority of the thing it would open.
-Managing the thread does not let you grant KVM on someone else's host, open a
-port or give another person's provider. The card shows whether you can decide it now.
-Bypass, Auto, a thread rule and Stop do not decide these requests.
+A request for KVM, a port or access needs the permission over the thing it would open. Managing the thread does not let you grant KVM on the host of someone else, open a port or give the provider of another person. The card shows whether you can decide it now. **Bypass**, **Auto**, a rule of a thread and **Stop** do not decide these requests.
 
-A capability's policy can allow, ask or deny. Under allow, the outcome records
-the policy that permitted it. For a port, **Allow once** permits this opening;
-**Grant to this environment** gives its matching port capability for later
-openings too; **Deny** refuses it. A link's review says who receives its secret.
-See [Let agents open ports without asking](let-agents-open-ports.md).
+The policy of a capability can allow, ask or deny. Under allow, the outcome records the policy that permitted it. For a port, **Allow once** permits this opening, **Grant to this environment** gives its matching port capability for later openings too, and **Deny** refuses it. The review of a link says who receives its secret. See [Let agents open ports without asking](let-agents-open-ports.md).
 
 ## Who can decide
 
 | Request | Who may decide |
 |---|---|
-| Agent command, edit or permission | Thread managers |
-| Proposed plan | People who may drive the thread, or managers where the place keeps plans to them |
-| Held message, Run it | People who may drive the thread and use its current model on their own access |
-| Capability | Environment port managers, host managers, org access managers or system admins, as its scope says |
-| Port | The environment's port managers |
-| Access | People who can give the requested permission on that thing |
-| Group membership | People who may add that person to the group |
+| Command, edit or permission of an agent | Managers of the thread |
+| A proposed plan | People who may send to the thread, or managers where the place keeps plans to them |
+| A held message, **Run it** | People who may send to the thread and use its current model with their own access |
+| Capability | Port managers of the environment, managers of the host, managers of access of the organization or system administrators, as its scope says |
+| Port | The port managers of the environment |
+| Access | People who can give the permission asked for on that thing |
+| Membership of a group | People who may add that person to the group |
 
-For a request raised in a turn, its eligible starter is told first. Otherwise
-only eligible people directly named in the thing's Owners row receive an Inbox
-item and appear in **Waiting for you**. When nobody there may decide, Orch walks
-up the places' Owners rows, then the org's admins, then all people who can decide
-now. Groups, roles and inherited authority do not fan notices out to everybody.
-Other eligible people find the card and **Others you may decide**, without a
-notice, unread mark or pending count.
+For a request raised in a turn, the person who started it is told first, if they are eligible. Otherwise only the eligible people named directly in the Owners row of the thing get an Inbox item and see it under **Waiting for you**. When nobody there may decide, Orch goes up the Owners rows of the places above, then to the administrators of the organization, then to everyone who can decide now. Groups, roles and permissions inherited do not send notices to everybody. Other people who are eligible find the card, and **Others you may decide**, without a notice, an unread mark or a count of pending requests.
 
 ## Follow and decide a card
 
-Open the request in the thread or [Approvals](/approvals). Confirm its current
-target, audience and scope. A colleague's earlier decision wins; your late
-click cannot overwrite it. A lost connection disables a decision until the
-page catches up. Denial can include a note, and the outcome stays readable.
-One decision settles every recipient copy and marks its Inbox item read.
-It leaves all pending lists and counts, with who decided, the outcome and time
-kept in history. This also applies to **Proceed**, **Keep planning** and **Run it**.
-A second decision returns the first result and makes no second change.
-If the list cannot load a decision made elsewhere, it keeps a retry for that
-outcome without showing the old request details.
+Open the request in the thread or in [Approvals](/approvals). Confirm its current target, its audience and its scope.
 
-A proposed plan offers **Proceed** or **Keep planning**. Proceed lets the agent
-continue under the composer's approval mode. Keep planning sends your words
-back so the agent can revise its plan. The Plan switch changes after the answer
-is confirmed. If an answer is refused, its reason appears beside the choices;
-reload the request before trying an option that is no longer offered.
+- A decision of a colleague made earlier wins. Your later click cannot overwrite it.
+- A lost connection turns decisions off until the page catches up.
+- A denial can include a note, and the outcome stays readable.
+- One decision settles every copy of the request for its recipients and marks its Inbox item read. It leaves all lists and counts of pending requests, and who decided, the outcome and the time stay in the history. This also holds for **Proceed**, **Keep planning** and **Run it**.
+- A second decision returns the first result and changes nothing a second time. If the list cannot load a decision made elsewhere, it keeps a retry for that outcome without showing the details of the old request.
 
 Agent action requests last while the program waits. Agent boundary requests use
-`requests.expiry_hours`, initially 24 hours and bounded to 1–168; the shortest
+`requests.expiry_minutes`, initially 1,440 minutes (one day) with no fixed upper cap; the shortest
 setting above the place wins. A link may lapse sooner. A person's access
 request initially lasts 14 days. Repeating the same denied agent boundary
 request within an hour returns its first denial and note rather than another
@@ -107,11 +78,6 @@ card; changed content makes a new request.
 
 ## Allow one routine action again
 
-When an agent program offers **Allow for this thread**, inspect its exact command or
-host matcher. It answers matching requests in this thread's current binding;
-it is not general access to another environment or a changed shared login.
-Parameters lists these rules and **Take back** removes one. Questions and
-forms still wait. A fork or side thread does not inherit the rule.
+When an agent program offers **Allow for this thread**, read its exact command or the host it matches. It answers matching requests in the current binding of this thread. It is not general access to another environment or to a shared sign-in that changed. **Parameters** lists these rules, and **Take back** removes one. Questions and forms still wait. A fork or a side thread does not inherit the rule.
 
-To understand an admin's separate **override**, see
-[Who can see and do what](who-can-see-and-do-what.md).
+To understand the separate **override** of an administrator, see [Who can see and do what](who-can-see-and-do-what.md).

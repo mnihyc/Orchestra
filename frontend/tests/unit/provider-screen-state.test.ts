@@ -78,9 +78,27 @@ for (const language of ['en','zh-CN'] as const) describe('QS-029 setup in ' + la
     provider.status_detail='The keeping machine needs its endpoint configuration reviewed.';
     expect(state(provider).detail).toBe(provider.status_detail);
   });
+  it('says that a managed provider\'s container could not be made, and why, before it asks for a sign-in', () => {
+    const provider=planProvider({status:'needs_setup',status_detail:'its runtime could not be made: The recorded host connector is no longer running.'});
+    provider.facts.credential=null;
+    expect(state(provider)).toMatchObject({text:t('providers.phrase.needsRuntime'),detail:provider.status_detail,next:'runtime'});
+    expect(PROVIDER_NEXT[state(provider).next ?? 'settings'].tab).toBe('runtime');
+    // A new provider that nothing has failed for still begins at its sign-in, which starts its container.
+    provider.status_detail=null;
+    expect(state(provider)).toMatchObject({text:t('providers.phrase.needsSignIn'),next:'signIn'});
+  });
   it('points to the runtime when its key and models are ready but no managed runtime exists', () => {
     const provider=planProvider({kind:'api',status:'needs_setup',key_set:true,upstreams:[keyEndpoint],
       models:[{ ...MODEL_ESTIMATE,id:'model',model_name:'example',display_name:'Example',parameters:{},groups:[],enabled:true,source:'manual'}]});
     expect(state(provider)).toMatchObject({text:t('providers.phrase.needsRuntime'),detail:t('providers.overview.needsRuntimeLead'),next:'runtime'});
   });
+});
+
+for (const language of ['en', 'zh-CN'] as const) it(`distinguishes observed vendor quota from refused calls in ${language}`, () => {
+  const t = i18n.getFixedT(language);
+  const current = (status: 'exhausted' | 'disabled' | 'error') => providerState(planProvider({ status, status_detail: null }), t, { locale: language, timeZone: 'UTC' }, PLAN_NOW);
+  expect(current('exhausted').text).toContain(language === 'en' ? 'Vendor limit reported' : '厂商报告已达限额');
+  expect(current('exhausted').text).toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('disabled').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
+  expect(current('error').text).not.toContain(language === 'en' ? 'calls allowed' : '仍可请求');
 });

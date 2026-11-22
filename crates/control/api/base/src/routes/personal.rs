@@ -2,7 +2,7 @@
 //!
 //! Everything here acts on the caller and on nobody else. A favorite or a
 //! recent is a kind/id the caller may view; one they lost the right to is no
-//! longer listed. The interface state is kept under nine keys and no
+//! longer listed. The interface state is kept under ten keys and no
 //! others, whole, and no value is larger than the limit; the last view of a
 //! project is also kept one project at a time, beside the others. Drafts and the
 //! chat states belong to the threads and the chats, and the read position

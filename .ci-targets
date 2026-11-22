@@ -1,0 +1,9 @@
+fmt
+clippy
+test -p orch-engine --test provider_runtime
+test -p orch-engine --test environments
+test -p orch-engine --test lifecycle
+test -p orch-engine --test provisioned_source
+web typecheck
+web lint
+web test -- tests/unit/provider-screen-state.test.ts tests/unit/start-choices.test.ts tests/unit/provider-model-ack.test.ts
