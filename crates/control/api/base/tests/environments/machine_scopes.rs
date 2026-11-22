@@ -3,7 +3,7 @@
 use super::*;
 use http::StatusCode;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::{Json, new_id};
@@ -54,7 +54,7 @@ async fn key(world: &World, user: Id, rules: Vec<Json>) -> (Id, String) {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -394,7 +394,7 @@ async fn registration_rechecks_the_original_deadline_after_actual_machine_and_ho
             &world,
             pid,
             if on_machine {
-                "%FROM machines%FOR SHARE%"
+                "%FROM machines%FOR KEY SHARE%"
             } else {
                 "%FROM nodes%FOR SHARE%"
             },

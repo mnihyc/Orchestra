@@ -38,6 +38,13 @@ impl MasterKey {
         Self(bytes)
     }
 
+    /// A distinct installation key for native tickets, stable across an API restart.
+    /// The fixed application-specific context uses BLAKE3's key derivation, not the public fingerprint.
+    #[must_use]
+    pub fn link_ticket_seed(&self) -> [u8; 32] {
+        orch_types::derive_key("Orch 2026-11-15 native link ticket signing v1", &self.0)
+    }
+
     /// Stable opaque equality evidence, never a credential or a sealed value.
     /// The caller must serialize an explicit purpose/version and object identity with its data.
     /// Keyed hashing prevents guessing private low-entropy inputs from a published fingerprint.
@@ -90,6 +97,16 @@ impl MasterKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_installations_ticket_seed_survives_restart_and_is_separate_from_its_sealing_key() {
+        let first = MasterKey::new([7; 32]).link_ticket_seed();
+        let restarted = MasterKey::new([7; 32]).link_ticket_seed();
+        let another = MasterKey::new([8; 32]).link_ticket_seed();
+        assert_eq!(first, restarted);
+        assert_ne!(first, another);
+        assert_ne!(first, [7; 32]);
+    }
 
     #[test]
     fn a_sealed_value_opens_only_under_its_key_and_for_its_row() {

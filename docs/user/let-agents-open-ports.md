@@ -2,15 +2,13 @@
 group: resources
 title: Let agents open ports without asking
 screens: /thread/$threadId, /resources/environments/$id, /resources/templates/$id, /topic/$topicId, /project/$projectId, /approvals
-keywords: how do I open a port, without asking, ports, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_hours, network.allowed_hosts, template defaults
+keywords: how do I open a port, without asking, ports, port_place, port_host, port_link, capability.policy, ports.enabled, ports.max_open, ports.link_max_secs, requests.expiry_minutes, network.allowed_hosts, template defaults
 summary: Choose who can reach an environment’s services and which openings agents may request.
 ---
 
 # Let agents open ports without asking
 
-An environment's Ports panel shows services and who can reach them through
-Orch. Watching a thread supplies no port authority by itself. **Ports View**
-lets its holder use a service; **Ports Manage** decides wider openings.
+The **Ports** panel of an environment shows services and who can reach them through Orch. Watching a thread gives no permission over ports by itself. **Ports View** lets its holder use a service, and **Ports Manage** decides wider openings. This page shows how to choose who can reach a service, and which openings agents may make without asking.
 
 ## Choose the audience
 
@@ -22,16 +20,13 @@ Three environment capabilities permit an agent to open a kind of port:
 | `port_host` | Anyone who reaches the host's declared listening address | Deny |
 | `port_link` | Anyone holding the unexpired link | Deny |
 
-These are gateway capabilities: they need no driver patch, restart or
-recreate. The template decides which may ever be given; the shipped templates
-allow all three. The place's capability policy still bounds them. A person
-with Ports Manage also cannot open a kind that policy denies.
+These are gateway capabilities: they need no change of the driver, no restart and no recreation. The template decides which may ever be given, and the templates that come with Orch allow all three. The capability policy of the place still bounds them. A person with **Ports Manage** also cannot open a kind that the policy denies.
 
 For example, an agent starts an application on TCP port **3000** and requests
 that the project's current viewers can open it. Under Ask, its card offers
 **Allow once**, **Grant to this environment**, or **Deny**. Read the named
 project and audience before allowing. This gives none of the environment's
-Files, Terminal, Browser or Display doors.
+Files, Terminal, Browser or Display access.
 
 ## Allow later openings
 
@@ -52,10 +47,7 @@ The example value for `capability.policy` is:
 }
 ```
 
-An agent there can then open port 3000 for the project's viewers without
-asking, while capacity, the door switch and current audience checks still
-apply. Host openings also need the host's actual ranges and local ceiling.
-There is no separate “agents' ports” policy or Always-rule list.
+An agent there can then open port 3000 for the viewers of the project without asking. The capacity, the switch of the ports and the checks of the audience now still apply. Openings on the host also need the real ranges of the host and its local ceiling. There is no separate policy for ports of agents, and no list of rules to always allow.
 
 ## Treat links as secrets
 
@@ -71,19 +63,14 @@ Request expiry and repeated denial use [How approvals work](how-approvals-work.m
 
 ## Understand the outbound path
 
-Port requests govern Orch's own doors. With **open** outbound network, a
-program can connect to an outside tunnel service and publish its port 3000
-without making an Orch link. Restricted egress with only the needed listed
-destinations closes that unlisted outward path. Ports and Network explain
-this while egress is open and link the egress setting. A port decision does
-not narrow what the network policy already permits.
+Port requests govern the ways in that Orch itself provides. With an **open** outgoing network, a program can connect to a tunnel service outside and publish its port 3000 without making a link of Orch. Restricted outgoing connections with only the destinations you need listed close that outward path that is not listed. **Ports** and **Network** explain this while outgoing connections are open, and link the setting for them. A decision about a port does not narrow what the network policy already allows.
 
 ## Read ports from a program inside the environment
 
 Processes Orch starts for an attached environment receive `ORCH_PORTS_URL`, its read-only loopback
 endpoint. On a connected machine they also receive a separate `ORCH_PORTS_TOKEN`, used as a Bearer
 credential. It belongs to this environment and is replaced after detach; do not share it or substitute
-a person's token. A runtime Orch made needs no bearer on this local interface.
+a person's token. A container Orch made needs no bearer on this local interface.
 
 ```sh
 orch-connector ports list --look --limit 20

@@ -14,10 +14,10 @@ export const displayKeys = {
 };
 
 /** The displays of an environment, what was found there to serve one, and why they are off where they are. */
-export const displaysQuery = (environmentId: string) =>
+export const displaysQuery = (environmentId: string, options?: { closed?: boolean; query?: string; cursor?: string }) =>
   queryOptions({
-    queryKey: displayKeys.list(environmentId),
-    queryFn: ({ signal }): Promise<EnvironmentDisplays> => ok(api.GET('/environments/{id}/displays', { params: { path: { id: environmentId } }, signal })),
+    queryKey: options === undefined ? displayKeys.list(environmentId) : [...displayKeys.list(environmentId), options],
+    queryFn: ({ signal }): Promise<EnvironmentDisplays> => ok(api.GET('/environments/{id}/displays', { params: { path: { id: environmentId }, ...(options === undefined ? {} : { query: options }) }, signal })),
   });
 
 /** The same list, after the environment looked again for what it has to serve a display. */
