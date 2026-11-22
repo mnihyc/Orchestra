@@ -31,6 +31,7 @@ pub mod forecast;
 pub mod limits;
 pub mod members;
 pub mod models;
+pub mod pools;
 pub mod search;
 pub mod services;
 pub mod source;

@@ -1,9 +1,10 @@
 /** Both unit pools show applicable values, provenance, apply timing and guarded editors, including commands after start. */
+import { PathLink } from '@/shell/TrailLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError } from '@/api/client';
-import { environmentKey, environmentSettingsKey } from '@/api/environments';
+import { environmentKey, environmentMcpFactsQuery, environmentSettingsKey } from '@/api/environments';
 import { jobQuery } from '@/api/forks';
 import { providerKey, providerSettingsKey, templateQuery } from '@/api/resources';
 import { putSetting, targetSettingsKey, targetSettingsQuery, type SettingsTarget } from '@/api/settings';
@@ -11,6 +12,7 @@ import { SettingsTable } from '@/features/resources/SettingsTable';
 import { DetailSections, ResourceDetails } from '@/features/resources/DetailSections';
 import { CommandList, CommandListEditor, TemplatePrograms, commandMap, record, templateCommands, validCommands } from '@/features/resources/UnitCommands';
 import { SettingsEditor } from '@/features/settings/Editor';
+import { EffectLine } from '@/features/settings/EffectLine';
 import type { RowPlace } from '@/features/settings/SettingRow';
 import { runtimeEffect } from '@/features/settings/runtimeEffects';
 import type { ResolvedSetting, RuntimeChanges } from '@/generated/api-types';
@@ -28,6 +30,7 @@ export interface UnitConfigurationProps {
   commands?: { supported: boolean; reason: string | null } | null;
   afterUp?: boolean | null;
   resourceSupport?:unknown;
+  boundThreads?: number;
   compact?: boolean;
   wantedKey?: string;
 }
@@ -39,7 +42,13 @@ export function unitKeys(pool: 'environment' | 'provider', managed: boolean, row
     (pool === 'environment' && /^(exec|mcp|browser|vnc|terminal|ports|capability|workspace)\./.test(row.key))).map((row) => row.key);
 }
 
-function AfterStart({ target, setting, spec, editable, templateReadable, templateApplies = true, blockedReason = null, compact = false }: { target: SettingsTarget; setting: ResolvedSetting; spec: unknown; editable: boolean; templateReadable: boolean; templateApplies?: boolean; blockedReason?: string | null; compact?: boolean }) {
+function McpApplyTime({ id }: { id: string }) {
+  const { t } = useTranslation();
+  const mcp = useQuery(environmentMcpFactsQuery(id));
+  return <>{mcp.isSuccess ? t(`mcpWords.applies.${mcp.data.applies}`) : t('runtimeChanges.driverUnknown')}</>;
+}
+
+function AfterStart({ target, setting, spec, editable, templateReadable, templateApplies = true, reach, blockedReason = null, compact = false }: { target: SettingsTarget; setting: ResolvedSetting; spec: unknown; editable: boolean; templateReadable: boolean; templateApplies?: boolean; reach?: string; blockedReason?: string | null; compact?: boolean }) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const [commands, setCommands] = useState(() => commandMap(setting.own?.value));
@@ -65,9 +74,12 @@ function AfterStart({ target, setting, spec, editable, templateReadable, templat
   }, onError: (error) => {
     if (error instanceof ApiError && error.is('conflict.stale_revision')) void client.invalidateQueries({ queryKey: targetSettingsKey(target) });
   } });
+  const commandTiming = compact && reach !== undefined
+    ? t(templateApplies ? 'unitConfiguration.effects.start' : 'unitConfiguration.effects.attach')
+    : t(templateApplies ? 'unitConfiguration.commandTiming' : 'unitConfiguration.commandAttachTiming');
   return <section id="unit-after-up" className="flex flex-col gap-4" aria-label={t('unitConfiguration.commands')}>
     {!compact && <h2 className="text-base font-semibold">{t('unitConfiguration.commands')}</h2>}
-    <p className="text-sm text-text-muted">{t(templateApplies ? 'unitConfiguration.commandTiming' : 'unitConfiguration.commandAttachTiming')}</p>
+    <p className="text-sm text-text-muted"><span>{commandTiming}</span>{reach !== undefined && <> · {reach}</>}</p>
     {target.kind === 'provider' && <InlineAlert tone="warning">{t('unitConfiguration.credentialWarning')}</InlineAlert>}
     {templateApplies && (templateReadable ? <CommandList label={t('unitConfiguration.templateCommands')} commands={templateCommands(spec)} /> : <p className="text-sm text-text-muted">{t('unitConfiguration.templateUnread')}</p>)}
     <CommandList label={t('unitConfiguration.inheritedCommands')} commands={inherited.filter((command) => !removed.includes(command.name))} />
@@ -101,7 +113,7 @@ export function UnitCommandFailure({ jobId, detail, href = '#unit-after-up', onO
   const diagnostic=typeof error.message==='string'?error.message:typeof error.detail==='string'?error.detail:commandAt<0?'':status.slice(commandAt);
   const lines=diagnostic.split('\n');
   return <><InlineAlert tone="warning" action={
-    <a href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</a>
+    <PathLink href={href} className="underline" onClick={(event) => { if (onOpen !== undefined && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); onOpen(); } }}>{t('unitConfiguration.changeCommands')}</PathLink>
   }>{failureText({ code: COMMAND_FAILURE_CODE }).message}</InlineAlert>
     {diagnostic!=='' && <ResourceDetails label={t('unitConfiguration.commandOutput')}><Preview more={lines.length>COMMAND_FAILURE_PREVIEW_LINES}>{(expanded)=><pre className="text-sm wrap-anywhere whitespace-pre-wrap">{(expanded?lines:lines.slice(0,COMMAND_FAILURE_PREVIEW_LINES)).join('\n')}</pre>}</Preview></ResourceDetails>}
   </>;
@@ -132,12 +144,12 @@ export function ResourceSupport({support}:{support:unknown}) {
   </section>;
 }
 
-export function UnitConfiguration({ pool, id, place, owns = false, templateId, jobId, failureDetail, runtime, lifecycle, commands, afterUp,resourceSupport, compact = false, wantedKey }: UnitConfigurationProps) {
+export function UnitConfiguration({ pool, id, place, boundThreads, placement, owns = false, templateId, jobId, failureDetail, runtime, lifecycle, commands, afterUp,resourceSupport, compact = false, wantedKey }: UnitConfigurationProps) {
   const { t } = useTranslation();
   const client = useQueryClient();
   const target: SettingsTarget = pool === 'environment' ? { kind: 'environment', id } : { kind: 'provider', id };
   const list = useQuery(targetSettingsQuery(target));
-  const managed = lifecycle === 'unit' || ((lifecycle === null || lifecycle === undefined) && Boolean(templateId));
+  const managed = lifecycle === 'unit' || ((lifecycle === null || lifecycle === undefined) && (Boolean(templateId) || pool === 'environment' && placement === 'managed'));
   const resolvedTemplate = list.data?.find((row) => row.key === (pool === 'provider' ? 'runtime.template_id' : 'env.template_id'))?.value;
   const selectedTemplate = templateId ?? (typeof resolvedTemplate === 'string' ? resolvedTemplate : undefined);
   const [section, setSection] = useState(wantedKey === (pool === 'provider' ? 'runtime.after_up' : 'env.after_up') ? 'commands' : 'values');
@@ -150,7 +162,18 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
   // Dedicated command/home editors are their one entrance, including their stricter authority.
   const rows = (list.data ?? []).filter((row) => keys.includes(row.key)&&row.key!==storageKey && row.key!==commandKey && (pool !== 'provider' || row.key !== 'runtime.home'));
   const editorKeys = rows.map((row) => row.key);
+  const reach = boundThreads === undefined ? undefined : t('unitConfiguration.effects.threadCount', { count: boundThreads });
   const when = (key: string) => {
+    if (pool === 'environment') {
+      if (key === 'mcp.enabled') return <McpApplyTime id={id} />;
+      if (key === 'env.data_sources') return t(managed ? 'unitConfiguration.effects.update' : 'unitConfiguration.effects.attach');
+      if (key.startsWith('workspace.record_')) return t('unitConfiguration.effects.recording');
+      if (key.startsWith('workspace.')) return t('unitConfiguration.effects.workspace');
+      if (key === 'browser.idle_minutes' || key.startsWith('env.idle_') || key === 'env.temporary_idle_hours' || key === 'env.unused_remove_days' || key === 'env.removed_keep_days' || key === 'env.lifetime') return t('unitConfiguration.effects.cleanup');
+      if (key.startsWith('browser.')) return t('unitConfiguration.effects.browser');
+      if (key === 'vnc.geometry') return t('unitConfiguration.effects.display');
+      if (key === 'agents.harness_versions') return t('unitConfiguration.effects.update');
+    }
     if (!managed && key === 'env.mounts') return t('unitConfiguration.effects.attach');
     if (!managed && (key==='env.resources'||key==='runtime.resources')) return t('unitConfiguration.effects.attach');
     if (key === 'env.variables' || key === 'env.secret_names') return t('unitConfiguration.effects.attach');
@@ -163,19 +186,20 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
     if (/^(exec|mcp)\./.test(key)) return t('unitConfiguration.effects.turn');
     return t('unitConfiguration.effects.policy');
   };
+  const timing = (key: string) => <EffectLine when={when(key)} reach={reach} />;
   if (compact) {
     if (list.isPending) return <SkeletonRows read={list} rows={4} />;
     if (list.isError) return <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />;
     return <div className="flex min-w-0 flex-col gap-4">
       <UnitCommandFailure jobId={jobId} detail={failureDetail} href={`?tab=settings&setting=${commandKey}#unit-after-up`} onOpen={() => setSection('commands')} />
       <DetailSections label={t('resourceDetails.layout.configuration')} value={section} onValueChange={setSection} sections={[
-        { value: 'values', label: t('resourceDetails.layout.values'), panel: <SettingsEditor compact target={target} scope={pool} only={[...editorKeys, ...(storage === undefined ? [] : [storageKey])]} place={place} onChanged={(next) => {
+        { value: 'values', label: t('resourceDetails.layout.values'), panel: <SettingsEditor compact effectFor={pool === 'environment' ? timing : undefined} target={target} scope={pool} only={[...editorKeys, ...(storage === undefined ? [] : [storageKey])]} place={place} onChanged={(next) => {
           client.setQueryData<ResolvedSetting[]>(targetSettingsKey(target), (before) => before?.map((row) => row.key === next.key ? next : row));
         }} /> },
         ...(command === undefined ? [] : [{ value: 'commands', label: t('unitConfiguration.commands'), panel: <>
           {afterUp === false && <InlineAlert tone="info">{t('unitConfiguration.commandsPolicyOff')}</InlineAlert>}
           {managed && template.isError ? <ErrorState compact error={template.error} onRetry={() => void template.refetch()} /> : managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows read={template} rows={2} /> : <AfterStart compact key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
-            templateReadable={selectedTemplate === undefined || template.data !== undefined} templateApplies={managed}
+            templateReadable={selectedTemplate === undefined || template.data !== undefined} templateApplies={managed} reach={reach}
             blockedReason={commands?.supported === false ? commands.reason ?? t('unitConfiguration.commandsUnsupported') : null}
             editable={command.writable && (pool === 'environment' || owns) && commands?.supported !== false} />}
         </> }]),
@@ -187,16 +211,16 @@ export function UnitConfiguration({ pool, id, place, owns = false, templateId, j
     <UnitCommandFailure jobId={jobId} detail={failureDetail} />
     <ResourceSupport support={resourceSupport} />
     {storage!==undefined&&<section id="unit-storage" aria-label={t('machineStorage.title')} className="flex flex-col gap-3">
-      <SettingsTable settings={[storage]} label={t('machineStorage.title')} target={target} place={place} runtime={runtime} effectFor={when} />
+      <SettingsTable settings={[storage]} label={t('machineStorage.title')} target={target} place={place} runtime={runtime} effectFor={pool === 'environment' ? timing : when} />
     </section>}
     {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : <>
-      <SettingsTable settings={rows} label={t('unitConfiguration.values')} target={target} place={place} runtime={runtime} effectFor={when} />
+      <SettingsTable settings={rows} label={t('unitConfiguration.values')} target={target} place={place} runtime={runtime} effectFor={pool === 'environment' ? timing : when} />
       {managed && template.isError && <ErrorState compact error={template.error} onRetry={() => void template.refetch()} />}
       {pool === 'provider' && commands?.supported === false && <InlineAlert tone="info">{commands.reason ?? t('unitConfiguration.commandsUnsupported')}</InlineAlert>}
       {afterUp === false && <InlineAlert tone="info">{t('unitConfiguration.commandsPolicyOff')}</InlineAlert>}
       {managed && selectedTemplate !== undefined && template.isPending ? <SkeletonRows read={template} rows={2} /> : command !== undefined && <AfterStart key={`${pool}:${id}`} target={target} setting={command} spec={template.data?.spec}
         templateReadable={selectedTemplate === undefined || template.data !== undefined}
-        templateApplies={managed} blockedReason={commands?.supported === false ? commands.reason ?? t('unitConfiguration.commandsUnsupported') : null}
+        templateApplies={managed} reach={reach} blockedReason={commands?.supported === false ? commands.reason ?? t('unitConfiguration.commandsUnsupported') : null}
         editable={command.writable && (pool === 'environment' || owns) && commands?.supported !== false} />}
       {managed && pool === 'provider' && template.data !== undefined && <TemplatePrograms spec={template.data.spec} />}
     </>}

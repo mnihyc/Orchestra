@@ -26,7 +26,7 @@ export function settingValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function SettingsTable({ settings, label, target, place, runtime, effectFor, readOnlyNotice = true }: { settings: readonly ResolvedSetting[]; label: string; target?: SettingsTarget; place?: RowPlace; runtime?: RuntimeChanges | null; effectFor?: (key: string) => ReactNode; readOnlyNotice?: boolean }) {
+export function SettingsTable({ settings, label, target, place, runtime, effectFor, readOnlyNotice = true }: { settings: readonly ResolvedSetting[]; label: string; target?: SettingsTarget; place?: RowPlace; runtime?: RuntimeChanges | null; effectFor?: (key: string, setting?: ResolvedSetting) => ReactNode; readOnlyNotice?: boolean }) {
   const { t, i18n } = useTranslation();
   const client = useQueryClient();
   const registry = useQuery({ ...registryQuery, enabled: target !== undefined });
@@ -38,9 +38,10 @@ export function SettingsTable({ settings, label, target, place, runtime, effectF
   return <>{readOnlyNotice && readOnly && <ReadOnlySettingsNotice owner={place?.owner} partial={editable} />}<ul aria-label={label} className="min-w-0 divide-y divide-border rounded-lg border border-border bg-surface">{settings.map((setting) => {
     const def = definitions.get(setting.key);
     const effect = runtimeEffect(setting.key, runtime);
-    const note = effectFor === undefined ? effect === null ? null : <span className="text-xs text-text-muted">{t(`runtimeChanges.${effect}`)}</span> : effectFor(setting.key);
+    const note = effectFor === undefined ? effect === null ? null : <span className="text-xs text-text-muted">{t(`runtimeChanges.${effect}`)}</span> : effectFor(setting.key, setting);
     if (def === undefined || target === undefined) {
       return <SettingRowLayout key={setting.key} name={def?.title ?? t('settings.compact.definitionMissing')} description={def?.description} settingKey={setting.key}
+        status={note}
         value={<SettingSummary def={def ?? { key: setting.key }} value={setting.value} />} readOnly
         reason={t(def === undefined ? 'settings.compact.definitionMissingReason' : 'settings.compact.readOnly')}
         actions={def === undefined && target !== undefined ? <Button size="sm" pending={registry.isFetching} onClick={() => void registry.refetch()}>{t('common.tryAgain')}</Button> : undefined} />;

@@ -27,6 +27,6 @@ it('does not return to editable choices after the job has started', () => {
 it('says the current step in Chinese on a narrow screen', async () => {
   await setLocale('zh-CN');
   show(<ViewCompactContext.Provider value><ImportSteps at="review" onBack={vi.fn()} /></ViewCompactContext.Provider>);
-  expect(screen.getByText('3 / 5 · 预览')).toHaveAttribute('aria-current', 'step');
+  expect(screen.getByText('3 / 5 · 核对')).toHaveAttribute('aria-current', 'step');
   expect(screen.queryByRole('button', { name: /来源/ })).not.toBeInTheDocument();
 });

@@ -29,6 +29,10 @@ use crate::units::{LABEL_PREPARE, driver_labels, is_driver_label_set};
 /// How many bytes a GB is in this system: 2^30, as a MB of memory is 2^20, and as the daemon's own `size=10G`.
 pub const BYTES_PER_GB: u64 = 1 << 30;
 
+/// How many bytes a GB of a storage's size is: 10^9, as the node's own measure, the connector and the host driver
+/// report one, so that one disk reads the same through every kind of host.
+const STORAGE_BYTES_PER_GB: u64 = 1_000_000_000;
+
 /// Where the volumes of a helper container are mounted, one directory for each.
 const HELPER_ROOT: &str = "/v";
 
@@ -403,7 +407,8 @@ pub fn storages(config: &DockerConfig, facts: &DaemonFacts) -> Vec<StorageInfo> 
             Ok(stat) => {
                 let unit = stat.f_frsize.max(1);
                 let gb = |blocks: u64| {
-                    i64::try_from(blocks.saturating_mul(unit) / BYTES_PER_GB).unwrap_or(i64::MAX)
+                    i64::try_from(blocks.saturating_mul(unit) / STORAGE_BYTES_PER_GB)
+                        .unwrap_or(i64::MAX)
                 };
                 (gb(stat.f_blocks), gb(stat.f_bavail))
             }
@@ -701,6 +706,30 @@ mod tests {
             place(&config, Some("slow"), "x"),
             Err(DriverError::InvalidSpec(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_storage_is_measured_in_the_decimal_gigabytes_of_every_storage_report() {
+        // The node's own measure, the connector and the host driver say a storage's size in 10^9 bytes; a Docker
+        // host says the same disk the same way.
+        let dir = tempfile::tempdir().unwrap();
+        let config = DockerConfig {
+            storages: vec![StorageConfig {
+                name: "fast".into(),
+                path: dir.path().into(),
+                default: true,
+            }],
+            ..DockerConfig::default()
+        };
+        let stat = rustix::fs::statvfs(dir.path()).unwrap();
+        let decimal = |blocks: u64| {
+            i64::try_from(blocks.saturating_mul(stat.f_frsize.max(1)) / 1_000_000_000).unwrap()
+        };
+        let measured = storages(&config, &DaemonFacts::default());
+        assert_eq!(measured.len(), 1);
+        assert_eq!(measured[0].capacity_gb, decimal(stat.f_blocks));
+        assert!((measured[0].free_gb - decimal(stat.f_bavail)).abs() <= 1);
     }
 
     #[test]

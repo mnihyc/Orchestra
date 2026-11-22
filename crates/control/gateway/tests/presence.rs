@@ -14,9 +14,7 @@ use orch_link_contract::enrollment::Trust;
 use orch_link_contract::events::Event;
 use orch_link_contract::session::{MachineFacts, Role};
 use orch_link_contract::streams::Stream;
-use orch_link_contract::tunnels::{Service, TicketSource};
 use orch_link_contract::version::RejectCode;
-use orch_pki::tickets::TicketRequest;
 use orch_types::{Id, Time};
 use serde_json::json;
 use std::time::Duration;
@@ -177,7 +175,8 @@ async fn a_gateway_that_goes_away_takes_its_sessions_with_it_and_the_machines_ar
 }
 
 #[tokio::test]
-async fn while_the_system_is_away_new_sessions_are_told_to_wait_and_tunnels_and_sessions_go_on() {
+async fn while_the_system_is_away_machine_sessions_stay_but_tool_channels_close_and_new_sessions_wait()
+ {
     let mut world = World::start().await;
     let (agent, environment, latecomer) = (
         world.enroll("agent-box").await,
@@ -197,20 +196,13 @@ async fn while_the_system_is_away_new_sessions_are_told_to_wait_and_tunnels_and_
     .await
     .unwrap();
     let ticket = world
-        .api
-        .link
-        .tickets()
-        .issue(&TicketRequest {
-            src: TicketSource::Machine(near.id),
-            dst: far.id,
-            service: Service::Exec {
-                executor: "codex-exec-server".to_owned(),
-            },
-            thread_id: None,
-            tool_set: None,
-            expires_at: Time::new(chrono::Utc::now() + chrono::Duration::hours(1)),
-        })
-        .unwrap();
+        .tool_ticket(
+            near.id,
+            far.id,
+            "codex-exec-server",
+            Time::new(world.clock.now() + chrono::Duration::hours(1)),
+        )
+        .await;
     let mut incoming = far.link.incoming_tunnels();
     let (opened, accepted) = tokio::join!(near.link.open_tunnel(&ticket), async {
         incoming.next().await.unwrap().accept()
@@ -224,16 +216,26 @@ async fn while_the_system_is_away_new_sessions_are_told_to_wait_and_tunnels_and_
     })
     .await;
 
-    // The sessions that stand are held, and the tunnel between the two goes on without the system.
     assert_eq!(world.gateway.gateway.sessions_held(), 2);
-    here.write_all(b"still here").await.unwrap();
-    let mut got = vec![0u8; 10];
-    there.read_exact(&mut got).await.unwrap();
-    assert_eq!(&got, b"still here");
-    there.write_all(b"and here").await.unwrap();
-    let mut back = vec![0u8; 8];
-    here.read_exact(&mut back).await.unwrap();
-    assert_eq!(&back, b"and here");
+    assert!(
+        tokio::time::timeout(PATIENCE, here.read_u8())
+            .await
+            .unwrap()
+            .is_err(),
+        "tool channels close when the live API is lost"
+    );
+    assert!(
+        tokio::time::timeout(PATIENCE, there.read_u8())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(PATIENCE, near.link.open_tunnel(&ticket))
+            .await
+            .unwrap()
+            .is_err()
+    );
 
     // A machine that comes now is told that the system cannot be asked, and to try again.
     let waiting = world.start_machine(&latecomer, latecomer.endpoints(Trust::Pinned));
@@ -261,10 +263,24 @@ async fn while_the_system_is_away_new_sessions_are_told_to_wait_and_tunnels_and_
         async move { ids.iter().all(|id| link.is_online(*id)) }
     })
     .await;
-    // And the tunnel is the same tunnel.
+    let current = world
+        .tool_ticket(
+            near.id,
+            far.id,
+            "codex-exec-server",
+            Time::new(world.clock.now() + chrono::Duration::hours(1)),
+        )
+        .await;
+    let (opened, accepted) = tokio::join!(near.link.open_tunnel(&current), async {
+        incoming.next().await.unwrap().accept()
+    });
+    let (mut here, mut there) = (opened.unwrap(), accepted.unwrap());
     here.write_all(b"after").await.unwrap();
-    let mut after = vec![0u8; 5];
-    there.read_exact(&mut after).await.unwrap();
+    let mut after = [0; 5];
+    tokio::time::timeout(PATIENCE, there.read_exact(&mut after))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&after, b"after");
     world.stop().await;
 }

@@ -18,7 +18,8 @@ export function Facts({ rows, label, className, compact = false }: { rows: reado
         // The rows of a list of facts are given whole and never reordered.
         <div key={index} data-item className={compact ? 'flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1' : 'contents'}>
           <dt className={compact ? 'w-32 shrink-0 wrap-anywhere text-sm text-text-muted' : 'mt-2 text-sm text-text-muted first:mt-0 sm:mt-0 sm:py-1'}>{row.name}{compact && <span aria-hidden>:</span>}</dt>
-          <dd className={cx('min-w-0 max-w-full wrap-anywhere text-text', !compact && 'sm:py-1')}>{row.value}</dd>
+          {/* A wide value (a command, a list) takes the rest of its label's line rather than dropping below the label. */}
+          <dd className={cx('min-w-0 max-w-full wrap-anywhere text-text', compact ? 'flex-1 basis-48' : 'sm:py-1')}>{row.value}</dd>
         </div>
       ))}
     </dl>

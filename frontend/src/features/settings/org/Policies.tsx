@@ -7,6 +7,7 @@
 import { useTranslation } from 'react-i18next';
 
 import { SettingsEditor } from '@/features/settings/Editor';
+import { usePlaceSwitchEffect } from '@/features/settings/EffectLine';
 import type { RowPlace } from '@/features/settings/SettingRow';
 import type { Org } from '@/generated/api-types';
 import { Section } from '@/shell/Page';
@@ -18,9 +19,11 @@ export function placeOf(org: Pick<Org, 'name' | 'owner' | 'access' | 'kind'>): R
 
 export function Policies({ org }: { org: Org }) {
   const { t } = useTranslation();
+  // Its switches of mounts, MCP servers, templates and skills say when a change lands and what it reaches.
+  const effectFor = usePlaceSwitchEffect({ kind: 'node', id: org.id });
   return (
     <Section id="defaults" title={t('day100.names.defaults')}>
-      <SettingsEditor target={{ kind: 'node', id: org.id }} scope="org" place={placeOf(org)} secrets />
+      <SettingsEditor target={{ kind: 'node', id: org.id }} scope="org" place={placeOf(org)} secrets effectFor={effectFor} />
     </Section>
   );
 }

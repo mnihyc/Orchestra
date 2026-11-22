@@ -27,7 +27,7 @@ export async function historySetting(page: Page) {
     schema: { type: 'integer', minimum: 0, 'x-unit': 'days' }, default: 7, example: 7, display: { unit: 'days', zero: 'off' },
     text_key: 'day100.builtin.retention.agent_history_idle_days', keywords: [] };
   let current: ResolvedSetting = { key: HISTORY_KEY, value: 7, own: null, source: { scope: 'default', node: null }, locked_by: null, writable: true, parts: [] };
-  const reach: SettingReach = { applies: { orgs: 0, projects: 0, topics: 0, threads: 1 }, overrides: { items: [], next_cursor: null } };
+  const reach: SettingReach = { applies: { orgs: 0, projects: 0, topics: 0, threads: 1, environments: 0, environment_threads: 0 }, overrides: { items: [], next_cursor: null } };
   const writes: unknown[] = [];
   await page.route('**/api/v1/settings/registry', (route) => route.fulfill({ json: [def] }));
   await page.route(`**/api/v1/nodes/${ACME.research}/settings`, (route) => route.fulfill({ json: [current] }));

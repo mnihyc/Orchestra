@@ -26,3 +26,14 @@ for(const locale of ['en','zh-CN'] as const) for(const code of codes) it(`shows 
   view.rerender(<FailureAlert error={new ApiError({type:'orch:error:internal',status:500,code:'internal',title:'Internal',detail:diagnostic,request_id:'request'},null)} />);
   expect(screen.queryByRole('note')).toBeNull();
 });
+
+// A turn the agent program failed with the code internal is the program's failure, not the server's: its own words stand
+// under the alert as for every other failure of a program (an answer of Orch's API that says internal stays the server's).
+for(const locale of ['en','zh-CN'] as const) it(`reads a turn the program failed as internal as the program's failure, with its own words (${locale})`,async()=>{
+  await setLocale(locale);useAppearance.setState({locale});
+  show(<FailureAlert error={{code:'internal',message:'Writing footer.tsx failed',said:'disk quota exceeded',retryable:false,incomplete:false,resets_at:null,window:null}} />);
+  const primary=screen.getByRole('alert');
+  expect(primary).toHaveTextContent(i18n.t('harnessFailures.harness_error'));
+  expect(primary).not.toHaveTextContent(i18n.t('errors.internal'));
+  expect(screen.getByRole('note',{name:i18n.t('harnessFailures.programMessage')})).toHaveTextContent('Writing footer.tsx failed');
+});
