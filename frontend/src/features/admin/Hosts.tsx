@@ -8,24 +8,29 @@
  * nothing of its own, each changed where it is shown. A host's own page, where it is managed, is one
  * click from its name.
  */
-import { useQuery } from '@tanstack/react-query';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useInfiniteQuery, useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Server } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { hostsQuery } from '@/api/admin';
+import { bundledNodeQuery, hostsPageQuery, retryBundledNode } from '@/api/admin';
 import { ResourceHint, ResourceName } from '@/features/resource-facts/ResourceFacts';
 import { fullEffect, FULL_PERCENT_SHIPPED, declaredShare, megabytes } from '@/features/admin/hosts';
 import { ChoiceSetting, NumberSetting, useSystemSettings } from '@/features/admin/SettingRows';
 import type { Host, WhenFull } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
-import { formatBytes, formatNumber } from '@/lib/format';
+import { formatBytes, formatNumber, formatStorageGb } from '@/lib/format';
 import { boxClasses, Section } from '@/shell/Page';
 import { StatusTag } from '@/features/admin/StatusTag';
-import { buttonClasses } from '@/ui/Button';
+import { Button, buttonClasses } from '@/ui/Button';
 import { cx } from '@/ui/cx';
 import { EmptyState } from '@/ui/EmptyState';
-import { ErrorState } from '@/ui/ErrorState';
+import { StateLine } from '@/ui/StateLine';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Meter } from '@/ui/Meter';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
@@ -62,7 +67,22 @@ function Memory({ host, percent, inherited }: { host: Host; percent: number; inh
 export function Hosts() {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const hosts = useQuery(hostsQuery);
+  const search = useCollectionSearch("admin-hosts");
+  const hosts = useInfiniteQuery(hostsPageQuery(search.q));
+  const rows = hosts.data?.pages.flatMap((page) => page.items) ?? [];
+  // The server's own enrollment state is read only for the unfiltered list, where a missing bundled host means it.
+  const unfiltered = search.q === '';
+  const hasBundled = rows.some((host) => host.bundled_with_server);
+  const enrollment = useQuery({...bundledNodeQuery, enabled: unfiltered && !hasBundled});
+  const status = hasBundled || !unfiltered ? null : enrollment.data;
+  const wasPending = useRef(false);
+  const {refetch: refreshHosts} = hosts;
+  useEffect(() => {
+    if (status === null && wasPending.current) void refreshHosts();
+    wasPending.current = Boolean(status);
+  }, [status, refreshHosts]);
+  const retry = useMutation({mutationFn: retryBundledNode, onSuccess: () => { void enrollment.refetch(); }});
+  const waiting = status === 'waiting_for_administrator' || status === 'waiting_for_node';
   const { find } = useSystemSettings();
   const percentSetting = find('hosts.full_percent')?.value;
   const percent = typeof percentSetting === 'number' ? percentSetting : FULL_PERCENT_SHIPPED;
@@ -100,7 +120,7 @@ export function Hosts() {
       cell: (host) => (
         <span className="flex flex-col text-sm whitespace-nowrap text-text-muted">
           <span>{host.capacity.cpu_millis > 0 ? t('admin.hosts.cpus', { count: host.capacity.cpu_millis / 1000, number: formatNumber(host.capacity.cpu_millis / 1000, locale) }) : '–'}</span>
-          <span>{host.capacity.disk_gb > 0 ? t('admin.hosts.disk', { size: formatBytes(host.capacity.disk_gb * 1024 ** 3, locale) }) : '–'}</span>
+          <span>{host.capacity.disk_gb > 0 ? t('admin.hosts.disk', { size: formatStorageGb(host.capacity.disk_gb, locale) }) : '–'}</span>
           <span>{t('admin.hosts.environments', { count: host.running.environment, number: formatNumber(host.running.environment, locale) })}</span>
           <span>{t('admin.hosts.providers', { count: host.running.provider, number: formatNumber(host.running.provider, locale) })}</span>
         </span>
@@ -135,18 +155,25 @@ export function Hosts() {
           </Link>
         }
       >
+        {status && <StateLine compact role="status" tone={waiting ? 'neutral' : 'warning'}
+          message={t(`admin.hosts.enrollment.${status}`)}
+          action={waiting ? undefined : <Button size="sm" pending={retry.isPending} onClick={() => retry.mutate()}>{t('admin.hosts.retryRegistration')}</Button>} />}
+        {retry.isError && <ErrorAlert error={retry.error} />}
+        {enrollment.isError && unfiltered && !hasBundled && <ErrorState compact error={enrollment.error} onRetry={() => void enrollment.refetch()} />}
+        <CollectionSearch name={t("admin.sections.hosts.title")} {...search} />
         {hosts.isPending ? (
           <SkeletonRows read={hosts} rows={3} />
-        ) : hosts.isError ? (
+        ) : hosts.isError && rows.length === 0 ? (
           <ErrorState error={hosts.error} retrying={hosts.isRefetching} onRetry={() => void hosts.refetch()} />
-        ) : hosts.data.length === 0 ? (
-          <EmptyState compact icon={<Server aria-hidden />} title={t('admin.hosts.none')} description={t('admin.hosts.noneHint')} />
+        ) : rows.length === 0 ? (
+          unfiltered && (status || enrollment.isPending || enrollment.isError) ? null : <EmptyState compact icon={<Server aria-hidden />} title={t('admin.hosts.none')} description={t('admin.hosts.noneHint')} />
         ) : (
           <>
-            <Table label={t('admin.sections.hosts.title')} columns={columns} rows={hosts.data} rowKey={(host) => host.id} />
+            <Table label={t('admin.sections.hosts.title')} columns={columns} rows={rows} virtual rowKey={(host) => host.id} />
             <p className="text-sm text-text-muted">{t('admin.hosts.note')}</p>
           </>
         )}
+        <Pagination hasMore={hosts.hasNextPage} loading={hosts.isFetchingNextPage} error={hosts.isFetchNextPageError ? hosts.error : undefined} onMore={() => void hosts.fetchNextPage()} />
       </Section>
     </div>
   );

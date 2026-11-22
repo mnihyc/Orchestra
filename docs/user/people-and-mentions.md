@@ -8,6 +8,8 @@ summary: Open people’s cards, notify them explicitly and review sharing when m
 
 # People and mentions
 
+This page shows how to open the card of a person, notify them on purpose, and review what sharing a mention gives.
+
 ## Open a person
 
 Point at a person or focus their chip to see quick actions. Click the chip or press Enter to keep their profile open. On a touch screen, tap the chip to open the profile and its quick actions. Message opens a conversation when messaging is available. Your own chip opens your profile without offering Notify, Give access or Message; inserting your own mention opens no notification prompt.

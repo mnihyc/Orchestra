@@ -23,6 +23,8 @@ use std::time::Duration;
 enum Cause {
     /// Statements that break and mend it.
     Sql(&'static str, &'static str),
+    /// The bound runtime reports a narrower list than the agent profile.
+    RuntimeList(&'static str, &'static [&'static str]),
     /// The thread has no model.
     NoModel,
     /// The thread asks for an effort the model does not list.
@@ -41,8 +43,102 @@ struct Case {
     cause: Cause,
 }
 
-const ALL_MODES: &str = r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{approval_modes}', '["ask","on_request","bypass"]')"#;
-const ALL_ARRANGEMENTS: &str = r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{arrangements}', '[{"type":"together"},{"type":"separated","executor":"orch-exec","executor_version":"*","tool_sets":["plain"]}]')"#;
+#[derive(Clone, Copy)]
+enum InputEnding {
+    Membership,
+    Archive,
+    SourceRemoved,
+}
+
+async fn retained_ending(ending: InputEnding, cause: &str) {
+    let world = World::new().await;
+    let thread = world.thread("Retained cancellation outcome").await;
+    world.running_turn(thread, "Already running").await;
+    let sent = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Keep these words"),
+        )
+        .await
+        .unwrap();
+    let at = world.clock.time();
+    let mut tx = world.pool.begin().await.unwrap();
+    orch_db::queries::transaction_guard::lock_authority(&mut tx)
+        .await
+        .unwrap();
+    match ending {
+        InputEnding::Membership => {
+            let cancelled = world
+                .engine()
+                .cancel_member_work_in(&mut tx, world.root, world.ada, world.ada, at)
+                .await
+                .unwrap();
+            assert_eq!(cancelled.inputs, 1);
+        }
+        InputEnding::Archive => {
+            world
+                .engine()
+                .lock_archive_in(&mut tx, thread)
+                .await
+                .unwrap();
+            orch_db::queries::hierarchy::archive(&mut tx, thread, world.ada, at.get())
+                .await
+                .unwrap();
+            world
+                .engine()
+                .archive_in(&mut tx, thread, world.ada, at)
+                .await
+                .unwrap();
+        }
+        InputEnding::SourceRemoved => {
+            world
+                .engine()
+                .remove_bindings_in(&mut tx, world.environment, world.ada, at)
+                .await
+                .unwrap();
+        }
+    }
+    orch_authz::epoch::bump(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let sync = world.sync(thread).await;
+    let kept = sync
+        .retained_inputs
+        .iter()
+        .find(|input| input.id == sent.input.id)
+        .unwrap();
+    assert_eq!(kept.author.as_ref().unwrap().id, world.ada);
+    assert_eq!(
+        kept.parts,
+        vec![ContentPart::Text {
+            text: "Keep these words".into()
+        }]
+    );
+    let outcome = kept
+        .outcome
+        .as_ref()
+        .expect("the writer captures why the input was cancelled");
+    assert_eq!(serde_json::to_value(outcome.cause).unwrap(), json!(cause));
+    assert_eq!(outcome.at, at);
+    assert_eq!(outcome.by.as_ref().unwrap().id, world.ada);
+    assert_eq!(world.turn_starts(thread).len(), 1);
+}
+
+#[tokio::test]
+async fn a_membership_ending_keeps_the_cancelled_words_with_their_access_outcome() {
+    retained_ending(InputEnding::Membership, "access_changed").await;
+}
+
+#[tokio::test]
+async fn an_archived_thread_keeps_the_cancelled_words_with_its_recorded_ending() {
+    retained_ending(InputEnding::Archive, "thread_ended").await;
+}
+
+#[tokio::test]
+async fn a_removed_source_keeps_the_cancelled_words_without_claiming_the_thread_ended() {
+    retained_ending(InputEnding::SourceRemoved, "source_unavailable").await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_profile_pin_excludes_a_different_running_build_before_another_turn_opens() {
@@ -224,6 +320,14 @@ const CASES: &[Case] = &[
         ),
     },
     Case {
+        name: "an input waits until its model can generate replies again",
+        reason: "model_not_allowed",
+        cause: Cause::Sql(
+            r#"UPDATE provider_models SET parameters = parameters || '{"purposes":["embedding"]}'::jsonb"#,
+            r#"UPDATE provider_models SET parameters = parameters || '{"purposes":["generation"]}'::jsonb"#,
+        ),
+    },
+    Case {
         name: "the model does not list the effort",
         reason: "model_not_allowed",
         cause: Cause::UnlistedEffort,
@@ -241,10 +345,7 @@ const CASES: &[Case] = &[
     Case {
         name: "the agent lacks the approval mode",
         reason: "binding_invalid",
-        cause: Cause::Sql(
-            r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{approval_modes}', '["bypass"]')"#,
-            ALL_MODES,
-        ),
+        cause: Cause::RuntimeList("approval_modes", &["bypass"]),
     },
     Case {
         name: "the environment failed",
@@ -265,10 +366,7 @@ const CASES: &[Case] = &[
     Case {
         name: "the adapter offers no arrangement",
         reason: "binding_invalid",
-        cause: Cause::Sql(
-            r#"UPDATE agents SET descriptor = jsonb_set(descriptor, '{arrangements}', '[]')"#,
-            ALL_ARRANGEMENTS,
-        ),
+        cause: Cause::RuntimeList("arrangements", &[]),
     },
     Case {
         name: "the machine does not take the role of an agent",
@@ -285,9 +383,31 @@ const CASES: &[Case] = &[
     },
 ];
 
+/// An empty queue may never have started the harness. Give the selected runtime its report
+/// in either case, preserving the status of any process already running there.
+async fn report_runtime(world: &World, descriptor: serde_json::Value) {
+    sqlx::query(
+        "INSERT INTO harnesses (provider_id, agent_id, machine_id, descriptor)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (provider_id, agent_id, machine_id) DO UPDATE SET descriptor = EXCLUDED.descriptor",
+    )
+    .bind(world.provider)
+    .bind(world.agent)
+    .bind(world.machine_id)
+    .bind(descriptor)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+}
+
 async fn break_it(world: &World, thread: Id, cause: Cause) {
     match cause {
         Cause::Sql(broken, _) => world.exec(broken).await,
+        Cause::RuntimeList(field, values) => {
+            let mut descriptor = common::descriptor();
+            descriptor[field] = json!(values);
+            report_runtime(world, descriptor).await;
+        }
         Cause::NoModel => world.unset(thread, keys::AGENT_MODEL).await,
         Cause::UnlistedEffort => world.set(thread, keys::AGENT_EFFORT, json!("ultra")).await,
         Cause::ModelsNarrowed => {
@@ -309,6 +429,7 @@ async fn break_it(world: &World, thread: Id, cause: Cause) {
 async fn mend_it(world: &World, thread: Id, cause: Cause) {
     match cause {
         Cause::Sql(_, mended) => world.exec(mended).await,
+        Cause::RuntimeList(..) => report_runtime(world, common::descriptor()).await,
         Cause::NoModel => {
             world
                 .set(thread, keys::AGENT_MODEL, json!(common::MODEL))
@@ -323,7 +444,7 @@ async fn mend_it(world: &World, thread: Id, cause: Cause) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_check_blocks_the_thread_with_its_reason_and_lets_it_through_when_its_cause_clears() {
-    let world = World::new().await;
+    let world = World::observed().await;
     let thread = world.thread("Checks").await;
     let ada = Caller::session(world.ada);
     for (n, case) in CASES.iter().enumerate() {
@@ -554,6 +675,7 @@ async fn when_several_checks_fail_the_first_in_the_order_is_the_reason_and_the_n
 async fn an_author_who_lost_the_right_to_interact_while_the_input_waited_has_it_cancelled() {
     let world = World::new().await;
     let thread = world.thread("Shared").await;
+    let before_send = world.sync(thread).await.items.last().map(|item| item.id);
     let bob = world.person("bob").await;
     let role = world.give(bob, "interactor").await;
     world
@@ -582,6 +704,30 @@ async fn an_author_who_lost_the_right_to_interact_while_the_input_waited_has_it_
     // can do that.
     world.take(role).await;
     world.wait_input(bobs.input.id, "cancelled").await;
+    let history = world.sync(thread).await;
+    let retained: Vec<_> = history
+        .retained_inputs
+        .iter()
+        .filter(|input| input.id == bobs.input.id)
+        .collect();
+    assert_eq!(
+        retained.len(),
+        1,
+        "access changes keep the exact authored input in conversation history"
+    );
+    assert_eq!(retained[0].author.as_ref().unwrap().id, bob);
+    assert_eq!(
+        serde_json::to_value(&retained[0].parts).unwrap(),
+        json!([{"type":"text","text":"From bob"}])
+    );
+    assert_eq!(
+        serde_json::to_value(retained[0].outcome.as_ref().unwrap()).unwrap()["cause"],
+        "access_changed"
+    );
+    assert_eq!(retained[0].after_item, before_send);
+    assert!(!history.items.iter().any(|item| matches!(&item.payload,
+        orch_api_contract::threads::ItemPayload::UserMessage(message) if message.input_id == Some(bobs.input.id))),
+        "a cancelled input is never manufactured as a native Item");
     world
         .exec("UPDATE environments SET status = 'running', status_detail = NULL")
         .await;
@@ -604,12 +750,127 @@ async fn an_author_who_lost_the_right_to_interact_while_the_input_waited_has_it_
         .await;
     world.wait_state(thread, "idle").await;
     assert_eq!(world.input_state(adas.input.id).await.0, "delivered");
+    assert_eq!(
+        world
+            .sync(thread)
+            .await
+            .retained_inputs
+            .iter()
+            .filter(|input| input.id == bobs.input.id)
+            .count(),
+        1
+    );
     meanwhile(Duration::from_millis(300)).await;
     assert_eq!(
         world.turn_starts(thread).len(),
         1,
         "what was cancelled is not served later"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_conversation_without_a_segment_pages_every_cancelled_input_once_before_all_items() {
+    let world = World::new().await;
+    let thread = world
+        .thread("Authored history without a native segment")
+        .await;
+    world.engine().stop();
+    world
+        .exec("UPDATE environments SET status='failed',status_detail='not started'")
+        .await;
+    // The fixture's binding metadata has never opened a native conversation. Model the segment-free reader.
+    world
+        .exec("UPDATE threads SET current_segment_id=NULL")
+        .await;
+    world
+        .exec("UPDATE thread_continuations SET current_segment_id=NULL")
+        .await;
+    world.exec("DELETE FROM items").await;
+    world.exec("DELETE FROM segments").await;
+    let caller = Caller::session(world.ada);
+    let mut submitted = Vec::new();
+    for index in 0..45 {
+        let input = world
+            .engine()
+            .submit_input(
+                &caller,
+                thread,
+                queued(&format!("Retained {index}: {}", "x".repeat(1_000))),
+            )
+            .await
+            .unwrap();
+        world
+            .engine()
+            .cancel_input(&caller, thread, input.input.id)
+            .await
+            .unwrap();
+        submitted.push(input.input.id);
+    }
+    let opening = world
+        .engine()
+        .sync(thread, Some(world.ada), None, 40)
+        .await
+        .unwrap();
+    assert!(opening.items.is_empty());
+    assert!(opening.segments.is_empty());
+    assert!(!opening.retained_inputs.is_empty());
+    assert_eq!(opening.retained_inputs_next.len(), 1);
+    let mut seen = opening.retained_inputs;
+    let mut next = opening.retained_inputs_next;
+    let mut pages = 0;
+    while let Some(cursor) = next.pop() {
+        assert!(cursor.after_item.is_none());
+        let mut tx = world.pool.begin().await.unwrap();
+        let page = world
+            .engine()
+            .retained_inputs_page_in(
+                &mut tx,
+                thread,
+                &cursor.cursor,
+                40,
+                2_500,
+                orch_api_contract::threads::continuations::ThreadReadSelector::default(),
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            page.items.is_empty(),
+            "a continuation never repeats or invents an Item body"
+        );
+        assert!(serde_json::to_vec(&page.retained_inputs).unwrap().len() <= 2_500);
+        assert!(
+            page.retained_inputs
+                .iter()
+                .all(|input| input.after_item.is_none())
+        );
+        seen.extend(page.retained_inputs);
+        next = page.retained_inputs_next;
+        pages += 1;
+    }
+    assert!(
+        pages > 1,
+        "the byte allowance requires native continuations within one anchor group"
+    );
+    assert_eq!(
+        seen.iter().map(|input| input.id).collect::<Vec<_>>(),
+        submitted
+    );
+    assert_eq!(
+        seen.iter()
+            .map(|input| input.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        submitted.len()
+    );
+    for input in seen {
+        let outcome = input.outcome.unwrap();
+        assert_eq!(
+            outcome.cause,
+            orch_api_contract::threads::InputCancellationCause::Person
+        );
+        assert_eq!(outcome.by.unwrap().id, world.ada);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -950,7 +1211,7 @@ async fn when_a_question_cannot_be_answered_nothing_is_let_through_and_nothing_i
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cause_of_the_thread_stays_in_view_when_its_queue_empties_and_the_thread_is_idle_once_it_is_mended()
  {
-    let world = World::new().await;
+    let world = World::observed().await;
     let thread = world.thread("Kept in view").await;
     let ada = Caller::session(world.ada);
     // Every cause but a reached cap is the thread's own: what it is bound to and where it runs.
@@ -1235,6 +1496,8 @@ async fn automatic_derived_work_keeps_its_origins_token_and_approver_instead_of_
         .unwrap();
     world.run_turn(thread, 0, "The first turn ended.").await;
     world.wait_state(thread, "idle").await;
+    // Idle precedes terminal follow-up; admission assigns authority holds after that barrier.
+    world.wait_followed_up(thread).await;
     let original = stored_input(&world, sent.input.id).await;
     sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact'] WHERE id=$1")
         .bind(runner_id)
@@ -1794,4 +2057,36 @@ async fn a_declaration_that_cannot_be_read_or_is_of_another_version_declares_not
         let start = world.turn_start(thread, 0).await;
         assert_eq!(common::words_after_where(&start.text), "Go", "{declaration}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_thread_whose_environment_is_still_being_made_is_not_refused_for_the_executors_it_has_not_reported()
+ {
+    let world = World::observed().await;
+    let thread = world.thread("Environment being made").await;
+    world
+        .exec("UPDATE threads SET arrangement = 'separated'")
+        .await;
+    // The unit is not up: it reports no executors yet, and what its template promises is what is judged.
+    world
+        .exec(
+            r#"UPDATE environments SET status = 'provisioning',
+                   facts = '{"environment_descriptor":{"lifecycle":"unit"}}'::jsonb,
+                   config = '{"exec.offers":["plain"]}'::jsonb"#,
+        )
+        .await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Hello"))
+        .await
+        .unwrap();
+    eventually("the thread is looked at", || async {
+        world.state(thread).await.0 != "idle"
+    })
+    .await;
+    let (state, reason, step) = world.state(thread).await;
+    assert!(
+        !(state == "blocked" && reason.as_deref() == Some("binding_invalid")),
+        "it stands {state} (reason {reason:?}, step {step:?})"
+    );
 }

@@ -1,6 +1,6 @@
 /** The actual Programs tab confirms reported binaries without changing the program registry. */
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -12,13 +12,15 @@ import { i18n, setLocale } from '@/i18n';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { detailMachine } from './resource-detail-fixtures';
+import { GRACE } from '../doubles/chat-rows';
 
-const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<MachinePrograms>>(), write: vi.fn<(id: string, body: MachineProgramsCommand) => Promise<MachinePrograms>>() }));
+const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<MachinePrograms>>(), write: vi.fn<(id: string, body: MachineProgramsCommand) => Promise<MachinePrograms>>(), probe: vi.fn<(id: string) => Promise<Machine>>() }));
+vi.mock('@/api/resources', async (loadOriginal) => ({ ...await loadOriginal<object>(), probeMachine: calls.probe }));
 vi.mock('@/api/machinePrograms', () => ({ machineProgramsKey: (id: string) => ['machine-programs', id], machineProgramsQuery: (id: string) => ({ queryKey: ['machine-programs', id], queryFn: calls.read }), changeMachinePrograms: calls.write }));
-vi.mock('@/features/resources/harnesses', () => ({ useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude Code' : 'Other agent' }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/harnesses', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHarnessTitle: () => (kind: string) => kind === 'codex' ? 'Codex' : kind === 'claude-code' ? 'Claude Code' : 'Other agent' }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/features/resources/machines/Enrollment', () => ({ AddMachineDialog: () => null }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/machine?tab=policy">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/machine?tab=policy">{children}</a> }));
 
 const program = { kind: 'codex', path: '/opt/agent bins/codex', version: '0.164.0', daemon: true };
 const command = '"/opt/Orch Connector" --data "/var/instance" policy';
@@ -29,12 +31,14 @@ function machine(facts: Record<string, unknown>): Machine {
 }
 const policy = { 'agent.harnesses': [], 'policy.delegated': ['agent.harnesses'] };
 const confirmedPolicy = { ...policy, 'agent.harnesses': [{ kind: program.kind, path: program.path }] };
-function snapshot(canManage = true, view?: Machine): MachinePrograms { return { entries: [], capabilities: [], config_file: '/var/instance/config.toml', can_manage: canManage, ...(view === undefined ? {} : { machine_view: view }) }; }
+function snapshot(canManage = true, view?: Machine): MachinePrograms { return { approvals: [], entries: [], capabilities: [], config_file: '/var/instance/config.toml', can_manage: canManage, ...(view === undefined ? {} : { machine_view: view }) }; }
 function draw(initial: Machine) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   function Host() { const row = useQuery({ queryKey: machineKey(initial.id), initialData: initial, enabled: false }); return <MachineProgramsTab machine={row.data} />; }
   return { cache, ...render(<QueryClientProvider client={cache}><TooltipProvider><Toaster><Host /></Toaster></TooltipProvider></QueryClientProvider>) };
 }
+/** The list row a program's path is shown in. */
+function rowOf(path: HTMLElement): HTMLElement { const row = path.closest('li'); if (row === null) throw new Error('no row'); return row; }
 beforeEach(() => { vi.clearAllMocks(); calls.read.mockResolvedValue(snapshot()); calls.write.mockResolvedValue(snapshot()); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
 
@@ -84,6 +88,54 @@ for (const locale of ['en', 'zh-CN'] as const) {
   });
 }
 
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows the current program approver and recorded time to a viewer (${locale})`, async () => {
+    await setLocale(locale);
+    const acknowledgement = { ...snapshot(false), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.read.mockResolvedValue(acknowledgement);
+    const view = draw(machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+    const person = await screen.findByRole('button', { name: GRACE.display_name });
+    expect(person).toBeVisible();
+    expect(person.closest('label')).toBeNull();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(screen.queryByRole('button', { name: locale === 'en' ? 'Remove' : '移除' })).not.toBeInTheDocument();
+    expect(calls.write).not.toHaveBeenCalled();
+  });
+
+  it(`shows only the acknowledged approver after Use and sends no invented author (${locale})`, async () => {
+    await setLocale(locale);
+    const initial = machine({ harnesses: [], discovered_harnesses: [program], searched_harness_kinds: ['codex'], policy });
+    const updated = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
+    const acknowledgement = { ...snapshot(true, updated), approvals: [{
+      subject: { kind: 'program' as const, harness_kind: program.kind, path: program.path },
+      by: GRACE, at: '2026-10-31T00:00:00Z',
+    }] };
+    calls.write.mockResolvedValue(acknowledgement);
+    const user = userEvent.setup(), view = draw(initial);
+    await user.click(await screen.findByRole('button', { name: locale === 'en' ? 'Use' : '使用' }));
+    expect(await screen.findByRole('button', { name: GRACE.display_name })).toBeVisible();
+    expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeVisible();
+    expect(calls.write).toHaveBeenCalledExactlyOnceWith('machine', { action: 'confirm_harness', kind: program.kind, path: program.path });
+    expect(calls.read).toHaveBeenCalledTimes(1);
+  });
+}
+
+it('does not attribute a replacement path or a discovered program to an old confirmation', async () => {
+  const acknowledgement = { ...snapshot(), approvals: [{
+    subject: { kind: 'program' as const, harness_kind: program.kind, path: '/old/codex' },
+    by: GRACE, at: '2026-10-31T00:00:00Z',
+  }] };
+  calls.read.mockResolvedValue(acknowledgement);
+  const view = draw(machine({ harnesses: [program], discovered_harnesses: [{ ...program, path: '/old/codex' }], searched_harness_kinds: ['codex'], policy: confirmedPolicy }));
+  await screen.findByText('Confirmed', { exact: true });
+  expect(screen.queryByRole('button', { name: GRACE.display_name })).not.toBeInTheDocument();
+  expect(view.container.querySelector('time[datetime="2026-10-31T00:00:00Z"]')).toBeNull();
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
 it('keeps a different canonical path distinct when the acknowledged discovery replaces a removed tuple', async () => {
   const initial = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'], policy: confirmedPolicy });
   const replacement = { ...program, path: '/opt/another/codex' };
@@ -100,21 +152,75 @@ it('keeps a different canonical path distinct when the acknowledged discovery re
 it('keeps local harness policy exact even when the separate registry is delegated', async () => {
   const user = userEvent.setup();
   draw(machine({ harnesses: [], discovered_harnesses: [program], searched_harness_kinds: ['codex'], policy: { 'agent.harnesses': [{ kind: 'claude-code', path: '/opt/claude' }], 'policy.delegated': ['agent.programs'] } }));
-  await screen.findByText('…/agent bins/codex');
-  expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument();
-  const exact = `${command} set agent.harnesses '[{"kind":"claude-code","path":"/opt/claude"}]'`;
-  expect(screen.getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).toBeVisible();
-  const refresh = screen.getByRole('button', { name: 'Refresh programs' }); await user.click(refresh);
+  const row = rowOf(await screen.findByText('…/agent bins/codex'));
+  await user.click(within(row).getByRole('button', { name: 'Use' }));
+  const exact = `${command} set agent.harnesses '[{"kind":"claude-code","path":"/opt/claude"},{"kind":"codex","path":"/opt/agent bins/codex"}]'`;
+  expect(within(row).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).toBeVisible();
+  const refresh = screen.getAllByRole('button', { name: 'Refresh programs' }).find((button) => !row.contains(button));
+  await user.click(refresh!);
   await waitFor(() => expect(calls.write).toHaveBeenCalledExactlyOnceWith('machine', { action: 'reload' }));
 });
 
-it('keeps Use and Remove absent when a local harness value vetoes wildcard handover', async () => {
+it('offers only the local commands when a local harness value vetoes wildcard handover', async () => {
+  const user = userEvent.setup();
   draw(machine({ harnesses: [program], discovered_harnesses: [{ ...program, kind: 'claude-code', path: '/other/claude' }], searched_harness_kinds: ['codex', 'claude-code'],
     policy: { ...confirmedPolicy, 'policy.delegated': ['*'], 'policy.local': { 'agent.harnesses': confirmedPolicy['agent.harnesses'] } } }));
   await screen.findByText('Confirmed', { exact: true });
-  for (const name of ['Use', 'Remove']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Refresh programs' })).toBeEnabled();
+  const confirmed = rowOf(screen.getByText('…/agent bins/codex'));
+  await user.click(within(confirmed).getByRole('button', { name: 'Remove' }));
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  expect(within(confirmed).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === `${command} set agent.harnesses '[]'`)).toBeVisible();
+  const found = rowOf(screen.getByText('Claude Code', { exact: true }));
+  await user.click(within(found).getByRole('button', { name: 'Use' }));
+  const accept = `${command} set agent.harnesses '[{"kind":"codex","path":"/opt/agent bins/codex"},{"kind":"claude-code","path":"/other/claude"}]'`;
+  expect(within(found).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === accept)).toBeVisible();
   expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('offers Use on a found program of a machine added with the defaults, with the exact command that accepts it and Refresh', async () => {
+  const kept = { 'agent.harnesses': [], 'policy.delegated': [] };
+  const claude = { kind: 'claude-code', path: '/usr/local/bin/claude', version: '2.1.322', daemon: false };
+  const initial = machine({ harnesses: [], discovered_harnesses: [claude, program], searched_harness_kinds: ['claude-code', 'codex'], policy: kept });
+  const accepted = machine({ harnesses: [program], discovered_harnesses: [claude], searched_harness_kinds: ['claude-code', 'codex'],
+    policy: { ...kept, 'agent.harnesses': [{ kind: program.kind, path: program.path }] } });
+  calls.probe.mockResolvedValue(accepted);
+  const user = userEvent.setup(); const view = draw(initial);
+  const row = rowOf(await screen.findByText('…/agent bins/codex'));
+  expect(screen.queryByText((_text, element) => element?.tagName === 'CODE' && element.textContent === `${command} set agent.harnesses '[]'`)).not.toBeInTheDocument();
+  const use = within(row).getByRole('button', { name: 'Use' });
+  await user.click(use);
+  expect(use).toHaveAttribute('aria-expanded', 'true');
+  const exact = `${command} set agent.harnesses '${JSON.stringify([{ kind: program.kind, path: program.path }])}'`;
+  expect(within(row).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).toBeVisible();
+  await user.click(within(row).getByRole('button', { name: 'Refresh programs' }));
+  await waitFor(() => expect(calls.probe).toHaveBeenCalledExactlyOnceWith('machine'));
+  expect(await screen.findByText('Confirmed', { exact: true })).toBeVisible();
+  expect(view.cache.getQueryData(machineKey('machine'))).toEqual(accepted);
+  expect(screen.queryByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).not.toBeInTheDocument();
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+it('closes the open command of a program the machine confirms meanwhile, instead of showing the command that removes it', async () => {
+  // Round 11: Codex's box held the command that accepts it; once the connector reported it confirmed, the same open box
+  // showed `… '[]'`, and copying it again would have undone it.
+  const kept = { 'agent.harnesses': [], 'policy.delegated': [] };
+  const initial = machine({ harnesses: [], discovered_harnesses: [program], searched_harness_kinds: ['codex'], policy: kept });
+  const accepted = machine({ harnesses: [program], discovered_harnesses: [], searched_harness_kinds: ['codex'],
+    policy: { ...kept, 'agent.harnesses': [{ kind: program.kind, path: program.path }] } });
+  const user = userEvent.setup(); const view = draw(initial);
+  const row = rowOf(await screen.findByText('…/agent bins/codex'));
+  await user.click(within(row).getByRole('button', { name: 'Use' }));
+  const accept = `${command} set agent.harnesses '${JSON.stringify([{ kind: program.kind, path: program.path }])}'`;
+  expect(within(row).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === accept)).toBeVisible();
+  // The machine's own report arrives: the program is confirmed.
+  act(() => { view.cache.setQueryData(machineKey('machine'), accepted); });
+  const confirmedRow = rowOf(await screen.findByText('…/agent bins/codex'));
+  expect(await within(confirmedRow).findByText('Confirmed', { exact: true })).toBeVisible();
+  expect(screen.queryByText((_text, element) => element?.tagName === 'CODE' && element.textContent.includes('set agent.harnesses'))).not.toBeInTheDocument();
+  expect(within(confirmedRow).getByRole('button', { name: 'Remove' })).toHaveAttribute('aria-expanded', 'false');
+  // Asked again, it opens the command that removes it, as what it is for.
+  await user.click(within(confirmedRow).getByRole('button', { name: 'Remove' }));
+  expect(within(confirmedRow).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === `${command} set agent.harnesses '[]'`)).toBeVisible();
 });
 
 it('does not offer native mutation for a machine without an applicable role', async () => {
@@ -125,7 +231,7 @@ it('does not offer native mutation for a machine without an applicable role', as
   expect(calls.write).not.toHaveBeenCalled();
 });
 
-it('shows the actual local policy command after a current native refusal', async () => {
+it('shows the exact local command after a current native refusal', async () => {
   calls.write.mockRejectedValue(new ApiError({ type: 'orch:error:policy.not_delegated', code: 'policy.not_delegated', status: 403,
     title: 'Kept on this machine', detail: 'The setting is kept locally.', request_id: 'native-program-policy' }, null));
   const user = userEvent.setup();
@@ -134,9 +240,10 @@ it('shows the actual local policy command after a current native refusal', async
   await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove' }));
   await screen.findByText('Agent programs are kept in this machine’s local policy.');
   expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
-  const exact = `${command} set agent.harnesses '${JSON.stringify(confirmedPolicy['agent.harnesses'])}'`;
-  expect(screen.getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).toBeVisible();
+  const row = rowOf(screen.getByText('…/agent bins/codex'));
+  const exact = `${command} set agent.harnesses '[]'`;
+  expect(within(row).getByText((_text, element) => element?.tagName === 'CODE' && element.textContent === exact)).toBeVisible();
+  expect(within(row).getByRole('button', { name: 'Remove' })).toHaveAttribute('aria-expanded', 'true');
   expect(calls.write).toHaveBeenCalledExactlyOnceWith('machine', { action: 'remove_harness', kind: program.kind, path: program.path });
   expect(calls.read).toHaveBeenCalledTimes(1);
 });
@@ -144,8 +251,21 @@ it('shows the actual local policy command after a current native refusal', async
 it('does not call an unreported policy a local refusal', async () => {
   draw(machine({}));
   await screen.findByText('This machine has not reported agent program discovery.');
-  expect(screen.getByText('This machine has not reported its current harness policy and command.')).toBeVisible();
+  expect(screen.getByText('This machine has not reported its current agent program policy and command.')).toBeVisible();
   expect(screen.queryByText('Agent programs are kept in this machine’s local policy.')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Use' })).not.toBeInTheDocument();
+  expect(calls.write).not.toHaveBeenCalled();
+});
+
+
+it('lets a viewer find one native program in a long machine list without issuing a command', async () => {
+  const programs = Array.from({ length: 12 }, (_, index) => ({ ...program, kind: `program-${index}`, path: `/opt/agents/program-${index}` }));
+  calls.read.mockResolvedValue(snapshot(false));
+  draw(machine({ harnesses: programs, discovered_harnesses: [], searched_harness_kinds: programs.map((entry) => entry.kind),
+    policy: { ...policy, 'agent.harnesses': programs.map(({ kind, path }) => ({ kind, path })) } }));
+  const user = userEvent.setup();
+  await user.type(await screen.findByRole('searchbox', { name: i18n.t('ui.collection.find', { name: i18n.t('machinePrograms.nativeTitle') }) }), 'program-11');
+  expect(screen.getByText('…/agents/program-11')).toBeVisible();
+  expect(screen.queryByText('…/agents/program-0')).not.toBeInTheDocument();
   expect(calls.write).not.toHaveBeenCalled();
 });

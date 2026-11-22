@@ -1,4 +1,5 @@
-//! Batched, visibility-filtered setting reach using the resolver's merge and lock provenance.
+//! Batched, visibility-filtered setting reach using the resolver's merge and lock provenance: the places below, and for a
+//! key that environments take, the environments homed there and their threads.
 
 use super::scope_of;
 
@@ -11,6 +12,8 @@ use crate::middleware::requests::ApiResult;
 use crate::registry::Ctx;
 
 use orch_access_contract::permissions::NodePermission;
+
+use orch_access_contract::permissions::Permission;
 
 use orch_access_contract::permissions::PermissionName;
 
@@ -37,6 +40,8 @@ use orch_db::queries::hierarchy::NodeRow;
 use orch_db::queries::settings;
 
 use orch_settings::merge::Link;
+
+use orch_settings::merge::OwnValues;
 
 use orch_settings::merge::Rows;
 
@@ -124,6 +129,12 @@ pub(crate) async fn read(
     let baseline = resolved(def, &rows, &here);
     let mut applies = SettingReachCounts::default();
     let mut overrides = Vec::new();
+    // The environments of the readable threads below, for a key that environments take.
+    let thread_environments: Vec<Id> = candidates
+        .iter()
+        .filter(|node| visible.contains(&node.id) && node.kind == "thread")
+        .filter_map(|node| node.environment_id)
+        .collect();
     for node in candidates
         .into_iter()
         .filter(|node| visible.contains(&node.id))
@@ -153,6 +164,19 @@ pub(crate) async fn read(
             });
         }
     }
+    if def.scopes.contains(&Scope::Environment) {
+        let reached =
+            environments_reached(&mut conn, &principal, place, def, &rows, &by_id, &baseline)
+                .await?;
+        applies.environments = i64::try_from(reached.len()).unwrap_or(i64::MAX);
+        applies.environment_threads = i64::try_from(
+            thread_environments
+                .iter()
+                .filter(|environment| reached.contains(environment))
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+    }
     if let Some(after) = after {
         overrides.retain(|node| node.id > after);
     }
@@ -180,6 +204,64 @@ pub(crate) async fn read(
             next_cursor,
         },
     })
+}
+
+/// The readable environments homed at the place or below whose own value still takes the place's contribution, each
+/// resolved as its settings are: its home's chain, then its own values. Two statements, whatever their number.
+async fn environments_reached(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    place: Option<Id>,
+    def: &SettingDef,
+    rows: &Rows,
+    by_id: &HashMap<Id, &NodeRow>,
+    baseline: &Resolved<Id>,
+) -> ApiResult<HashSet<Id>> {
+    let homed = settings::reach_environments(conn, place).await?;
+    let ids: Vec<_> = homed.iter().map(|environment| environment.id).collect();
+    let readable: HashSet<_> = orch_authz::resources::holding(
+        conn,
+        principal,
+        &ids,
+        Permission::EnvironmentView,
+        Policy::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .into_iter()
+    .map(|environment| environment.id)
+    .collect();
+    let mut reached = HashSet::new();
+    for environment in homed {
+        if !readable.contains(&environment.id) {
+            continue;
+        }
+        let Some(home) = by_id.get(&environment.home_node_id).copied() else {
+            continue;
+        };
+        // A home below a deleted place takes nothing from here.
+        let Ok(chain) = chain(home, by_id) else {
+            continue;
+        };
+        let own = OwnValues {
+            scope: Scope::Environment,
+            values: environment.config,
+            revision: environment.revision,
+        };
+        let value = resolve_key(
+            def,
+            &Stack {
+                rows,
+                chain: &chain,
+                own: Some(&own),
+            },
+            None,
+        );
+        if contributes(baseline, &value) {
+            reached.insert(environment.id);
+        }
+    }
+    Ok(reached)
 }
 
 fn chain(node: &NodeRow, nodes: &HashMap<Id, &NodeRow>) -> ApiResult<Vec<Link>> {

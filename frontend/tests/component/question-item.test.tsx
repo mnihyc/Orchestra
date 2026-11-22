@@ -4,21 +4,23 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as ApprovalsApi from '@/api/approvals';
+import type * as ThreadsApi from '@/api/threads';
 import { ApprovalCard } from '@/features/timeline/items/Approval';
 import { ApiError, client } from '@/api/client';
 import { threadWriter } from '@/realtime/stores/thread';
 import { useDecision } from '@/features/approvals/Decision';
 import { approvalKey } from '@/api/approvals';
 import { NOT_PICKING, TimelineContextValue, type TimelineContext } from '@/features/timeline/context';
-import type { Approval, Item } from '@/generated/api-types';
+import type { Approval, Item, RawCall } from '@/generated/api-types';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { me, userRef } from '../doubles/fixtures';
-import { ALLOW_DENY, approvalItem, harnessApproval, otherTool } from '../doubles/thread-rows';
+import { ALLOW_DENY, approvalItem, harnessApproval, otherTool, rawOf } from '../doubles/thread-rows';
 import { show } from './support';
 
-const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<Approval>>(), decide: vi.fn<(id: string, decision: unknown) => Promise<Approval>>() }));
+const server = vi.hoisted(() => ({ raw: vi.fn<() => Promise<RawCall>>(), read: vi.fn<() => Promise<Approval>>(), decide: vi.fn<(id: string, decision: unknown) => Promise<Approval>>() }));
 vi.mock('@/api/approvals', async (load) => ({ ...await load<typeof ApprovalsApi>(), approvalQuery: (id: string) => ({ queryKey: ['approval', id], queryFn: server.read }), decideApproval: server.decide }));
-const context: TimelineContext = { threadId: 'question-thread', threadName: 'Login', detail: 'steps', recent: new Set(), layout: 'one', setLayout: () => undefined,
+vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), fetchRaw: server.raw }));
+const context: TimelineContext = { threadId: 'question-thread', threadName: 'Login', detail: 'normal', layout: 'one', setLayout: () => undefined,
   meId: null, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
 function request(canDecide = true, title = 'Choose scope'): Approval {
   return harnessApproval('question-1', { threadId: context.threadId, itemId: 'question-item', title, requester: userRef(me(1, 'ada', 'Ada')), canDecide,
@@ -31,7 +33,7 @@ function item(approval: Approval): Extract<Item, { kind: 'approval' }> {
 }
 let locale = currentLocale();
 let theme: string | null = null;
-beforeEach(() => { locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); server.read.mockReset(); server.decide.mockReset(); });
+beforeEach(() => { locale = currentLocale(); theme = document.documentElement.getAttribute('data-theme'); server.read.mockReset(); server.decide.mockReset(); server.raw.mockReset(); });
 afterEach(async () => { await setLocale(locale); if (theme === null) document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', theme); });
 
 describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const)('delivered question %s / %s', (language, look) => {
@@ -190,20 +192,29 @@ it('keeps a late response on its addressed request when a kept decision view cha
 });
 
 
-it('keeps native input/result beneath the question’s work detail without another request', async () => {
+it('reads native input and result only when the question’s work detail is opened', async () => {
   const approval = request();
   const source = { ...otherTool('native-question', { name: 'AskUserQuestion', args: { question: 'Native input marker' }, result: { answer: 'Native answer marker' }, turn: 'question-turn' }), thread_id: context.threadId };
+  if (source.kind !== 'tool_call') throw new Error('The question source is a tool call');
+  server.raw.mockResolvedValue(rawOf(source));
   const card = { ...item(approval), thread_id: context.threadId, turn_id: source.turn_id, parent_item_id: source.id };
-  threadWriter.reset(context.threadId, { items: [source, card] }, false);
+  threadWriter.reset(context.threadId, { items: [{ ...source, payload: { ...source.payload, raw: undefined } }, card] }, false);
   const network = vi.spyOn(globalThis, 'fetch');
   const drawn = show(<TimelineContextValue.Provider value={context}><ApprovalCard item={card} /></TimelineContextValue.Provider>);
   try {
     expect(screen.queryByText('AskUserQuestion')).not.toBeInTheDocument();
     expect(network).not.toHaveBeenCalled();
+    expect(server.raw).not.toHaveBeenCalled();
     await userEvent.click(screen.getByText(i18n.t('thread.header.workDetail'), { exact: true }));
     expect(await screen.findByText('AskUserQuestion')).toBeVisible();
     expect(screen.getByText(/Native input marker/)).toBeVisible();
     expect(screen.getByText(/Native answer marker/)).toBeVisible();
+    expect(server.raw).toHaveBeenCalledOnce();
+    expect(server.raw).toHaveBeenCalledWith(expect.objectContaining({ threadId: context.threadId }), source.id, expect.any(AbortSignal), expect.anything());
+    await userEvent.click(screen.getByText(i18n.t('thread.header.workDetail'), { exact: true }));
+    await userEvent.click(screen.getByText(i18n.t('thread.header.workDetail'), { exact: true }));
+    expect(await screen.findByText('AskUserQuestion')).toBeVisible();
+    expect(server.raw).toHaveBeenCalledOnce();
     expect(network).not.toHaveBeenCalled();
     expect(server.read).not.toHaveBeenCalled();
   } finally { drawn.unmount(); network.mockRestore(); threadWriter.evict(context.threadId); }

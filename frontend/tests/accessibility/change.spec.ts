@@ -105,7 +105,7 @@ test('a switch that is done: the thread held while it is under way, and the thre
   await expect(page.locator('[data-lock]')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await change.finish();
-  await expect(page.getByText(/switched to Codex with OpenAI key, carrying \d+ items of the conversation/)).toBeVisible();
+  await expect(page.getByText(/switched to Codex with OpenAI key, carrying \d+ items of the thread/)).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -130,7 +130,7 @@ test('a fork: the plan with each of its choices opened, the options, the job, an
   await page.keyboard.press('Escape');
 
   await dialog.getByRole('combobox', { name: 'Environment', exact: true }).click();
-  await page.getByRole('option', { name: 'Copy to new', exact: true }).click();
+  await page.getByRole('option', { name: 'Copy to a new environment', exact: true }).click();
   await dialog.getByRole('radio', { name: 'By pattern', exact: true }).click();
   await dialog.getByRole('textbox', { name: 'Take these' }).fill('src/**');
   await expect(dialog.getByText(/^Files: \d+ files?, /)).toBeVisible();
@@ -170,7 +170,8 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
 
   // The limit: the dialog that says how many are open, with a way to close each.
   await change.sides(MAIN, 3);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
   await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
@@ -193,7 +194,7 @@ test('an environment: the update, the move that is cancelled, and what is idle o
   await expect(update.getByText('Updating Sandbox')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await change.finish();
-  await expect(update.getByText('Sandbox is up to date. The old unit is being removed.')).toBeVisible();
+  await expect(update.getByText('Sandbox is up to date. The old container is being removed.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await update.getByRole('button', { name: 'Done' }).click();
 
@@ -214,7 +215,7 @@ test('an environment: the update, the move that is cancelled, and what is idle o
 
   await page.goto(`/resources/hosts/${HOST_ONE}`);
   await page.getByRole('button', { name: 'Actions for host-1' }).click();
-  await page.getByRole('menuitem', { name: 'Recycle idle…' }).click();
+  await page.getByRole('menuitem', { name: 'Recycle idle environments…' }).click();
   const recycle = page.getByRole('dialog', { name: 'Recycle idle on host-1' });
   await expect(recycle.getByText(/^Stops 1 environment\./)).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -258,12 +259,12 @@ test('in Chinese: the plan of a switch and of a fork, each with its choices open
   await expect(dialog.getByRole('button', { name: '切换', exact: true })).toBeEnabled();
   await page.keyboard.press('Escape');
   // Compact plans use the inline pickers instead of the former summary sentence.
-  await expect(dialog.getByRole('combobox', { name: '代理与提供方', exact: true })).toHaveValue(/OpenAI key/);
+  await expect(dialog.getByRole('combobox', { name: '智能体与提供方', exact: true })).toHaveValue(/OpenAI key/);
   await shot(page, 'zh-switch-1-plan');
   await expectAccessibleInBothThemes(page);
 
-  await dialog.getByRole('combobox', { name: '代理与提供方', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: '代理与提供方', exact: true })).toBeVisible();
+  await dialog.getByRole('combobox', { name: '智能体与提供方', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '智能体与提供方', exact: true })).toBeVisible();
   await shot(page, 'zh-switch-2-editor');
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
@@ -282,8 +283,9 @@ test('in Chinese: the plan of a switch and of a fork, each with its choices open
   await playScene(MAIN, 'history');
   await page.goto(`/thread/${MAIN}`);
   await expect(page.getByRole('log', { name: '对话', exact: true }).getByText('Please fix it, and run the tests.')).toBeVisible();
-  // Visible header actions retain their handler and are omitted from the folded menu.
-  const forkAction = page.locator('[data-thread-header]').getByRole('button', { name: '创建副本到…', exact: true });
+  // The act keeps its handler in the menu of the head.
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  const forkAction = page.getByRole('menuitem', { name: '创建副本到…', exact: true });
   await expect(forkAction).toBeVisible();
   await forkAction.click();
   const fork = wizard(page, '分叉“Main thread”');

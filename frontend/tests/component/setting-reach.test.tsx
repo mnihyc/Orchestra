@@ -17,8 +17,8 @@ interface ReadOptions {
 }
 const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options: ReadOptions) => Promise<{ data: SettingReach; response: Response }>>() }));
 vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: calls.read } }));
-vi.mock('@/features/chat/open', () => ({ useOpenPath: () => vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/chat/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useOpenPath: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 
 const def: KeyDef = { key: 'agent.web_search', title: 'Web search', description: 'Let the agent search the web.',
   group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', schema: { type: 'boolean' },
@@ -26,7 +26,7 @@ const def: KeyDef = { key: 'agent.web_search', title: 'Web search', description:
 const target = { kind: 'node', id: 'research' } as const;
 const initial: ResolvedSetting = { key: def.key, value: true, own: null, writable: false, locked_by: null,
   source: { scope: 'default', node: null }, parts: [] };
-const first: SettingReach = { applies: { orgs: 0, projects: 1, topics: 1, threads: 7 }, overrides: {
+const first: SettingReach = { applies: { orgs: 0, projects: 1, topics: 1, threads: 7, environments: 0, environment_threads: 0 }, overrides: {
   items: [{ id: 'override-one', kind: 'topic', name: 'login', redacted: false }], next_cursor: 'page-two',
 } };
 const second: SettingReach = { ...first, overrides: { items: [{ id: 'override-two', kind: 'project', name: 'Web', redacted: false }], next_cursor: null } };
@@ -51,7 +51,7 @@ it.each(['en', 'zh-CN'] as const)('loads from the row itself and gives native ap
   expect(calls.read).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: i18n.t('settings.reach.openFor', { name: def.title }) }));
   const region = await screen.findByRole('region', { name: i18n.t('settings.reach.openFor', { name: def.title }) });
-  expect(within(region).getByText(locale === 'en' ? 'Applies to 1 project, 1 topic, and 7 threads' : '适用于1 个项目、1 个主题和7 个线程')).toBeVisible();
+  expect(within(region).getByText(locale === 'en' ? 'Applies to 1 project, 1 topic, and 7 threads' : '适用于1 个项目、1 个话题和7 个会话')).toBeVisible();
   expect(within(region).getByRole('link', { name: 'login' })).toHaveAttribute('href', '/topic/override-one?tab=settings&section=defaults&setting=agent.web_search');
   expect(calls.read).toHaveBeenCalledOnce();
   expectRead(0, '/nodes/{id}/settings/{key}/reach', {
@@ -79,7 +79,7 @@ it('hides reach for a changed native value without a repair GET, and reads that 
   expect(screen.queryByRole('link', { name: 'login' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: i18n.t('settings.reach.openFor', { name: def.title }) })).toBeVisible();
   expect(calls.read).toHaveBeenCalledTimes(1);
-  calls.read.mockResolvedValue(reply({ applies: { orgs: 0, projects: 0, topics: 0, threads: 0 }, overrides: { items: [], next_cursor: null } }));
+  calls.read.mockResolvedValue(reply({ applies: { orgs: 0, projects: 0, topics: 0, threads: 0, environments: 0, environment_threads: 0 }, overrides: { items: [], next_cursor: null } }));
   await user.click(screen.getByRole('button', { name: i18n.t('settings.reach.openFor', { name: def.title }) }));
   expect(await screen.findByText(i18n.t('settings.reach.none'))).toBeVisible();
   expect(screen.queryByRole('link', { name: 'login' })).not.toBeInTheDocument();
@@ -108,7 +108,7 @@ it('loads the next cursor on request, keeps all served counts, and Refresh makes
 });
 
 it('reads the system’s own native route and says visible zero without a completion or global count claim', async () => {
-  calls.read.mockResolvedValue(reply({ applies: { orgs: 0, projects: 0, topics: 0, threads: 0 }, overrides: { items: [], next_cursor: null } }));
+  calls.read.mockResolvedValue(reply({ applies: { orgs: 0, projects: 0, topics: 0, threads: 0, environments: 0, environment_threads: 0 }, overrides: { items: [], next_cursor: null } }));
   show(<SettingReachDetails target={{ kind: 'system' }} def={def} snapshot="system-value" />);
   expect(await screen.findByText('No other visible places use this value.')).toBeVisible();
   expect(calls.read).toHaveBeenCalledOnce();

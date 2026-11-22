@@ -1,7 +1,7 @@
 /** Times, numbers, sizes, the one character of an avatar, and which keys are shortcuts: as each language and each keyboard needs them. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { formatBytes, formatNumber, formatPercent, formatTokens } from '@/lib/format';
+import { formatBytes, formatDiskBytes, formatNumber, formatPercent, formatStorageGb, formatTokens } from '@/lib/format';
 import { avatarText, graphemeCount, graphemes, IDENTITY_COLORS, identityColor } from '@/lib/grapheme';
 import { retryPause, retryRead, NetworkError, newActKey } from '@/lib/requests';
 import { matchesChord, parseShortcut, ShortcutBook, shortcutCaps, takesTyping } from '@/lib/shortcuts';
@@ -64,6 +64,16 @@ describe('a time', () => {
 });
 
 describe('a number', () => {
+  it('reuses the locale’s ordinary formatter for successive live counts', () => {
+    const make = vi.spyOn(Intl, 'NumberFormat');
+    try {
+      expect(formatNumber(1.5, 'de')).toBe('1,5');
+      expect(formatNumber(2.5, 'de')).toBe('2,5');
+      expect(make).toHaveBeenCalledTimes(1);
+      expect(formatNumber(2.5, 'en')).toBe('2.5');
+      expect(formatNumber(0.5, 'en', { style: 'percent' })).toBe('50%');
+    } finally { make.mockRestore(); }
+  });
   it('is grouped as its language groups it', () => {
     expect(formatNumber(1234567.5, 'en')).toBe('1,234,567.5');
     expect(formatNumber(1234567.5, 'zh-CN')).toBe('1,234,567.5');
@@ -77,6 +87,16 @@ describe('a number', () => {
     expect(formatBytes(1536, 'en')).toBe('1.5 KiB');
     expect(formatBytes(20 * 1024 * 1024, 'zh-CN')).toBe('20 MiB');
     expect(formatBytes(5 * 1024 ** 3 + 1024 ** 3 / 4, 'en')).toBe('5.3 GiB');
+  });
+
+  it('of a disk is said in the decimal gigabytes every storage report uses, as df -H says it', () => {
+    // One disk: 267,900,809,216 bytes, of which a connector reports 267 GB and 30 GB free.
+    expect(formatDiskBytes(267_900_809_216, 'en')).toBe('267.9 GB');
+    expect(formatDiskBytes(30_848_278_528, 'en')).toBe('30.8 GB');
+    expect(formatDiskBytes(999, 'en')).toBe('999 B');
+    expect(formatDiskBytes(1_500_000_000_000, 'zh-CN')).toBe('1.5 TB');
+    expect(formatStorageGb(267, 'en')).toBe('267 GB');
+    expect(formatStorageGb(1_081, 'en')).toBe('1.1 TB');
   });
 
   it('of tokens is written out up to ten thousand and abbreviated above', () => {
