@@ -1,0 +1,1 @@
+test -p orch-api-core --test everything_resources -- figures_scopes::resource_impact_publication_rechecks_the_original_model_qualified_binding_after_activity_wait --nocapture

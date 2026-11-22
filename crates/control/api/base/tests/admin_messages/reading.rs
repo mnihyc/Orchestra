@@ -5,7 +5,7 @@ mod permission_rules;
 use http::StatusCode;
 use orch_api_contract::{
     admin_messages::{AdminMessageList, MessageGet, OrgMessageList},
-    common::PageQuery,
+    common::CollectionQuery,
 };
 
 fn system_read(operation: &str) -> Json {
@@ -22,7 +22,8 @@ async fn sent(
     cursor: Option<String>,
     limit: u32,
 ) -> RawReply {
-    let query = PageQuery {
+    let query = CollectionQuery {
+        q: None,
         cursor,
         limit: Some(limit),
     };
@@ -50,6 +51,100 @@ fn value(reply: RawReply) -> Json {
         String::from_utf8_lossy(&reply.raw)
     );
     serde_json::from_slice(&reply.raw).unwrap()
+}
+
+fn phase_count(log: &orch_api_core::testing::Boundaries, phase: &str) -> usize {
+    let prefix = format!("MessageGet:{phase} ");
+    log.all(std::time::Instant::now())
+        .iter()
+        .filter(|line| line.starts_with(&prefix))
+        .count()
+}
+
+#[tokio::test]
+async fn a_stable_message_read_checks_its_source_only_at_the_transport_cuts_even_when_repeats_are_zero()
+ {
+    use orch_api_core::testing::{Boundaries, follow};
+    for repeats in [0, 3] {
+        let world = World::new().await;
+        let c = admin_support::cast(&world).await;
+        let message = full_org_send(&world, &c.boss, c.acme).await;
+        world.set("api.read_repeats", json!(repeats)).await;
+        let log = Boundaries::new();
+        let answer = follow(log.clone(), get(&world, &c.boss.token, message.id)).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(
+            phase_count(&log, "selected.refresh"),
+            2,
+            "one source check for the header and one after the produced data frame"
+        );
+        assert_eq!(phase_count(&log, "selected.repeat_render"), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_message_that_keeps_changing_is_answered_with_current_content_instead_of_an_access_denial()
+ {
+    use orch_api_core::testing::{Boundaries, follow};
+    let world = World::new().await;
+    let c = admin_support::cast(&world).await;
+    let message = full_org_send(&world, &c.boss, c.acme).await;
+    let log = Boundaries::new();
+    let (pool, id) = (world.db.pool.clone(), message.id);
+    log.hold(move |operation, phase| {
+        let pool = pool.clone();
+        Box::pin(async move {
+            if operation == "MessageGet" && phase == "publication.snapshot" {
+                sqlx::query("UPDATE admin_messages SET title=title || ' updated' WHERE id=$1")
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        })
+    });
+    let answer = follow(log.clone(), get(&world, &c.boss.token, message.id)).await;
+    let shown = value(answer);
+    assert!(shown["title"].as_str().unwrap().starts_with(&message.title));
+    assert!(phase_count(&log, "selected.refresh") >= 2);
+    let current: String = sqlx::query_scalar("SELECT title FROM admin_messages WHERE id=$1")
+        .bind(message.id)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        shown["title"],
+        json!(current),
+        "the bytes belong to the last current source check"
+    );
+}
+
+#[tokio::test]
+async fn a_changed_message_with_rebuilding_disabled_says_to_read_again_without_rebuilding_a_discarded_reply()
+ {
+    use orch_api_core::testing::{Boundaries, follow};
+    let world = World::new().await;
+    let c = admin_support::cast(&world).await;
+    let message = full_org_send(&world, &c.boss, c.acme).await;
+    world.set("api.read_repeats", json!(0)).await;
+    let log = Boundaries::new();
+    let (pool, id) = (world.db.pool.clone(), message.id);
+    log.hold(move |operation, phase| {
+        let pool = pool.clone();
+        Box::pin(async move {
+            if operation == "MessageGet" && phase == "selected.settle" {
+                sqlx::query("UPDATE admin_messages SET title=title || ' updated' WHERE id=$1")
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        })
+    });
+    let answer = follow(log.clone(), get(&world, &c.boss.token, message.id)).await;
+    assert_eq!(answer.status, StatusCode::CONFLICT);
+    assert_eq!(answer.problem().code, ErrorCode::ConflictConcurrentChange);
+    assert_eq!(phase_count(&log, "selected.repeat_render"), 0);
 }
 
 #[tokio::test]
@@ -252,5 +347,36 @@ async fn system_messages_are_readable_in_the_inbox_but_the_sent_list_keeps_curre
         value(get(&world, &c.root.token, message.id).await)["id"],
         json!(message.id),
         "received content does not borrow the admin switch"
+    );
+}
+
+#[tokio::test]
+async fn sent_search_finds_an_older_title_before_one_summary_row_and_keeps_the_full_audience_count()
+{
+    let world = World::new().await;
+    let c = admin_support::cast(&world).await;
+    let older = full_org_send(&world, &c.boss, c.acme).await;
+    sqlx::query("UPDATE admin_messages SET title='An older special message' WHERE id=$1")
+        .bind(older.id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    for _ in 0..13 {
+        full_org_send(&world, &c.boss, c.acme).await;
+    }
+    let result = world
+        .app
+        .call(OrgMessageList, &[&c.acme])
+        .token(&c.boss.token)
+        .raw_query("q=older%20special&limit=1")
+        .send_bytes()
+        .await;
+    let shown = value(result);
+    assert_eq!(shown["items"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["items"][0]["id"], json!(older.id));
+    assert!(shown["items"][0].get("body").is_none());
+    assert_eq!(
+        shown["audience_count"],
+        value(sent(&world, &c.boss.token, Some(c.acme), None, 1).await)["audience_count"]
     );
 }

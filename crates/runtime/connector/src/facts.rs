@@ -118,6 +118,8 @@ pub(crate) async fn local_sign_ins(hosting: &Hosting) -> Vec<ProviderFound> {
 /// What the roles add to the facts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FactsDraft {
+    /// The bundled node's native release updater, never inferred from its name.
+    pub server_update: Option<orch_driver_contract::descriptor::OperationSupport>,
     /// The actual account's independently proved native resource controllers.
     pub process_controls: orch_driver_contract::process_limits::ProcessControls,
     /// Local-only machine isolation declaration, read from the same configuration file.
@@ -136,6 +138,66 @@ pub struct FactsDraft {
     pub harnesses: Vec<MachineFactsHarness>,
     /// The implementations from outside registered on it.
     pub plugins: Vec<MachineFactsPlugin>,
+}
+
+/// System-wide CPU and RAM sampling uses only aggregate counters, even for large workspaces.
+pub(crate) struct RoomSampler {
+    system: System,
+    last_cpu_read: std::time::Instant,
+    last: Option<orch_api_contract::environment::PlaceRoom>,
+}
+
+impl RoomSampler {
+    pub(crate) fn new() -> Self {
+        let mut system = System::new();
+        system.refresh_cpu_usage();
+        Self {
+            system,
+            last_cpu_read: std::time::Instant::now(),
+            last: None,
+        }
+    }
+
+    pub(crate) fn sample(
+        &mut self,
+        clock: &dyn orch_types::Clock,
+        clock_offset_ms: i64,
+    ) -> orch_api_contract::environment::PlaceRoom {
+        let ready = self.last_cpu_read.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
+        if !ready && let Some(last) = self.last {
+            return last;
+        }
+        let cpu_free_millis = if ready {
+            self.system.refresh_cpu_usage();
+            self.last_cpu_read = std::time::Instant::now();
+            let usage = f64::from(self.system.global_cpu_usage());
+            let cpus = u32::try_from(self.system.cpus().len()).ok();
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the measured idle share is in 0..=100 and rounded to millicores"
+            )]
+            let free = cpus
+                .filter(|count| *count > 0 && (0.0..=100.0).contains(&usage))
+                .map(|count| (f64::from(count) * (100.0 - usage) * 10.0).round() as u64);
+            free
+        } else {
+            None
+        };
+        self.system
+            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        let room = orch_api_contract::environment::PlaceRoom {
+            cpu_free_millis,
+            memory_free_bytes: (self.system.total_memory() > 0)
+                .then(|| self.system.available_memory()),
+            // Session start and host load times use the system clock.
+            observed_at: orch_types::Time::new(
+                clock.now() - chrono::Duration::milliseconds(clock_offset_ms),
+            ),
+        };
+        self.last = Some(room);
+        room
+    }
 }
 
 /// What the host is.
@@ -170,6 +232,31 @@ impl Host {
     }
 }
 
+/// Capacity of the connector's own filesystem. Measuring it does not walk its contents.
+#[cfg(unix)]
+pub(crate) fn data_volume_bytes(path: &std::path::Path) -> Option<i64> {
+    let fs = rustix::fs::statvfs(path).ok()?;
+    i64::try_from(fs.f_blocks.checked_mul(fs.f_frsize)?)
+        .ok()
+        .filter(|n| *n > 0)
+}
+#[cfg(windows)]
+pub(crate) fn data_volume_bytes(path: &std::path::Path) -> Option<i64> {
+    let path = path.canonicalize().ok()?;
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter_map(|disk| {
+            let mount = disk.mount_point().canonicalize().ok()?;
+            path.starts_with(&mount)
+                .then(|| (mount.components().count(), disk.total_space()))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .and_then(|(_, total)| i64::try_from(total).ok())
+        .filter(|n| *n > 0)
+}
+
 /// The facts of a machine.
 #[must_use]
 pub fn machine_facts(
@@ -180,6 +267,12 @@ pub fn machine_facts(
     clock_offset_ms: i64,
 ) -> MachineFacts {
     MachineFacts {
+        room: None,
+        runtime_platform: draft
+            .environment_data_storage
+            .as_ref()
+            .and_then(|_| crate::installation::reviewable_platform().cloned()),
+        server_update: draft.server_update,
         data_directory: None,
         gateway: None,
         role_management: None,
@@ -213,6 +306,8 @@ pub fn machine_facts(
         os_version: host.os_version.clone(),
         cpus: host.cpus,
         memory_bytes: host.memory_bytes,
+        data_volume_bytes: None,
+        capacity_refresh_secs: None,
         discovered_harnesses: None,
         searched_harness_kinds: None,
         // Local configuration can name a program before it is installed. Report only files
@@ -264,12 +359,14 @@ mod tests {
                     kind: "existing".to_owned(),
                     path: existing.display().to_string(),
                     version: "unknown".to_owned(),
+                    sha256: None,
                     daemon: false,
                 },
                 MachineFactsHarness {
                     kind: "missing".to_owned(),
                     path: missing.display().to_string(),
                     version: "unknown".to_owned(),
+                    sha256: None,
                     daemon: false,
                 },
             ],

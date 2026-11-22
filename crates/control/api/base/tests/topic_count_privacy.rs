@@ -206,13 +206,14 @@ async fn topic_get_and_project_list_count_no_private_state_or_activity_but_owner
     );
     assert_eq!(own.last_activity_at, Some(Time::new(f.latest)));
     // A modern key retains the same native ACL and assurance as its actual person.
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
-    let secret = new_token(API_TOKEN_PREFIX);
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let scope:orch_access_contract::key_scope::KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"topic","id":f.topic,"reach":"self"},"resources":["topic"],"allow":[{"operation":"NodeGet.read","actions":["read"]}]}]})).unwrap();
     orch_db::queries::identity::create_api_token_scoped(
         &mut *f.world.conn().await,
         &orch_db::queries::identity::NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: f.viewer.id(),
             name: "Visible topic statistics",
             token_hash: &token_hash(&secret),
