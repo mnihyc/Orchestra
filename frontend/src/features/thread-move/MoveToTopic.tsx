@@ -1,21 +1,20 @@
-/** Moving the same conversation to a reviewed topic through the shared tree and current topic authority. */
-import { useMutation, useQueries, useQuery } from '@tanstack/react-query';
-import { useCallback, useMemo, useRef, useState } from 'react';
+/** The selected topic determines which native move is reviewed. */
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { nodeQuery } from '@/api/nodes';
 import { moveThread, previewThreadMove } from '@/api/thread-move';
 import type { Thread, ThreadMovePlan, PreviewPerson } from '@/generated/api-types';
 import { canCreateIn, permissionLabel } from '@/lib/permissions';
 import { newActKey } from '@/lib/requests';
-import { useOrgTree } from '@/realtime/stores/tree';
+import { openChange } from '@/features/change/target';
+import { CopyPlacePicker } from '@/features/duplicate/CopyPlacePicker';
+import type { PickedPlace } from '@/features/settings/PlacePicker';
 import { threadWriter } from '@/realtime/stores/thread';
 import { SettingReadout } from '@/features/settings/SettingReadout';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { NodeIcon } from '@/ui/NodeIcon';
-import { Tree, type TreeRow } from '@/ui/Tree';
-import { topicTree, type MovePlace } from './tree';
 
 function PersonChange({ entry, gained }: { entry: PreviewPerson; gained: boolean }) {
   const { t } = useTranslation();
@@ -23,44 +22,46 @@ function PersonChange({ entry, gained }: { entry: PreviewPerson; gained: boolean
 }
 
 export function MoveToTopic({ thread, close }: { thread: Thread; close: () => void }) {
-  const { t } = useTranslation(); const tree = useOrgTree(thread.org_id);
-  const [expanded, setExpanded] = useState(() => new Set(thread.path.map((place) => place.id)));
-  const [target, setTarget] = useState<string | null>(null);
+  const { t } = useTranslation();
+  const [place, setPlace] = useState<PickedPlace | null>(null);
+  const target = place?.id ?? null;
   const key = useRef(newActKey());
-  const rows = useMemo(() => topicTree(tree.nodes, thread.org_id, expanded), [tree.nodes, thread.org_id, expanded]);
-  // Only visible topic leaves are probed. Collapsed folders never create a request for every descendant.
-  const topics = useMemo(() => rows.filter((row) => row.item.kind === 'topic' && row.id !== thread.topic_id), [rows, thread.topic_id]);
-  const checks = useQueries({ queries: topics.map((row) => nodeQuery(row.id)) });
-  const permissions = useMemo(() => new Map(topics.map((row, index) => [row.id, checks[index]])), [topics, checks]);
+  const topic = useQuery({ ...nodeQuery(target ?? ''), enabled: target !== null });
+  const mayChoose = topic.data?.kind === 'topic' && canCreateIn('topic', topic.data.access);
   const review = useQuery({ queryKey: ['thread-move', thread.id, target], queryFn: ({ signal }) => {
     if (target === null) throw new Error('Choose a topic before reviewing this move.');
     return previewThreadMove(thread.id, target, signal);
-  }, enabled: target !== null, staleTime: 0, retry: false });
+  }, enabled: target !== null && mayChoose, retry: false });
   const move = useMutation({ mutationFn: (plan: ThreadMovePlan) => moveThread(thread.id, plan, key.current), onSuccess: (moved) => {
     threadWriter.apply(thread.id, { thread: moved });
     close();
   } });
-  const renderRow = useCallback((row: TreeRow<MovePlace>) => {
-    const check = permissions.get(row.id);
-    const topic = check?.data?.kind === 'topic' ? check.data : null;
-    const mayChoose = row.item.kind === 'topic' && row.id !== thread.topic_id && topic !== null && canCreateIn('topic', topic.access);
-    const reason = row.id === thread.topic_id ? t('threadMove.here') : row.item.kind !== 'topic' ? null : check?.isPending === true ? t('threadMove.checking') : !mayChoose ? t('threadMove.needsInteract') : null;
-    return <a href={`#move-topic-${row.id}`} aria-disabled={!mayChoose} className={`flex min-w-0 flex-1 items-center gap-2 py-1 ${mayChoose ? 'text-text' : 'text-text-muted'}`} onClick={(event) => { event.preventDefault(); if (mayChoose && !move.isPending) { key.current = newActKey(); move.reset(); setTarget(row.id); } }}>
-      <NodeIcon kind={row.item.kind === 'project' && tree.nodes.get(row.item.parent_id ?? '')?.kind === 'project' ? 'folder' : row.item.kind} color={row.item.color} />
-      <span className="truncate">{row.item.name}</span>{reason !== null && <span className="ml-auto truncate text-xs">{reason}</span>}
-    </a>;
-  }, [permissions, thread.topic_id, tree.nodes, move, t]);
+  const choose = (next: PickedPlace | null) => {
+    if (move.isPending || next !== null && next.rootOrgId === undefined) return;
+    if (next !== null && next.rootOrgId !== thread.org_id) {
+      close();
+      openChange({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'move-out', destination: next });
+      return;
+    }
+    key.current = newActKey();
+    move.reset();
+    setPlace(next);
+  };
   const plan = review.data;
   const footer = <><Button variant="ghost" onClick={close} disabled={move.isPending}>{t('common.cancel')}</Button>
-    {target !== null && <Button variant="secondary" onClick={() => { key.current = newActKey(); move.reset(); void review.refetch(); }} disabled={move.isPending || review.isFetching}>{t('threadMove.reviewAgain')}</Button>}
-    <Button pending={move.isPending} disabled={plan === undefined || review.isFetching || plan.blockers.length > 0} onClick={() => { if (plan !== undefined) move.mutate(plan); }}>{t('threadMove.confirm', { topic: plan?.to.name ?? '' })}</Button></>;
+    {target !== null && mayChoose && <Button variant="secondary" onClick={() => { key.current = newActKey(); move.reset(); void review.refetch(); }} disabled={move.isPending || review.isFetching}>{t('threadMove.reviewAgain')}</Button>}
+    <Button pending={move.isPending} disabled={!mayChoose || topic.isError || review.isError || plan === undefined || review.isFetching || plan.blockers.length > 0} onClick={() => { if (plan !== undefined) move.mutate(plan); }}>{t('threadMove.confirm', { topic: plan?.to.name ?? '' })}</Button></>;
   return <Dialog open onOpenChange={(open) => { if (!open && !move.isPending) close(); }} title={t('threadMove.title')} size="lg" dismissible={!move.isPending} footer={footer}>
     <div className="flex flex-col gap-4">
-      {tree.error !== null && <ErrorAlert error={tree.error} />}
-      {!tree.loaded ? <p role="status">{t('threadMove.loading')}</p> : <Tree label={t('threadMove.choose')} rows={rows} currentId={target} nameOf={(place) => place.name} renderRow={renderRow} onExpandedChange={(id, open) => setExpanded((current) => { const next = new Set(current); if (open) next.add(id); else next.delete(id); return next; })} />}
+      <CopyPlacePicker label={t('threadMove.choose')} only="topic" liveBranchesOnly subject={{ kind: 'thread', id: thread.id }} sourceName={thread.name}
+        intent="move" homeMoveRoot={thread.org_id} homeMoveRefusal={(candidate) => candidate.id === thread.topic_id ? t('threadMove.here') : false}
+        refusal={(candidate) => candidate.rootOrgId === undefined ? t('duplicate.homeUnknown') : false}
+        onStanding={() => undefined} value={place} onChange={choose} disabled={move.isPending} />
+      {target !== null && (topic.isError ? <ErrorAlert error={topic.error} /> : topic.isPending ? <p role="status">{t('threadMove.checking')}</p>
+        : !mayChoose && <p className="text-sm text-text-muted">{t('threadMove.needsInteract')}</p>)}
       {review.isFetching && <p role="status" className="text-sm text-text-muted">{t('threadMove.reviewing')}</p>}
       {review.error !== null && <ErrorAlert error={review.error} />}{move.error !== null && <ErrorAlert error={move.error} />}
-      {plan !== undefined && <section className="flex flex-col gap-2 text-sm" aria-label={t('threadMove.review')}>
+      {mayChoose && plan !== undefined && <section className="flex flex-col gap-2 text-sm" aria-label={t('threadMove.review')}>
         <p>{t('threadMove.unchanged', { owner: plan.unchanged.owner.display_name, environment: plan.unchanged.environment?.name ?? t('threadMove.noEnvironment'), directory: plan.unchanged.directory || '/' })}</p>
         {plan.blockers.map((blocker) => <p key={blocker.code} className="text-danger-text">{blocker.message}</p>)}
         <ul className="list-disc pl-6">{plan.access.gaining.map((entry) => <PersonChange key={`gain-${entry.user.id}`} entry={entry} gained />)}{plan.access.losing.map((entry) => <PersonChange key={`lose-${entry.user.id}`} entry={entry} gained={false} />)}{plan.access.more > 0 && <li>{t('threadMove.more', { count: plan.access.more })}</li>}</ul>

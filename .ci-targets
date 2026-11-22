@@ -1,0 +1,4 @@
+test -p orch-settings-contract --lib
+test -p orch-config --lib
+test -p orch-api-core --test removal --test document_comment_edit_replay --test kfix_upload
+web test -- tests/component/agent-features-editor.test.tsx tests/component/settings-policy-narrowing.test.tsx

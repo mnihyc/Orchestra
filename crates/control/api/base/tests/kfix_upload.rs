@@ -58,6 +58,7 @@ async fn disk_room() -> (Room, TempDir) {
     let blobs = Blobs::new(store, directory.path());
     old.engine.attach_blobs(blobs.store());
     let state = Arc::new(AppState {
+        metrics_listener_failed: old.metrics_listener_failed.clone(),
         host_ports: old.host_ports.clone(),
         builtin_sources: old.builtin_sources.clone(),
         db: old.db.clone(),
@@ -157,6 +158,7 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .call(UploadSessionCreate, &[])
         .token(&by.token)
         .body(&UploadSessionCreateBody {
+            to: None,
             size: i64::try_from(bytes.len()).unwrap(),
             name: "source.txt".into(),
             media_type: None,
@@ -181,6 +183,8 @@ async fn session_upload(room: &Room, by: &Who, bytes: &[u8]) -> UploadedBlob {
         .send()
         .await
         .ok()
+        .into_file()
+        .expect("the retained upload completed verification")
 }
 
 fn same_refusal(known: &Problem, missing: &Problem) {
@@ -404,6 +408,39 @@ async fn an_unsent_private_draft_keeps_downloadable_bytes_after_the_blob_grace_p
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn an_unpinned_upload_is_collected_after_the_grace_the_system_sets() {
+    let (room, _directory) = disk_room().await;
+    let hours = json!(1);
+    orch_db::queries::settings::put(
+        &mut *room.world.conn().await,
+        None,
+        "retention.blob_grace_hours",
+        &orch_db::queries::settings::Stored {
+            value: &hours,
+            locked: false,
+            by: None,
+            at: room.world.now(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let file = raw_file(&room, &room.bea, b"short grace").await;
+    save(&room, &room.bea, vec![part(&file)]).await;
+    discard(&room, &room.bea).await;
+    assert_eq!(room.pins(&file.blob).await, 0);
+    let app = &room.world.app.app;
+    room.world.advance(Duration::hours(2));
+    collect_garbage(&app.db, &app.blobs, app.clock.as_ref(), &app.config)
+        .await
+        .unwrap();
+    assert!(
+        app.blobs.store().size(&file.blob).await.unwrap().is_none(),
+        "two hours exceed the one-hour grace the system set"
     );
 }
 
