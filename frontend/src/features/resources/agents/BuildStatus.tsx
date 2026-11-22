@@ -1,4 +1,5 @@
 /** One bounded result card for an immutable program build. */
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import type { HarnessBuild } from '@/generated/api-types';
 import { StatusTag, type TagTone } from '@/features/admin/StatusTag';
@@ -6,30 +7,58 @@ import { Popover } from '@/ui/Popover';
 import { Tooltip } from '@/ui/Tooltip';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { buildRefusal } from '@/lib/versions';
-import { caseUnavailable, checkName, disabledFeatures, featureFallback, featureName, unsupportedReason } from './buildChecks';
+import { formatNumber } from '@/lib/format';
+import { useFormatContext } from '@/lib/appearance';
+import { useServerNow } from '@/lib/serverClock';
+import { formatSpan, useRunningClock } from '@/lib/time';
+import { caseUnavailable, checkErrorWords, checkName, disabledFeatures, featureFallback, featureName, pendingCases, unsupportedReason } from './buildChecks';
 import { programNameIn } from '@/features/resources/programNames';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
+/** Keep the recorded reason available when a host or adapter reports an unfamiliar failure. */
+function outcomeReason(build: HarnessBuild, t: TFunction): string | null {
+  const check = build.check;
+  if (check === null || check === undefined || build.status === 'checking' || build.status === 'checked') return null;
+  const error = check.error?.trim();
+  if (build.status === 'untested') {
+    return error === undefined || error === '' ? t('programVersions.noCheckResult') : checkErrorWords(error, t);
+  }
+  const failed = check.cases.find((result) => !result.passed);
+  const reason = failed?.error ?? error ?? (check.missing.length > 0 ? t('admin.harnesses.missing', { names: check.missing.join(', ') }) : null);
+  return reason === null || reason.trim() === '' ? t('programVersions.chooseChecked') : t('programVersions.failedReason', { reason });
+}
+
 /** How far a build is known to work, with its existing status trigger opening the check's results. */
-export function BuildStatus({ build, name, catalogue }: { build: HarnessBuild; name?: string | undefined; catalogue?: unknown }) {
+export function BuildStatus({ build, name, catalogue, showOutcome = false }: { build: HarnessBuild; name?: string | undefined; catalogue?: unknown; showOutcome?: boolean }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const status = build.status;
   const refusal = buildRefusal(build);
   const check = build.check;
+  const outcome = showOutcome ? outcomeReason(build, t) : null;
   const cases = check?.cases ?? [];
   const firstFailure = cases.find(caseUnavailable);
   const off = disabledFeatures(build);
+  const pending = status === 'checked' ? pendingCases(build, catalogue, locale) : [];
   const tone: TagTone = refusal !== null || status === 'failed' ? 'danger' : off.length > 0 ? 'warning' : status === 'checked' ? 'accent' : 'neutral';
   const firstFeature = firstFailure?.feature ?? off[0];
   const failedName = firstFailure === undefined ? null : checkName(firstFailure.name, t, catalogue, locale);
-  const hasDetails = check !== undefined && check !== null && (check.error !== null || check.missing.length > 0 || off.length > 0 || cases.length > 0);
-  const label = refusal !== null ? t('programVersions.refused') : status === 'checking' ? t(`admin.harnesses.checking.${check?.stage === 'conformance' ? 'conformance' : 'interface'}`)
+  const hasDetails = check !== undefined && check !== null && (check.error !== null || check.missing.length > 0 || off.length > 0 || cases.length > 0 || pending.length > 0);
+  const label = outcome !== null && status === 'untested' ? t('programVersions.couldNotCheck') : refusal !== null ? t('programVersions.refused') : status === 'checking' ? t(`admin.harnesses.checking.${check?.stage === 'conformance' ? 'conformance' : 'interface'}`)
     : firstFeature !== undefined ? t('programVersions.offInBuild', { feature: featureName(firstFeature, t, catalogue, locale) })
-      : status === 'failed' && failedName !== null ? <>{t('admin.harnesses.status.failed')}{' · '}{failedName.known ? failedName.text : <code className="font-mono">{failedName.text}</code>}</> : t(`admin.harnesses.status.${status}`);
-  const plainStatus = refusal !== null || (status !== 'checking' && firstFeature === undefined && !(status === 'failed' && failedName !== null));
-  const tag = <StatusTag tone={tone} className={plainStatus ? 'min-w-max whitespace-nowrap' : 'max-w-full whitespace-normal wrap-anywhere'}>{label}</StatusTag>;
-  return !hasDetails ? tag : <Popover label={t('admin.harnesses.checkResults')} trigger={<Tooltip content={t('admin.harnesses.checkResults')}><button type="button" className="focus-inset min-w-0 max-w-full rounded-md text-left">{tag}</button></Tooltip>}>
+      : status === 'failed' && failedName !== null ? <>{t('admin.harnesses.status.failed')}{' · '}{failedName.known ? failedName.text : <code className="font-mono">{failedName.text}</code>}</>
+        : pending.length > 0 ? t('programVersions.checkedPending', { count: pending.length, number: formatNumber(pending.length, locale) }) : t(`admin.harnesses.status.${status}`);
+  const plainStatus = refusal !== null || (status !== 'checking' && firstFeature === undefined && pending.length === 0 && !(status === 'failed' && failedName !== null));
+  // A check under way says how long it has run: its record is this check's from its start.
+  const running = status === 'checking' && check !== null && check !== undefined;
+  const deviceNow = useRunningClock(running);
+  const now = useServerNow(deviceNow) ?? deviceNow;
+  const format = useFormatContext();
+  const ran = running ? now - Date.parse(check.at) : Number.NaN;
+  const tag = <StatusTag tone={tone} className={plainStatus ? 'min-w-max whitespace-nowrap' : 'max-w-full whitespace-normal wrap-anywhere'}>
+    {label}{Number.isFinite(ran) && <span className="tabular-nums">{' · '}{formatSpan(Math.max(0, ran), format)}</span>}
+  </StatusTag>;
+  const statusControl = !hasDetails ? tag : <Popover label={t('admin.harnesses.checkResults')} trigger={<Tooltip content={t('admin.harnesses.checkResults')}><button type="button" className="focus-inset min-w-0 max-w-full rounded-md text-left">{tag}</button></Tooltip>}>
     <div className="flex min-w-0 flex-col gap-3 text-sm wrap-anywhere">
       <span className="font-medium">{name ?? programNameIn(build, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown')} {build.version}</span>
       {off.map((feature) => <div key={feature}>
@@ -44,10 +73,14 @@ export function BuildStatus({ build, name, catalogue }: { build: HarnessBuild; n
           {(unsupported ?? result.error) !== null && <div className="text-text-muted whitespace-pre-line">{unsupported ?? result.error}</div>}
         </div>;
       })}
+      {pending.length > 0 && <div>{t('programVersions.casesPending', { names: pending.join(', ') })}</div>}
       {off.includes('import_native') && <ArticleGuideLink article="carry-a-thread" heading="read-the-method" title={t('admin.harnesses.historySupport')} />}
-      {check.error !== null && <div className="text-text-muted whitespace-pre-line">{check.error}</div>}
+      {check.error !== null && <div className="text-text-muted whitespace-pre-line">{checkErrorWords(check.error, t)}</div>}
       {check.missing.length > 0 && <div className="text-text-muted">{t('admin.harnesses.missing', { names: check.missing.join(', ') })}</div>}
       <span className="text-text-muted"><RelativeTime at={check.at} />{check.machine === null ? null : ` · ${check.machine}`}</span>
     </div>
   </Popover>;
+  return outcome === null ? statusControl : <span className="inline-flex min-w-0 flex-wrap items-baseline gap-x-1.5" role="status">
+    {statusControl}<span className="wrap-anywhere text-sm text-text-muted">{status === 'failed' && firstFeature !== undefined && refusal === null ? t('admin.harnesses.status.failed') + ' · ' : ''}{outcome}</span>
+  </span>;
 }

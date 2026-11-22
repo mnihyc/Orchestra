@@ -125,3 +125,27 @@ describe('where a visitor goes on to after signing in', () => {
     }
   });
 });
+
+
+it('uses the same closed branch facts with archived rows hidden or shown',()=>{
+  const folded={has_children:false,waiting:0,unread:false,mentions:0,urgency:null,
+    archived:{has_children:true,waiting:1,unread:true,mentions:2,urgency:'running' as const}};
+  const held=treeOf([node('root','org',null),node('web','project','root',{folded})]);
+  const off=buildRows(held,'root',new Set(),'en',{showArchived:false});
+  expect(off.find((row)=>row.id==='web')?.item).toMatchObject({unread:false,mentions:0,waiting:0,urgent:null});
+  const on=buildRows(held,'root',new Set(),'en',{showArchived:true});
+  expect(on.find((row)=>row.id==='web')?.item).toMatchObject({unread:true,mentions:2,waiting:1,urgent:'running'});
+  expect(on.find((row)=>row.id==='web')?.expandable).toBe(true);
+});
+
+it('keeps a large closed branch expandable from native evidence without retaining its descendants',()=>{
+  treeWriter.clear();
+  const root=node('root','org',null,{folded:{has_children:true,small_tree:false,waiting:0,unread:false,mentions:0,urgency:null}});
+  const branch=node('branch','project',root.id,{folded:{has_children:true,waiting:0,unread:false,mentions:0,urgency:null}});
+  treeWriter.branch(root.id,root.id,[branch],1,[],[root]);
+  const held=useTreeStore.getState().byOrg.get(root.id);if(held===undefined)throw new Error('The first level must be retained');
+  expect(held.nodes.size).toBe(2);expect(firstExpanded(held)).toEqual([]);
+  const rows=buildRows(held,root.id,new Set(),'en');
+  expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({id:branch.id,expandable:true,expanded:false});
+  treeWriter.clear();
+});

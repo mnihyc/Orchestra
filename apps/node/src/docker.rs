@@ -42,8 +42,7 @@ const IDENTITY_DIR: &str = "identity";
 /// How long a request to the daemon for the record of a unit's enrollment may take: it is a small file.
 const PROBE_SECS: u64 = 10;
 
-/// The driver's settings from the operator's `[node.docker]` and `[[node.storage]]`, and from where the node
-/// keeps its tool cache. Everything else is the driver's own default.
+/// The driver's operational settings, storages from the machine policy, and the node's tool cache. Everything else is the driver's own default.
 pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
     let docker = &settings.docker;
     let mut labels = docker.labels.clone();
@@ -59,8 +58,8 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
         live_helper_binary: docker
             .live_helper_binary
             .clone()
-            .or_else(orch_connector_core::installation::program_path),
-        builds: docker.builds,
+            .or_else(orch_connector_core::installation::program_path)
+            .map(|runner| runner_for_daemon(settings, runner)),
         build_args: docker.build_args.clone(),
         offline_images: docker.offline_images.clone(),
         build_timeout_secs: docker.build_timeout_secs,
@@ -131,6 +130,71 @@ pub fn config_of(settings: &NodeSettings) -> Result<DockerConfig, DriverError> {
             .collect::<Result<_, DriverError>>()?,
         ..DockerConfig::default()
     })
+}
+
+/// The directory of the node's data directory that holds the copy of its own program it hands its daemon.
+const RUNNER_DIR: &str = "runner";
+
+/// The node's own program as its daemon can bind it into a helper or a check unit. The daemon resolves a bind on its
+/// host: a program inside a directory it has under the name the node uses (the data directory, which a node in a
+/// container has at the path the host has, or a directory of `path_map`) is handed as it is; one only the node sees,
+/// as a node in a container sees its own program, is copied once into the data directory, named by the digest of its
+/// bytes. Only a static program is copied: no helper runs another, and each says so itself.
+fn runner_for_daemon(settings: &NodeSettings, runner: std::path::PathBuf) -> std::path::PathBuf {
+    let seen = std::iter::once(settings.data_dir.as_path())
+        .chain(
+            settings
+                .docker
+                .path_map
+                .iter()
+                .map(|map| std::path::Path::new(map.node.as_str())),
+        )
+        .any(|directory| runner.starts_with(directory));
+    if seen || !orch_driver_docker::live_mounts::static_binary(&runner) {
+        return runner;
+    }
+    match place_runner(&settings.data_dir.join(RUNNER_DIR), &runner) {
+        Ok(placed) => placed,
+        Err(error) => {
+            // The daemon then names the path it could not find, as it did before.
+            tracing::warn!(%error, runner = %runner.display(), "the node's program could not be put where its daemon sees it");
+            runner
+        }
+    }
+}
+
+/// Copies `runner` to `<directory>/<digest>/<its name>` unless it is there already, and removes the copies of other
+/// programs, which older builds of the node left.
+fn place_runner(
+    directory: &std::path::Path,
+    runner: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let mut hasher = orch_types::Hash::hasher();
+    std::io::copy(&mut std::fs::File::open(runner)?, &mut hasher)?;
+    let digest = orch_types::Hash::finish(&hasher).to_string();
+    let name = runner
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("the node's program has no file name"))?;
+    let folder = directory.join(&digest);
+    let placed = folder.join(name);
+    if !placed.is_file() {
+        std::fs::create_dir_all(&folder)?;
+        let partial = folder.join(format!(".{}.partial", name.to_string_lossy()));
+        // A copy keeps the program's permissions; it is whole before it has its name.
+        std::fs::copy(runner, &partial)?;
+        std::fs::rename(&partial, &placed)?;
+    }
+    for entry in std::fs::read_dir(directory)?.flatten() {
+        let other = entry.file_name();
+        if other != std::ffi::OsStr::new(&digest)
+            && other
+                .to_str()
+                .is_some_and(|other| other.parse::<orch_types::Hash>().is_ok())
+        {
+            std::fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(placed)
 }
 
 /// Use the same trusted configured/enrolled entrance as the node, including a retained installation.
@@ -231,7 +295,14 @@ pub async fn connect(config: DockerConfig, desk: Arc<BlobDesk>) -> Result<HostDr
             .map_err(|error| DriverError::Unavailable(error.to_string()))?;
     let driver = Arc::new(driver);
     let contract: Arc<dyn EnvironmentDriver> = driver.clone();
-    Ok(HostDriver::new(contract).with_extras(Arc::new(DockerExtras { driver, docker })))
+    let server_update = crate::server_update::Runner::new(docker.clone(), &socket);
+    Ok(
+        HostDriver::new(contract).with_extras(Arc::new(DockerExtras {
+            driver,
+            docker,
+            server_update,
+        })),
+    )
 }
 
 /// The registration of the driver for a program: it reads the settings `adjust` is given the chance to change
@@ -247,8 +318,6 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
                 settings.docker = serde_json::from_value(value.clone())
                     .map_err(|error| DriverError::InvalidSpec(error.to_string()))?;
             }
-            // Permission to build is checked live; the driver reports its actual implementation.
-            settings.docker.builds = true;
             let mut config = config_of(&settings)?;
             adjust(&mut config);
             let schema = crate::composition::configuration_schema(
@@ -273,6 +342,7 @@ pub fn registration(adjust: impl Fn(&mut DockerConfig) + Send + Sync + 'static) 
 
 /// What the Docker driver has beyond the contract, as the node asks for it.
 pub struct DockerExtras {
+    server_update: crate::server_update::Runner,
     driver: Arc<DockerDriver>,
     docker: Docker,
 }
@@ -295,6 +365,27 @@ impl ProgressSink for Reporting<'_> {
 
 #[async_trait]
 impl DriverExtras for DockerExtras {
+    fn server_update_support(&self) -> Option<orch_driver_contract::descriptor::OperationSupport> {
+        self.server_update.support()
+    }
+    async fn server_update(
+        &self,
+        command: orch_types::Id,
+        body: &orch_link_contract::commands::NodeServerUpdate,
+    ) -> Result<orch_api_contract::admin::ServerUpdateObservation, DriverError> {
+        self.server_update.prepare(command, body).await
+    }
+    fn pending_server_update(&self) -> Option<orch_types::Id> {
+        self.server_update.pending()
+    }
+    fn server_update_answered(&self, command: orch_types::Id) {
+        self.server_update.answered(command);
+    }
+    async fn server_update_observation(
+        &self,
+    ) -> Result<Option<orch_link_contract::events::NodeServerUpdate>, DriverError> {
+        self.server_update.observe().await
+    }
     async fn stop_volume_work(&self, command: orch_types::Id) -> Result<(), DriverError> {
         self.driver.stop_volume_work(command).await
     }
@@ -626,6 +717,36 @@ mod tests {
         clippy::unwrap_used,
         reason = "a failed fixture or assertion must fail the test"
     )]
+    fn build_support_stays_with_the_driver_and_live_policy_alone_permits_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_of(&NodeSettings::in_dir(directory.path())).unwrap();
+        let sources = orch_driver_docker::descriptor::sources(&config);
+        assert!(sources.contains(&orch_driver_contract::sources::SourceKind::Build));
+        let descriptor = serde_json::from_value(serde_json::json!({
+            "name":NAME,"version":"1","title":"Images","sources":sources,"local_accounts":false
+        }))
+        .unwrap();
+        let spec = serde_json::json!({"build":{"dockerfile":"FROM scratch"}});
+        let mut policy = orch_link_contract::policy::MachineDrivers::managed();
+        policy.images.builds = false;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_err()
+        );
+        policy.images.builds = true;
+        assert!(
+            policy
+                .check(&descriptor, &spec, None, &Default::default())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a failed fixture or assertion must fail the test"
+    )]
     fn restricted_parent_and_its_trusted_probe_come_only_from_node_settings() {
         let dir = tempfile::tempdir().unwrap();
         let mut settings = NodeSettings::in_dir(dir.path());
@@ -646,6 +767,40 @@ mod tests {
         let direct = config_of(&settings).unwrap();
         assert!(direct.egress.parent_proxy.is_none());
         assert!(direct.egress.parent_probe.is_none());
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a failed fixture or assertion must fail the test"
+    )]
+    fn the_program_handed_to_the_daemon_is_put_once_per_build_and_an_older_builds_copy_goes() {
+        let data = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        let runner = container.path().join("orch-node");
+        std::fs::write(&runner, b"the node of this build").unwrap();
+        let directory = data.path().join(RUNNER_DIR);
+        let older = directory.join(orch_types::Hash::of(b"an older build").to_string());
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::write(older.join("orch-node"), b"an older build").unwrap();
+        std::fs::create_dir_all(directory.join("kept")).unwrap();
+        let placed = place_runner(&directory, &runner).unwrap();
+        assert_eq!(
+            placed,
+            directory
+                .join(orch_types::Hash::of(b"the node of this build").to_string())
+                .join("orch-node")
+        );
+        assert_eq!(std::fs::read(&placed).unwrap(), b"the node of this build");
+        assert!(!older.exists(), "an older build's copy goes");
+        assert!(directory.join("kept").is_dir(), "nothing else is touched");
+        assert_eq!(place_runner(&directory, &runner).unwrap(), placed);
+        // A program the daemon has under the node's name is handed as it is; so is one no helper can run.
+        let settings = NodeSettings::in_dir(data.path());
+        let inside = data.path().join("orch-node");
+        std::fs::write(&inside, b"not a static program").unwrap();
+        assert_eq!(runner_for_daemon(&settings, inside.clone()), inside);
+        assert_eq!(runner_for_daemon(&settings, runner.clone()), runner);
     }
 
     #[test]
