@@ -1,6 +1,6 @@
 /** What runs on a host, from both pools and whoever's it is: each unit with the environment or provider it serves, where it stands and when it was last busy; one is stopped, leaving or interrupting what runs in it, or removed after naming it, with its volumes only when asked.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Boxes, Ellipsis, Square, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
@@ -8,11 +8,14 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError } from '@/api/client';
-import { hostRuntimesQuery, removeHostRuntime, stopHostRuntime } from '@/api/resources';
+import { hostRuntimesPageQuery, hostRuntimesQuery, removeHostRuntime, stopHostRuntime } from '@/api/resources';
 import { Hint } from '@/features/help/Hint';
 import type { Host, Runtime } from '@/generated/api-types';
-import { DetailPages } from '@/features/resources/DetailSections';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { Pagination } from '@/ui/Pagination';
+import { useCollectionSearch } from '@/lib/collectionSearch';
 import { runtimeDetail } from '@/features/resources/runtimeDetail';
+import { canForce } from '@/features/resources/runtimeForce';
 import { Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -29,11 +32,11 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusDot, type DotTone } from '@/ui/StatusDot';
 import { type Column, Table } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
-import { CopyButton } from '@/ui/CopyButton';
+import { copyIdEntry } from '@/ui/CopyId';
 import { UpdateDialog, type UpdateTargets } from '@/features/fleet/UpdateDialog';
 
 function runtimeName(runtime: Runtime, t: TFunction): string {
-  return runtime.environment?.name ?? runtime.provider?.name ?? t('resourceDetails.unitGeneration', { generation: runtime.generation });
+  return runtime.environment?.name ?? runtime.provider?.name ?? t('hosts.runtimes.unowned');
 }
 
 /** How a unit stands, as the colour of its dot: running is well, a failure is not, the rest is quiet. */
@@ -51,8 +54,9 @@ function RemoveRuntimeDialog({ host, runtime, onClose }: { host: Host; runtime: 
   const name = runtimeName(runtime, t);
   const [typed, setTyped] = useState('');
   const [volumes, setVolumes] = useState(false);
+  const [force, setForce] = useState(false);
   const remove = useMutation({
-    mutationFn: () => removeHostRuntime(host.id, runtime.id, runtime.unit_name, volumes),
+    mutationFn: () => removeHostRuntime(host.id, runtime.id, runtime.unit_name, volumes, force),
     onSuccess: () => {
       toast({ tone: 'success', title: t('hosts.runtimes.removed', { name }) });
       onClose();
@@ -77,34 +81,45 @@ function RemoveRuntimeDialog({ host, runtime, onClose }: { host: Host; runtime: 
     >
       <div className="flex flex-col gap-3 py-2">
         <p className="text-base text-text-muted">{t(runtime.kind === 'provider' ? 'hosts.runtimes.removeProviderBody' : 'hosts.runtimes.removeBody', { host: host.name })}</p>
-        <p className="text-sm text-text-muted">{t('resourceDetails.unitGeneration', { generation: runtime.generation })}</p>
         <Checkbox label={t('hosts.runtimes.volumes')} help={<Hint id="host-volumes" />} checked={volumes} onCheckedChange={setVolumes} disabled={remove.isPending} />
-        <CopyButton value={runtime.unit_name} label={t('resourceDetails.copyId')} />
         <Input label={t('hosts.runtimes.type', { name })} value={typed} onChange={(event) => setTyped(event.target.value)} autoComplete="off" disabled={remove.isPending} />
         {remove.error !== null && <ErrorAlert error={remove.error} />}
+        {runtime.kind === 'provider' && (force || canForce(remove.error)) && <Checkbox label={t('hosts.runtimes.force')} checked={force} onCheckedChange={setForce} disabled={remove.isPending} />}
         {remove.error instanceof ApiError && remove.error.is('resource.in_use') && <p className="text-sm text-text-muted">{t('hosts.runtimes.inUse')}</p>}
       </div>
     </Dialog>
   );
 }
 
-export function HostRuntimes({ host }: { host: Host }) {
+function RuntimeRows({ host }: { host: Host }) {
   const { t } = useTranslation();
-  const list = useQuery(hostRuntimesQuery(host.id));
+  const search = useCollectionSearch('host-runtimes:' + host.id);
+  const cache = useQueryClient();
+  const list = useInfiniteQuery(hostRuntimesPageQuery(host.id, search.q));
+  const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
+  const [readingAll, setReadingAll] = useState(false);
+  const [readError, setReadError] = useState<unknown>(null);
+  const updateAll = async () => {
+    setReadingAll(true); setReadError(null);
+    try {
+      const all = await cache.query(hostRuntimesQuery(host.id));
+      setUpdating({ environments: all.flatMap((runtime) => runtime.environment === null ? [] : [runtime.environment.id]), providers: all.flatMap((runtime) => runtime.provider === null ? [] : [runtime.provider.id]) });
+    } catch (error) { setReadError(error); } finally { setReadingAll(false); }
+  };
   const [interrupting, setInterrupting] = useState<Runtime | null>(null);
   const [removing, setRemoving] = useState<Runtime | null>(null);
   const [updating, setUpdating] = useState<UpdateTargets | null>(null);
 
   const stop = useMutation({
-    mutationFn: ({ runtime, interrupt }: { runtime: Runtime; interrupt: boolean }) => stopHostRuntime(host.id, runtime.id, interrupt),
+    mutationFn: ({ runtime, interrupt, force = false }: { runtime: Runtime; interrupt: boolean; force?: boolean }) => stopHostRuntime(host.id, runtime.id, interrupt, force),
     onSuccess: (_stopped, { runtime }) => {
       toast({ tone: 'success', title: t('hosts.runtimes.stopped', { name: runtimeName(runtime, t) }) });
       setInterrupting(null);
     },
   });
 
-  if (list.isPending) return <SkeletonRows read={list} rows={4} />;
-  if (list.isError) return <ErrorState compact title={t('hosts.runtimes.title')} error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
+  // A stop that was refused for a reason that doing it by force changes is offered again by force.
+  const refusedStop = canForce(stop.error) ? stop.variables : undefined;
 
   const columns: Column<Runtime>[] = [
     {
@@ -127,8 +142,6 @@ export function HostRuntimes({ host }: { host: Host }) {
                 <span className="truncate font-medium text-text">{runtimeName(runtime, t)}</span>
               )}
               <Badge>{t(`templates.kind.${runtime.kind}`)}</Badge>
-              {(runtime.environment !== null || runtime.provider !== null) && <span className="text-xs text-text-muted">{t('resourceDetails.unitGeneration', { generation: runtime.generation })}</span>}
-              <CopyButton value={runtime.unit_name} label={t('resourceDetails.copyId')} />
             </span>
             {withoutState && <StatusDot tone={stateTone(runtime.state)} label={words(runtime.state)} showLabel />}
           </div>
@@ -154,13 +167,6 @@ export function HostRuntimes({ host }: { host: Host }) {
     },
     { id: 'driver', header: t('hosts.runtimes.driver'), from: 'lg', className: 'text-text-muted', cell: (runtime) => runtime.driver },
     {
-      id: 'machine',
-      header: t('hosts.runtimes.machine'),
-      from: 'lg',
-      className: 'text-text-muted',
-      cell: (runtime) => runtime.machine?.name ?? '–',
-    },
-    {
       id: 'active',
       header: t('hosts.runtimes.active'),
       from: 'md',
@@ -179,6 +185,8 @@ export function HostRuntimes({ host }: { host: Host }) {
           entries={[
             { id: 'stop', label: t('hosts.runtimes.stop'), icon: <Square aria-hidden />, onSelect: () => stop.mutate({ runtime, interrupt: false }) },
             { id: 'interrupt', label: t('hosts.runtimes.stopInterrupt'), icon: <Square aria-hidden />, onSelect: () => setInterrupting(runtime) },
+            { type: 'separator', id: 'then' },
+            copyIdEntry(t, runtime.unit_name),
             { type: 'separator', id: 'apart' },
             { id: 'remove', label: t('hosts.runtimes.remove'), icon: <Trash2 aria-hidden />, danger: true, onSelect: () => setRemoving(runtime) },
           ]}
@@ -190,16 +198,24 @@ export function HostRuntimes({ host }: { host: Host }) {
 
   return (
     <Section id="host-runtimes" title={t('hosts.runtimes.title')} lead={t('hosts.runtimes.lead')}>
-      {list.data.length === 0 ? (
+      <CollectionSearch name={t('hosts.runtimes.title')} {...search} />
+      {list.isPending ? <SkeletonRows read={list} rows={4} /> : list.isError && !list.isFetchNextPageError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? (
         <EmptyState compact icon={<Boxes aria-hidden />} title={t('hosts.runtimes.none')} description={t('hosts.runtimes.noneLead')} />
       ) : (
         <>
-          <Button className="self-start" size="sm" onClick={() => setUpdating({ environments: list.data.flatMap((runtime) => runtime.environment === null ? [] : [runtime.environment.id]), providers: list.data.flatMap((runtime) => runtime.provider === null ? [] : [runtime.provider.id]) })}>{t('change.env.menu.update')}</Button>
-          <DetailPages items={list.data}>{(page) => <Table label={t('hosts.runtimes.title')} columns={columns} rows={page} rowKey={(runtime) => runtime.id} />}</DetailPages>
+          <Button className="self-start" size="sm" pending={readingAll} onClick={() => void updateAll()}>{t('change.env.menu.update')}</Button>
+          <Table label={t('hosts.runtimes.title')} columns={columns} rows={rows} rowKey={(runtime) => runtime.id} virtual key={host.id + search.q} />
+          <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : null} onMore={() => void list.fetchNextPage()} />
         </>
       )}
+      {readError !== null && <ErrorAlert error={readError} />}
       {updating !== null && <UpdateDialog targets={updating} onClose={() => setUpdating(null)} />}
       {stop.error !== null && interrupting === null && <ErrorAlert error={stop.error} />}
+      {refusedStop !== undefined && interrupting === null && (
+        <Button className="self-start" size="sm" pending={stop.isPending} onClick={() => stop.mutate({ ...refusedStop, force: true })}>
+          {t('hosts.runtimes.stopForce', { name: runtimeName(refusedStop.runtime, t) })}
+        </Button>
+      )}
       <ConfirmDialog
         open={interrupting !== null}
         onOpenChange={(next) => !next && setInterrupting(null)}
@@ -215,4 +231,9 @@ export function HostRuntimes({ host }: { host: Host }) {
       {removing !== null && <RemoveRuntimeDialog host={host} runtime={removing} onClose={() => setRemoving(null)} />}
     </Section>
   );
+}
+
+export function HostRuntimes(props: Parameters<typeof RuntimeRows>[0]) {
+  const { scope } = useCollectionSearch('host-runtimes:' + props.host.id);
+  return <RuntimeRows key={scope} {...props} />;
 }
