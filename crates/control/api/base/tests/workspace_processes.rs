@@ -108,7 +108,7 @@ fn report(site: &Site, sample: &ResourceSample) -> Report {
             stream: format!("env:{}", site.environment),
             kind: "stats.sample".to_owned(),
             at: sample.at,
-            body: serde_json::to_value(sample).unwrap(),
+            body: serde_json::json!({"generation":1,"cpu_interval_started_at":null,"sample":sample}),
         },
     }
 }

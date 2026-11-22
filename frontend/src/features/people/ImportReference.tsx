@@ -1,4 +1,5 @@
 /** A report's named object opens the shared reference card, which checks current access on demand. */
+import { PathLink } from '@/shell/TrailLink';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { FileText, Folder, MessageSquare } from 'lucide-react';
@@ -24,7 +25,7 @@ function FolderReference({ id, name, onOpen, scope }: { id: string; name: string
   const { t } = useTranslation();
   const cache = useQueryClient();
   const [open, setOpen] = useState(false);
-  const folder = useQuery({ ...documentTreeEntryQuery({ kind: 'container', id }, cache, false, scope), enabled: open, staleTime: 0, refetchOnMount: 'always' });
+  const folder = useQuery({ ...documentTreeEntryQuery({ kind: 'container', id }, cache, false, scope), enabled: open, refetchOnMount: 'always' });
   return <Popover open={open} onOpenChange={setOpen} label={name} trigger={<button type="button" title={name} className={REFERENCE_CHIP_CLASS}><Folder aria-hidden className="size-4 shrink-0" /><span className="min-w-0 truncate">{name}</span></button>}>
     {folder.isPending || folder.isFetching ? <SkeletonRows read={folder} rows={1} /> : folder.isError ? <ErrorAlert error={folder.error} />
       : folder.data.directory?.folder?.standing.read === true ? <Button asChild><Link to="/document-folder/$folderId" params={{ folderId: id }} onClick={(event) => { if (isPlainClick(event)) onOpen?.(); }}>{t('importWizard.report.openFolder')}</Link></Button>
@@ -39,7 +40,7 @@ export function ImportReference({ id, kind, name, onOpen }: { id: string; kind: 
   const reference: TypedReference = { id, kind: kind === 'document' ? 'document' : kind === 'chat' ? 'chat' : 'node', label: name };
   const icon = kind === 'document' ? <FileText aria-hidden className="size-4 shrink-0" /> : kind === 'chat' ? <MessageSquare aria-hidden className="size-4 shrink-0" /> : <NodeIcon kind={kind} className="size-4 shrink-0" />;
   const path = kind === 'document' ? `/doc/${encodeURIComponent(id)}` : kind === 'chat' ? `/chat/${encodeURIComponent(id)}` : `/${kind}/${encodeURIComponent(id)}`;
-  return <ReferenceCard reference={reference} label={name} onOpen={onOpen} cacheScope={scope}>{(keep) => <a href={path} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }} title={name} className={REFERENCE_CHIP_CLASS}>
+  return <ReferenceCard reference={reference} label={name} onOpen={onOpen} cacheScope={scope}>{(keep) => <PathLink href={path} onClick={(event) => { if (isPlainClick(event)) { event.preventDefault(); keep(); } }} title={name} className={REFERENCE_CHIP_CLASS}>
     {icon}<span className="min-w-0 truncate">{name}</span>
-  </a>}</ReferenceCard>;
+  </PathLink>}</ReferenceCard>;
 }

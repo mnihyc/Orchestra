@@ -21,6 +21,8 @@ fn settings(config_path: &Path, data_dir: Option<PathBuf>) -> anyhow::Result<Nod
         settings.data_dir = data_dir;
     }
     settings.config_file = Some(config_path.to_owned());
+    // The plan lists what the node made, under the name the system enrolled it with.
+    settings.follow_enrollment()?;
     Ok(settings)
 }
 
