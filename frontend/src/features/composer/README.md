@@ -54,35 +54,48 @@ A lane and its panel share one draft and debounce owner. Different writes are or
 save, including the clear after sending; equal content is saved once. An accepted send preserves newer
 words or files, and queued writes and acknowledgements cannot cross a signed-in account's lifetime.
 
-The model control opens on what the thread runs with, which is its own state and never what the provider
-allows (that is the provider's Models tab). Beside the model and its effort it has Speed, Access and
-Context, each only where the model's managers switched it on there, each opening on what the thread has
-now and saying where that comes from (chosen by somebody, or as the model starts), with the line on what it
-changes and when it takes effect; a context offers the sizes open for the model with a field for another
-number, the adapter's sentence on where the conversation is shortened and a line where a size crosses a step
-of the model's rate. A change of model drops a choice the new one lacks and says so. For somebody who only
-drives the thread it is read-only, with who can change it. `/model`, `/effort`, `/speed`, `/access` and
-`/context` in the box open it on a choice or, written with what to choose, make the choice, and the footer of
-a turn says what the turn ran with. The approval picker is shared with Parameters and offers only modes
+The controls of what a thread runs with show their value alone, each opening a list of its own, and stand in one row under
+the text box in this order: attach, Agent, Model, Effort, Fast (or Speed), Access, then Approvals, Plan, the context ring and
+Send. They show the thread's own state and never what the provider allows (that is the provider's Models tab). The Model
+list holds the models of every provider the person may use, in groups under the provider's name, so that choosing a model
+chooses its provider, with the providers to ask for and the unavailable ones last; search stands above eight rows and the
+list has its own scroll and a help entrance. A provider is no control of its own. The Effort list holds the efforts of the
+chosen model with its default marked; exactly two speeds are one chip that flips and says the speed that is on; Access and
+Context stand only where the model's managers switched them on, each saying where its value comes from, and the context
+size is chosen from the ring's popover, with a field for another number, the adapter's sentence on where the conversation
+is shortened and a line where a size crosses a step of the model's rate. A speed, an access program or a context size that
+the managers switched on and the thread cannot use is still shown in its control, dimmed, and its list says why in a few
+words (the agent offers none, the credential must stay with the provider, the environment or the provider is of the other
+kind, the provider leaves it out, or a feature of agents is off) with, where the person may lift it, the act that does.
+A change of model drops a choice the new one lacks and says so. For somebody who only drives the thread the values are plain
+and read-only, with who can change them. `/model`, `/effort`, `/fast`, `/speed`, `/access`, `/context`, `/plan`, `/goal`,
+`/side` (`/btw`), `/fork` and `/directory` in the box open the control or, written with what to choose, make the choice,
+each only where the act exists, and the footer of a turn says what the turn ran with. The approval picker is shared with Parameters and offers only modes
 declared by the harness and allowed by policy and confinement. It writes the displayed setting revision,
 keeps a refused choice open with the current value, and never retries it silently. `/file`, `/document`
 and @ open the reference picker; selecting a workspace file adds its real path, and selecting a document
 attaches a copy through the ordinary permission-checked export and upload readers, ready for the next Send.
 The row's small draft mark reports saving or a failed save without adding a status line. Disabled Send
-and its chevron share one reason. The model list names each model once and keeps guidance in one entry.
-Model and effort options are full-width picker rows in one menu, with a check for each current choice
-and no visible option border or selected fill. Effort names are indented inside the same full-width
-target. Arrow keys, Home and End move focus without changing a setting; Enter or Space selects it.
-The search field takes ArrowDown into the current row and ArrowUp into the last row; filtered-out rows
-cannot retain the tab stop. A reader without permission to manage still sees the choices read-only.
+and its chevron share one reason. Every list of the row is the same list (`PickList.tsx`): full-width single-line rows
+with a check for the current one and no visible option border or selected fill, a muted second line only where there
+is something to say, and groups under small headers shown only where they hold rows. Arrow keys, Home and End move
+focus without changing a setting; Enter or Space selects it. The search field takes ArrowDown into the current row and
+ArrowUp into the last row; filtered-out rows cannot retain the tab stop. A reader without permission to manage still
+sees the choices read-only.
 
 - `SettingConflict.tsx`: A refused setting choice names the reported changer and current model while leaving its controls open.
 - `Composer.tsx`: IME-aware input to the agent and delivery controls; references added from files, differences and shells; and the limit prompt before a message goes past a limit.
-- `Controls.tsx`: The next turn's controls beside its message: attachments, binding, model, permission mode, context and delivery.
+- `Controls.tsx`: The next turn's controls beside its message: attachments, agent, model, effort, speed and access program, permission mode, context and delivery, and the line of what an archived thread ran with.
 - `ApprovalMode.tsx`: The thread's native permission mode, chosen from its harness and place's offered modes with the current setting revision.
 - `DeliveryControl.tsx`: One split action: Send when idle, Stop while a turn runs, with explicit queue, steer and interruption choices.
 - `DeliveryMenu.tsx`: Queue, steer and interrupt for whoever may drive the thread; Side thread; broadcast choices.
-- `ModelEffort.tsx`: Model, by its display name, and reasoning effort chosen together at the composer; applies from the next turn.
+- `PickList.tsx`: The one list the controls of the row share, and the chip that shows a value alone and opens it.
+- `ModelEffort.tsx`: The model, its effort, its speed and its access program as separate controls; applies from the next turn.
+- `ProviderModelChip.tsx`: The list of models in groups under their providers' names, with the providers to ask for and the unavailable ones last.
+- `BindingLists.tsx`: The providers and agents of what a thread could be bound to, and the agent's list.
+- `ThreadAgent.tsx`: The agent of a thread as a control of its own.
+- `modelRows.tsx`: The rows of the lists of a model and of its effort.
+- `Withheld.tsx`: A speed, an access program or a context size that the thread cannot use, shown off with why and what lifts it.
 - `SpeedAndAccess.tsx`: Speed and access: the faster speeds and the access programs that a manager of the provider enabled for this model, and nothing that was only offered.
 - `QueueTray.tsx`: One queue for every waiting input: author edits, delivery, Send now, removal and pointer or keyboard ordering.
 - `queue.ts`: Waiting-input text edits, stable reorder targets and the delivery of an explicit Send now.

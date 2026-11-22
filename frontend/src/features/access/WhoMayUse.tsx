@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** The control that ends every dialog that makes a resource: only me, everyone in the org, chosen people, or as the org decides.
  *
  * Making a resource asks first where it belongs; this is the one question that ends the dialog: who
@@ -13,7 +14,6 @@ import { choiceOption } from '@/i18n/choices';
 
 import type { AccessTarget } from '@/api/access';
 import type { PageChange } from '@/generated/api-types';
-import { Combobox } from '@/ui/Combobox';
 import { RadioGroup, type RadioOption } from '@/ui/RadioGroup';
 import { ChoiceFieldHelp } from '@/ui/ChoiceField';
 
@@ -79,7 +79,7 @@ export function WhoMayUse({ home, value, onChange, defaultsNow, disabled }: WhoM
       {value.mode === 'chosen' && (
         <div className="flex flex-col gap-2 pl-1">
           {candidates.placePicker}
-          <Combobox
+          <CandidatePicker candidates={candidates}
             label={t('access.who.pick')}
             placeholder={t('access.add.placeholder')}
             query={query}
