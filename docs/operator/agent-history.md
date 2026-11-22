@@ -9,6 +9,9 @@ Large inventories and historical records use temporary disk indexes. Keep
 enough room in the node process's temporary directory for a captured transcript
 and its indexes. Transcript and record spools are temporary. A home inventory
 is cached for its current pass.
+Claude Code transfers also use temporary storage for archive payloads and file
+lists. Provide enough for your largest transfer: copying an archive uses
+bounded memory and runs outside the asynchronous request executor.
 Adoption keeps the latest complete turns within the existing 32 MiB record
 limit and reports earlier turns left out. Historical resync does not charge
 recorded usage again; plan changes restore their final recorded state.
@@ -52,7 +55,7 @@ Explicit Harness-kept notes still use the thread's own configured directory.
 These additional controls do not change a person's own home.
 
 An unexpected program exit leaves its reason in the conversation and marks a
-running turn interrupted. The provider's Runtime section retains the latest
+running turn interrupted. The container section of the provider retains the latest
 program error with its time, including after the process comes back online.
 The next input follows the existing session-recovery and history policy.
 

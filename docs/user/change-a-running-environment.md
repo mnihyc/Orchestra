@@ -8,6 +8,8 @@ summary: Check which environment changes apply live and which need a restart or 
 
 # Change an environment while it runs
 
+This page shows which changes to an environment apply while it runs, which need a restart or a recreation, and how to restart one tool server or the whole environment.
+
 Environment Manage controls where work runs and the environment's settings.
 Read **Takes effect** beside a change: it follows the driver's actual live
 abilities and this host's readiness.
@@ -22,8 +24,8 @@ process. A storage-fixed disk limit still needs a recreate.
 
 For a mount, choose its real location and read-only/private/shared mode.
 A host with safe live-mount support attaches or detaches it without restarting
-the unit. Unsupported kernels or a failed safe attach leave a pending change
-with its reason and Recreate now; they do not silently replace the unit.
+the container. Kernels that are not supported, or a safe attach that failed, leave a change
+pending with its reason and **Recreate now**. They never replace the container quietly.
 Desired live mounts are applied again after every start.
 
 The agent receives only the changed context line with its next accepted
@@ -61,17 +63,17 @@ clears the failure count and starts it again; the environment, other servers
 and active turns continue. Read the result: a further failure keeps its reason.
 An unavailable server still needs its missing requirement or permission.
 
-The offered tools refresh immediately when the harness supports MCP reload,
+The tools that are offered refresh at once when the agent program supports reloading MCP servers,
 otherwise before its next turn. This operation keeps the server's enabled
 choice and the machine's local policy. A stopped environment says it must be
 started before this server can return.
 
 ## Restart the environment
 
-**Restart…**, beside Stop, shows the running turns, shells, browsers, displays
-and port connections that will stop. It keeps the same unit and every file,
+**Restart…**, beside Stop, shows the running turns, terminals, browsers, displays
+and port connections that will stop. It keeps the same container and every file,
 including packages and files outside the volumes. With
-`capability.recreate_grace_secs = 120`, it waits for running turns under the
+a grace period of 120 seconds, it waits for running turns under the
 ordinary recreate grace rule. Choose **Interrupt now** for an immediate
 interruption instead. **Wait** lets turns finish during that grace, then
 interrupts any still running; the dialog says this before confirmation.
@@ -90,7 +92,7 @@ return checks.
 Capabilities such as `ptrace`, GPU, network administration, unconfined,
 privileged or host networking, another storage and creation-time disk limits
 still need a replacement. A same-image Docker recreate keeps the stopped
-unit's own filesystem as a local layer, including packages in `/usr` and
+container's own filesystem as a local layer, including packages in `/usr` and
 files in `/opt`. The plan states the measured size and estimated time first.
 An estimate can vary by host; unknown is labelled unknown.
 
@@ -107,8 +109,8 @@ to put a required installation into the template instead.
 Kept images belong to the environment. Moves list and carry their size;
 archiving retains them for restoration; failed replacements and obsolete
 generations clean their own images. Deletion/purge removes them with the
-owned unit and volumes. The node's page shows retained layer size.
+owned container and volumes. The page of the node shows retained layer size.
 
-Capability authority and request lifetime are in
+Who may decide a capability, and how long a request lasts, are in
 [How approvals work](how-approvals-work.md). Ports are separate gateway
 capabilities, described in [Let agents open ports without asking](let-agents-open-ports.md).
