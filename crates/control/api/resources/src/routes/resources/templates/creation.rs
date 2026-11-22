@@ -128,13 +128,14 @@ impl effects::Effect for Templates {
             clean_name("name", &body.name)?;
             let driver = clean_driver("driver", &body.driver)?;
             clean_spec("spec", &body.spec)?;
-            let restricted = restricted_driver(conn, &driver).await?;
+            let private = matches!(body.access, Some(NewResourceAccess::OnlyMe));
+            let restricted = administers_driver(conn, &driver, body.home_id, private).await?;
             let initial = known_facts(conn, body.home_id, restricted).await?;
             let known = native::bind_known(ctx, &sources::CREATE, &initial)?;
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
-            creation_authority(conn, &principal, body.home_id, &driver).await?;
+            creation_authority(conn, &principal, body.home_id, &driver, private).await?;
             creation_home::lock(conn, body.home_id).await?;
-            let restricted = restricted_driver(conn, &driver).await?;
+            let restricted = administers_driver(conn, &driver, body.home_id, private).await?;
             let facts = known_facts(conn, body.home_id, restricted).await?;
             let known = native::bind_required(ctx, &sources::CREATE, &facts)?;
             let principal = native::preparation_principal(ctx, conn, caller, &known).await?;
@@ -150,7 +151,14 @@ impl effects::Effect for Templates {
         value: &'a Proposal,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
-            creation_authority(conn, principal, value.row.home_id, &value.row.driver).await?;
+            creation_authority(
+                conn,
+                principal,
+                value.row.home_id,
+                &value.row.driver,
+                value.access == NewAccess::OnlyMe,
+            )
+            .await?;
             validate_saved(conn, &value.row.driver, &value.row.kind, &value.row.spec).await
         })
     }
@@ -166,10 +174,11 @@ pub(crate) async fn prepare_native(
     let driver = clean_driver("driver", &body.driver)?;
     clean_spec("spec", &body.spec)?;
     let kind = body.kind.unwrap_or(UnitKind::Environment);
-    creation_authority(conn, principal, body.home_id, &driver).await?;
+    let private = matches!(body.access, Some(NewResourceAccess::OnlyMe));
+    creation_authority(conn, principal, body.home_id, &driver, private).await?;
     creation_home::lock(conn, body.home_id).await?;
-    let home = creation_authority(conn, principal, body.home_id, &driver).await?;
-    let restricted = restricted_driver(conn, &driver).await?;
+    let home = creation_authority(conn, principal, body.home_id, &driver, private).await?;
+    let restricted = administers_driver(conn, &driver, body.home_id, private).await?;
     validate_saved(conn, &driver, unit_word(kind), &body.spec).await?;
     Ok(Proposal {
         row: TemplateRow {
@@ -200,7 +209,14 @@ impl Proposal {
         self.restricted
     }
     pub(crate) async fn require(&self, conn: &mut Conn, principal: &Principal) -> ApiResult<()> {
-        creation_authority(conn, principal, self.row.home_id, &self.row.driver).await?;
+        creation_authority(
+            conn,
+            principal,
+            self.row.home_id,
+            &self.row.driver,
+            self.access == NewAccess::OnlyMe,
+        )
+        .await?;
         validate_saved(conn, &self.row.driver, &self.row.kind, &self.row.spec).await
     }
 }
@@ -332,7 +348,15 @@ impl native::Stored for Templates {
         value: &'a Subject,
     ) -> BoxFuture<'a, ApiResult<()>> {
         Box::pin(async move {
-            creation_authority(conn, principal, value.created.home, &value.row.driver).await?;
+            // A template made as its maker's own was no administration of its driver when it was made.
+            creation_authority(
+                conn,
+                principal,
+                value.created.home,
+                &value.row.driver,
+                !value.created.restricted,
+            )
+            .await?;
             Ok(())
         })
     }

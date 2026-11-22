@@ -2,8 +2,9 @@
 //!
 //! A template is a recipe for units, environments or the runtimes of providers. Here it is data: it
 //! is made, changed and kept, and no build is started. Who may make one where is the access engine's
-//! to say; a driver the setting `templates.restricted_drivers` lists is saved by a system admin
-//! alone, wherever the template is to be. The spec is kept as it is given: the driver of a host
+//! to say; a template of a driver the setting `templates.restricted_drivers` lists is saved by a
+//! system admin alone where others would reach it, and is its maker's own to make when it is private to
+//! them in a home they make things in. The spec is kept as it is given: the driver of a host
 //! reads it; the reported schema checks every save, and the driver also validates it before making a unit.
 
 use crate::middleware::authorization;
@@ -213,14 +214,25 @@ async fn check_spec(
     let found = drivers_of(&reported)
         .into_iter()
         .find(|found| found.name == driver);
+    // A driver that no host has loaded has no schema to check against: the person is told so, and how a
+    // host loads one, rather than that a machine is offline.
+    let found = found.ok_or_else(|| {
+        invalid(
+            "driver",
+            &format!(
+                "no host has loaded this driver; {}",
+                orch_engine::places::DRIVER_LOADING
+            ),
+        )
+    })?;
     let schema = found
-        .as_ref()
-        .and_then(|found| found.descriptor.get("spec_schemas"))
+        .descriptor
+        .get("spec_schemas")
         .and_then(|schemas| schemas.get(kind))
         .ok_or_else(|| {
-            ApiError::new(
-                ErrorCode::SourceOffline,
-                "this driver's schema for this pool has not been reported",
+            invalid(
+                "kind",
+                "the hosts that loaded this driver cannot make this kind of template",
             )
         })?;
     let mut errors = match orch_plugin::schema::validate(schema, spec) {
@@ -545,12 +557,27 @@ pub(crate) async fn restricted_driver(conn: &mut Conn, driver: &str) -> ApiResul
     Ok(restricted.iter().any(|name| name == driver))
 }
 
-/// The same creation and restricted-driver checks for a proposal and a saved template.
+/// Whether making a template is the administration of a driver kept to the admins of the system: a template of
+/// such a driver that others would reach, one of the system or one shared in its home. A template private to its
+/// maker, in a home they make things in, is theirs to make, as a provider of theirs is: it runs only on hosts they
+/// may use, within each host's own policy.
+pub(crate) async fn administers_driver(
+    conn: &mut Conn,
+    driver: &str,
+    home: Option<Id>,
+    private: bool,
+) -> ApiResult<bool> {
+    Ok(restricted_driver(conn, driver).await? && !(private && home.is_some()))
+}
+
+/// The same creation and restricted-driver checks for a proposal and a saved template. `private`: the template
+/// is reachable by its maker alone.
 pub(crate) async fn creation_authority(
     conn: &mut Conn,
     principal: &Principal,
     home: Option<Id>,
     driver: &str,
+    private: bool,
 ) -> ApiResult<Home> {
     let selected = super::creation_home::require(
         conn,
@@ -561,7 +588,7 @@ pub(crate) async fn creation_authority(
         "only a system admin makes a template of the system",
     )
     .await?;
-    if restricted_driver(conn, driver).await?
+    if administers_driver(conn, driver, home, private).await?
         && !orch_authz::system_administration::on_system(
             principal,
             orch_access_contract::key_scope::KeyTargetKind::Object(

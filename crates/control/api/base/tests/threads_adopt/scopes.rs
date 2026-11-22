@@ -2,7 +2,7 @@
 
 use super::*;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::testing::RawReply;
 use orch_db::queries::identity::{self, NewApiToken};
 use orch_types::Json;
@@ -52,7 +52,7 @@ async fn key_for(s: &Scene, actor: Id, rules: Vec<Json>) -> (Id, String) {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *s.rig.world.conn().await,
         &NewApiToken {
@@ -740,7 +740,7 @@ async fn preview_rechecks_the_same_original_operation_between_discovery_and_hist
         if reached && mode == "replace_key_hash" {
             sqlx::query("UPDATE api_tokens SET token_hash=$2 WHERE id=$1")
                 .bind(id.unwrap())
-                .bind(token_hash(&new_token(API_TOKEN_PREFIX)))
+                .bind(token_hash(&new_api_token(id.unwrap())))
                 .execute(s.rig.db.pool())
                 .await
                 .unwrap();
@@ -1087,6 +1087,8 @@ async fn native_preview_commands_keep_exact_private_preparation_evidence_and_cur
     }
     .wire();
     let actual = orch_db::queries::link::NewCommand {
+        content_transit: false,
+        native_target: None,
         id: execution.id,
         machine_id: s.rig.machine_id,
         kind: "agent.discover_sessions",

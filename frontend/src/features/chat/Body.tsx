@@ -45,7 +45,7 @@ function Runs({ runs, mentions, mentionsAll, me, originThread }: { runs: readonl
       case 'code': {
         const written = idReferenceOf(run.text);
         if (written?.path !== undefined) return <TypedChip key={index} reference={{ kind: 'environment_file', id: written.id, path: written.path, ...(written.number === undefined ? {} : { line: written.number }) }} />;
-        if (written !== null) return <IdChip key={index} id={written.id} {...(written.number === undefined ? {} : { number: written.number })} fallback={<code className="rounded-sm bg-bg-muted px-1 font-mono text-sm">{run.text}</code>} />;
+        if (written !== null) return <IdChip key={index} id={written.id} {...(written.number === undefined ? {} : { number: written.number })} label={run.text} fallback={<code className="rounded-sm bg-bg-muted px-1 font-mono text-sm">{run.text}</code>} />;
         if (originThread !== undefined && (run.text.includes('/') || run.text.endsWith('.md'))) return <SharedPathChip key={index} threadId={originThread} path={run.text} code />;
         return (
           <code key={index} className="rounded-sm bg-bg-muted px-1 font-mono text-sm">

@@ -11,7 +11,7 @@ use orch_access_contract::permissions::ObjectKind as K;
 use crate::common::{Page, PageQuery};
 use crate::nodes::{CreateThread, NodeRef};
 use crate::routes::Access::{Permission, Rule, User};
-use crate::threads::ContentPart;
+use crate::threads::{ContentPart, Delivery};
 use crate::users::UserRef;
 use orch_types::Json;
 use orch_types::{Id, Seq, Time};
@@ -23,8 +23,10 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct NativeInvocation {
     /// Opaque identity of the artifact the adapter can actually invoke.
+    #[schemars(extend("x-storage-exact" = true))]
     pub action_id: String,
     /// The loaded mapping which must still hold through dispatch.
+    #[schemars(extend("x-storage-exact" = true))]
     pub revision: String,
     /// Conversation content; never copied into audit details.
     pub arguments: Json,
@@ -59,6 +61,82 @@ pub enum InputTiming {
         /// Always UTC; civil daily/weekly schedules keep their existing IANA-zone rules.
         zone: String,
     },
+}
+
+/// Rules used by both the civil preview and the occurrence decision; not a promise to admit work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputTimingPolicy {
+    pub clock: InputTimingClock,
+    pub repeated_time: InputTimingFold,
+    pub missing_time: InputTimingGap,
+    pub overdue: InputTimingOverdue,
+    pub paused_dates: InputTimingPause,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTimingClock {
+    FixedInstant,
+    Civil,
+    Utc,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTimingFold {
+    ExplicitInstant,
+    EarlierInstant,
+    NotApplicable,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTimingGap {
+    Refused,
+    Skipped,
+    NotApplicable,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTimingOverdue {
+    SingleOccurrence,
+    LatestOccurrence,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTimingPause {
+    NotReplayed,
+}
+
+impl InputTimingPolicy {
+    #[must_use]
+    pub fn of(timing: &InputTiming) -> Self {
+        let (clock, repeated_time, missing_time, overdue) = match timing {
+            InputTiming::Once { .. } => (
+                InputTimingClock::FixedInstant,
+                InputTimingFold::ExplicitInstant,
+                InputTimingGap::Refused,
+                InputTimingOverdue::SingleOccurrence,
+            ),
+            InputTiming::Repeat { .. } => (
+                InputTimingClock::Civil,
+                InputTimingFold::EarlierInstant,
+                InputTimingGap::Skipped,
+                InputTimingOverdue::LatestOccurrence,
+            ),
+            InputTiming::Cron { .. } => (
+                InputTimingClock::Utc,
+                InputTimingFold::NotApplicable,
+                InputTimingGap::NotApplicable,
+                InputTimingOverdue::LatestOccurrence,
+            ),
+        };
+        Self {
+            clock,
+            repeated_time,
+            missing_time,
+            overdue,
+            paused_dates: InputTimingPause::NotReplayed,
+        }
+    }
 }
 
 /// A managed future input created by the thread's own agent.
@@ -171,6 +249,9 @@ pub struct InputScheduleDestination {
 /// Safe metadata and, for its author only, its prepared definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputSchedule {
+    /// Current timing's typed preview rules, distinct from each retained run's own policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_policy: Option<InputTimingPolicy>,
     /// Schedule identity.
     pub id: Id,
     /// Present only for agent-created schedules; absent preserves existing people's schedules.
@@ -185,6 +266,10 @@ pub struct InputSchedule {
     pub author: UserRef,
     /// Authored name.
     pub name: String,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// The delivery choice reviewed by the author.
+    pub delivery: Delivery,
     /// Current redacted destination.
     pub destination: InputScheduleDestination,
     /// Author-only draft.
@@ -223,6 +308,41 @@ pub enum InputScheduleRunState {
     Skipped,
 }
 
+/// The decision made for a civil occurrence, independently of its input's later delivery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputScheduleOccurrenceReason {
+    /// An ordinary input was accepted.
+    Accepted,
+    /// The previous occurrence's input still waited.
+    PreviousInputPending,
+    /// The civil time did not exist in its captured zone.
+    NonexistentLocalTime,
+    /// The schedule's accepted allowance had ended.
+    ScheduleEnded,
+    /// Current admission refused the occurrence.
+    AdmissionFailed,
+}
+
+/// Immutable facts captured by the occurrence claim, never inferred from a later schedule edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputScheduleOccurrenceOutcome {
+    /// Policy actually used by this occurrence; absent old receipts stay unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_policy: Option<InputTimingPolicy>,
+    /// Why this occurrence was accepted or skipped.
+    pub reason_code: InputScheduleOccurrenceReason,
+    /// Earlier occurrences actually combined into the accepted input; zero for a skipped occurrence.
+    #[schemars(range(min = 0))]
+    pub coalesced_count: i64,
+    /// The original occurrence instant; absent for a nonexistent civil time.
+    pub scheduled_for: Option<Time>,
+    /// The accepted ordinary input, withheld when its destination is not currently readable.
+    pub accepted_input_ref: Option<Id>,
+    /// The zone in force when this occurrence was decided.
+    pub zone: String,
+}
+
 /// One safe occurrence outcome, with names subject to current View.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputScheduleRun {
@@ -242,6 +362,9 @@ pub struct InputScheduleRun {
     pub turn_id: Option<Id>,
     /// Safe explanation without the prompt.
     pub reason: Option<String>,
+    /// The captured occurrence decision; absent means not reported, never a guessed success or skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<InputScheduleOccurrenceOutcome>,
     /// Occurrence creation time.
     pub created_at: Time,
     /// Actual start, if any.
@@ -258,6 +381,10 @@ pub struct InputScheduleCreateBody {
     pub target: InputScheduleTarget,
     /// Frozen authored parts.
     pub content: Vec<ContentPart>,
+    /// Whether occurrences request a planning turn.
+    pub plan: bool,
+    /// Authored queue, steer or interrupt delivery, rechecked when due.
+    pub delivery: Delivery,
     /// Optional native selection.
     pub native_action: Option<NativeInvocation>,
     /// Explicit future timing.
@@ -276,6 +403,12 @@ pub struct InputScheduleUpdateBody {
     pub target: Option<InputScheduleTarget>,
     /// New frozen parts.
     pub content: Option<Vec<ContentPart>>,
+    /// A new planning choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// A new delivery choice; omission keeps the reviewed choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
     /// Omitted preserves, null removes.
     #[serde(
         default,
@@ -293,6 +426,12 @@ pub struct InputScheduleUpdateBody {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputScheduleListQuery {
+    /// Only schedules whose disclosed destination and agent origin address this thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<Id>,
+    /// Words in the admitted visible name, before paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
     /// Ordinary paging.
     #[serde(flatten)]
     pub page: PageQuery,

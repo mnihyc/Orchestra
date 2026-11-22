@@ -166,6 +166,7 @@ pub fn install_interfaces() {
     routes::nodes::tree::__api_install_a30b746301();
 
     routes::nodes::tree::__api_install_e99356e299();
+    routes::nodes::tree::__api_install_eb1fd91e22();
 
     routes::nodes::tree_work::__api_install_7100f6658b();
 
