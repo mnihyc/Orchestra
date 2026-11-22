@@ -62,6 +62,7 @@ orch-driver-contract.workspace = true
 orch-documents.workspace = true
 orch-engine.workspace = true
 orch-executor-contract.workspace = true
+orch-human-check-contract.workspace = true
 orch-identity-contract.workspace = true
 orch-link-contract.workspace = true
 orch-link.workspace = true
@@ -110,6 +111,7 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+crc32fast.workspace = true
 orch-telemetry.workspace = true
 orch-summarizer-contract.workspace = true
 orch-blob-local.workspace = true

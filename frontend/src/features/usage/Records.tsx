@@ -10,7 +10,7 @@
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Info } from 'lucide-react';
-import { memo } from 'react';
+import { Fragment, memo } from 'react';
 import { Section } from '@/shell/Page';
 import { useTranslation } from 'react-i18next';
 
@@ -20,7 +20,7 @@ import { EventCredits } from '@/features/usage/Amounts';
 import { type Span, type UsageScope, type UsageSearch, recordsParams } from '@/features/usage/search';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { programNameIn } from '@/features/resources/programNames';
-import { RequestFacts, TokenFacts } from './RequestFacts';
+import { RequestFacts, TokenFacts, useRequestFactRows, useTokenFactRows } from './RequestFacts';
 import { tierAvailable, tierLabel } from './tier';
 import { purposeLabel } from './words';
 import { useFormatContext } from '@/lib/appearance';
@@ -121,33 +121,33 @@ function Thread({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
     <span className="flex min-w-0 flex-col">
       {readable ? (
         <Link to="/thread/$threadId" params={{ threadId: thread.id }} search={event.turn_ordinal === null ? {} : { turn:event.turn_ordinal }} className="font-medium wrap-anywhere text-text hover:underline">
-          {scope.kind==='node' && scope.id===thread.id && event.turn_ordinal!==null ? t('usage.records.turn',{id:event.turn_ordinal}) : thread.name}
+          {scope.kind==='node' && scope.id===thread.id && event.turn_ordinal!==null ? t('usage.records.turn',{number:event.turn_ordinal}) : thread.name}
         </Link>
       ) : (
         <span className="wrap-anywhere text-text-muted">{t('usage.key.hidden', { kind: t('usage.key.kind.thread') })}</span>
       )}
       <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm wrap-anywhere text-text-muted">
-        {context!=='' && <span>{context}</span>}{event.turn_ordinal!==null && readable && !(scope.kind==='node' && scope.id===thread.id) && <span>{t('usage.records.turn',{id:event.turn_ordinal})}</span>}
+        {context!=='' && <span>{context}</span>}{event.turn_ordinal!==null && readable && !(scope.kind==='node' && scope.id===thread.id) && <span>{t('usage.records.turn',{number:event.turn_ordinal})}</span>}
       </span>
     </span>
   );
 }
 
-function ModelLine({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
+function RecordFacts({ event,scope }: { event: UsageEvent;scope:UsageScope }) {
   const {t}=useTranslation();
   const parts = [
     ...(event.effort===null?[]:[{name:t('usage.chip.effort'),value:effortDisplayName(event.effort,t)}]),
     ...(!tierAvailable(event) || event.tier===null && event.tier_unknown !== true?[]:[{name:t('usage.chip.tier'),value:tierLabel(event,t)}]),
     ...(scope.kind==='provider'?[]:[{name:t('usage.chip.provider'),value:event.provider.name}]),
   ];
-  return (
-    <span className="flex min-w-0 flex-col">
-      <span className="wrap-anywhere text-text">
-        {event.timing?.service_usage?.offering??modelDisplayName(event.model_display,t)}
-      </span>
-      {parts.map((part)=><span key={part.name} className="flex flex-wrap gap-x-2 gap-y-1 text-sm wrap-anywhere text-text-muted"><span>{part.name}</span><span>{part.value}</span></span>)}
-    </span>
-  );
+  const request = useRequestFactRows(event, false, true);
+  const tokens = useTokenFactRows(event);
+  return <dl className="grid min-w-0 grid-cols-[fit-content(50%)_minmax(0,1fr)] items-baseline gap-x-2 text-left text-sm">
+    {[...parts, ...request, ...tokens].map((fact, index) => <Fragment key={index}>
+      <dt className="min-w-0 wrap-anywhere text-text-muted">{fact.name}</dt>
+      <dd className="m-0 min-w-0 wrap-anywhere text-text tabular-nums">{fact.value}</dd>
+    </Fragment>)}
+  </dl>;
 }
 
 export interface RecordsProps {
@@ -182,8 +182,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
         return (
           <div className="flex min-w-0 flex-col">
             <Thread event={event} scope={scope} />
-            <RequestFacts event={event} speed />
-            {!tokensShown && <TokenFacts event={event} />}
+            <RecordFacts event={event} scope={scope} />
             {folded.length > 0 && (
               <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
                 {folded.map((part, at) => (
@@ -207,7 +206,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
             cell: (event: UsageEvent) => (event.user === null ? <span className="text-text-muted">{t('usage.key.nobody')}</span> : <UserChip user={event.user} size={24} />),
           },
         ]),
-    { id: 'model', header: rows.some((row)=>row.timing?.service_usage!==undefined && row.timing.service_usage!==null)?t('usagePerf.choices.splits.offering.name'):t('usage.records.model'), from: 'md', cell: (event) => <ModelLine event={event} scope={scope} /> },
+    { id: 'model', header: rows.some((row)=>row.timing?.service_usage!==undefined && row.timing.service_usage!==null)?t('usagePerf.choices.splits.offering.name'):t('usage.records.model'), from: 'md', cell: (event) => <span className="wrap-anywhere text-text">{event.timing?.service_usage?.offering ?? modelDisplayName(event.model_display, t)}</span> },
     {
       id: 'tokens',
       header: t('usage.records.tokens'),
@@ -216,7 +215,6 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
       cell: (event) => (
         <div className="tabular-nums" title={event.context_tokens === null ? undefined : t('usage.records.prompt', { tokens: formatNumber(event.context_tokens, locale) })}>
           {event.timing?.service_usage!==undefined && event.timing.service_usage!==null?'–':formatTokens(event.tokens.total_tokens, locale)}
-          <TokenFacts event={event} />
         </div>
       ),
     },
@@ -245,7 +243,7 @@ function RecordsView({ scope, search, span, depth, className }: RecordsProps) {
         <p className="text-sm text-text-muted">{t('usage.records.empty')}</p>
       ) : (
         <>
-          <Table label={t('usage.records.title')} columns={columns} rows={rows} rowKey={(event) => event.id} />
+          <Table virtual label={t('usage.records.title')} columns={columns} rows={rows} rowKey={(event) => event.id} />
           <Pagination hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.isFetchNextPageError ? query.error : undefined} onMore={() => void query.fetchNextPage()} />
         </>
       )}
