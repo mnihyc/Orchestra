@@ -1,15 +1,22 @@
 /** Long settings pages keep readable values, one authority sentence and keyboard-reachable group contents. */
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { Activity, Profiler } from 'react';
+import { Settings as ManagementSettings } from '@/features/admin/Settings';
+import { useWorkbench } from '@/features/workbench/store';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as SettingsApi from '@/api/settings';
 import { putSetting, targetSettingsKey } from '@/api/settings';
 import { SettingsEditor } from '@/features/settings/Editor';
+import { OrgSettings } from '@/features/settings/org/OrgSettings';
+import { orgBySlugKey } from '@/api/nodes';
+import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { GROUP_ORDER } from '@/features/settings/settingsModel';
 import type { ResolvedSetting, SettingDef } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
+import { ACME, me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
 const server = vi.hoisted(() => ({ definitions: vi.fn<() => Promise<SettingDef[]>>(), values: vi.fn<() => Promise<ResolvedSetting[]>>(), location: { pathname: '/topic/topic', searchStr: '?tab=settings&section=defaults' } }));
@@ -21,7 +28,7 @@ vi.mock('@/api/settings', async (load) => {
   };
 });
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => server.location }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const target = { kind: 'node', id: 'topic' } as const;
 const place = { name: 'login', kind: 'topic', owner: { display_name: 'Ada Lovelace' }, access: { permissions: ['topic.view'] } };
 const scroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
@@ -46,6 +53,175 @@ const definition = (index: number): SettingDef => ({ key: `test.feature${index}`
   schema: { type: 'boolean' }, default: false, example: true, text_key: null, keywords: [] });
 const value = (def: SettingDef, current: unknown, writable: boolean): ResolvedSetting => ({ key: def.key, value: current, own: null,
   source: { scope: 'default', node: null }, locked_by: null, writable, parts: [] });
+
+it('opens Acme Defaults with its served settings and first screen of controls within one second', async () => {
+  const acme = org(ACME.org, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')));
+  server.location = { pathname: '/org/acme/settings/defaults', searchStr: '' };
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const defs = SETTINGS_REGISTRY.filter((def) => def.scopes.includes('org'));
+  expect(defs.length).toBeGreaterThan(200);
+  cache.setQueryData(orgBySlugKey('acme'), acme);
+  cache.setQueryData(['settings-registry'], SETTINGS_REGISTRY);
+  cache.setQueryData(targetSettingsKey({ kind: 'node', id: acme.id }), defs.map((def) => {
+    const row = value(def, def.default, true);
+    return { ...row, inherited: { value: def.default, source: row.source } };
+  }));
+
+  // jsdom has no layout. Deliver the browser's first viewport before measuring readiness.
+  const watched = new Map<Element, (entries: Partial<IntersectionObserverEntry>[]) => void>();
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private notify: (entries: Partial<IntersectionObserverEntry>[]) => void) {}
+    observe(element: Element) { watched.set(element, this.notify); }
+    unobserve(element: Element) { watched.delete(element); }
+    disconnect() { for (const [element, notify] of watched) if (notify === this.notify) watched.delete(element); }
+  });
+  const start = performance.now();
+  const view = show(<OrgSettings slug="acme" section="defaults" />, cache);
+  try {
+    const firstScreen = [...view.container.querySelectorAll('li[data-setting]')].slice(0, 6);
+    act(() => {
+      for (const [element, notify] of [...watched]) {
+        if (firstScreen.some((row) => row.contains(element) || element.contains(row))) {
+          notify([{ target: element, isIntersecting: true }]);
+        }
+      }
+    });
+    await act(async () => { await Promise.resolve(); });
+    const elapsed = performance.now() - start;
+    expect(firstScreen).toHaveLength(6);
+    expect(view.container.querySelector('[data-setting="agent.model"] input')).toBeInTheDocument();
+    expect(elapsed).toBeLessThan(1000);
+
+    const later = view.container.querySelector<HTMLElement>('li[data-setting="search.semantic.embeddings"]');
+    if (later === null) throw new Error('The embeddings setting must be reachable by keyboard');
+    expect(later).toHaveAccessibleName(i18n.t('settingRegistry.search.semantic.embeddings.title'));
+    act(() => later.focus());
+    expect(later).toHaveFocus();
+    expect(later.querySelector('button')).toBeInTheDocument();
+
+    // An offscreen setting remains searchable across the complete registry.
+    fireEvent.change(screen.getByRole('searchbox', { name: i18n.t('settings.editor.search') }), { target: { value: 'search.semantic.embeddings' } });
+    await waitFor(() => expect(view.container.querySelector('[data-setting="search.semantic.embeddings"] button')).toBeInTheDocument());
+    expect(putSetting).not.toHaveBeenCalled();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it.each(['project', 'topic'] as const)('opens a %s\'s Defaults with its first screen of controls within one second and draws the rest as it comes into view', async (scope) => {
+  server.location = { pathname: `/${scope}/${scope}/settings`, searchStr: '?section=defaults' };
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const defs = SETTINGS_REGISTRY.filter((def) => def.scopes.includes(scope));
+  expect(defs.length).toBeGreaterThan(150);
+  const here = { kind: 'node', id: scope } as const;
+  cache.setQueryData(['settings-registry'], SETTINGS_REGISTRY);
+  cache.setQueryData(targetSettingsKey(here), defs.map((def) => {
+    const row = value(def, def.default, true);
+    return { ...row, inherited: { value: def.default, source: row.source } };
+  }));
+  const watched = new Map<Element, (entries: Partial<IntersectionObserverEntry>[]) => void>();
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private notify: (entries: Partial<IntersectionObserverEntry>[]) => void) {}
+    observe(element: Element) { watched.set(element, this.notify); }
+    unobserve(element: Element) { watched.delete(element); }
+    disconnect() { for (const [element, notify] of watched) if (notify === this.notify) watched.delete(element); }
+  });
+  const start = performance.now();
+  const view = show(<SettingsEditor target={here} scope={scope} place={{ ...place, name: scope === 'topic' ? 'login' : 'web', kind: scope }} />, cache);
+  try {
+    const firstScreen = [...view.container.querySelectorAll('li[data-setting]')].slice(0, 6);
+    act(() => {
+      for (const [element, notify] of [...watched]) {
+        if (firstScreen.some((row) => row.contains(element) || element.contains(row))) notify([{ target: element, isIntersecting: true }]);
+      }
+    });
+    await act(async () => { await Promise.resolve(); });
+    const elapsed = performance.now() - start;
+    expect(firstScreen).toHaveLength(6);
+    // The page draws the controls of the rows in view, not those of every key of the place.
+    expect(view.container.querySelectorAll('[data-setting-row]').length).toBeLessThanOrEqual(12);
+    expect(elapsed).toBeLessThan(1000);
+
+    // A row further down keeps its name for the keyboard and draws its controls when it is reached.
+    const last = defs.filter((def) => def.group === GROUP_ORDER.findLast((group) => defs.some((candidate) => candidate.group === group))).at(-1);
+    const later = last === undefined ? null : view.container.querySelector<HTMLElement>(`li[data-setting="${last.key}"]`);
+    if (later === null) throw new Error('The last setting must be reachable by keyboard');
+    act(() => later.focus());
+    expect(view.container.querySelector(`[data-setting-row][data-setting="${last?.key ?? ''}"]`)).toBeInTheDocument();
+    expect(putSetting).not.toHaveBeenCalled();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it.each(['en', 'zh-CN'] as const)('lists the groups without a finder of their own and finds a group by its name through Search settings in %s', async (locale) => {
+  await setLocale(locale);
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  const defs = SETTINGS_REGISTRY.filter((def) => def.scopes.includes('topic'));
+  cache.setQueryData(['settings-registry'], SETTINGS_REGISTRY);
+  cache.setQueryData(targetSettingsKey(target), defs.map((def) => value(def, def.default, true)));
+  vi.stubGlobal('IntersectionObserver', class { observe = vi.fn(); unobserve = vi.fn(); disconnect = vi.fn(); });
+  const view = show(<SettingsEditor target={target} scope="topic" place={place} />, cache);
+  try {
+    const groups = await screen.findByRole('navigation', { name: i18n.t('settings.editor.groupsNav') });
+    expect(within(groups).getAllByRole('link').length).toBeGreaterThan(10);
+    // One search serves the page: its groups carry no second finder.
+    expect(within(groups).queryByRole('searchbox')).toBeNull();
+    expect(screen.getAllByRole('searchbox')).toHaveLength(1);
+    // A group's name finds that group's settings, as its link would have.
+    const name = i18n.t('settings.editor.groups.collaboration');
+    fireEvent.change(screen.getByRole('searchbox', { name: i18n.t('settings.editor.search') }), { target: { value: name } });
+    await waitFor(() => expect(view.container.querySelector('[data-setting="agent.model"]')).not.toBeInTheDocument());
+    expect(view.container.querySelector('[data-setting="broadcast.thread_messages_per_hour"]')).toBeInTheDocument();
+  } finally { view.unmount(); cache.clear(); }
+});
+
+it('switches between Management settings and org General within 200 ms and leaves the retained editor idle', async () => {
+  const team = org(ACME.org, 'acme', 'Acme', userRef(me(1, 'ada', 'Ada')));
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+  cache.setQueryData(['settings-registry'], SETTINGS_REGISTRY);
+  cache.setQueryData(orgBySlugKey('acme'), team);
+  const system = SETTINGS_REGISTRY.filter((def) => def.scopes.includes('system'));
+  cache.setQueryData(targetSettingsKey({ kind: 'system' }), system.map((def) => value(def, def.default, true)));
+  const watched = new Map<Element, (entries: Partial<IntersectionObserverEntry>[]) => void>();
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private notify: (entries: Partial<IntersectionObserverEntry>[]) => void) {}
+    observe(element: Element) { watched.set(element, this.notify); }
+    unobserve(element: Element) { watched.delete(element); }
+    disconnect() { for (const [element, notify] of watched) if (notify === this.notify) watched.delete(element); }
+  });
+  const commits = vi.fn();
+  const settings = <Profiler id="system" onRender={commits}><ManagementSettings /></Profiler>;
+  const general = <OrgSettings slug="acme" section="general" />;
+  const panes = (active: 'general' | 'first' | 'return') => <>
+    <Activity mode={active === 'first' ? 'hidden' : 'visible'}>{general}</Activity>
+    {active !== 'general' && <Activity mode={active === 'first' ? 'visible' : 'hidden'}>{settings}</Activity>}
+  </>;
+  const view = show(panes('general'), cache);
+  try {
+    const start = performance.now();
+    view.rerender(panes('first'));
+    const first = [...watched][0];
+    if (first) act(() => first[1]([{ target: first[0], isIntersecting: true }]));
+    const openMs = performance.now() - start;
+    expect(view.container.querySelector('[data-setting-row] button')).toBeInTheDocument();
+    expect(openMs).toBeLessThan(200);
+    const back = performance.now();
+    view.rerender(panes('return'));
+    expect(performance.now() - back).toBeLessThan(200);
+    commits.mockClear();
+    act(() => useWorkbench.setState({}));
+    expect(commits).not.toHaveBeenCalled();
+    const again = performance.now();
+    view.rerender(panes('first'));
+    expect(performance.now() - again).toBeLessThan(200);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 300)); });
+    commits.mockClear();
+    const frames = vi.spyOn(window, 'requestAnimationFrame');
+    try {
+      act(() => useWorkbench.setState({}));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
+      expect(commits).not.toHaveBeenCalled();
+      expect(frames).not.toHaveBeenCalled();
+    } finally { frames.mockRestore(); }
+  } finally { view.unmount(); cache.clear(); }
+});
 
 it.each(['en', 'zh-CN'] as const)('keeps one full search field and its Only here toggle on shared system and project editors in %s', async (locale) => {
   await setLocale(locale);
@@ -144,27 +320,25 @@ it.each(['en', 'zh-CN'] as const)('condenses 146 view-only values under one sent
   expect(server.values).toHaveBeenCalledTimes(1);
 });
 
-it('jumps to a group without opening a new view or loading another setting list', { timeout: 30_000 }, async () => {
+it('lists every group beside or above the page, marks the one pressed and takes it to its heading without another read', { timeout: 30_000 }, async () => {
   const definitions = GROUP_ORDER.map((group, index) => ({ ...definition(index), group }));
   server.definitions.mockResolvedValue(definitions);
   server.values.mockResolvedValue(definitions.map((def) => value(def, false, false)));
   const view = show(<SettingsEditor target={target} scope="topic" place={place} />);
-  const picker = await screen.findByRole('combobox', { name: i18n.t('settings.editor.groupsNav') });
-  await userEvent.click(picker);
-  expect(screen.getAllByRole('option')).toHaveLength(GROUP_ORDER.length);
+  const nav = await screen.findByRole('navigation', { name: i18n.t('settings.editor.groupsNav') });
+  expect(within(nav).queryByRole('combobox')).not.toBeInTheDocument();
+  expect(within(nav).getAllByRole('link')).toHaveLength(GROUP_ORDER.length);
   expect(GROUP_ORDER.length).toBeGreaterThan(10);
-  await userEvent.type(picker, i18n.t('settings.editor.groups.system'));
-  expect(putSetting).not.toHaveBeenCalled();
-  expect(server.definitions).toHaveBeenCalledTimes(1);
-  expect(server.values).toHaveBeenCalledTimes(1);
-  await userEvent.click(screen.getByRole('option', { name: i18n.t('settings.editor.groups.system') }));
-  const contents = view.container.querySelector<HTMLElement>('[data-settings-contents]');
-  if (contents === null) throw new Error('The long page has no contents list');
-  const link = within(contents).getByText(i18n.t('settings.editor.groups.system'));
+  // Every group is on the page under its own heading: none is hidden behind the list.
+  expect(view.container.querySelectorAll('[data-scroll-section]')).toHaveLength(GROUP_ORDER.length);
+  const link = within(nav).getByRole('link', { name: i18n.t('settings.editor.groups.system') });
   const href = link.getAttribute('href');
   if (href === null) throw new Error('The contents link has no destination');
+  await userEvent.click(link);
   await waitFor(() => expect(document.getElementById(href.slice(1))).toHaveFocus());
   expect(link).toHaveAttribute('aria-current', 'location');
+  expect(putSetting).not.toHaveBeenCalled();
+  expect(server.definitions).toHaveBeenCalledTimes(1);
   expect(server.values).toHaveBeenCalledTimes(1);
 });
 

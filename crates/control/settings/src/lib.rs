@@ -29,6 +29,7 @@ pub mod locks;
 pub mod merge;
 pub mod provenance;
 pub mod resolver;
+pub mod retention;
 pub mod secrets;
 pub mod supplied;
 pub mod validation;
@@ -40,9 +41,11 @@ use orch_types::Id;
 pub use provenance::SettingView;
 pub use resolver::{
     ProviderAt, Snapshot, Wanted, cleanup_at_hosts, get, get_at_nodes, get_at_providers, resolve,
-    resolve_all, snapshots_at_providers,
+    resolve_all, snapshots_at_nodes, snapshots_at_providers,
 };
 mod provider_runtime;
+pub mod provider_translation;
+pub mod provider_upstream;
 pub use provider_runtime::{
     ProviderSignIn, credential_home, credential_home_choice, harness_home_owned,
     machine_home_owned, profile_home, profile_home_choice, profile_home_in, provider_home,
@@ -65,6 +68,8 @@ pub enum Place {
     Provider(Id),
     /// One host's maintenance policy, inherited from the system.
     Host(Id),
+    /// A pool's own defaults, after the path to its home.
+    Pool(Id),
 }
 
 /// Where a setting is written: a row of the system or of a node. The own

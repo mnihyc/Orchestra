@@ -272,6 +272,15 @@ pub struct ChatDuplicateAudience {
     /// The native reviewed recipient set; absent for no recipients or an audience above the synchronous limit.
     pub preview_id: Option<Id>,
 }
+/// The complete reviewed contributor set for a native Thread move.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadMoveAudience {
+    /// All distinct eligible original contributors, excluding the mover.
+    pub people: u64,
+    /// The same private review used by the existing paginated people list.
+    /// Absent only when there are no eligible contributors.
+    pub preview_id: Option<Id>,
+}
 /// The existing fork plan and the original native deletion reviewed in the same preflight.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadMoveOutPreviewResponse {
@@ -280,7 +289,7 @@ pub struct ThreadMoveOutPreviewResponse {
     /// Present only when that exact source's response Read is admitted.
     pub delete_plan: Option<MoveOutDeletePlan>,
     /// Current eligible original contributors; absent on the write-only plan receipt.
-    pub notification: Option<ChatDuplicateAudience>,
+    pub notification: Option<ThreadMoveAudience>,
     /// Open side conversations the native fork does not carry; close or keep each before confirming.
     /// Absent on the write-only plan receipt.
     pub open_side_threads: Option<Vec<crate::nodes::NodeRef>>,
