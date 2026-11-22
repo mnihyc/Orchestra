@@ -1,0 +1,1 @@
+web-e2e tests/e2e/call-recovery.spec.ts tests/e2e/machine-programs.spec.ts tests/e2e/resources.spec.ts --project=chromium

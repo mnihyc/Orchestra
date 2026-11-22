@@ -51,6 +51,7 @@ pub(super) fn of(facts: &Json) -> EnvironmentSupport {
                 .and_then(Json::as_bool),
         },
         vnc: EnvironmentSupportVnc {
+            desktop: vnc.and_then(|v| v.get("desktop")).and_then(Json::as_bool),
             servers: programs(vnc.and_then(|found| found.get("servers"))),
             window_manager: text(vnc.and_then(|found| found.get("window_manager"))),
         },

@@ -122,7 +122,7 @@ test('items being picked, with the bar that stands in place of the box, and the 
   // The newest item is in view; the conversation draws only the items near what is shown.
   const first = conversation(page).locator('[data-item="a-quoted"]');
   await first.hover();
-  await first.getByRole('button', { name: 'More acts on this item' }).click();
+  await first.getByRole('button', { name: 'More actions for this item' }).click();
   await page.getByRole('menuitem', { name: 'Select', exact: true }).click();
   await expect(page.getByRole('toolbar', { name: 'Selected items' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
