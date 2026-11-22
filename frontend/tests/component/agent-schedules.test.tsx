@@ -11,7 +11,8 @@ import { client } from '@/api/client';
 import { meQuery } from '@/api/auth';
 import { seedPendingAgentSchedules, type InputSchedule } from '@/api/inputSchedules';
 import { scheduledReads } from '@/api/readScheduler';
-import { PendingAgentSchedules, ThreadSchedules, SchedulesView } from '@/features/schedules/Schedules';
+import { ThreadSchedules, SchedulesView } from '@/features/schedules/Schedules';
+import { PendingAgentSchedules } from '@/features/schedules/PendingAgentSchedules';
 import { makeTab } from '@/features/workbench/layout';
 import type * as ViewOpening from '@/features/workbench/viewOpening';
 import { i18n, setLocale } from '@/i18n';
@@ -43,7 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks(); wire.remove.mockReset(); wire.shown = false; rows = [inputSchedule()];
   client.session.setState({ userId: thread().owner.id, readerVersion: 801 });
   wire.get.mockImplementation((path: string) => {
-    if (path === '/topics/{id}/sync') return Promise.resolve({ data: { input_schedules: rows }, response: new Response() });
+    if (path === '/topics/{id}/input-schedules') return Promise.resolve({ data: { items: rows, next_cursor: null }, response: new Response() });
     if (path === '/threads/{id}/opening') return Promise.resolve({ data: { sync: { thread: thread() }, pending_agent_schedules: { status: 'ready', data: pending() } }, response: new Response() });
     throw new Error(`Unexpected read ${path}`);
   });
@@ -74,8 +75,27 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
   expect(within(list).queryByText('Another thread')).toBeNull();
   expect(screen.getByTestId('schedule-settings')).toHaveTextContent('threads.agent_schedules,threads.agent_schedule_hours,threads.agent_schedule_runs');
   expect(wire.get).toHaveBeenCalledOnce();
-  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/sync');
+  expect(wire.get.mock.calls[0]?.[0]).toBe('/topics/{id}/input-schedules');
   expect(wire.remove).not.toHaveBeenCalled();
+});
+
+it.each([['en', 1], ['en', 3], ['zh-CN', 1], ['zh-CN', 3]] as const)('keeps captured coalescing and a prior-input skip separate from failures in %s (%s earlier)', async (locale, count) => {
+  await setLocale(locale);
+  const queued = Object.assign(scheduleRun({ state: 'queued', started_at: null, reason: null }), {
+    outcome: { reason_code: 'accepted', coalesced_count: count, zone: 'UTC', scheduled_for: scheduleRun().scheduled_for, accepted_input_ref: 'scheduled-input' },
+  });
+  const skipped = Object.assign(scheduleRun({ id: 'prior-input-skip', state: 'skipped', started_at: null, input_id: null, turn_id: null, reason: null }), {
+    outcome: { reason_code: 'previous_input_pending', coalesced_count: 0, zone: 'UTC', scheduled_for: scheduleRun().scheduled_for, accepted_input_ref: null },
+  });
+  rows = [inputSchedule({ last_run: queued }), inputSchedule({ id: 'skipped-schedule', name: 'Skipped review', last_run: skipped })];
+  showSchedules(<ThreadSchedules thread={thread()} />);
+  const table = await screen.findByRole('table', { name: i18n.t('agentSchedules.title') });
+  const coalesced = locale === 'en' ? `Queued · ${count} earlier occurrence${count === 1 ? '' : 's'} coalesced` : `已排队 · 已合并此前 ${count} 次计划`;
+  const previous = locale === 'en' ? 'Skipped · Previous input still pending' : '已跳过 · 上一次输入仍在等待';
+  expect(within(table).getByText(coalesced)).toBeVisible();
+  expect(within(table).getByText(previous)).toBeVisible();
+  expect(within(table).queryByText(locale === 'en' ? 'Operation failed' : '操作失败')).toBeNull();
+  expect(wire.get).toHaveBeenCalledOnce();
 });
 
 it('shares pending cancellation between the timeline and list, leaving accepted input delivery to the ordinary tray', async () => {

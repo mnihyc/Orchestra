@@ -25,6 +25,51 @@ fn executable(path: &Path) -> String {
     }
 }
 
+/// The exact policy command, ending in `policy`, of the connector whose data directory is `directory`, or of
+/// the node whose configuration is `node_config`, as [`observe`] names it for the installation's page.
+pub(crate) fn policy_command(directory: &Path, node_config: Option<&Path>) -> String {
+    let program = program_path().unwrap_or_else(|| {
+        PathBuf::from(if node_config.is_some() {
+            "orch-node"
+        } else {
+            "orch-connector"
+        })
+    });
+    let root = std::path::absolute(directory).unwrap_or_else(|_| directory.to_owned());
+    format!("{} policy", instance_prefix(&program, &root, node_config))
+}
+
+/// The program and the instance it is run for: its data directory and, for a node, its configuration.
+fn instance_prefix(program: &Path, root: &Path, node_config: Option<&Path>) -> String {
+    let mut prefix = format!(
+        "{} --data-dir {}",
+        executable(program),
+        quote(&root.to_string_lossy())
+    );
+    if let Some(config) = node_config {
+        let config = std::path::absolute(config).unwrap_or_else(|_| config.to_owned());
+        prefix.push_str(&format!(" --config {}", quote(&config.to_string_lossy())));
+    }
+    prefix
+}
+
+/// A policy value as the local policy command reads it, written as the machine's page writes it: a switch or a
+/// number bare, a plain word bare, anything else as quoted JSON.
+pub(crate) fn command_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.to_string(),
+        serde_json::Value::String(text)
+            if !text.is_empty()
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')) =>
+        {
+            text.clone()
+        }
+        _ => quote(&value.to_string()),
+    }
+}
+
 /// The physical runner's selected executable, retained when an installer replaces its file in place.
 #[must_use]
 pub fn program_path() -> Option<PathBuf> {
@@ -53,6 +98,34 @@ pub fn node(data: &DataDir, config_file: &Path) -> MachineInstallation {
     )
 }
 
+/// Read the identity of this connector once; changing an installation requires reviewing its new build.
+pub(crate) fn reviewable_platform()
+-> Option<&'static orch_agent_programs::confirmation::PlatformBuild> {
+    use orch_agent_programs::confirmation::PlatformBuild;
+    static BUILD: OnceLock<Option<PlatformBuild>> = OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            if orch_envhost::RUNTIME_VERIFIED {
+                return None;
+            }
+            let mut binary = std::fs::File::open(program_path()?).ok()?;
+            let mut hash = orch_types::Hash::hasher();
+            std::io::copy(&mut binary, &mut hash).ok()?;
+            Some(PlatformBuild {
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                executable: orch_types::Hash::finish(&hash),
+            })
+        })
+        .as_ref()
+}
+
+/// A local review names one executable; it does not add support for an unavailable primitive.
+pub(crate) fn runtime_reviewed(policy: &orch_link_contract::policy::LocalPolicy) -> bool {
+    orch_envhost::RUNTIME_VERIFIED
+        || reviewable_platform().is_some_and(|build| policy.exec_platform.accepts(build))
+}
+
 /// Uses the same observed command formatter for a known installed connector executable.
 #[must_use]
 pub fn connector_with_program(data: &DataDir, program: &Path) -> MachineInstallation {
@@ -76,17 +149,7 @@ fn observe(data: &DataDir, node_config: Option<&Path>, path: &Path) -> MachineIn
     let root = std::path::absolute(data.root()).unwrap_or_else(|_| data.root().to_owned());
     let configured = node_config.map_or_else(|| data.config_path(), Path::to_owned);
     let config_file = std::path::absolute(&configured).unwrap_or(configured);
-    let mut prefix = format!(
-        "{} --data-dir {}",
-        executable(&path),
-        quote(&root.to_string_lossy())
-    );
-    if node {
-        prefix.push_str(&format!(
-            " --config {}",
-            quote(&config_file.to_string_lossy())
-        ));
-    }
+    let prefix = instance_prefix(&path, &root, node.then_some(config_file.as_path()));
     let user = {
         #[cfg(unix)]
         {

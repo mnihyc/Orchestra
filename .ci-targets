@@ -1,0 +1,10 @@
+fmt
+clippy
+contracts
+test -p orch-link-contract --lib
+test -p orch-connector-core --lib
+test -p orch-node-core --test tools
+test -p orch-api-core --features test-support --test machines
+web typecheck
+web lint
+web test -- tests/component/machine-policy.test.tsx tests/component/machine-programs.test.tsx tests/unit/api-error-words.test.ts tests/unit/machine-program-consent-double.test.ts tests/unit/help-content.test.ts tests/unit/help-reference-coverage.test.ts
