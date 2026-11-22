@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { CallsRules, CallsSummary } from '@/features/settings/CallsRules';
 import { CallRecoveryControls, CallRecoveryStatus } from '@/features/thread/CallRecovery';
-import type { CallRecovery, Thread } from '@/generated/api-types';
+import type { CallRecovery, Thread, ResourceTarget } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 import { formatSpan } from '@/lib/time';
@@ -14,11 +14,13 @@ import { recoveryCause } from '@/features/calls/History';
 
 vi.mock('@/features/settings/ProviderChoice', () => ({ ProviderDefaultChoice: ({ label }: { label: string }) => <span>{label}</span> }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), providerModelsQuery: (id: string) => ({ queryKey: ['test-models', id], queryFn: () => Promise.resolve([]) }), providerQuery: (id:string)=>({queryKey:['test-provider',id],queryFn:()=>Promise.resolve({id,kind:'api',protocols:['openai-responses'],agent:null,agent_id:null,harness_kind:null})}), agentsQuery:()=>({queryKey:['test-agents'],queryFn:()=>Promise.resolve([])}) }));
-vi.mock('@/features/change/target', () => ({ openChange: vi.fn() }));
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/change/target', async (loadOriginal) => ({ ...await loadOriginal<object>(), openChange: vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/resources/pools/targetChoices',()=>({usePoolTargetChoices:()=>({rows:[{id:'model-pool',name:'Rotating models',kind:'model',enabled:true,policy:{type:'ordered'}}],options:[{value:'\u0000pool:model-pool',label:'Rotating models',text:'Rotating models'}],loading:false,footer:null})}));
 const appearance = useAppearance.getState();
 afterEach(async () => { vi.useRealTimers(); useAppearance.setState(appearance); await setLocale('en'); });
 
+const modelTarget=(provider:string,offering:string):ResourceTarget=>({type:'single',resource:{kind:'model',backend:{route:'generation.model',offering:{provider,offering},config:{}}}});
 const rule = { id: 'busy', when: { kind: 'provider_busy' }, steps: [{ type: 'retry', delay_secs: 60, times: 3, backoff: 2 }, { type: 'wait', until: 'person' }] };
 const recovery = (): CallRecovery => ({ state: 'scheduled', failure: { code: 'provider_busy', message: 'Synthetic capacity', retryable: true, window: null, said: null, resets_at: null, incomplete: false }, rule_id: 'busy', step: { type: 'retry', delay_secs: 60, times: 3, backoff: 2 }, attempt: 2, due_at: new Date(Date.now() + 42_000).toISOString(), detail: null, count: null, window_secs: null });
 
@@ -98,7 +100,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`keeps an unfinished candidate parameter draft with its step when reordered (${locale})`,async()=>{
     await setLocale(locale);
     const change=vi.fn();
-    const held={id:'fallback',when:{kind:'provider_busy'},steps:[{type:'failover',candidate:{provider_id:'provider',model:'One',params:{mode:'one'},dimensions:null}},{type:'failover',candidate:{provider_id:'provider',model:'Two',params:{mode:'two'}}}]};
+    const held={id:'fallback',when:{kind:'provider_busy'},steps:[{type:'failover',candidate:{target:modelTarget('provider','One'),params:{mode:'one'},dimensions:null}},{type:'failover',candidate:{target:modelTarget('provider','Two'),params:{mode:'two'}}}]};
     show(<CallsRules shape={{type:'json'}} value={[held]} label={i18n.t('calls.rules')} onChange={change} />);
     await userEvent.click(screen.getByRole('button',{name:/→/}));
     let fields=screen.getAllByLabelText(i18n.t('calls.parameters'));
@@ -144,7 +146,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await setLocale(locale);
     useAppearance.setState({ locale });
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-25T10:00:00.000Z'));
-    const view = show(<CallRecoveryStatus recovery={{ ...recovery(), due_at: '2026-10-25T10:01:00.000Z', step: { type: 'failover', candidate: { provider_id: 'provider', model: 'Fallback', params: {} } } }} />);
+    const view = show(<CallRecoveryStatus recovery={{ ...recovery(), due_at: '2026-10-25T10:01:00.000Z', step: { type: 'failover', candidate: { target: modelTarget('provider','Fallback'), params: {} } } }} />);
     expect(view.container).toHaveTextContent('Fallback');
     expect(view.container).toHaveTextContent(formatSpan(60_000, { locale }, 'short'));
     expect(view.container.querySelector('.resource-chip')).toBeVisible();
@@ -205,7 +207,8 @@ for (const locale of ['en', 'zh-CN'] as const) {
   it(`edits an explicit capability route in the same rule and keeps its opaque configuration (${locale})`, async () => {
     await setLocale(locale); useAppearance.setState({locale});
     const change=vi.fn();
-    const candidate={provider_id:'provider',model:'',params:{},route:{route:'web_search.service-api',offering:{provider:'provider',offering:'public-search'},config:{fixture:'kept'}}};
+    const backend={route:'web_search.service-api',offering:{provider:'provider',offering:'public-search'},config:{fixture:'kept'}};
+    const candidate={params:{},target:{type:'single' as const,resource:{kind:'model' as const,backend}}};
     const held={id:'search-fallback',when:{kind:'unavailable',purpose:'web_search'},steps:[{type:'failover',candidate},{type:'wait',until:'person'}]};
     show(<CallsRules shape={{type:'json'}} value={[held]} label={i18n.t('calls.rules')} onChange={change} />);
     await userEvent.click(screen.getByRole('button',{name:/→/}));
@@ -218,11 +221,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await userEvent.keyboard('{Escape}');
     fireEvent.change(within(dialog).getByLabelText(i18n.t('calls.offering')),{target:{value:'another-search'}});
     await userEvent.click(within(dialog).getByRole('button',{name:i18n.t('common.save')}));
-    expect(change).toHaveBeenCalledExactlyOnceWith([{...held,steps:[{...held.steps[0],candidate:{...candidate,route:{...candidate.route,offering:{provider:'provider',offering:'another-search'}}}},held.steps[1]]}]);
+    expect(change).toHaveBeenCalledExactlyOnceWith([{...held,steps:[{...held.steps[0],candidate:{...candidate,target:{...candidate.target,resource:{...candidate.target.resource,backend:{...backend,offering:{provider:'provider',offering:'another-search'}}}}}},held.steps[1]]}]);
   });
   it(`names a capability failover and the exhausted chain without showing backend configuration (${locale})`, async () => {
     await setLocale(locale);
-    const candidate={provider_id:'provider',model:'',params:{},route:{route:'image_generation.delegation',offering:null,config:{private:'never-publish'}}};
+    const candidate={params:{},target:{type:'single' as const,resource:{kind:'model' as const,backend:{route:'image_generation.delegation',offering:null,config:{private:'never-publish'}}}}};
     const view=show(<CallRecoveryStatus recovery={{...recovery(),due_at:null,step:{type:'failover',candidate}}} />);
     expect(view.container).toHaveTextContent(i18n.t('calls.capabilityDestination'));
     expect(view.container).not.toHaveTextContent('never-publish');
@@ -254,3 +257,29 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(view.container).toHaveTextContent(i18n.t('capabilityRoutes.names.web_search'));
   });
 }
+
+it('chooses a model pool inside the existing model field of a recovery step',async()=>{
+  const change=vi.fn();
+  const held={id:'pool-fallback',when:{kind:'provider_busy'},steps:[{type:'failover',candidate:{target:modelTarget('provider','One'),params:{}}}]};
+  show(<CallsRules shape={{type:'json'}} value={[held]} label={i18n.t('calls.rules')} onChange={change} />);
+  await userEvent.click(screen.getByRole('button',{name:/→/}));
+  const dialog=screen.getByRole('dialog',{name:i18n.t('calls.editRule')});
+  await userEvent.click(within(dialog).getByRole('combobox',{name:i18n.t('calls.model')}));
+  await userEvent.click(await screen.findByRole('option',{name:'Rotating models'}));
+  await userEvent.click(within(dialog).getByRole('button',{name:i18n.t('common.save')}));
+  expect(change).toHaveBeenCalledExactlyOnceWith([{...held,steps:[{type:'failover',candidate:{target:{type:'pool',kind:'model',id:'model-pool'},params:{}}}]}]);
+});
+
+it('finds a late recovery rule without narrowing its saved order or losing its step draft', async()=>{
+  const value=Array.from({length:60},(_,index)=>({...rule,id:`Recovery ${index}`}));
+  const change=vi.fn<(value:unknown)=>void>();
+  const user=userEvent.setup();show(<CallsRules shape={{type:'json'}} value={value} label={i18n.t('calls.rules')} onChange={change}/>);
+  const find=screen.getByRole('searchbox');await user.click(find);await user.paste('Recovery 59');
+  const actions=screen.getByRole('button',{name:new RegExp('Recovery 59')});await user.click(actions);
+  await user.click(screen.getByRole('menuitem',{name:i18n.t('calls.edit')}));
+  const name=screen.getByRole('textbox',{name:i18n.t('calls.name')});await user.clear(name);await user.paste('Kept recovery');
+  await user.click(screen.getByRole('button',{name:i18n.t('common.save')}));
+  const saved=change.mock.calls[0]?.[0];expect(Array.isArray(saved)).toBe(true);
+  if(!Array.isArray(saved))throw new Error('the complete rules remain an array');
+  expect(saved).toHaveLength(60);expect(saved[0]).toEqual(value[0]);expect(saved[59]).toEqual({...value[59],id:'Kept recovery'});
+});

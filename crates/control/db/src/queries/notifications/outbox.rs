@@ -421,13 +421,18 @@ pub async fn hold_unreserved(
     conn: &mut Conn,
     ids: &[Id],
     until: DateTime<Utc>,
+    quiet_problem: Option<&str>,
 ) -> Result<(), DbError> {
     sqlx::query(
-        "UPDATE outbox SET next_attempt_at = $2, payload = jsonb_set(payload, '{held}', 'true'::jsonb)
+        "UPDATE outbox SET next_attempt_at = $2,
+                last_error = CASE WHEN $3::text IS NOT NULL THEN $3 WHEN payload ? 'quiet_error' THEN NULL ELSE last_error END,
+                payload = CASE WHEN $3::text IS NULL THEN jsonb_set(payload, '{held}', 'true'::jsonb) - 'quiet_error'
+                               ELSE jsonb_set(jsonb_set(payload, '{held}', 'true'::jsonb), '{quiet_error}', to_jsonb($3::text)) END
           WHERE id = ANY($1) AND state = 'pending'",
     )
     .bind(ids)
     .bind(until)
+    .bind(quiet_problem)
     .execute(conn)
     .await?;
     Ok(())
@@ -728,6 +733,29 @@ pub async fn end_session(conn: &mut Conn, pid: i32) -> Result<bool, DbError> {
         .bind(END_SESSION_WAIT_MS)
         .fetch_one(conn)
         .await?)
+}
+
+/// Stored operands of the next own delivery, or latest retained accepted delivery.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DeliveryFacts {
+    /// Durable delivery state.
+    pub state: String,
+    /// Completed or recovered attempts.
+    pub attempts: i32,
+    /// Reservation start, not a device-display receipt.
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// Stored retry or current reservation deadline.
+    pub next_eligible_at: Option<DateTime<Utc>>,
+    /// Recovery explicitly recorded an unconfirmed attempt.
+    pub unconfirmed: bool,
+}
+/// Enforce ownership even if a caller supplies another route identifier.
+pub async fn delivery_facts(
+    conn: &mut Conn,
+    user: Id,
+    route: Id,
+) -> Result<Option<DeliveryFacts>, DbError> {
+    Ok(sqlx::query_as("SELECT o.state,o.attempts,o.dispatch_started_at AS last_attempt_at,CASE WHEN o.state='sending' THEN o.dispatch_expires_at WHEN o.state='pending' THEN o.next_attempt_at ELSE NULL END AS next_eligible_at,COALESCE(o.last_error=$3,false) AS unconfirmed FROM outbox o JOIN notification_routes r ON r.id=o.route_id WHERE r.user_id=$1 AND r.id=$2 AND o.state IN ('pending','sending','sent') ORDER BY (o.state IN ('pending','sending')) DESC,CASE WHEN o.state IN ('pending','sending') THEN o.next_attempt_at END ASC,o.dispatch_started_at DESC NULLS LAST,o.id LIMIT 1").bind(user).bind(route).bind(UNCONFIRMED).fetch_optional(conn).await?)
 }
 
 #[cfg(test)]

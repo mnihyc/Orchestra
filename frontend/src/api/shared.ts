@@ -1,7 +1,7 @@
 /** Things shared by name whose parent the caller cannot see, as the server admits them. */
 import { queryOptions } from '@tanstack/react-query';
 import { api, ok } from '@/api/client';
-import type { SharedListItem, SharedListReply } from '@/generated/api-types';
+import type { SharedListItem, SharedListReply, SharedListKind } from '@/generated/api-types';
 
 export const sharedKey = ['shared-with-me'] as const;
 
@@ -23,8 +23,8 @@ export const sharedQuery = queryOptions({ queryKey: sharedKey,
 });
 
 /** One visible page; an empty candidate page may still have a continuation. */
-export const sharedPageQuery = (cursor: string | null) => queryOptions({
-  queryKey: [...sharedKey, cursor],
-  queryFn: ({ signal }): Promise<SharedListReply> => ok(api.GET('/shared', { params: { query: cursor === null ? {} : { cursor } }, signal })),
+export const sharedPageQuery = (cursor: string | null, q = '', kind?: SharedListKind) => queryOptions({
+  queryKey: [...sharedKey, cursor, ...(q.trim() !== '' || kind !== undefined ? [{ q: q.trim(), kind }] : [])],
+  queryFn: ({ signal }): Promise<SharedListReply> => ok(api.GET('/shared', { params: { query: { ...(cursor === null ? {} : { cursor }), ...(q.trim() === '' ? {} : { q: q.trim() }), ...(kind === undefined ? {} : { kind }) } }, signal })),
   retry: false,
 });

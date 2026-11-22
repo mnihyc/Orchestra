@@ -1,3 +1,4 @@
+import { CandidatePicker } from '@/features/access/CandidatePicker';
 /** The Owners line of a page: who owns the thing, Add owner, Make first, taking oneself out, and the last owner who cannot.
  *
  * It is the first line of a page and a row like the others, with one difference: it follows no default,
@@ -16,7 +17,6 @@ import { meQuery } from '@/api/auth';
 import type { Entry, PermissionPage } from '@/generated/api-types';
 import { Avatar } from '@/ui/Avatar';
 import { Button } from '@/ui/Button';
-import { Combobox } from '@/ui/Combobox';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { cx } from '@/ui/cx';
 import { Menu, type MenuEntry } from '@/ui/Menu';
@@ -53,13 +53,13 @@ function AddOwner({ page, target, changes }: { page: PermissionPage; target: Acc
       }
     >
       {candidates.placePicker}
-      <Combobox
+      <CandidatePicker candidates={candidates}
         label={t('access.owners.addLabel')}
         hint={t('access.owners.addHint')}
         placeholder={t('access.owners.addPlaceholder')}
         query={query}
         onQueryChange={setQuery}
-        minChars={2}
+        minChars={0}
         loading={candidates.loading}
         empty={t('access.candidates.none')}
         groups={candidates.groups.map((group) => ({ ...group, options: group.options.filter((option) => !taken.has(option.value)) }))}

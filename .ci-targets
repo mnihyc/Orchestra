@@ -1,0 +1,8 @@
+fmt
+clippy
+test -p orch-api-core --test realtime_threads --test realtime_feeds --test realtime_socket --test realtime_origins --test kfeeds_live
+test -p orch-api-core --lib
+web typecheck
+web lint
+web test
+test -p orch-api-core --test thread_terminalization --test background_wake_reads

@@ -113,6 +113,7 @@ async fn start_side(w: &Forks, source: Id, client: &str) -> Proof<Id> {
             .call(orch_api_contract::threads::ThreadSideCreate, &[&source])
             .token(&w.s.ada.token)
             .body(&orch_api_contract::threads::ThreadSideCreateBody {
+                acting: false,
                 content: vec![orch_api_contract::threads::ContentPart::Text {
                     text: "Read this aside".into(),
                 }],
@@ -401,6 +402,71 @@ async fn over(w: &Forks, id: Id) -> orch_db::queries::jobs::JobRow {
         .unwrap()
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn a_move_reviews_the_destination_model_policy_before_it_can_end_the_source() -> Proof {
+    let w = Forks::new().await;
+    let source = w.thread_with_history("Destination model policy").await;
+    let topic = destination(&w).await;
+    let model = "recipient-model";
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by)
+        SELECT $1,provider_id,$3,$3,parameters,true,'manual',created_by FROM provider_models WHERE provider_id=$2 AND model_name=$4")
+        .bind(orch_types::new_id()).bind(w.provider).bind(model).bind(MODEL)
+        .execute(w.s.rig.db.pool()).await?;
+    sqlx::query("INSERT INTO settings(node_id,key,value) VALUES ($1,'models.allowed',$2)")
+        .bind(topic)
+        .bind(json!([model]))
+        .execute(w.s.rig.db.pool())
+        .await?;
+    let review: ThreadMoveOutPreviewResponse =
+        serde_json::from_value(ok(&preview(&w, source, topic, &w.s.ada.token).await)?)?;
+    let blocked = review
+        .plan
+        .into_full()
+        .map_err(|_| "expected owner review")?;
+    assert!(
+        blocked
+            .blockers
+            .iter()
+            .any(|b| b.code == "model_not_allowed")
+    );
+    let reply = confirm(&w, source, blocked.preflight_id, &w.s.ada.token, false).await;
+    assert!(!reply.status.is_success());
+    assert_eq!(
+        w.count("SELECT count(*) FROM jobs WHERE kind='thread_fork'")
+            .await,
+        0
+    );
+    let replacement = ForkRequest {
+        topic_id: Some(topic),
+        to: Some(ForkTo {
+            provider_id: Some(w.provider),
+            agent_id: Some(w.agent),
+            model: Some(model.into()),
+            ..ForkTo::default()
+        }),
+        ..w.fork()
+    };
+    let reply =
+        w.s.rig
+            .world
+            .app
+            .call(ThreadMoveOutPreview, &[&source])
+            .token(&w.s.ada.token)
+            .body(&replacement)
+            .send_bytes()
+            .await;
+    let reviewed: ThreadMoveOutPreviewResponse = serde_json::from_value(ok(&reply)?)?;
+    let accepted = reviewed
+        .plan
+        .into_full()
+        .map_err(|_| "expected replacement review")?;
+    assert!(accepted.blockers.is_empty(), "{:?}", accepted.blockers);
+    assert_eq!(accepted.to.provider.id, w.provider);
+    assert_eq!(accepted.to.agent.id, w.agent);
+    assert_eq!(accepted.to.model, model);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_the_original_once()
 -> Proof {
     let w = Forks::new().await;
@@ -410,6 +476,21 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
         .bind(w.s.tree.topic.base.id)
         .bind(json!("summary"))
         .execute(w.s.rig.db.pool())
+        .await?;
+    const REPLIES: &str = "SELECT payload->>'text' FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created";
+    let original_replies: Vec<String> = sqlx::query_scalar(REPLIES)
+        .bind(source)
+        .fetch_all(w.s.rig.db.pool())
+        .await?;
+    assert!(
+        original_replies
+            .iter()
+            .any(|text| text == "The plan is ready")
+    );
+    const WORKSPACE: &str = "SELECT environment_id,workspace_dir FROM threads WHERE node_id=$1";
+    let original_workspace: (Id, String) = sqlx::query_as(WORKSPACE)
+        .bind(source)
+        .fetch_one(w.s.rig.db.pool())
         .await?;
     let original: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM items WHERE thread_id=$1 AND kind NOT IN ('marker','announcement')",
@@ -451,6 +532,24 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
             .fetch_one(w.s.rig.db.pool())
             .await?;
     assert!(source_deleted);
+    let progress =
+        w.s.rig
+            .world
+            .app
+            .call(orch_api_contract::workspace::JobGet, &[&job])
+            .token(&w.s.ada.token)
+            .send()
+            .await;
+    assert_eq!(
+        progress.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&progress.raw)
+    );
+    let progress = progress.ok();
+    assert_eq!(progress.id, job);
+    let result = progress.result.ok_or("completed move job result absent")?;
+    assert_eq!(result["thread_id"], json!(target));
     let new: (Id, Id) = sqlx::query_as(
         "SELECT topic_id,owner_id FROM threads t JOIN nodes n ON n.id=t.node_id WHERE t.node_id=$1",
     )
@@ -465,6 +564,20 @@ async fn an_owner_thread_move_uses_native_history_and_fresh_defaults_then_ends_t
     .fetch_one(w.s.rig.db.pool())
     .await?;
     assert_eq!(copied, original);
+    let moved_replies: Vec<String> = sqlx::query_scalar(REPLIES)
+        .bind(target)
+        .fetch_all(w.s.rig.db.pool())
+        .await?;
+    let moved_workspace: (Id, String) = sqlx::query_as(WORKSPACE)
+        .bind(target)
+        .fetch_one(w.s.rig.db.pool())
+        .await?;
+    assert_eq!(moved_replies, original_replies);
+    assert_eq!(
+        moved_workspace, original_workspace,
+        "keeping the binding keeps the files in the same workspace"
+    );
+
     assert_eq!(
         row.plan["confirmed_history_source"]["operation"]["origin"]["operation"],
         "ThreadMoveOut"
@@ -607,5 +720,188 @@ async fn a_late_native_thread_delete_failure_rolls_back_the_copy_ready_and_expor
     .fetch_one(w.s.rig.db.pool())
     .await?;
     assert_eq!(exports, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_reviews_every_eligible_contributor_across_pages_and_keeps_notify_available() -> Proof
+{
+    let w = Forks::new().await;
+    let source = w
+        .thread_with_history("A conversation with many contributors")
+        .await;
+    let topic = destination(&w).await;
+    // One more than the former recipient cutoff proves pagination is not a notification limit.
+    let mut people = Vec::new();
+    for number in 0..201 {
+        let person = w.s.rig.person(&format!("move-contributor-{number}")).await;
+        w.s.rig
+            .lets_use("node", source, "thread.view", &person, json!({}))
+            .await;
+        people.push(person.id());
+    }
+    let mut tx = w.s.rig.db.pool().begin().await?;
+    let segment: Id = sqlx::query_scalar("SELECT current_segment_id FROM threads WHERE node_id=$1")
+        .bind(source)
+        .fetch_one(&mut *tx)
+        .await?;
+    let payload: Json = sqlx::query_scalar(
+        "SELECT payload FROM items WHERE thread_id=$1 AND kind='user_message' LIMIT 1",
+    )
+    .bind(source)
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut unit = orch_engine::unit::Unit::new(&mut tx, w.s.rig.world.now());
+    for person in &people {
+        let seq = unit.stamp(source).await?;
+        orch_db::queries::threads::insert_item(
+            &mut *unit.conn,
+            &orch_db::queries::threads::NewItem {
+                id: orch_types::new_id(),
+                thread_id: source,
+                segment_id: segment,
+                turn_id: None,
+                stream: "main",
+                parent_item_id: None,
+                kind: "user_message",
+                status: "completed",
+                author_id: Some(*person),
+                payload: &payload,
+                native_ref: None,
+                search_text: None,
+                at: w.s.rig.world.now(),
+            },
+            seq,
+        )
+        .await?;
+    }
+    unit.finish().await?;
+    tx.commit().await?;
+    let mut conn = w.s.rig.db.acquire().await?;
+    let audience = orch_engine::fork_plan::moving::audience(
+        &mut conn,
+        source,
+        w.s.ada.id(),
+        orch_types::Time::new(w.s.rig.world.now()),
+    )
+    .await?;
+    assert_eq!(audience.count, 201);
+    assert_eq!(
+        audience
+            .people
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        people.iter().copied().collect()
+    );
+    let response: ThreadMoveOutPreviewResponse =
+        serde_json::from_value(ok(&preview(&w, source, topic, &w.s.ada.token).await)?)?;
+    let notification = response
+        .notification
+        .ok_or("the reviewed notification choice is present")?;
+    assert_eq!(notification.people, 201);
+    let review = notification
+        .preview_id
+        .ok_or("all reviewed contributors can be notified")?;
+    let mut cursor = None;
+    let mut visible = std::collections::BTreeSet::new();
+    loop {
+        let page =
+            w.s.rig
+                .world
+                .app
+                .call(orch_api_contract::loss::OperationRecipientsGet, &[&review])
+                .token(&w.s.ada.token)
+                .query(&orch_api_contract::common::PageQuery {
+                    limit: Some(100),
+                    cursor,
+                })
+                .send()
+                .await
+                .ok();
+        assert_eq!(page.total, 201);
+        assert_eq!(page.hidden, 0);
+        visible.extend(page.people.items.into_iter().map(|person| person.id));
+        cursor = page.people.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(visible, people.iter().copied().collect());
+    let scoped = key(
+        &w.s.rig.world,
+        w.s.ada.id(),
+        vec![rule(
+            "OperationRecipientsGet",
+            "thread",
+            source,
+            "self",
+            "read",
+        )],
+    )
+    .await?;
+    let scoped_page =
+        w.s.rig
+            .world
+            .app
+            .call(orch_api_contract::loss::OperationRecipientsGet, &[&review])
+            .token(&scoped.secret)
+            .query(&orch_api_contract::common::PageQuery::default())
+            .send()
+            .await
+            .ok();
+    assert_eq!(scoped_page.total, 201);
+    let wrong = key(
+        &w.s.rig.world,
+        w.s.ada.id(),
+        vec![rule("ThreadGet", "thread", source, "self", "read")],
+    )
+    .await?;
+    let denied =
+        w.s.rig
+            .world
+            .app
+            .call(orch_api_contract::loss::OperationRecipientsGet, &[&review])
+            .token(&wrong.secret)
+            .query(&orch_api_contract::common::PageQuery::default())
+            .send_bytes()
+            .await;
+    assert!(
+        !denied.status.is_success(),
+        "another operation's Read cannot open the Move audience"
+    );
+    // Isolate complete fanout from the separately configurable hourly notification policy.
+    w.s.rig
+        .world
+        .set("notifications.person_rate_per_hour", json!(0))
+        .await;
+    let plan = response
+        .plan
+        .into_full()
+        .map_err(|_| "the full Move plan is present")?;
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let accepted = confirm(&w, source, plan.preflight_id, &w.s.ada.token, true).await;
+    assert_eq!(
+        accepted.status,
+        202,
+        "{}",
+        String::from_utf8_lossy(&accepted.raw)
+    );
+    let accepted: Json = serde_json::from_slice(&accepted.raw)?;
+    let job: Id = serde_json::from_value(accepted["job_id"].clone())?;
+    let finished = over(&w, job).await;
+    assert_eq!(finished.state, "succeeded", "{:?}", finished.error);
+    let notified: Vec<Id> = sqlx::query_scalar(
+        "SELECT user_id FROM notifications WHERE kind='person.notify' AND data->>'operation_id'=$1",
+    )
+    .bind(job.to_string())
+    .fetch_all(w.s.rig.db.pool())
+    .await?;
+    assert_eq!(
+        notified
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        people.into_iter().collect()
+    );
     Ok(())
 }
