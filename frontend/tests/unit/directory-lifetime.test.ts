@@ -8,8 +8,8 @@ import { socket } from '@/realtime/live';
 import { DIRECTORY_READ_CONCURRENCY, MOST_WATCHED, directoryKey, directoryWriter, sortEntries, stopWatching, useDirectories, watchDirectory } from '@/realtime/stores/environment';
 
 const calls = vi.hoisted(() => ({ list: vi.fn(), subscribe: vi.fn() }));
-vi.mock('@/api/workspace', () => ({ listDirectory: calls.list }));
-vi.mock('@/realtime/live', () => ({ socket: { subscribe: calls.subscribe, status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, build: null, outdated: false })) } }));
+vi.mock('@/api/workspace', async (loadOriginal) => ({ ...await loadOriginal<object>(), listDirectory: calls.list }));
+vi.mock('@/realtime/live', async (loadOriginal) => ({ ...await loadOriginal<object>(), socket: { subscribe: calls.subscribe, status: createStore<SocketStatus>(() => ({ phase: 'ready', lostAt: null, roundTripMs: null, usualRoundTripMs: null, slow: false, build: null, outdated: false })) } }));
 const door = { environmentId: 'workspace', threadId: 'thread' };
 const subscriptions: { onFrame: (frame: FeedFrame) => void; unsubscribe: ReturnType<typeof vi.fn> }[] = [];
 const entry = (name: string): DirEntry => ({ name, path: name, type: 'file', size: 1, mtime: '2026-01-01T00:00:00Z', cached: false, mode: 420, link_target: null });
@@ -191,7 +191,7 @@ it('clears inaccessible HTTP rows and ignores old acknowledgements until a succe
   expect(held()?.entries[0]?.name).toBe('authorized-again.ts'); release();
 });
 
-it('invalidates a complete page identity without polling or accepting an older in-flight snapshot', async () => {
+it('keeps an in-flight observation through membership changes and replaces it only on explicit reload', async () => {
   const release = watchDirectory(door, '');
   subscriptions[0]?.onFrame({ op: 'event', id: 1, feed: 'directory', data: {
     reset: true, changed: [entry('page-one.ts')], removed: [], truncated: true, revision: 'v1', next_cursor: 'next-v1',
@@ -200,8 +200,8 @@ it('invalidates a complete page identity without polling or accepting an older i
   const load = directoryWriter.load(door, '');
   subscriptions[0]?.onFrame({ op: 'event', id: 1, feed: 'directory', data: { invalidated: true, changed: [], removed: [] } });
   old.resolve({ ...listing('obsolete.ts'), revision: 'v1', next_cursor: 'next-v1', truncated: true }); await load;
-  expect(held()).toMatchObject({ watch: 'stale', invalidated: true, nextCursor: null });
-  expect(held()?.entries[0]?.name).toBe('page-one.ts');
+  expect(held()).toMatchObject({ watch: 'stale', invalidated: true, nextCursor: 'next-v1' });
+  expect(held()?.entries[0]?.name).toBe('obsolete.ts');
   expect(calls.list).toHaveBeenCalledTimes(1);
   calls.list.mockResolvedValueOnce({ ...listing('fresh.ts'), revision: 'v2', next_cursor: 'next-v2', truncated: true });
   await directoryWriter.retry(door, '');

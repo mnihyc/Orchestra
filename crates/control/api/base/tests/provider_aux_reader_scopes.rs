@@ -19,7 +19,7 @@ use orch_api_contract::access::PermissionPageUpdate;
 use orch_api_contract::common::{ErrorCode, PageQuery, Problem};
 use orch_api_contract::resources::{ProviderThreadList, ProviderThreadListReply};
 use orch_api_contract::settings::{ProviderSettingList, ResolvedSetting};
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_api_core::registry::Registry;
 use orch_api_core::testing::RawReply;
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -169,7 +169,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>, scopes: &[&str
         serde_json::to_value(scope).unwrap()
     });
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &NewApiToken {
@@ -684,4 +684,48 @@ async fn auxiliary_readers_recheck_current_scope_on_their_actual_read_connection
         checkpoint(operation, false).await;
         checkpoint(operation, true).await;
     }
+}
+
+#[tokio::test]
+async fn provider_thread_search_finds_later_visible_names_and_does_not_match_redacted_places() {
+    let s = Scene::new().await;
+    let rows: ProviderThreadListReply = ok(threads(
+        &s.world,
+        &s.company.boss.token,
+        s.provider,
+        Default::default(),
+    )
+    .await);
+    let wanted = rows.items.last().unwrap();
+    let selected: ProviderThreadListReply = ok(s
+        .world
+        .app
+        .call(ProviderThreadList, &[&s.provider])
+        .token(&s.company.boss.token)
+        .query(&json!({"q":wanted.thread.name,"limit":1}))
+        .send_bytes()
+        .await);
+    assert_eq!(selected.items, vec![wanted.clone()]);
+    assert!(selected.next_cursor.is_none());
+    let token = key(
+        &s.world,
+        s.company.boss.id(),
+        vec![
+            rule("ProviderThreadList", "provider", s.provider),
+            rule("ProviderThreadList", "thread", wanted.thread.id),
+        ],
+    )
+    .await;
+    let hidden: ProviderThreadListReply = ok(s
+        .world
+        .app
+        .call(ProviderThreadList, &[&s.provider])
+        .token(&token.secret)
+        .query(&json!({"q":"Protected topic","limit":1}))
+        .send_bytes()
+        .await);
+    assert!(
+        hidden.items.is_empty(),
+        "a hidden place name is not searchable"
+    );
 }

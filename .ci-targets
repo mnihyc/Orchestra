@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-api-core --features test-support --test templates
+test -p orch-api-core --features test-support --test template_duplicates
+test -p orch-api-core --features test-support --test kmounts_import
+test -p orch-api-core --features test-support --test kfix_schemas
+test -p orch-settings-contract --lib

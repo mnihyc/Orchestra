@@ -383,6 +383,50 @@ async fn a_driver_the_system_keeps_to_its_admins_is_saved_by_them_alone() {
 }
 
 #[tokio::test]
+async fn a_person_makes_their_own_template_of_a_driver_kept_to_admins_and_only_an_admin_makes_one_others_reach()
+ {
+    let world = World::new().await;
+    let c = company(&world).await;
+    // The shipped setting keeps the `host` driver to the admins of the system, for templates others reach. A
+    // template private to its maker, in a home they make things in, is theirs, as a provider of theirs is.
+    let mut own = body("My host processes", Some(c.acme), "host");
+    own.access = Some(NewResourceAccess::OnlyMe);
+    let made = make(&world, &c.boss, &own).await;
+    assert_eq!(made.driver, "host");
+    assert_eq!(made.home.as_ref().unwrap().id, c.acme);
+    let unseen = world
+        .app
+        .call(TemplateGet, &[&made.id])
+        .token(&c.viewer.token)
+        .send()
+        .await;
+    assert!(
+        !unseen.status.is_success(),
+        "nobody else in the org reaches it"
+    );
+    for (name, home) in [
+        ("Shared host processes", Some(c.acme)),
+        ("System host processes", None),
+    ] {
+        let mut reached = body(name, home, "host");
+        reached.access = if home.is_some() {
+            None
+        } else {
+            Some(NewResourceAccess::OnlyMe)
+        };
+        let refused = world
+            .app
+            .call(TemplateCreate, &[])
+            .token(&c.boss.token)
+            .body(&reached)
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::AuthzDenied, "{name}: {refused:?}");
+    }
+}
+
+#[tokio::test]
 async fn what_is_wrong_with_a_new_template_is_told_member_by_member() {
     let world = World::new().await;
     let c = company(&world).await;
@@ -426,6 +470,48 @@ async fn what_is_wrong_with_a_new_template_is_told_member_by_member() {
         .await
         .problem();
     assert_eq!(missing.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn a_template_for_a_driver_no_host_has_loaded_is_refused_with_that_reason_rather_than_as_an_offline_machine()
+ {
+    let world = World::new().await;
+    let c = company(&world).await;
+    let unloaded = body("Host processes", Some(c.acme), "firecracker");
+    let refused = world
+        .app
+        .call(TemplateCreate, &[])
+        .token(&c.boss.token)
+        .body(&unloaded)
+        .send()
+        .await
+        .problem();
+    assert_eq!(refused.code, ErrorCode::RequestInvalid, "{refused:?}");
+    assert_eq!(refused.extra["errors"][0]["path"], "driver");
+    assert_eq!(
+        refused.extra["errors"][0]["message"],
+        "no host has loaded this driver; a host loads a driver its policy allows when its node starts"
+    );
+    let checked = world
+        .app
+        .call(TemplateCheck, &[])
+        .token(&c.boss.token)
+        .body(&TemplateCheckBody {
+            driver: "firecracker".into(),
+            kind: UnitKind::Provider,
+            spec: json!({}),
+        })
+        .send()
+        .await
+        .problem();
+    assert_eq!(checked.code, ErrorCode::RequestInvalid);
+    assert_eq!(checked.extra["errors"], refused.extra["errors"]);
+    let made: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM env_templates WHERE name = 'Host processes'")
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(made, 0);
 }
 
 #[tokio::test]
