@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
-import { formatExact, formatSpan, HOUR_MS, useNow } from '@/lib/time';
+import { formatDateTime, formatExact, formatSpan, HOUR_MS, useNow } from '@/lib/time';
 import { Button } from '@/ui/Button';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -188,6 +188,7 @@ export function ProviderUsageSummary({provider,windows=provider.facts.windows}:{
 export function ProviderUsageCard({ provider, compact = false, allWindows = false, loading = false, error, refreshing = false, onRefresh, actions }: ProviderUsageCardProps) {
   const { t } = useTranslation();
   const describe = useErrorText();
+  const now = useNow();
   const format = useFormatContext();
   if (loading) return <SkeletonGroup className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4"><Skeleton className="h-5 w-1/3" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-2/3" /></SkeletonGroup>;
   if (provider === undefined) return <p className="text-sm text-text-muted">{t('providerPlan.notReported')}</p>;
@@ -229,7 +230,7 @@ export function ProviderUsageCard({ provider, compact = false, allWindows = fals
   return <section className="flex min-w-0 flex-col gap-2" aria-label={t('providerDetails.title',{source:sourceTitle})} data-provider-usage="full">
     <div className="flex flex-wrap items-start justify-between gap-2">
       <h2 className="min-w-0 text-base font-semibold text-text">{t('providerDetails.title',{source:sourceTitle})}</h2>
-      {onRefresh !== undefined && <Button size="sm" icon={<RefreshCw aria-hidden />} pending={refreshing} onClick={onRefresh}>{t(refreshing ? 'providerPlan.reading' : 'providers.overview.refresh')}</Button>}
+      {onRefresh !== undefined && <Button size="sm" icon={<RefreshCw aria-hidden />} pending={refreshing} onClick={onRefresh} title={provider.facts_refresh?.eligible === false ? t(provider.facts_refresh.source_minimum ? 'providerPlan.refreshSourceMinimum' : 'providerPlan.refreshCoalesced') : undefined}>{refreshing ? t('providerPlan.reading') : provider.facts_refresh?.eligible === false && (provider.facts_refresh.next_at === null || Date.parse(provider.facts_refresh.next_at) > now) ? provider.facts_refresh.next_at === null ? t('providerPlan.refreshReusesUnknown') : t('providerPlan.refreshReusesUntil', {time:formatDateTime(provider.facts_refresh.next_at, format, now)}) : t('providers.overview.refresh')}</Button>}
     </div>
     {unread.length > 0 && <p data-unread-members role={refreshing ? 'status' : undefined} aria-busy={refreshing} className="text-sm wrap-anywhere text-text-muted">
       {t('providerDetails.notReadOnce')}{': '}{unread.map((member,index) => <span key={member} data-fact-member={member} data-fact-state="not_read_yet">{index > 0 && ', '}{t(MEMBER_LABELS[member])}</span>)}

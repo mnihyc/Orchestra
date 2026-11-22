@@ -1,0 +1,19 @@
+fmt
+clippy
+test -p orch-api-core --test personal
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test sign_in
+test -p orch-api-core --test browsers
+test -p orch-api-core --test transaction_guards
+test -p orch-api-core --test typed_thread_operations
+test -p orch-api-core --test kguard_nodes
+test -p orch-api-core --test me
+test -p orch-api-core --test api_surface_sockets
+test -p orch-api-core --test realtime_threads
+test -p orch-api-core --test everything_resources
+test -p orch-api-core --test everything_operation_scopes
+test -p orch-api-core --test access_everything
+test -p orch-api-core --test nodes_lists
+test -p orch-api-core --test org_contents
+test -p orch-api-core --test admin_mode
+test -p orch-api-core --test action_guard_resolver_deadlines

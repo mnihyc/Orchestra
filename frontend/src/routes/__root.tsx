@@ -7,7 +7,7 @@
  * that no screen caught, are shown inside the same frame.
  */
 import { createRootRoute, Outlet, useMatches, useRouter } from '@tanstack/react-router';
-import { type ComponentProps, type ReactNode, Suspense } from 'react';
+import { type ReactNode, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
@@ -16,16 +16,12 @@ import { AuthFrame } from '@/features/auth/Frame';
 import { ConnectionFailure } from '@/features/auth/ConnectionFailure';
 import { admit, type RouteFrame } from '@/routes/-access';
 import { NotFound } from '@/routes/not-found';
-import { lazyPart } from '@/features/files/lazy';
-import type { Shell as ShellFrame } from '@/shell/Shell';
+import { ShellFrame } from '@/shell/shellFrame';
 import { ShellControls } from '@/shell/ShellControls';
 import { ErrorState } from '@/ui/ErrorState';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { useScreenCodePrefetch } from '@/shell/screenCode';
 import { useAdminExit } from '@/shell/useAdminExit';
-
-/** The workbench's frame, fetched when a signed-in screen is first drawn (the entry starts it with the words, see `main.tsx`). */
-const Shell = lazyPart<ComponentProps<typeof ShellFrame>>(() => import('@/shell/Shell').then((module) => ({ default: module.Shell })));
 
 export const Route = createRootRoute({
   beforeLoad: ({ location, matches }) => {
@@ -59,7 +55,7 @@ function Framed({ children }: { children: ReactNode }) {
   const leavingAdmin = useAdminExit();
   const frame = useFrame();
   if (frame === 'bare') return children;
-  return <ShellControls>{frame === 'shell' ? <Suspense fallback={<ScreenLoading />}><Shell leavingAdmin={leavingAdmin}>{children}</Shell></Suspense> : <AuthFrame>{children}</AuthFrame>}</ShellControls>;
+  return <ShellControls>{frame === 'shell' ? <Suspense fallback={<ScreenLoading />}><ShellFrame leavingAdmin={leavingAdmin}>{children}</ShellFrame></Suspense> : <AuthFrame>{children}</AuthFrame>}</ShellControls>;
 }
 
 function Root() {

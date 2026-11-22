@@ -91,6 +91,7 @@ enum Raw {
 pub struct Watcher {
     root: PathBuf,
     recursive: AtomicBool,
+    rescan: Duration,
     degraded: Arc<AtomicBool>,
     native: Mutex<Option<RecommendedWatcher>>,
     admission: Option<Admission>,
@@ -189,6 +190,7 @@ impl Watcher {
             Self {
                 root: root.to_path_buf(),
                 recursive: AtomicBool::new(recursive),
+                rescan: config.rescan,
                 degraded,
                 native: Mutex::new(native),
                 admission,
@@ -203,6 +205,20 @@ impl Watcher {
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
+    }
+
+    /// Facts of this installed watcher; subsequent settings do not replace its accepted interval.
+    pub(crate) fn facts(
+        &self,
+        observation_id: String,
+    ) -> orch_api_contract::workspace::FileWatchFacts {
+        orch_api_contract::workspace::FileWatchFacts {
+            source: orch_api_contract::workspace::FileWatchSource::MachineConfiguration,
+            native: !self.is_degraded(),
+            recursive: self.recursive.load(Ordering::SeqCst),
+            fallback_interval_secs: self.rescan.as_secs(),
+            observation_id,
+        }
     }
 
     /// Starts a recursive watch only after the bounded first scan finished successfully.
@@ -327,7 +343,8 @@ impl Watcher {
 
     /// Stops watching `dir`.
     pub fn unwatch_dir(&self, dir: &Path) {
-        if self.recursive.load(Ordering::SeqCst) {
+        // The attached workspace's root observer outlives individual view subscriptions.
+        if (dir == self.root && self.admission.is_some()) || self.recursive.load(Ordering::SeqCst) {
             return;
         }
         if let Some(watcher) = self

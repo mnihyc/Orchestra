@@ -512,7 +512,11 @@ async fn a_stricter_environment_external_lifetime_refuses_the_gift_without_hidin
     .id;
     for (place, key, value) in [
         (s.tree.org.base.id, "sharing.allow_external", json!(true)),
-        (s.tree.topic.base.id, "sharing.external_max_days", json!(1)),
+        (
+            s.tree.topic.base.id,
+            "sharing.external_max_minutes",
+            json!(1440),
+        ),
     ] {
         orch_db::queries::settings::put(
             &mut *s.rig.world.conn().await,
