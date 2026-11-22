@@ -12,7 +12,7 @@ use orch_summarizer_contract::descriptor::SummaryField;
 use orch_summarizer_contract::summarizer::{
     SummarizeError, Summarizer, SummaryLimits, SummaryRequest,
 };
-use orch_summarizer_model::{Complete, Model};
+use orch_summarizer_model::{Complete, CompletionAnswer, CompletionRequest, Model};
 use orch_types::{Id, new_id};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -27,9 +27,9 @@ impl Complete for Port {
     async fn complete(
         &self,
         _node: Id,
-        request: ProviderComplete,
-    ) -> Result<ProviderCompleteResult, SummarizeError> {
-        self.requests.lock().unwrap().push(request);
+        request: CompletionRequest,
+    ) -> Result<CompletionAnswer, SummarizeError> {
+        self.requests.lock().unwrap().push(request.into_api()?);
         Ok(ProviderCompleteResult {
             timing: Default::default(),
             text: self.text.clone(),
@@ -40,7 +40,8 @@ impl Complete for Port {
                 ..Default::default()
             },
             request_ref: Some("completion-1".to_owned()),
-        })
+        }
+        .into())
     }
 }
 
@@ -59,7 +60,7 @@ fn request(field: SummaryField) -> SummaryRequest {
         }],
         tag_choices: vec!["backend".to_owned()],
         limits: SummaryLimits::for_field(field, 2),
-        config: json!({"provider_id":new_id(),"model_name":"small"}),
+        config: json!({"backend":{"route":"summarizer-model.complete","offering":{"provider":new_id(),"offering":"small"}}}),
     }
 }
 
@@ -92,6 +93,53 @@ async fn selected_request_options_follow_every_summary_field_without_replacing_i
         assert_eq!(carried.max_output_tokens, original.max_output_tokens);
         assert_eq!(carried.purpose, original.purpose);
     }
+}
+
+#[tokio::test]
+async fn titles_and_paragraphs_have_separate_token_allowances_independent_of_the_character_target()
+{
+    let port = Arc::new(Port {
+        text: "A bounded answer".into(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let model = Model::new(port.clone());
+    model.summarize(request(SummaryField::Title)).await.unwrap();
+    let paragraph = request(SummaryField::Summary);
+    assert_eq!(paragraph.limits.max_chars, 600);
+    model.summarize(paragraph).await.unwrap();
+    {
+        let asked = port.requests.lock().unwrap();
+        assert_eq!(asked[0].max_output_tokens, 120 + 2_000);
+        assert_eq!(
+            asked[1].max_output_tokens,
+            1_024 + 2_000,
+            "a paragraph's answer does not inherit the title's short allowance"
+        );
+    }
+    let mut custom = request(SummaryField::Summary);
+    custom.config["answer_max_output_tokens"] = json!(900);
+    custom.limits.max_chars = 250;
+    model.summarize(custom).await.unwrap();
+    assert_eq!(
+        port.requests.lock().unwrap()[2].max_output_tokens,
+        900 + 2_000,
+        "token allowance and character target remain separate explicit choices"
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_shared_answer_allowance_is_refused_before_any_model_call() {
+    let port = Arc::new(Port {
+        text: "Unused".into(),
+        requests: Mutex::new(Vec::new()),
+    });
+    let mut selected = request(SummaryField::Summary);
+    selected.config["max_output_tokens"] = json!(900);
+    assert!(matches!(
+        Model::new(port.clone()).summarize(selected).await,
+        Err(SummarizeError::Config(_))
+    ));
+    assert!(port.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -205,4 +253,32 @@ async fn a_handoff_keeps_exact_paths_and_refuses_oversized_text_whole() {
         .unwrap();
     assert_eq!(refused.text, None);
     assert_eq!(refused.usage.unwrap().tokens.total_tokens, 120);
+}
+
+#[tokio::test]
+async fn an_unreported_completion_keeps_its_usage_unknown() {
+    struct Unreported;
+    #[async_trait]
+    impl Complete for Unreported {
+        async fn complete(
+            &self,
+            _node: Id,
+            _request: CompletionRequest,
+        ) -> Result<orch_summarizer_model::CompletionAnswer, SummarizeError> {
+            Ok(orch_summarizer_model::CompletionAnswer {
+                text: "A bounded summary".into(),
+                usage: None,
+                request_ref: Some("native-unreported".into()),
+            })
+        }
+    }
+    let result = Model::new(Arc::new(Unreported))
+        .summarize(request(SummaryField::Description))
+        .await
+        .unwrap();
+    assert_eq!(result.text.as_deref(), Some("A bounded summary"));
+    assert!(
+        result.usage.is_none(),
+        "a missing native report cannot become a measured zero"
+    );
 }

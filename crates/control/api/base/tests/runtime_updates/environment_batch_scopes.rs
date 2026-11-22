@@ -1,7 +1,7 @@
 //! Actual cross-place review sources, once-only observations and truthful write-only receipts.
 use super::*;
 use orch_access_contract::key_scope::KeyScope;
-use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+use orch_api_core::middleware::authentication::{new_api_token, token_hash};
 use orch_db::queries::{identity, jobs};
 use orch_engine::hosting::{HostServices, HostingError, ToolBuild};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -36,8 +36,8 @@ fn rules(team: &Team, read: bool) -> Vec<serde_json::Value> {
 async fn key(world: &World, user: Id, rules: Vec<serde_json::Value>) -> Key {
     let scope: KeyScope = serde_json::from_value(json!({"rules":rules})).unwrap();
     assert!(scope.validate().is_empty());
-    let secret = new_token(API_TOKEN_PREFIX);
     let id = new_id();
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {

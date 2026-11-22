@@ -14,11 +14,13 @@ use orch_provider_contract::builtins::VendorClient;
 use orch_types::Json;
 use url::Url;
 
-/// The connector supplies the transport, so the same vendor reader runs beside either credential placement.
+/// The connector supplies this vendor transport through the shared HTTP exchange.
+pub struct Client(pub Upstream);
+
 #[async_trait]
-impl VendorClient for Upstream {
+impl VendorClient for Client {
     async fn get(&self, base: &Url, path: &str, key: &Secret, reply_bytes: usize) -> Option<Json> {
-        fetch_json(self, base, path, key, reply_bytes).await
+        fetch_json(&self.0, base, path, key, reply_bytes).await
     }
 
     async fn get_headers(
@@ -38,7 +40,7 @@ impl VendorClient for Upstream {
             value.set_sensitive(true);
             headers.insert(name, value);
         }
-        fetch_with_headers(self, base, path, headers, reply_bytes).await
+        fetch_with_headers(&self.0, base, path, headers, reply_bytes).await
     }
 }
 
@@ -137,7 +139,7 @@ mod tests {
         ))
         .unwrap();
         let serving = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
-        let client = Upstream::new(Arc::new(orch_types::SystemClock)).unwrap();
+        let client = Client(Upstream::new(Arc::new(orch_types::SystemClock)).unwrap());
         let query = [
             ("group_by[]", "project"),
             ("group_by[]", "line item"),

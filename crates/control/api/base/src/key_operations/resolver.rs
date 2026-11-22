@@ -356,7 +356,7 @@ where
 
 /// An erased typed resolver and its original bounded inputs, held only by this request.
 #[derive(Clone)]
-pub struct OperationRequest(Arc<dyn Resolve>);
+pub struct OperationRequest(Arc<dyn Resolve>, orch_types::Id);
 
 impl fmt::Debug for OperationRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -365,6 +365,11 @@ impl fmt::Debug for OperationRequest {
 }
 
 impl OperationRequest {
+    /// A server-created identity shared only by clones of this bounded native input.
+    /// It correlates rollbackable choice preparation and is never permission evidence.
+    pub fn identity(&self) -> orch_types::Id {
+        self.1
+    }
     /// One native decoder result and its original known destination/current caller ceiling.
     /// The prefix is factual input provenance; this request still requires full fresh admission.
     pub fn raw_owned<Q, I>(
@@ -398,14 +403,17 @@ impl OperationRequest {
             )
             .with("limit", MAX_JSON_BYTES));
         }
-        Ok(Self(Arc::new(RawOwnedRequest {
-            route,
-            query: query.map(str::to_owned),
-            input,
-            accepted: orch_authz::CapturedCaller::capture(accepted),
-            known,
-            resolver,
-        })))
+        Ok(Self(
+            Arc::new(RawOwnedRequest {
+                route,
+                query: query.map(str::to_owned),
+                input,
+                accepted: orch_authz::CapturedCaller::capture(accepted),
+                known,
+                resolver,
+            }),
+            orch_types::new_id(),
+        ))
     }
 
     /// Explicit query-only raw mutation input, not a typed JSON request with a fictional body.
@@ -414,7 +422,9 @@ impl OperationRequest {
         resolver: OptionalOperationResolver<Q, ()>,
         query: Option<&str>,
     ) -> ApiResult<Self> {
-        if route.method == Method::GET || !matches!(route.body, Shape::Bytes | Shape::Raw) {
+        if route.method == Method::GET
+            || !matches!(route.body, Shape::Bytes | Shape::Raw | Shape::Json(_))
+        {
             return Err(ApiError::internal(
                 "a raw changing query operation requires its actual raw body declaration",
             ));
@@ -426,11 +436,14 @@ impl OperationRequest {
             )
             .with("limit", MAX_JSON_BYTES));
         }
-        Ok(Self(Arc::new(RawQueryRequest {
-            route,
-            query: query.map(str::to_owned),
-            resolver,
-        })))
+        Ok(Self(
+            Arc::new(RawQueryRequest {
+                route,
+                query: query.map(str::to_owned),
+                resolver,
+            }),
+            orch_types::new_id(),
+        ))
     }
 
     pub fn snapshot_read(&self) -> bool {
@@ -455,12 +468,15 @@ impl OperationRequest {
             )
             .with("limit", MAX_JSON_BYTES));
         }
-        Ok(Self(Arc::new(TypedRequest {
-            route,
-            resolver,
-            query: query.map(str::to_owned),
-            body,
-        })))
+        Ok(Self(
+            Arc::new(TypedRequest {
+                route,
+                resolver,
+                query: query.map(str::to_owned),
+                body,
+            }),
+            orch_types::new_id(),
+        ))
     }
 
     pub async fn prepare(
@@ -566,6 +582,28 @@ pub mod tests {
         (): (),
     ) -> OptionalOperationFuture<'a> {
         Box::pin(async { Ok(None) })
+    }
+
+    #[test]
+    fn repeated_preparation_keeps_one_private_request_identity_and_independent_requests_do_not_share_it()
+     {
+        use orch_api_contract::routes::Endpoint;
+        let first = OperationRequest::raw_query(
+            orch_api_contract::threads::UploadSessionPut::ROUTE,
+            raw_query_source,
+            Some("offset=0"),
+        )
+        .unwrap();
+        let replay = first.clone();
+        let independent = OperationRequest::raw_query(
+            orch_api_contract::threads::UploadSessionPut::ROUTE,
+            raw_query_source,
+            Some("offset=0"),
+        )
+        .unwrap();
+        assert_eq!(first.identity(), replay.identity());
+        assert_ne!(first.identity(), independent.identity());
+        assert!(!format!("{first:?}").contains(&first.identity().to_string()));
     }
 
     #[cfg(any(test, feature = "test-support"))]
