@@ -7,7 +7,7 @@ import { useAppearance } from '@/lib/appearance';
 import program from '../../../extensions/agents/claude-code/src/capability-program.json';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 const base = { title: 'Capability', reason: null, program_default: true, provider: null, prices: {}, route_view: { kind: 'native-program' } };
 afterEach(async () => { cleanup(); await setLocale('en'); useAppearance.getState().set({ locale: 'en', theme: 'system' }); });
 

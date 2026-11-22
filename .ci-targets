@@ -1,0 +1,2 @@
+web build
+web-e2e tests/e2e/openings.spec.ts

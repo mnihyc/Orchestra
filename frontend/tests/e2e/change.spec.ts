@@ -178,7 +178,7 @@ test('a fork from a message in the middle goes to a new environment with some of
 
   // A new environment, with only some of the files.
   await dialog.getByRole('combobox', { name: 'Environment', exact: true }).click();
-  await page.getByRole('option', { name: 'Copy to new', exact: true }).click();
+  await page.getByRole('option', { name: 'Copy to a new environment', exact: true }).click();
   await expect(dialog.getByRole('combobox', { name: 'Place', exact: true })).toHaveValue('Automatic · host-1');
   await dialog.getByRole('radio', { name: 'By pattern', exact: true }).click();
   await dialog.getByRole('textbox', { name: 'Take these' }).fill('src/**');
@@ -277,7 +277,8 @@ test('a side thread is asked from a message, answered inline and in its panel, a
 test('a thread with as many side threads open as it may have says so, and one is closed to ask again', async ({ page }) => {
   await openHistory(page);
   await change.sides(MAIN, 4);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  await page.locator('[data-thread-header] [data-thread-more]').click();
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).click();
   const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
   await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
@@ -312,7 +313,7 @@ test('an environment that is behind is brought up to date: its thread is told an
   await expect(dialog.getByText('Notice', { exact: true })).toBeVisible();
   await shot(page, 'update-2-progress');
   await change.finish();
-  await expect(dialog.getByText('Sandbox is up to date. The old unit is being removed.')).toBeVisible();
+  await expect(dialog.getByText('Sandbox is up to date. The old container is being removed.')).toBeVisible();
   await expect(dialog.getByText('Its thread takes messages again.')).toBeVisible();
   await shot(page, 'update-3-done');
   await dialog.getByRole('button', { name: 'Done' }).click();
@@ -440,7 +441,7 @@ test('what is idle on a host is listed exactly as it will be stopped, and stoppe
   await signIn(page);
   await page.goto(`/resources/hosts/${HOST_ONE}`);
   await page.getByRole('button', { name: 'Actions for host-1' }).click();
-  await page.getByRole('menuitem', { name: 'Recycle idle…' }).click();
+  await page.getByRole('menuitem', { name: 'Recycle idle environments…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Recycle idle on host-1' });
   await expect(dialog.getByText(/^Stops 1 environment\. Its files stay; it starts again when a message arrives\./)).toBeVisible();
   await expect(dialog.getByRole('listitem').filter({ hasText: 'Sandbox' })).toContainText('idle 120 min');
@@ -542,7 +543,9 @@ test('a switch is planned, confirmed and hidden from the keyboard alone, and Esc
 
 test('a side thread is asked, kept in view and closed from the keyboard alone', async ({ page }) => {
   await openHistory(page);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).focus();
+  await page.locator('[data-thread-header] [data-thread-more]').focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: 'Side thread…', exact: true }).focus();
   await page.keyboard.press('Enter');
   const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByRole('textbox', { name: 'What to ask' })).toBeFocused();

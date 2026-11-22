@@ -58,6 +58,8 @@ pub mod attachments;
 #[path = "backplane.rs"]
 pub mod backplane;
 
+pub mod relay;
+
 #[path = "blobs.rs"]
 pub mod blobs;
 
@@ -66,6 +68,10 @@ pub mod cache;
 
 #[path = "certificates.rs"]
 pub mod certificates;
+
+#[path = "collection.rs"]
+pub mod collection;
+pub mod picker_recents;
 
 #[path = "component_updates.rs"]
 pub mod component_updates;
@@ -120,6 +126,7 @@ pub mod ports_browser;
 
 #[path = "ports_runtime.rs"]
 pub mod ports_runtime;
+pub mod public_addresses;
 
 #[path = "previews.rs"]
 pub mod previews;
@@ -169,6 +176,7 @@ pub mod thread_engine;
 #[path = "thread_markers.rs"]
 pub mod thread_markers;
 
+pub mod server_host_use;
 #[path = "thread_read_tools.rs"]
 pub mod thread_read_tools;
 
@@ -185,3 +193,5 @@ extern crate self as orch_api_base;
 #[cfg(any(test, feature = "test-support"))]
 extern crate self as orch_api_core;
 pub mod route_assembly;
+
+pub mod transit;
