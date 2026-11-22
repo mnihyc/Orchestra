@@ -7,6 +7,7 @@
 import { type ReactNode, type SyntheticEvent, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { type HumanCheck, HumanCheckNotice, HumanCheckWidget } from '@/features/auth/HumanCheck';
 import { Button } from '@/ui/Button';
 import { Tooltip } from '@/ui/Tooltip';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -52,6 +53,8 @@ export interface EmailCodeProps {
   refusal?: ReactNode;
   /** A code request that did not receive an accepted response. */
   sendError?: unknown;
+  /** The human check of this sign-in's tries and of the requests for a code. */
+  check: HumanCheck;
   /** Other ways on, under the button. */
   children?: ReactNode;
 }
@@ -68,6 +71,7 @@ export function EmailCode({
   fieldError,
   refusal,
   sendError,
+  check,
   children,
 }: EmailCodeProps) {
   const { t } = useTranslation();
@@ -114,11 +118,13 @@ export function EmailCode({
       />
       {refusal}
       {sendError !== null && sendError !== undefined && <ErrorAlert error={sendError} />}
-      <Button type="submit" variant="primary" block pending={pending} disabled={resending} reason={resending ? t('auth.code.sending') : pending ? t('ui.unavailable.checkingCode') : undefined}>
+      <HumanCheckWidget check={check} act="sign_in" />
+      <Button type="submit" variant="primary" block pending={pending} disabled={resending || check.waiting('sign_in')} reason={resending ? t('auth.code.sending') : pending ? t('ui.unavailable.checkingCode') : check.waiting('sign_in') ? t('auth.humanCheck.waiting') : undefined}>
         {t('auth.login.submit')}
       </Button>
+      <HumanCheckNotice check={check} act="sign_in" />
       <div className="flex flex-col items-start gap-2 text-sm">
-        {canResend && <ResendButton key={sentAt ?? 'none'} sentAt={sentAt} resending={resending} onResend={onResend} />}
+        {canResend && <ResendButton key={sentAt ?? 'none'} sentAt={sentAt} resending={resending} waitingForCheck={check.waiting('email_code')} onResend={onResend} />}
         {children}
       </div>
     </form>
@@ -126,10 +132,10 @@ export function EmailCode({
 }
 
 /** Reset just the countdown after an accepted send, keeping any code the person typed. */
-function ResendButton({ sentAt, resending, onResend }: { sentAt: number | null; resending: boolean; onResend: () => void }) {
+function ResendButton({ sentAt, resending, waitingForCheck, onResend }: { sentAt: number | null; resending: boolean; waitingForCheck: boolean; onResend: () => void }) {
   const { t } = useTranslation();
   const wait = useSecondsUntil(sentAt === null ? 0 : sentAt + RESEND_AFTER_MS);
-  return <Tooltip content={resending ? t('auth.code.sending') : wait > 0 ? t('auth.code.resendIn', { count: wait }) : undefined}><span className="inline-flex" tabIndex={wait > 0 || resending ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={wait > 0 || resending} onClick={onResend}>
+  return <Tooltip content={resending ? t('auth.code.sending') : wait > 0 ? t('auth.code.resendIn', { count: wait }) : waitingForCheck ? t('auth.humanCheck.waiting') : undefined}><span className="inline-flex" tabIndex={wait > 0 || resending || waitingForCheck ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={wait > 0 || resending || waitingForCheck} onClick={onResend}>
     {wait > 0 ? t('auth.code.resendIn', { count: wait }) : t(sentAt === null ? 'auth.code.send' : 'auth.code.resend')}
   </button></span></Tooltip>;
 }

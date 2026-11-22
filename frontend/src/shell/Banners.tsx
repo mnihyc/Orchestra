@@ -17,9 +17,11 @@ import { InstallationProgress } from '@/features/admin/InstallationProgress';
 import { useWorkbench } from '@/features/workbench/store';
 import { useSocketStatus } from '@/realtime/live';
 import { Banner } from '@/ui/Banner';
+import { PublicAddressNotice } from '@/shell/PublicAddressNotice';
 import { Button } from '@/ui/Button';
 import { useFrameReady } from '@/shell/FrameReadiness';
 import { AdminExitNotice } from '@/shell/AdminExitNotice';
+import { ShellCheckNotice } from '@/shell/ShellCheckNotice';
 import { useViewChoice } from '@/lib/viewChoices';
 
 /** Whether the connection has been gone for longer than a moment. */
@@ -54,6 +56,8 @@ export function Banners() {
   return (
     <>
       <AdminExitNotice />
+      <PublicAddressNotice meta={meta} />
+      <ShellCheckNotice />
       {notice !== null && !dismissed && (
         <Banner tone={notice.level} onDismiss={() => setDismissed(true)}>
           {notice.text}

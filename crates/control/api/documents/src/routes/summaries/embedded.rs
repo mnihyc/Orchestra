@@ -73,28 +73,35 @@ pub(crate) async fn prepare(
     )
     .await
     .map_err(ApiError::internal)?;
-    let range = match chat {
-        Some(chat) => sources::disclosure_range(conn, &principal, chat).await.ok(),
-        None => None,
-    };
-    let mut targets = Vec::new();
-    if let Some(chat) = chat {
-        if let Some(range) = range {
-            targets.push((SummaryTarget::Chat { id: chat }, Some(range)));
-        }
-        targets.push((SummaryTarget::ChatTitle { id: chat }, None));
-    }
-    if let Some(place) = place {
-        targets.push((place, None));
-    }
     let mut views = Vec::new();
-    for (target, wanted) in targets {
-        // Each optional source has its own admission; a missing view never drops its siblings.
-        if let Ok(Some(view)) = optional_view(ctx, conn, caller, target, wanted, plan, slots).await
-        {
-            views.push(view);
+    // The chat's range, its catch-up, its title and the place ask again whether the chat opens for the reader and
+    // whether the reader may use the place's model: decided once for all of them.
+    let range = orch_engine::summaries::once::deciding(async {
+        let range = match chat {
+            Some(chat) => sources::disclosure_range(conn, &principal, chat).await.ok(),
+            None => None,
+        };
+        let mut targets = Vec::new();
+        if let Some(chat) = chat {
+            if let Some(range) = range {
+                targets.push((SummaryTarget::Chat { id: chat }, Some(range)));
+            }
+            targets.push((SummaryTarget::ChatTitle { id: chat }, None));
         }
-    }
+        if let Some(place) = place {
+            targets.push((place, None));
+        }
+        for (target, wanted) in targets {
+            // Each optional source has its own admission; a missing view never drops its siblings.
+            if let Ok(Some(view)) =
+                optional_view(ctx, conn, caller, target, wanted, plan, slots).await
+            {
+                views.push(view);
+            }
+        }
+        range
+    })
+    .await;
     Ok((!views.is_empty()).then(|| {
         Arc::new(Embedded {
             views,
@@ -145,7 +152,7 @@ pub(crate) fn retain(ctx: &Ctx, principal: &Principal, selected: &Arc<Embedded>)
         caller,
         (Arc::clone(selected), selection),
         |ctx, conn, current, (old, selection)| {
-            Box::pin(async move {
+            Box::pin(orch_engine::summaries::once::deciding(async move {
                 let plan = Prepared::new(ctx.route, selection).map_err(source_error)?;
                 for view in &old.views {
                     let target = view.identity.target();
@@ -154,23 +161,39 @@ pub(crate) fn retain(ctx: &Ctx, principal: &Principal, selected: &Arc<Embedded>)
                     } else {
                         None
                     };
-                    let fresh = optional_view(
-                        ctx,
-                        conn,
-                        current.caller(),
-                        target,
-                        wanted,
-                        &plan,
-                        old.slots,
-                    )
-                    .await?
-                    .ok_or_else(ApiError::not_found)?;
-                    if !same_view(view, &fresh) {
+                    // What the opening carries is the paragraph as it was read. Whether the request that
+                    // writes it has moved since changes nothing about who may read it; whether what it was
+                    // made from may still be read by this reader does: that is checked directly.
+                    let held =
+                        sources_held(ctx, conn, current.caller(), &plan, view, old.slots).await?;
+                    if crate::testing::followed() {
+                        // A followed request also makes the view again, so that a case sees both answers to
+                        // the same view and sources.
+                        let rebuilt = sources_held_by_rebuilding(
+                            ctx,
+                            conn,
+                            current.caller(),
+                            &plan,
+                            view,
+                            wanted,
+                            old.slots,
+                        )
+                        .await?;
+                        crate::testing::note_boundary(
+                            ctx.route.name,
+                            if held == rebuilt {
+                                "embedded.sources_agree"
+                            } else {
+                                "embedded.sources_differ"
+                            },
+                        );
+                    }
+                    if !held {
                         return Err(ApiError::not_found());
                     }
                 }
                 Ok(())
-            })
+            }))
         },
     )
 }

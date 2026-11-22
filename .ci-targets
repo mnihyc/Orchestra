@@ -1,0 +1,5 @@
+web typecheck
+web lint
+web build
+web-e2e tests/e2e/openings.spec.ts tests/e2e/first-wave-edge.spec.ts tests/e2e/last-place.spec.ts
+web-e2e tests/e2e/openings.spec.ts -g "reads each part of the navigation tree" --repeat-each=20 --retries=0

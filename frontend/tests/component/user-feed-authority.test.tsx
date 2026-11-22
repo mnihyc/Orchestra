@@ -7,8 +7,9 @@ import { queryClient } from '@/api/query';
 import type { Notification, NotificationPage, NotificationSummaryGetReply } from '@/generated/api-types';
 import { feeds, socket, useUserFeed } from '@/realtime/live';
 import type { FeedListener } from '@/realtime/socket';
-import { userWriter, useUserStore } from '@/realtime/stores/user';
+import { onUserEvent, tellUserEvent, userWriter, useUserStore } from '@/realtime/stores/user';
 import type * as ActsApi from '@/api/acts';
+import { applyChanges } from '@/api/acts';
 
 const calls = vi.hoisted(() => ({ page: vi.fn<typeof Notifications.fetchNotifications>(), summary: vi.fn<typeof Notifications.fetchSummary>() }));
 vi.mock('@/api/notifications', async (original) => ({ ...await original<typeof Notifications>(), fetchNotifications: calls.page, fetchSummary: calls.summary }));
@@ -94,4 +95,32 @@ it('cancels a page whose last visible owner left without reading another hidden 
     expect(useUserStore.getState().error).toBeNull();
     expect(calls.page).toHaveBeenCalledOnce(); expect(calls.summary).toHaveBeenCalledOnce();
   } finally { old.resolve({ items: [], next_cursor: null }); view.unmount(); }
+});
+
+it('tells the views that wait for news to read again when the feed joins again after an authority reset', async () => {
+  calls.page.mockResolvedValue({ items: [], next_cursor: null });
+  const heard = vi.fn();
+  const stop = onUserEvent('rejoined', heard);
+  const view = render(<InboxOwner rows={false} />);
+  try {
+    await waitFor(() => expect(subscriptions).toHaveLength(1));
+    act(() => subscriptions[0]?.listener.onFrame({ op: 'subscribed', id: 1, feed: 'user', mode: 'delta', seq: 2 }));
+    expect(heard).not.toHaveBeenCalled();
+    // An enrollment resets the person's feed, and its notice, sent on the old subscription, can be lost.
+    resetAuthority();
+    await waitFor(() => expect(subscriptions).toHaveLength(2));
+    act(() => subscriptions[1]?.listener.onFrame({ op: 'subscribed', id: 2, feed: 'user', mode: 'delta', seq: 3 }));
+    expect(heard).toHaveBeenCalledOnce();
+  } finally { stop(); view.unmount(); }
+});
+
+it('applies an enrollment notice as it comes instead of gathering it with a burst of changes', () => {
+  vi.useFakeTimers();
+  vi.mocked(applyChanges).mockClear();
+  try {
+    const receipt = 'c'.repeat(64);
+    const status = { receipt, machine: null, host: null };
+    tellUserEvent('enrollment', { what: 'enrollment', receipt, status });
+    expect(applyChanges).toHaveBeenCalledWith([{ enrollment: { receipt, status } }]);
+  } finally { vi.useRealTimers(); }
 });
