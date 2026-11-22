@@ -132,6 +132,8 @@ pub fn install_interfaces() {
     routes::environments::__api_install_5e3042a2f8();
 
     routes::environments::__api_install_4c32840a49();
+    routes::environments::__api_install_environment_row_preparation();
+    routes::environments::__api_install_environment_list_rows();
 
     routes::environments::__api_install_a51865252c();
 

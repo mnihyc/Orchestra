@@ -244,34 +244,30 @@ pub(super) struct FilePage {
 
 impl native::Selected for Files {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = FilePage;
     type Reply = Page<String>;
+    const MOVES: native::Moves = native::Moves::Repeat;
     const DECLARATION: &'static Declaration<Source> = &sources::IMPORT_FILES;
 
     fn select<'a>(
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(FilePage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
-            let (row, facts, principal) = load(ctx, conn, caller, Self::DECLARATION).await?;
-            let (items, next_cursor) = match ctx
-                .app
-                .engine
-                .import_file_names_for(
-                    conn,
-                    &principal,
-                    row.id,
-                    query.cursor.as_deref(),
-                    i64::from(query.limit()),
-                )
-                .await
-            {
-                Ok(value) => value,
-                Err(error) => return Err(failed(conn, error).await),
-            };
+            let (row, facts, _principal) = load(ctx, conn, caller, Self::DECLARATION).await?;
+            let page = crate::collection::snapshot(
+                query,
+                &format!("import-files:{}:{}", caller.user(), row.id),
+                row.files.iter().cloned().enumerate().collect(),
+                |(position, _)| *position,
+                |(_, name)| name.clone(),
+                false,
+            )?;
+            let items = page.items.into_iter().map(|(_, name)| name).collect();
+            let next_cursor = page.next_cursor;
             Ok((
                 FilePage {
                     row,
@@ -309,7 +305,7 @@ impl native::Selected for Files {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a FilePage,
         fresh: &'a FilePage,
     ) -> BoxFuture<'a, ApiResult<bool>> {
@@ -489,7 +485,7 @@ async fn prepare_history(
 
 impl native::Selected for History {
     type Source = Source;
-    type Query = PageQuery;
+    type Query = CollectionQuery;
     type Value = HistoryPage;
     type Reply = Page<ImportLine>;
     const DECLARATION: &'static Declaration<Source> = &sources::IMPORT_LIST;
@@ -498,13 +494,15 @@ impl native::Selected for History {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        query: &'a PageQuery,
+        query: &'a CollectionQuery,
     ) -> BoxFuture<'a, ApiResult<(HistoryPage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
             let modern = native::modern(caller);
             let plan = native::bind_known(ctx, Self::DECLARATION, &[])?;
-            let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
-            let mut after = query.cursor.clone();
+            let page_size = crate::collection::limit(query)?;
+            let limit = usize::try_from(page_size).map_err(ApiError::internal)?;
+            let source = format!("import-history:{}", caller.user());
+            let mut after = crate::collection::after::<String>(query, &source)?;
             let mut selected = Vec::new();
             let mut targets = Vec::new();
             let next_cursor;
@@ -516,7 +514,8 @@ impl native::Selected for History {
                         conn,
                         caller.user(),
                         after.as_deref(),
-                        i64::from(query.limit()),
+                        i64::from(page_size),
+                        query.q.as_deref().unwrap_or(""),
                     )
                     .await
                 {
@@ -581,6 +580,9 @@ impl native::Selected for History {
             } else {
                 Vec::new()
             };
+            let next_cursor = next_cursor
+                .map(|after| crate::collection::cursor(query, &source, after))
+                .transpose()?;
             prepare_history(ctx, conn, caller, selected, primary, next_cursor).await
         })
     }
@@ -589,7 +591,7 @@ impl native::Selected for History {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a HistoryPage,
     ) -> BoxFuture<'a, ApiResult<(HistoryPage, Vec<native::Facts<Source>>)>> {
         Box::pin(async move {
@@ -655,7 +657,7 @@ impl native::Selected for History {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a PageQuery,
+        _query: &'a CollectionQuery,
         opened: &'a HistoryPage,
         fresh: &'a HistoryPage,
     ) -> BoxFuture<'a, ApiResult<bool>> {

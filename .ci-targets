@@ -1,0 +1,9 @@
+clippy
+test -p orch-engine --test lifecycle --test loss --test kept_images
+test -p orch-engine --lib -- reaper:: retention:: kept_images:: jobs::remove:: jobs::source:: views::
+test -p orch-engine --test source_uniform --test source
+test -p orch-db --lib
+test -p orch-db --test command_owner_jobs
+test -p orch-api-core --test hosted_environments
+test -p orch-node --test program
+test -p orch-node --lib -- composition::

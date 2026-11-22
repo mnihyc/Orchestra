@@ -20,7 +20,7 @@ use orch_authz::resources::Seen;
 struct Mount;
 
 pub(super) fn mount(registry: &mut Registry) {
-    read::register::<Mount, _, _>(registry, api::MountGet, api::MountList);
+    read::register_children::<Mount, _, _>(registry, api::MountGet, api::MountList);
 }
 
 impl Family for Mount {
