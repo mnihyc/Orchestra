@@ -1,3 +1,6 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 /** Readable chats returned for this org need no separate admin viewing mode. */
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ChevronRight } from 'lucide-react';
@@ -27,18 +30,17 @@ function Section({ label, children, onOpen }: { label: string; children: React.R
 
 function Others({ orgId, of, kind, slug, search, me }: { orgId: string; of: string | null; kind: 'others' | 'nodes'; slug: string; search: MessagesProps['search']; me: string | null }) {
   const { t } = useTranslation();
-  const chats = useInfiniteQuery(orgChatsQuery(orgId, { scope: kind, of, participating: search.participating === 'true' }));
+  const names = useCollectionSearch('other-chats:' + orgId + ':' + kind);
+  const chats = useInfiniteQuery(orgChatsQuery(orgId, { scope: kind, of, participating: search.participating === 'true', ...(names.q === '' ? {} : { q: names.q }) }));
   const items: Chat[] = chats.data?.pages.flatMap((page) => page.items) ?? [];
-  if (chats.isPending) return <Skeleton className="m-2 h-10" />;
-  if (chats.isLoadingError) return <ErrorState compact error={chats.error} title={t('chat.all.couldNotLoad')} onRetry={() => void chats.refetch()} />;
-  if (items.length === 0) return <EmptyState compact className="px-3" title={t(kind === 'others' ? 'chat.all.noOthers' : 'chat.all.noNodes')} />;
-  return (
-    <><ul className="flex flex-col gap-1">
-      {items.map((chat) => (
-        <ChatRow key={chat.id} chat={chat} slug={slug} selected={chat.id === search.chat} me={me} search={search} quiet={kind === 'others'} />
-      ))}
-    </ul><Pagination hasMore={chats.hasNextPage} loading={chats.isFetchingNextPage} error={chats.isFetchNextPageError ? chats.error : null} onMore={() => void chats.fetchNextPage()} /></>
-  );
+  const label = t(kind === 'others' ? 'chat.all.others' : 'chat.all.nodes');
+  return <div className="flex min-w-0 flex-col gap-2">
+    <CollectionSearch name={label} {...names} />
+    {chats.isPending ? <Skeleton className="m-2 h-10" /> : chats.isLoadingError ? <ErrorState compact error={chats.error} title={t('chat.all.couldNotLoad')} onRetry={() => void chats.refetch()} /> : items.length === 0 ? <EmptyState compact className="px-3" title={t(kind === 'others' ? 'chat.all.noOthers' : 'chat.all.noNodes')} /> : <ScrollRegion kind="table" label={label} className="max-h-96 overflow-y-auto"><ul className="flex flex-col gap-1">
+      {items.map((chat) => <ChatRow key={chat.id} chat={chat} slug={slug} selected={chat.id === search.chat} me={me} search={search} quiet={kind === 'others'} />)}
+    </ul></ScrollRegion>}
+    <Pagination hasMore={chats.hasNextPage} loading={chats.isFetchingNextPage} error={chats.isFetchNextPageError ? chats.error : null} onMore={() => void chats.fetchNextPage()} />
+  </div>;
 }
 
 export function AllChats({ org, slug, search, me }: { org: Pick<Org, 'org_id'>; slug: string; search: MessagesProps['search']; me: string | null; onSearch?: MessagesProps['onSearch'] }) {

@@ -35,6 +35,8 @@ pub enum Evidence {
     Preparation(Preparation),
     Reviewed(Box<planning::Packet>),
     Inventory(Box<host_inventory::Packet>),
+    MountCopyPreparation(Box<crate::mount_copies::location::preparation::Packet>),
+    MountCopyExecution(Box<crate::jobs::mount_copy::command::Packet>),
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 enum PreparationVersion {
@@ -62,6 +64,8 @@ impl Evidence {
             Self::Preparation(command) => command.native.command_kind(),
             Self::Reviewed(command) => command.command_kind(),
             Self::Inventory(command) => command.command_kind(),
+            Self::MountCopyPreparation(command) => command.command_kind(),
+            Self::MountCopyExecution(command) => command.command_kind(),
         }
     }
     pub async fn lock_source(&self, conn: &mut Conn) -> Result<(), EngineError> {
@@ -70,6 +74,8 @@ impl Evidence {
             Self::Preparation(command) => command.native.lock_source(conn).await,
             Self::Reviewed(command) => command.lock_source(conn).await,
             Self::Inventory(command) => command.lock_source(conn).await,
+            Self::MountCopyPreparation(command) => command.lock_source(conn).await,
+            Self::MountCopyExecution(command) => command.lock_source(conn).await,
         }
     }
     pub async fn current_issue_callers(
@@ -80,6 +86,10 @@ impl Evidence {
         access: &dyn crate::access::ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         match self {
+            Self::MountCopyPreparation(source) => {
+                source.current_issue_callers(conn, command, clock).await
+            }
+            Self::MountCopyExecution(source) => source.current_issue(conn, command, clock).await,
             Self::Inventory(source) => source.current_issue_callers(conn, command, clock).await,
             Self::Reviewed(source) => {
                 source
@@ -107,6 +117,10 @@ impl Evidence {
         access: &dyn crate::access::ResourceAccess,
     ) -> Result<Option<Vec<(Option<Caller>, Option<Time>)>>, EngineError> {
         match self {
+            Self::MountCopyPreparation(source) => {
+                source.current_callers(conn, command, clock).await
+            }
+            Self::MountCopyExecution(source) => source.current_stored(conn, command, clock).await,
             Self::Inventory(source) => source.current_callers(conn, command, clock).await,
             Self::Reviewed(source) => source.current_callers(conn, command, clock, access).await,
             Self::Execution(source) => source.current_callers(conn, command, clock, access).await,
@@ -135,10 +149,15 @@ impl Evidence {
         EngineError,
     > {
         match self {
+            Self::MountCopyPreparation(source) => {
+                source
+                    .reprepare_measurement(conn, clock, origin, until, command)
+                    .await
+            }
             // Preparation provenance cannot be converted to a captured business operation.
-            Self::Inventory(_) => Err(EngineError::BeforeEffect(Box::new(
-                crate::operation_scope::continuing::Error::Refused,
-            ))),
+            Self::MountCopyExecution(_) | Self::Inventory(_) => Err(EngineError::BeforeEffect(
+                Box::new(crate::operation_scope::continuing::Error::Refused),
+            )),
             Self::Reviewed(source) => {
                 source
                     .reprepare_measurement(conn, clock, access, origin, until, command)
@@ -155,6 +174,8 @@ impl Evidence {
                 // It still requires the real job, current recipe and exact journaled proposal.
                 let serial = command.key.wire();
                 let proposed = NewCommand {
+                    content_transit: false,
+                    native_target: None,
                     id: command.id,
                     machine_id: command.machine,
                     kind: command.kind.as_str(),
@@ -209,7 +230,7 @@ enum Owner {
     EnvironmentLifecycle,
 }
 fn owner(row: &rows::JobRow) -> Option<Owner> {
-    if environment::present(row) {
+    if environment::present(row) || row.kind == rows::kind::ENVIRONMENT_RESTART {
         Some(Owner::EnvironmentLifecycle)
     } else if jobs::environment_move::authority::present(row) && row.kind == "environment_move" {
         Some(Owner::NodeMove)

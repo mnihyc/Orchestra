@@ -389,6 +389,8 @@ async fn reducing(
     link::insert_command(
         &mut tx,
         &link::NewCommand {
+            content_transit: false,
+            native_target: None,
             id: command.id,
             machine_id: command.machine,
             kind: command.kind.as_str(),

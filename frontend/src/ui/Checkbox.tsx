@@ -10,6 +10,8 @@ import { type ReactNode, useId } from 'react';
 import { Choice, hasChoiceDescription, type ChoiceDetails, type ChoiceHelp, type ChoiceName } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
+import { DeviceToggleFacts } from '@/ui/DeviceChoiceFacts';
+import { deviceChoiceOf } from '@/lib/viewChoiceFacts';
 
 export interface CheckboxProps {
   label: ReactNode;
@@ -68,6 +70,7 @@ export function Checkbox({ label, checked, onCheckedChange, disabled = false, na
       </Primitive.Root></Tooltip>
       <Choice id={id} htmlFor={id} name={label} description={pickerDescription} help={help} presentation={presentation}
         className="flex-1" nameClassName={disabled ? 'text-text-disabled' : 'text-text'} />
+      {checked !== 'indeterminate' && deviceChoiceOf(onCheckedChange) !== undefined && <DeviceToggleFacts writer={onCheckedChange} checked={checked} />}
     </div>
     </div>
   );
