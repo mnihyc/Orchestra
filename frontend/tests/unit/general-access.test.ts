@@ -81,7 +81,7 @@ describe('a local edit of inherited holders', () => {
     expect(base.rows.find((item) => item.permission === 'doc.view')?.inherit).toBe(true);
   });
 
-  it('removes a followed Take part holder, leaves View following and reads Custom', () => {
+  it('removes a followed Interact holder, leaves View following and reads Custom', () => {
     const base = pageFor();
     const holder = linesOf(base, CATALOGUE, 'thread').interact[0]!;
     const change = removeHolderChange(base, holder);

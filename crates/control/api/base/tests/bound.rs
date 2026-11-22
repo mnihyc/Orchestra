@@ -22,10 +22,12 @@ fn every_request_of_signing_in_is_bound_single_sign_on_and_its_test_included() {
     for route in orch_api_contract::auth::ROUTES {
         assert!(bound.contains(route.name), "{}", route.name);
     }
-    // Sign-in, cookie session restoration, current-session authority, admin openings
-    // and both recent key activity reads.
-    assert_eq!(orch_api_contract::auth::ROUTES.len(), 46);
+    // Sign-in, cookie session restoration and thread opening, current-session authority, admin openings
+    // the signed-in landing and both recent key activity reads.
+    assert_eq!(orch_api_contract::auth::ROUTES.len(), 48);
     assert!(bound.contains("AuthSessionRestore"));
+    assert!(bound.contains("AuthSessionThreadOpen"));
+    assert!(bound.contains("MeLandingGet"));
     assert!(bound.contains("MeTokenActivityList"));
     assert!(bound.contains("OrgTokenActivityList"));
     assert!(bound.contains("AdminIdentityProviderTest"));

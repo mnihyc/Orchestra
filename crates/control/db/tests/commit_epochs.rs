@@ -62,8 +62,8 @@ async fn fixture() -> TestResult<(TestDb, Db)> {
         CREATE TRIGGER commit_epoch_probe_pause BEFORE DELETE ON commit_work
             FOR EACH ROW EXECUTE FUNCTION commit_epoch_probe_pause();
     "#).execute(&test.pool).await?;
-    // Only this observer is added: the deployed deferred trigger and its
-    // epoch/cache statements remain intact. DELETE is after their real checks.
+    // Only this observer is added: the deployed deferred trigger and its statements
+    // remain intact. DELETE follows the epoch checks; the cache counter is last.
     let db = Db::from_pool(test.pool.clone());
     Ok((test, db))
 }
@@ -321,6 +321,194 @@ async fn require_final(
         outstanding, 0,
         "successful and refused commits both retire their work"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_org_can_commit_while_a_tree_commit_waits_for_its_own_counter() -> TestResult {
+    use orch_db::queries::{hierarchy, identity};
+    let (test, db) = fixture().await?;
+    let mut observer = test.pool.acquire().await?;
+    let owner = new_id();
+    identity::testing::insert_user(&mut observer, owner, "tree-counter-owner").await?;
+    let roots = [new_id(), new_id()];
+    for (root, name) in roots.into_iter().zip(["First tree", "Second tree"]) {
+        hierarchy::testing::insert_node(&mut observer, root, "org", None, name, owner).await?;
+    }
+    let watched = [transaction_guard::SYSTEM, roots[0], roots[1]];
+    sqlx::query(
+        "INSERT INTO authz_epochs(org_id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(watched.as_slice())
+    .execute(&mut *observer)
+    .await?;
+    let epochs: Vec<(Id, i64)> =
+        sqlx::query_as("SELECT org_id,epoch FROM authz_epochs WHERE org_id=ANY($1)")
+            .bind(watched.as_slice())
+            .fetch_all(&mut *observer)
+            .await?;
+    let cache = access::epoch(&mut observer).await?;
+    let mut blocker = test.pool.begin().await?;
+    sqlx::query("SELECT node_id FROM orgs WHERE node_id=$1 FOR NO KEY UPDATE")
+        .bind(roots[0])
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let mut first = decision(&db, Kind::Birth, &[roots[0]], &[]).await?;
+    let first_effect = first.effect;
+    let first_node = new_id();
+    tokio::time::timeout(
+        LOCK_WAIT_LIMIT,
+        hierarchy::create(
+            &mut first.tx,
+            &hierarchy::NewNode {
+                id: first_node,
+                kind: "project",
+                parent: Some(roots[0]),
+                name: "First project",
+                name_by_person: true,
+                description: "",
+                owner,
+                org: None,
+                at: orch_testkit::clock::start(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| failure("node preparation waited for its org counter"))??;
+    let leading = first.tx.commit();
+    tokio::pin!(leading);
+    require_blocked(
+        leading.as_mut(),
+        &mut observer,
+        first.pid,
+        blocker_pid,
+        "tree commit at its own counter",
+    )
+    .await?;
+    let mut second = decision(&db, Kind::Birth, &[roots[1]], &[]).await?;
+    let second_effect = second.effect;
+    let second_node = new_id();
+    hierarchy::create(
+        &mut second.tx,
+        &hierarchy::NewNode {
+            id: second_node,
+            kind: "project",
+            parent: Some(roots[1]),
+            name: "Second project",
+            name_by_person: true,
+            description: "",
+            owner,
+            org: None,
+            at: orch_testkit::clock::start(),
+        },
+    )
+    .await?;
+    let competing = second.tx.commit();
+    tokio::pin!(competing);
+    let independent = tokio::time::timeout(LOCK_WAIT_LIMIT, competing.as_mut()).await;
+    let visible: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=$1)")
+        .bind(second_node)
+        .fetch_one(&mut *observer)
+        .await?;
+    blocker.rollback().await?;
+    tokio::time::timeout(LOCK_WAIT_LIMIT, leading.as_mut()).await??;
+    match independent {
+        Ok(result) => result?,
+        Err(_) => {
+            tokio::time::timeout(LOCK_WAIT_LIMIT, competing.as_mut()).await??;
+            return Err(failure(
+                "a tree-counter wait retained the global cache counter and blocked another org",
+            ));
+        }
+    }
+    assert!(
+        visible,
+        "the other org's node committed before this counter was released"
+    );
+    require_final(
+        &mut observer,
+        &epochs,
+        &[first_effect, second_effect],
+        &[],
+        cache + 2,
+    )
+    .await?;
+    for (node, root) in [(first_node, roots[0]), (second_node, roots[1])] {
+        let (stamp,head):(i64,i64)=sqlx::query_as("SELECT n.tree_seq,o.tree_seq FROM nodes n JOIN orgs o ON o.node_id=n.org_id WHERE n.id=$1 AND n.org_id=$2")
+            .bind(node).bind(root).fetch_one(&mut *observer).await?;
+        assert_eq!(stamp, head, "each node keeps its own committed tree cut");
+    }
+    drop(observer);
+    drop(db);
+    test.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn authority_changes_in_different_orgs_share_the_unchanged_system_epoch() -> TestResult {
+    let (test, db) = fixture().await?;
+    let mut observer = test.pool.acquire().await?;
+    let roots = [new_id(), new_id()];
+    sqlx::query(
+        "INSERT INTO authz_epochs(org_id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(roots.as_slice())
+    .execute(&mut *observer)
+    .await?;
+    let cache = access::epoch(&mut observer).await?;
+    let mut first = decision(&db, Kind::Change, &[roots[0]], &[roots[0]]).await?;
+    pause_at_commit(&mut first.tx).await?;
+    let (latch, latch_pid) = hold(&test.pool).await?;
+    let first_effect = first.effect;
+    let leading = first.tx.commit();
+    tokio::pin!(leading);
+    require_blocked(
+        leading.as_mut(),
+        &mut observer,
+        first.pid,
+        latch_pid,
+        "first org after its epoch checks",
+    )
+    .await?;
+    let second = decision(&db, Kind::Change, &[roots[1]], &[roots[1]]).await?;
+    let second_effect = second.effect;
+    let competing = second.tx.commit();
+    tokio::pin!(competing);
+    let independent = tokio::time::timeout(LOCK_WAIT_LIMIT, competing.as_mut()).await;
+    let visible: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit_epoch_probe_effects WHERE id=$1)")
+            .bind(second_effect)
+            .fetch_one(&mut *observer)
+            .await?;
+    latch.rollback().await?;
+    tokio::time::timeout(LOCK_WAIT_LIMIT, leading.as_mut()).await??;
+    match independent {
+        Ok(result) => result?,
+        Err(_) => {
+            tokio::time::timeout(LOCK_WAIT_LIMIT, competing.as_mut()).await??;
+            return Err(failure(
+                "an org-only change exclusively locked the unchanged system epoch",
+            ));
+        }
+    }
+    assert!(
+        visible,
+        "an unrelated authority change commits while only this org is retained"
+    );
+    require_final(
+        &mut observer,
+        &[(transaction_guard::SYSTEM, 0), (roots[0], 1), (roots[1], 1)],
+        &[first_effect, second_effect],
+        &[],
+        cache + 2,
+    )
+    .await?;
+    drop(observer);
+    drop(db);
+    test.close().await?;
     Ok(())
 }
 
