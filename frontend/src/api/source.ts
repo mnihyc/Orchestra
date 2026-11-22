@@ -8,7 +8,7 @@ import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
 import { api, done, ok, repeatable } from '@/api/client';
 import type { Door } from '@/api/workspace';
-import type { ChangeOptions, ContentPart, Delivery, Draft, EnvironmentGitCommitBody, EnvironmentGitPushBody, Job, RepositorySource, RestorePlan, ReviewComment, Snapshot, SnapshotPage, ThreadLink } from '@/generated/api-types';
+import type { ChangeOptions, ContentPart, Delivery, Draft, EnvironmentGitCommitBody, EnvironmentGitPushBody, Job, RepositorySource, RestorePlan, ReviewComment, Snapshot, SnapshotPage, ThreadLink,WorkspaceFileEdits } from '@/generated/api-types';
 
 const through = (door: Door): { thread?: string } => (door.threadId === null ? {} : { thread: door.threadId });
 
@@ -18,11 +18,11 @@ export const sourceKeys = {
 };
 
 /** A recorded file source is chosen a page at a time, using the server's page-size default. */
-export const threadSnapshotsQuery = (id: string) => infiniteQueryOptions({
-  queryKey: sourceKeys.snapshots(id),
+export const threadSnapshotsQuery = (id: string, q = '') => infiniteQueryOptions({
+  queryKey: [...sourceKeys.snapshots(id), q],
   initialPageParam: null as string | null,
   queryFn: ({ pageParam, signal }): Promise<SnapshotPage> => ok(api.GET('/threads/{id}/snapshots', {
-    params: { path: { id }, query: { ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
+    params: { path: { id }, query: { ...(q === '' ? {} : { q }), ...(pageParam === null ? {} : { cursor: pageParam }) } }, signal,
   })),
   getNextPageParam: (page) => page.next_cursor ?? undefined,
   retry: false,
@@ -62,9 +62,15 @@ export function saveThreadLinks(threadId: string, links: ThreadLink[]): Promise<
 }
 
 /** Prepares the thread's source again after it failed; with `source`, accepts the one that resolves now instead of the one it was made with. */
-export function prepareSource(environmentId: string, threadId: string, key: string, source?: RepositorySource): Promise<Job> {
-  return ok(api.POST('/environments/{id}/source/prepare', { params: { path: { id: environmentId } }, body: { thread_id: threadId, ...(source === undefined ? {} : { source }) }, ...repeatable(key) }));
+export function prepareSource(environmentId: string, threadId: string, key: string, source?: RepositorySource, files?:WorkspaceFileEdits): Promise<Job> {
+  return ok(api.POST('/environments/{id}/source/prepare', { params: { path: { id: environmentId } }, body: { thread_id: threadId, ...(source === undefined ? {} : { source }),...(files===undefined?{}:{workspace_edits:files.edits,workspace_edit_revision:files.revision}) }, ...repeatable(key) }));
 }
+
+export const sourceFileEditsQuery=(environmentId:string,threadId:string,sourceState:string)=>queryOptions({
+  queryKey:['source-file-edits',environmentId,threadId,sourceState] as const,
+  queryFn:({signal}):Promise<WorkspaceFileEdits>=>ok(api.GET('/environments/{id}/source/edits',{params:{path:{id:environmentId},query:{thread_id:threadId}},signal})),
+  retry:false,gcTime:0,
+});
 
 /**
  * Empties the draft once what it held was sent or erased, keeping the comments on lines that were not sent with
