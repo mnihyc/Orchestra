@@ -1,0 +1,10 @@
+fmt
+clippy
+test -p orch-adapter-fake --lib
+test -p orch-adapter-fake --test harness
+test -p orch-adapter-fake --test sessions
+test -p orch-connector-core --test sign_in
+test -p orch-connector-core --test credentials
+test -p orch-connector-core --test provider_homes
+test -p orch-connector-core --test native_registered_home
+test -p orch-connector-core --test provider_signin_policy

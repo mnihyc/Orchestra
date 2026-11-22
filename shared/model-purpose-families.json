@@ -1,0 +1,8 @@
+[
+  { "purpose": "rerank", "pattern": "re[-_]?rank" },
+  { "purpose": "embedding", "pattern": "embed|^(bge-(m3|small|base|large)|all-minilm|multilingual-e5|e5-(small|base|large))([._:-]|$)" },
+  { "purpose": "transcription", "pattern": "(^|[-_])(whisper|transcribe|transcription)([-_.:]|$)" },
+  { "purpose": "speech_generation", "pattern": "(^|[-_])(tts|text-to-speech)([-_.:]|$)" },
+  { "purpose": "image_generation", "pattern": "^(gpt-image|dall-e|imagen|stable-diffusion|flux[.-][12])([-_.:]|$)|^gemini-.*-image([-.:]|$)" },
+  { "purpose": "generation", "pattern": "^((global\\.|us\\.|eu\\.)?anthropic\\.)?claude-(haiku|sonnet|opus|fable|mythos|[0-9])|^(haiku|sonnet|opus)([- .:]|$)|^(gpt-[3456]([.0-9]|o)?|chatgpt-4o|gpt-oss|o[134])([-.:]|$)|^gemini-[0-9.]+-(pro|flash)([-.:]|$)|(^|[-_])(chat|instruct)([-_.:]|$)" }
+]
