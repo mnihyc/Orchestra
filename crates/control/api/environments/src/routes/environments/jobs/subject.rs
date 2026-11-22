@@ -132,6 +132,19 @@ fn maker_candidates(row: &JobRow, gate: Gate) -> Vec<Candidate> {
     found
 }
 
+fn copy_mount(row: &JobRow) -> ApiResult<Id> {
+    let recipe: orch_engine::jobs::mount_copy::Recipe =
+        serde_json::from_value(row.plan["copy"].clone()).map_err(ApiError::internal)?;
+    let mount = recipe.review.source().mount;
+    if !recipe.valid()
+        || row.plan["mount_id"] != serde_json::json!(mount)
+        || row.created_by != Some(recipe.origin.origin().user())
+    {
+        return Err(ApiError::not_found());
+    }
+    Ok(mount)
+}
+
 /// This is the original kind dispatch, extracted once before any renderer or scope decision.
 fn native_candidates(row: &JobRow) -> ApiResult<Vec<Candidate>> {
     let one = |candidate| Ok(vec![candidate]);
@@ -148,6 +161,13 @@ fn native_candidates(row: &JobRow) -> ApiResult<Vec<Candidate>> {
             ResourceKind::Environment,
             environment()?,
             Permission::FilesView,
+        ));
+    }
+    if row.kind == orch_engine::jobs::mount_copy::KIND {
+        return one(resource(
+            ResourceKind::Mount,
+            copy_mount(row)?,
+            Permission::MountView,
         ));
     }
     if row.kind == orch_engine::jobs::host_delete::KIND {
@@ -218,7 +238,15 @@ fn native_candidates(row: &JobRow) -> ApiResult<Vec<Candidate>> {
             gate: Gate::Retained(id),
         });
     }
-    let mut found = Vec::new();
+    let moved = row.kind == "thread_fork"
+        && row.plan["confirmed_history_source"]["operation"]["origin"]["operation"].as_str()
+            == Some("ThreadMoveOut");
+    let mut found = if moved {
+        // A native move can delete its source; its maker keeps the accepted job within its real namespace.
+        maker_candidates(row, Gate::WorkspaceMaker)
+    } else {
+        Vec::new()
+    };
     if let Some(id) = row.environment_id {
         found.push(Candidate {
             choice: Choice::object(ObjectKind::Environment, id),
@@ -551,6 +579,13 @@ async fn native_cancellation_candidates(
             ResourceKind::Environment,
             environment()?,
             Permission::FilesManage,
+        ));
+    }
+    if row.kind == orch_engine::jobs::mount_copy::KIND {
+        return one(resource(
+            ResourceKind::Mount,
+            copy_mount(row)?,
+            Permission::MountManage,
         ));
     }
     if row.kind == orch_engine::jobs::host_delete::KIND {

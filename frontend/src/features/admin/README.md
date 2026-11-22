@@ -41,7 +41,8 @@ provider's Test asks the server, which reads the provider's description of itsel
 - `Users.tsx`: Users: creation with what their own org starts as, suspending and resuming, admin status, reset links that may switch a second step off, and a name that strangers' wrong tries have closed.
 - `UserDialogs.tsx`: The acts on a person that ask first: making one, the link by which they set a new password, suspending and resuming them, and making them a system admin or not.
 - `Organizations.tsx`: Every root org with its owners and its size, each of which a system admin enters as an Admin of it; naming an owner where none is left; and the two limits of each: whether it takes members, and whether it holds orgs inside it.
-- `SignIn.tsx`: Who may register; confirming addresses; password sign-in; a code by mail, with its lock; how wrong tries are counted; and identity providers.
+- `SignIn.tsx`: Who may register; confirming addresses; password sign-in; a code by mail, with its lock; how wrong tries are counted; the human check; and identity providers.
+- `HumanCheck.tsx`: The human check's card under Sign-in: the service, its keys and acts, and the secret, which is written and never read back, with a test of the keys.
 - `IdentityProviders.tsx`: The identity providers people may sign in through: the list with each one's callback address to copy, and the form that adds or changes one.
 - `Channels.tsx`: The system's own ways out of the application: its mail server, which also sends confirmations, resets and sign-in codes, its bot, push, webhooks and installed kinds; whether root orgs without a mail server send through it; and which private addresses channels may reach.
 - `Hosts.tsx`: The system's hosts: capacity, a meter of what their units declare they need, what each does when full, load, drivers, enrollment, runtimes, mount locations, recycle and move.

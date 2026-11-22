@@ -17,14 +17,17 @@ import { type Door, environmentQuery } from '@/api/workspace';
 import type { Environment, EnvironmentRef, Thread } from '@/generated/api-types';
 import { denial, permissionLabel } from '@/lib/permissions';
 import { useThreadFeed } from '@/realtime/live';
-import { useThreadView } from '@/realtime/stores/thread';
+import { useThreadPart } from '@/realtime/stores/thread';
 import { useStore } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 import { client } from '@/api/client';
 export { workspaceBinding } from '@/api/workspaceBinding';
 
 export interface EnvironmentWorkspaceAccess {
   door: Door;
   thread: Thread | null;
+  /** Current metadata reader for this exact workspace door. */
+  read?: ThreadReadTarget;
   environment: EnvironmentRef;
   /** The thread's directory, from the workspace root: where the tree opens. */
   directory: string;
@@ -59,13 +62,15 @@ export function useThreadDoor(threadId: string | null, read?: ThreadReadTarget):
   // A tab kept from another thread follows that thread too; the feed is shared, so this costs nothing where the screen follows it already.
   const target = read ?? threadId;
   useThreadFeed(target, false);
-  const view = useThreadView(target ?? '');
   const reader = useStore(client.session, (state) => state.readerVersion);
+  const view = useThreadPart(target ?? '', useShallow(({ closed, error, thread, read }) => ({
+    closed, error, thread, admitted: read === null || read.ready && read.reader === reader && !read.controller.signal.aborted,
+  })));
   if (threadId === null) return { kind: 'none', why: 'no_thread' };
   if (view.closed !== null) return { kind: 'none', why: 'no_thread' };
   if (view.error !== null) return { kind: 'error', error: view.error };
   const thread = view.thread;
-  if (thread === null || view.read !== null && (view.read.reader !== reader || !view.read.ready || view.read.controller.signal.aborted)) {
+  if (thread === null || !view.admitted) {
     return { kind: 'loading', admission: true };
   }
   if (thread.environment === null) return { kind: 'none', why: 'no_environment' };
@@ -74,6 +79,7 @@ export function useThreadDoor(threadId: string | null, read?: ThreadReadTarget):
     access: {
       door: { environmentId: thread.environment.id, threadId },
       thread,
+      read: read ?? threadId,
       environment: thread.environment,
       directory: thread.directory,
       mayView: thread.environment_permissions.includes('files.view'),
@@ -119,7 +125,7 @@ export function usePanelWorkspaceDoor(): WorkspaceDoorState {
 export function useWorkspaceDoor(threadId: string | null, environmentId: string | null): WorkspaceDoorState {
   const read = workspaceThreadRead(environmentId, threadId);
   const throughThread = useThreadDoor(threadId, read ?? undefined);
-  const view = useThreadView(read ?? '');
+  const view = useThreadPart(read ?? '', useShallow(({ closed, error }) => ({ closed, error })));
   const matches = view.closed === null && throughThread.kind === 'ready' && throughThread.access.door.environmentId === environmentId;
   const waiting = threadId !== null && throughThread.kind === 'loading' && view.closed === null && view.error === null;
   // A kept file's environment is part of its identity. A later thread binding cannot retarget it.
