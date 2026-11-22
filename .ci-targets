@@ -1,0 +1,10 @@
+fmt
+contracts
+clippy
+test -p orch-settings-contract --lib
+test -p orch-settings --test resolution --test writes
+test -p orch-api-core --test settings --test setting_reach --test threads_settings --test thread_read_tools --test ask_tools_native_origin --test personal
+web typecheck
+web lint
+web test
+web-e2e --project=chromium --workers=1 --retries=0 --grep-invert "summary target defaults survive|chat title and catch-up options remain independent" tests/e2e/settings-pages.spec.ts tests/e2e/workbench-scrolling.spec.ts tests/e2e/everything.spec.ts tests/e2e/summary-options.spec.ts tests/e2e/call-recovery.spec.ts tests/e2e/capability-recovery.spec.ts tests/e2e/craft.spec.ts tests/e2e/ask-payer.spec.ts

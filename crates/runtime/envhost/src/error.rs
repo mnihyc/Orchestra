@@ -22,6 +22,9 @@ pub enum HostError {
     /// has to stay in, or is not one a path may be.
     #[error("{0}")]
     NotFound(String),
+    /// No read or mutation reach admits this resolved native target.
+    #[error("outside allowed file reach")]
+    FileReachDenied,
     /// The workspace's ignore rules leave the path out.
     #[error("{0}")]
     Ignored(String),
@@ -123,6 +126,7 @@ impl HostError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::NotFound(_) => ErrorCode::NotFound,
+            Self::FileReachDenied => ErrorCode::FileReachDenied,
             Self::Ignored(_) => ErrorCode::Ignored,
             Self::Exists(_) | Self::Stale { .. } | Self::Cancelled => ErrorCode::Conflict,
             Self::Changed(_) => ErrorCode::Changed,
