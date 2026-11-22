@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import type * as Workspace from '@/api/workspace';
-import { useFileBytes, useFileHead, useFileText } from '@/features/files/content';
+import { bringFile, useFileBytes, useFileHead, useFileText } from '@/features/files/content';
 import { ViewOpeningContext } from '@/features/workbench/viewOpening';
 import { show } from './support';
 
@@ -41,4 +41,24 @@ it('starts machine-backed reads only while shown and keeps a hidden new path qui
   await act(async () => { await cache.invalidateQueries({queryKey:['workspace-head',door.environmentId],exact:false}); });
   expect(calls.stat).not.toHaveBeenCalled();expect(calls.fetch).not.toHaveBeenCalled();expect(calls.bytes).not.toHaveBeenCalled();
   rendered.unmount();cache.clear();
+});
+
+
+it('keeps a legitimate file description pending until the source finishes', async () => {
+  calls.fetch.mockReset();
+  for (let reply = 0; reply < 17; reply += 1) calls.fetch.mockResolvedValueOnce({ state: 'fetching', hash: null, size: 4, reason: null });
+  calls.fetch.mockResolvedValueOnce({ state: 'ready', hash: ready.hash, size: 4 });
+  await expect(bringFile(door, 'code.txt', new AbortController().signal)).resolves.toEqual(ready);
+  expect(calls.fetch).toHaveBeenCalledTimes(18);
+});
+
+it('stops asking for a file when its reader leaves during a description', async () => {
+  calls.fetch.mockReset();
+  const reader = new AbortController();
+  calls.fetch.mockImplementation(() => {
+    reader.abort();
+    return Promise.resolve({ state: 'fetching', hash: null, size: 4, reason: null });
+  });
+  await expect(bringFile(door, 'code.txt', reader.signal)).rejects.toMatchObject({ name: 'AbortError' });
+  expect(calls.fetch).toHaveBeenCalledTimes(1);
 });

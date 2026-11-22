@@ -73,8 +73,8 @@ it('does not present an incomplete empty report as nowhere', async () => {
   show(<McpEnabledIn server={server} />);
   await waitFor(() => expect(calls.facts).toHaveBeenCalledOnce());
   const section = screen.getByRole('region', { name: i18n.t('mcpSwitch.where') });
-  expect(within(section).queryByText(i18n.t('mcpSwitch.nowhere'))).toBeNull();
   expect(await within(section).findByText('–')).toBeVisible();
+  expect(within(section).queryByText(i18n.t('mcpSwitch.nowhere'))).toBeNull();
 });
 
 it('keeps a server of one environment on that environment alone', async () => {

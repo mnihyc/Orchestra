@@ -316,7 +316,7 @@ pub(super) struct PreparedEnvironments {
 
 impl native::Selected for Environments {
     type Source = Source;
-    type Query = ();
+    type Query = orch_api_contract::common::CollectionQuery;
     type Value = PreparedEnvironments;
     type Reply = Vec<Environment>;
     const DECLARATION: &'static Declaration<Source> = &sources::ENVIRONMENTS;
@@ -324,7 +324,7 @@ impl native::Selected for Environments {
         ctx: &'a Ctx,
         conn: &'a mut Conn,
         caller: &'a Caller,
-        _query: &'a (),
+        _query: &'a Self::Query,
     ) -> BoxFuture<'a, ApiResult<(Self::Value, Vec<native::Facts<Source>>)>> {
         Box::pin(select_environments(ctx, conn, caller))
     }
@@ -353,7 +353,7 @@ impl native::Selected for Environments {
         _ctx: &'a Ctx,
         _conn: &'a mut Conn,
         _principal: &'a Principal,
-        _query: &'a (),
+        _query: &'a Self::Query,
         old: &'a Self::Value,
         fresh: &'a Self::Value,
     ) -> BoxFuture<'a, ApiResult<bool>> {

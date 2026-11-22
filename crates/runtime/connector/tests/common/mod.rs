@@ -75,6 +75,8 @@ pub struct Rig {
     /// The connector's way to the content of the system: a test changes its shape (a line that is slow, one that
     /// recovers) while a command is under way. It lasts across starts of the connector.
     pub link: ShapedBlobs,
+    /// A command-bound memory endpoint for native pass-through cases.
+    pub blob_endpoint: Option<Arc<dyn orch_link::content::BlobEndpoint>>,
     pub provider: Id,
     pub agent: Id,
     pub config: ConnectorConfig,
@@ -154,6 +156,7 @@ impl Rig {
         let clock: Arc<dyn Clock> = Arc::new(manual.clone());
         let pki = TestPki::new(Arc::clone(&clock));
         let hub = Hub::new(Arc::clone(&clock), pki.certificate());
+        hub.admit_test_tool_sessions();
         let machine_id = new_id();
         let pki_identity = pki.machine(machine_id);
         let controller =
@@ -175,6 +178,7 @@ impl Rig {
             data: tempfile::tempdir().unwrap(),
             machine_id,
             link: ShapedBlobs::new(Arc::clone(&blobs), None, i64::MAX),
+            blob_endpoint: None,
             blobs,
             provider: new_id(),
             agent: new_id(),
@@ -228,12 +232,27 @@ impl Rig {
             },
             adapters: self.adapters.clone(),
             tools_dir: self.tools_dir.clone(),
-            blobs: Some(Arc::new(self.link.clone())),
+            blobs: Some(
+                self.blob_endpoint
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(self.link.clone())),
+            ),
         }
     }
 
     /// Starts the connector and waits for its session.
     pub async fn start(&mut self) {
+        self.start_link().await;
+        tokio::time::timeout(
+            self.patience,
+            self.connector.as_ref().unwrap().link().connected(),
+        )
+        .await
+        .expect("the connector never got a session");
+    }
+
+    /// Starts the actual connector without requiring that a gateway admit its version.
+    pub async fn start_link(&mut self) {
         let mut builder = ConnectorBuilder::new(self.params());
         if let Some(plug) = &self.plug {
             builder = plug(
@@ -248,9 +267,6 @@ impl Rig {
             builder = builder.provider_sources(Arc::clone(sources));
         }
         let connector = builder.start().await.unwrap();
-        tokio::time::timeout(self.patience, connector.link().connected())
-            .await
-            .expect("the connector never got a session");
         self.connector = Some(connector);
     }
 
@@ -332,12 +348,12 @@ impl Rig {
             "workspace_root": directory, "instruction_root_marker": false,
             "directory": directory, "cwd": directory, "mounts": [],
             "model": "fake-large", "effort": "medium", "params": {},
-            "approval_mode": "on_request", "sandbox_mode": "workspace",
+            "approval_mode": "on_request", "web_action_wait_secs": 120, "sandbox_mode": "workspace",
             "instructions": "You are working inside Orch.", "memory": null,
             "arrangement": "together",
             "provider": { "path": "native", "provider_id": self.provider },
             "exec": { "executor": null, "environment_id": new_id(), "generation": 1 },
-            "mcp": [], "orch_tools": [], "raw_events": false
+            "mcp": [], "orch_tools": [], "output_capture_bytes":67108864, "raw_events": false
         })
     }
 

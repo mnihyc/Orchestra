@@ -15,6 +15,7 @@ import { ActionIcon, actionForLabel, actionName, type ActionId } from '@/ui/acti
 import { cx } from '@/ui/cx';
 import { AdminActTooltip, type AdminActSpec } from '@/ui/AdminAct';
 import { Tooltip } from '@/ui/Tooltip';
+import { useReadProgress } from '@/lib/useReadProgress';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-ghost';
 export type ButtonSize = 'sm' | 'md';
@@ -110,6 +111,7 @@ export function Button({
   ref,
   ...rest
 }: ButtonProps) {
+  const slow = useReadProgress(pending);
   const act = action ?? actionForLabel(children);
   const sign = act === undefined ? icon : <ActionIcon action={act} />;
   const words = children ?? (act === undefined ? null : actionName(act));
@@ -117,26 +119,25 @@ export function Button({
   const explain = (content: ReactNode) => reason === undefined ? content
     : <Tooltip content={reason}><span className={cx('inline-flex', block && 'w-full', bounded && 'min-w-0 max-w-full')} tabIndex={disabled ? 0 : undefined}>{content}</span></Tooltip>;
 
+  const press = (event: MouseEvent<HTMLButtonElement>) => {
+    if (disabled || pending || blocked || event.defaultPrevented) { event.preventDefault(); return; }
+    onClick?.(event);
+  };
+
   if (asChild) {
     const child = isValidElement<{ children?: ReactNode }>(children) && typeof children.props.children === 'string' ? children : null;
     const childAct = child === null ? undefined : action ?? actionForLabel(child.props.children);
     const childSign = childAct === undefined ? icon : <ActionIcon action={childAct} />;
     const content = child !== null && childSign !== undefined ? cloneElement(child, { children: <>{childSign}{child.props.children}</> }) : children;
     return explain(
-      <AdminActTooltip spec={admin}><Slot.Root ref={ref} className={classes} data-action={childAct ?? act} aria-description={reason ?? rest['aria-description']} {...rest}>
+      <AdminActTooltip spec={admin}><Slot.Root ref={ref} className={classes} data-action={childAct ?? act} aria-description={reason ?? rest['aria-description']} {...rest}
+        aria-disabled={disabled || pending || blocked || undefined} aria-busy={pending || undefined} onClick={press}
+        onClickCapture={(event) => { if (disabled || pending || blocked) { event.preventDefault(); event.stopPropagation(); return; } rest.onClickCapture?.(event as MouseEvent<HTMLButtonElement>); }}>
         {content}
       </Slot.Root></AdminActTooltip>
     );
   }
 
-  const press = (event: MouseEvent<HTMLButtonElement>) => {
-    if (pending || blocked) {
-      // Still focused, still announced, and deaf to a second press, or to one that is not for this reader.
-      event.preventDefault();
-      return;
-    }
-    onClick?.(event);
-  };
 
   return explain(
     <AdminActTooltip spec={admin}><button
@@ -151,7 +152,7 @@ export function Button({
       onClick={press}
       {...rest}
     >
-      {pending ? <LoaderCircle className="animate-spin" aria-hidden /> : sign}
+      {slow ? <LoaderCircle className="animate-spin" aria-hidden /> : sign}
       {words}
     </button></AdminActTooltip>
   );

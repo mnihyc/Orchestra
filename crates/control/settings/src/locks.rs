@@ -34,7 +34,9 @@ impl From<Place> for Here {
         match place {
             Place::System => Self::System,
             Place::Node(id) => Self::Node(id),
-            Place::Environment(_) | Place::Provider(_) | Place::Host(_) => Self::Own,
+            Place::Environment(_) | Place::Provider(_) | Place::Host(_) | Place::Pool(_) => {
+                Self::Own
+            }
         }
     }
 }

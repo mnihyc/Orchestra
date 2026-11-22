@@ -1,0 +1,4 @@
+fmt
+clippy
+test -p orch-api-core --test realtime_threads --test realtime_socket --test realtime_feeds --test realtime_continuations
+test -p orch-api-core --lib
