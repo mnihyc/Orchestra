@@ -35,7 +35,7 @@ for (const width of [1440, 400]) {
     await review.getByRole('button', { name: 'Apply to 1 ready place' }).click();
     const results = page.getByRole('dialog', { name: 'Results for selected places', exact: true });
     await expect(results.getByText('Succeeded', { exact: true })).toBeVisible();
-    await results.getByRole('button', { name: 'Undo successful rows', exact: true }).click();
+    await results.getByRole('button', { name: 'Undo what succeeded', exact: true }).click();
     await expect(results.getByRole('heading', { name: 'Undo results', exact: true })).toBeVisible();
     await expect(results.getByText('Succeeded', { exact: true })).toHaveCount(2);
     await results.getByRole('contentinfo').getByRole('button', { name: 'Close', exact: true }).click();

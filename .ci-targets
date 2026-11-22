@@ -1,0 +1,17 @@
+fmt
+clippy
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test bound
+test -p orch-api-core --test everything_scale -- resource_lists restoring_the_team_members_session --nocapture --test-threads=1
+test -p orch-api-core --test everything_resources
+test -p orch-api-core --test resource_groups
+test -p orch-api-core --test nodes_lists
+test -p orch-api-core --test org_contents
+test -p orch-api-core --test sign_in
+test -p orch-api-core --test realtime_feeds
+web typecheck
+web lint
+web test
+web build
+web-e2e tests/e2e/openings.spec.ts tests/e2e/last-place.spec.ts tests/e2e/first-wave-edge.spec.ts
+web-e2e tests/e2e/configuration-read-availability.spec.ts tests/e2e/machine-native-tools.spec.ts tests/e2e/implicit-actions.spec.ts tests/e2e/program-versions.spec.ts tests/e2e/implicit-personal-settings.spec.ts tests/e2e/screen-review2.spec.ts tests/e2e/meta-admission.spec.ts tests/e2e/frame-review.spec.ts tests/performance/frame-budget.spec.ts tests/performance/tree-scale.spec.ts

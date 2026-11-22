@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import type { Item } from '@/generated/api-types';
 import { isSafeHref } from '@/lib/markdown';
 import { Button } from '@/ui/Button';
+import { nativeFieldMasked } from '../masking';
 
 type FetchItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -23,11 +24,12 @@ export function WebFetchDisplay({ item }: { item: FetchItem }) {
   if (tool.kind !== 'web_fetch') return null;
   const text = tool.content.inline;
   const cut = !all && text.length > SCREEN_CHARS;
+  const hidden = nativeFieldMasked(item.payload, '/tool/url');
   return (
     <div className="flex flex-col gap-2">
       <p className="flex flex-wrap items-center gap-2 text-sm">
         {tool.title !== null && tool.title !== '' && <span className="font-medium text-text">{tool.title}</span>}
-        {isSafeHref(tool.url) ? (
+        {!hidden && isSafeHref(tool.url) ? (
           <a href={tool.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-text underline underline-offset-2">
             <span className="truncate">{tool.url}</span>
             <ExternalLink aria-hidden />
@@ -37,6 +39,7 @@ export function WebFetchDisplay({ item }: { item: FetchItem }) {
           <span className="text-text-muted">{tool.url}</span>
         )}
         {tool.status !== null && <span className="text-text-subtle">{tool.status}</span>}
+        {hidden && <span className="text-xs text-text-subtle">{t('timeline.masking.address')}</span>}
       </p>
       {text !== '' && (
         <pre className="max-h-(--output-height) overflow-auto rounded-lg border border-border bg-bg-inset p-3 text-sm break-words whitespace-pre-wrap">{cut ? text.slice(0, SCREEN_CHARS) : text}</pre>
