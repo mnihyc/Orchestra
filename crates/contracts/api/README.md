@@ -1,41 +1,26 @@
 # orch-api-contract
 
-HTTP request and response contracts, with route metadata.
+The contract of the HTTP API. Every request of the API is declared here once: who may make it, and the types of its query, body and reply as they are on the wire. The server binds handlers only to these declarations, and the OpenAPI document and the browser's types are generated from them with `cargo xtask contracts`, so the server, the key API and the browser cannot drift apart.
 
-`resource_facts` defines reported-use units, history coverage, current dependents and their privacy
-projection shared by resource lists, storage and destructive plans. Physical artifacts have
-dependencies and an exact cleanup fence; they do not have popularity figures.
+Where a figure is missing from an older record, the contract leaves it absent and never turns it into a false zero. Unit tests round-trip the intricate shapes against JSON written by hand.
 
-Org summaries distinguish domain `member_count` from optional `people_count`, the native deduplicated
-active people in the branch and its inherited/group roles. Missing older counts remain absent rather
-than becoming a false zero. Normal OpenAPI and TypeScript generation carries this same projection.
+## Build and test
 
-Implemented. Every request of the API is declared here once, with who may
-make it and the types of its query, body and reply, as they are on the
-wire; the server binds handlers only to these declarations, and the
-OpenAPI document and the browser's types are generated from them. Unit
-tests round-trip the intricate shapes against JSON written by hand. The export of a place
-is declared in `exports`: the request, the plan that says what an archive would hold and what stands in its way,
-the archive and the job that writes it, and the chat's single export; its refusals are three error codes.
-Node views include icon colours, tree summaries count following documents, and
-machine enrollment can retain an existing identity. Personal state accepts the
-sidebar, and child lists can select a kind.
+```sh
+cargo build -p orch-api-contract
+cargo test -p orch-api-contract
+cargo xtask contracts --check      # fails when the generated OpenAPI document or browser types differ from the committed ones
+```
 
-`TreeThread` optionally carries `waiting` (approval or answer, with this reader's current decision
-authority) and `blocked_cause` (a classified sandbox, approval-mode or sign-in refusal). The existing
-authorized HTTP/live tree shares these compact observations; no request content or raw diagnostic
-text is added to it. An absent personal flag never gives a viewer “your approval” wording. These
-members are generated with the other contracts by the integrator, never edited into browser types.
+See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the checks every change passes. The generated files are [docs/openapi.json](../../../docs/openapi.json) and [frontend/src/generated](../../../frontend/src/generated/README.md).
 
-Finder results include a person's username and avatar, the settings registry carries its group and texts, and tree rows carry an org's full address. The generated document and browser types expose the same members.
+## Modules
 
-The browser's `GET /me/bootstrap` returns `MeBootstrapReply`: person, interface state, ordinary
-organizations, the session's admin mode, visible favorites, personal chat states and notification
-summary. Its members reuse the individual read contracts; trees and chat contents are opened separately.
+What each module of `src/` declares.
 
-| Module | Planned responsibility |
+| Module | What it declares |
+|--------|------------------|
 | [calls](src/calls.rs) | Model-call recovery state and the controls available to a thread's readers and drivers. |
-|--------|------------------------|
 | [common](src/common.rs) | Pagination, errors, identifiers and HTTP conventions. |
 | [messages](src/messages.rs) | Public error and native failure sentences from the shared interface catalogue and alias table; both languages resolve every declared code. |
 | [native](src/native.rs) | Native session command observations and installed browser facts shared by adapter and link payloads. |
@@ -90,7 +75,5 @@ summary. Its members reuse the individual read contracts; trees and chat content
 | [displays](src/displays.rs) | Displays of an environment and single-use tickets to watch or work in them. |
 | [input_schedules](src/input_schedules.rs) | Private authored input schedules, civil timing and visible occurrence outcomes. |
 | [loss](src/loss.rs) | Explicit permanent loss and independent recovery plans for environments and their machines. |
-
 | [library](src/library.rs) | Authorized library facts for resource pages and immutable skill versions. |
-
 | [program_admin](src/program_admin.rs) | Paged administration of agent programs, their immutable builds and the capabilities proved for them. |

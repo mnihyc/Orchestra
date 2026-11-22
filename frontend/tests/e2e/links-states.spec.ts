@@ -87,7 +87,7 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
       await page.reload();
       await expect(page.locator('[data-main-area]')).toBeVisible();
       await page.locator('[data-main-area]').getByRole('button', { name: 'Actions for Rollout plan', exact: true }).click();
-      await page.getByRole('menuitem', { name: 'Links tabs…' }).click();
+      await page.getByRole('menuitem', { name: 'Link tabs…' }).click();
       const dialog = page.getByRole('dialog', { name: 'Links tabs' });
       await expect(dialog).toBeVisible();
       if (locked) await expect(dialog.getByRole('checkbox', { name: 'Graph' })).toBeDisabled();

@@ -39,7 +39,7 @@ async fn provider(world: &World, by: &Who, home: Id) -> Provider {
         .call(ProviderCreate, &[])
         .token(&by.token)
         .body(&CreateProvider::Api {
-            runtime_machine_id: None,
+            runtime_location: None,
             name: "Team key".to_owned(),
             home_id: home,
             access: None,
