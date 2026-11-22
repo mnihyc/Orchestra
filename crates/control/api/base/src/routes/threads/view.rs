@@ -17,3 +17,11 @@ orch_api_base::api_family_callback! {
 
     async fn thread_with_name_sources<'__api>(arg0: &'__api mut orch_db::Conn, arg1: &'__api orch_authz::Principal, arg2: orch_api_contract::nodes::NodeBase<orch_api_contract::threads::ThreadKind>, arg3: chrono::DateTime<chrono::Utc>, arg4: Option<&'__api std::collections::BTreeSet<orch_types::Id>>) -> orch_api_base::middleware::requests::ApiResult<orch_api_contract::threads::Thread>;
 }
+
+orch_api_base::api_family_callback! {
+    bind __api_bind_a108d28ec4, __api_install_a108d28ec4, __api_callback_a108d28ec4;
+    slot __ApiCallbacka108d28ec4, __API_CALLBACK_A108D28EC4, __api_set_a108d28ec4;
+    base orch_api_base::routes::threads::view;
+
+    async fn threads_with_name_sources<'__api>(arg0: &'__api mut orch_db::Conn, arg1: &'__api orch_authz::Principal, arg2: Vec<orch_api_contract::nodes::NodeBase<orch_api_contract::threads::ThreadKind>>, arg3: chrono::DateTime<chrono::Utc>, arg4: Option<&'__api std::collections::BTreeSet<orch_types::Id>>) -> orch_api_base::middleware::requests::ApiResult<Vec<orch_api_contract::threads::Thread>>;
+}

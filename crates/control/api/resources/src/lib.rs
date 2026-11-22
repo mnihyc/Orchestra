@@ -1,5 +1,8 @@
 //! Internal route family implementation.
 #![forbid(unsafe_code)]
+// The provider creation routes' futures nest past the default depth of 128 when the crate is built for release
+// (E0275 on QueryAs<…>: Send at provider_creation/duplicate.rs, 2026-11-22), so the limit is raised for the crate.
+#![recursion_limit = "256"]
 #![cfg_attr(
     any(test, feature = "test-support"),
     allow(
@@ -22,6 +25,9 @@ pub mod routes {
 
 #[doc(hidden)]
 pub fn install_interfaces() {
+    routes::resources::providers::__api_install_provider_thread();
+    routes::resources::providers::__api_install_provider_list_rows();
+    routes::resources::providers::__api_install_provider_inventory_rows();
     routes::capabilities::__api_install_51c3f443d6();
 
     routes::duplicates::moving::__api_install_5ca59db85d();
@@ -155,6 +161,7 @@ pub fn install_interfaces() {
     routes::resources::mcp_readers::__api_install_712f4c3049();
 
     routes::resources::mounts::__api_install_dd4e30c19a();
+    routes::resources::mounts::__api_install_a94d90d474();
 
     routes::resources::mounts::__api_install_66bcfd9efe();
 
@@ -219,6 +226,8 @@ pub fn install_interfaces() {
     routes::resources::templates::__api_install_d83d9b6fff();
 
     routes::resources::validation::__api_install_d2a05682ae();
+
+    routes::resources::validation::__api_install_ef3cd14b55();
 
     routes::resources::view::__api_install_9b9d72ac9f();
 

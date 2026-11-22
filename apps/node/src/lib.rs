@@ -16,6 +16,7 @@ pub mod file_state_volume;
 #[cfg(all(target_os = "linux", feature = "kubernetes"))]
 pub mod kubernetes;
 pub mod runtime_helper;
+pub mod server_update;
 pub mod uninstall;
 pub mod update;
 pub mod volume_archive;

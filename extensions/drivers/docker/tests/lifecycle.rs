@@ -17,6 +17,34 @@ use orch_driver_contract::volumes::VolumeRequest;
 use serde_json::json;
 
 #[tokio::test]
+async fn a_fresh_birth_never_reuses_or_rewrites_an_existing_container() {
+    let Some(lab) = Lab::start().await else {
+        return;
+    };
+    let mut request = lab.request("environment", "fresh-birth", |_| {});
+    let original_gateway = request.gateway_url.clone();
+    let unit = lab.create(&request).await;
+    request
+        .labels
+        .insert("orch.birth".into(), orch_types::new_id().to_string());
+    request.gateway_url = "wss://replacement.example.invalid".into();
+    assert!(matches!(
+        lab.driver.create(&request).await,
+        Err(DriverError::InvalidSpec(_))
+    ));
+    assert_eq!(
+        lab.driver.inspect(&unit).await.unwrap().state,
+        UnitStateKind::Stopped
+    );
+    lab.driver.start(&unit).await.unwrap();
+    lab.wait_done(&unit).await;
+    assert_eq!(
+        lab.launch(&unit).await["ORCH_GATEWAY_URL"],
+        original_gateway
+    );
+}
+
+#[tokio::test]
 async fn a_unit_is_made_from_a_reference_and_its_connector_finds_every_launch_input() {
     let Some(lab) = Lab::start().await else {
         return;
