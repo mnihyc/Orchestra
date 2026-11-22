@@ -108,12 +108,15 @@ async fn a_colour_of_its_own_is_shown_everywhere_and_one_of_the_twelve_replaces_
         .call(NameSearchList, &[])
         .token(&reader.token)
         .query(&NameSearchListQuery {
+            id: None,
             starred: None,
             participating: None,
             q: Some("Work".to_owned()),
             kinds: Some("project".to_owned()),
             org_id: Some(org),
             limit: None,
+            picker: None,
+            cursor: None,
         })
         .send()
         .await

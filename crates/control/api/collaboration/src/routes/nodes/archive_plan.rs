@@ -262,6 +262,9 @@ pub(super) async fn prepare_make(
     Ok(PreparedPlan {
         kept,
         answer: NodeArchivePlan {
+            retention: orch_engine::schedule::node_retention(conn, id, ctx.now)
+                .await
+                .map_err(ApiError::engine)?,
             preflight_id,
             expires_at: Time::new(expires_at),
             stamp,

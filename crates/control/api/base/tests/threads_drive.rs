@@ -22,17 +22,64 @@ use orch_api_contract::threads::{
     ThreadQueueResumeBody, ThreadSync, ThreadSyncGet, ThreadSyncGetQuery, ThreadTurnRetry,
     ThreadTurnRetryBody, TurnState,
 };
-use orch_link_contract::commands::CommandKind;
+use orch_link_contract::commands::{Command, CommandKind, CommandResult};
+use orch_link_contract::events::IndexingProgress;
 use orch_link_contract::events::TurnOutcome;
+use orch_link_contract::source::{FsRecordResult, RecordState};
 use orch_types::{Id, new_id};
 use places::{Who, missing_permissions};
 use rig::{Scene, message_began, message_grew, turn_began, turn_ended};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 fn text(words: &str) -> Vec<ContentPart> {
     vec![ContentPart::Text {
         text: words.to_owned(),
     }]
+}
+
+#[tokio::test]
+async fn a_creation_key_with_a_zero_does_not_reuse_a_literal_glyph_key() {
+    let s = Scene::new().await;
+    let thread = stuck(&s).await;
+    let first = s
+        .say(&s.ada, thread, "First", Delivery::Queue, "same\0key")
+        .await
+        .ok()
+        .input;
+    let second = s
+        .say(&s.ada, thread, "Second", Delivery::Queue, "same�key")
+        .await
+        .ok()
+        .input;
+    let replay = s
+        .say(&s.ada, thread, "First", Delivery::Queue, "same\0key")
+        .await
+        .ok()
+        .input;
+    assert_ne!(first.id, second.id);
+    assert_eq!(first.id, replay.id);
+    assert_eq!(first.client_id.as_deref(), Some("same\0key"));
+    assert_eq!(second.client_id.as_deref(), Some("same�key"));
+}
+
+#[tokio::test]
+async fn words_with_an_embedded_zero_reach_the_agent_and_keep_their_repair_receipt() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    running(&s, thread, 0, "Before\0after").await;
+    let view = synced(&s, thread, None).await;
+    let items = serde_json::to_value(&view.items).unwrap();
+    let message = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["kind"] == "user_message" && item["payload"]["parts"][0]["text"] == "Before�after"
+        })
+        .expect("the safe words remain in the conversation");
+    assert_eq!(message["text_replacements"], 1);
+    assert!(!s.rig.seen.of_kind(CommandKind::TurnStart).is_empty());
 }
 
 #[tokio::test]
@@ -959,7 +1006,7 @@ async fn stopped_inputs_keep_the_hold_through_edits_delivery_changes_and_reorder
         .call(ThreadInterrupt, &[&thread])
         .token(&s.dan.token)
         .body(&ThreadInterruptBody {
-            turn_id: start.turn_id,
+            turn_id: Some(start.turn_id),
         })
         .send()
         .await
@@ -1068,7 +1115,7 @@ async fn messages_sent_after_stop_join_the_held_queue_and_edit_reorder_remove_re
         .call(ThreadInterrupt, &[&thread])
         .token(&s.ada.token)
         .body(&ThreadInterruptBody {
-            turn_id: first.turn_id,
+            turn_id: Some(first.turn_id),
         })
         .send()
         .await
@@ -1451,7 +1498,7 @@ async fn an_input_that_was_taken_up_is_refused_as_not_waiting_and_a_waiting_one_
 }
 
 #[tokio::test]
-async fn a_turn_is_stopped_while_it_runs_and_cannot_be_once_it_is_over() {
+async fn a_thread_stop_follows_the_running_turn_when_the_page_still_names_its_predecessor() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
     // Dan drives the thread and has no use of its provider: stopping a turn asks nothing of him there.
@@ -1463,29 +1510,41 @@ async fn a_turn_is_stopped_while_it_runs_and_cannot_be_once_it_is_over() {
             .app
             .call(ThreadInterrupt, &[&id])
             .token(&s.dan.token)
-            .body(&ThreadInterruptBody { turn_id: turn });
+            .body(&ThreadInterruptBody {
+                turn_id: Some(turn),
+            });
         async move { call.send().await }
     };
     let stopped = stop(start.turn_id).await.ok();
+    assert_eq!(
+        stopped.state,
+        orch_api_contract::threads::StopState::Stopping,
+        "a turn that runs is stopping until the program has stopped"
+    );
+    let stopped = stopped.turn.expect("the answer is the turn it names");
     assert_eq!(stopped.id, start.turn_id);
     assert!(stopped.interrupted_by.is_some());
+    assert!(
+        stopped.interrupted_at.is_some(),
+        "and says when the Stop was asked for"
+    );
     s.rig
         .say(id, turn_ended(start.turn_id, TurnOutcome::Interrupted))
         .await;
     s.rig.wait_turn(start.turn_id, "interrupted").await;
     // A Stop that arrives as its turn ends, with nothing newer begun, answers the turn as it ended.
-    let late = stop(start.turn_id).await.ok();
+    let late = stop(start.turn_id)
+        .await
+        .ok()
+        .turn
+        .expect("the Stop answer names the ended turn");
     assert_eq!(late.id, start.turn_id);
     assert_eq!(late.state, TurnState::Interrupted);
-    // Once a newer turn runs, a Stop of the old one changes nothing and names the turn that stands.
-    let next = running(&s, id, 1, "Again").await;
-    let stale = stop(start.turn_id).await.problem();
-    assert_eq!(stale.code, ErrorCode::ThreadNotRunning);
-    assert_eq!(
-        stale.extra.get("current_turn_id"),
-        Some(&json!(next.turn_id))
-    );
     assert_eq!(stop(new_id()).await.problem().code, ErrorCode::NotFound);
+    let next = running(&s, id, 1, "Again").await;
+    let stopped = stop(start.turn_id).await.ok().turn.unwrap();
+    assert_eq!(stopped.id, next.turn_id);
+    assert_eq!(stopped.interrupted_by.unwrap().id, s.dan.id());
 }
 
 #[tokio::test]
@@ -1559,6 +1618,34 @@ async fn an_input_needs_the_senders_own_right_to_drive_the_thread_and_to_use_its
 async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in() {
     let s = Scene::new().await;
     let id = s.thread().await.base.id;
+    let recordings = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&recordings);
+    s.rig
+        .machine
+        .handler
+        .on(CommandKind::FsRecord, move |command| {
+            let Command::FsRecord(request) = command else {
+                unreachable!("a recording handler receives its own command");
+            };
+            recorded
+                .lock()
+                .unwrap()
+                .push((request.snapshot_id, request.wait_for_indexing));
+            Ok(CommandResult::FsRecord(FsRecordResult {
+                indexing: Some(IndexingProgress {
+                    done: 80_000,
+                    total: 200_000,
+                }),
+                state: RecordState::Unavailable,
+                tree_ref: None,
+                repository_head: None,
+                manifest_blob: None,
+                files: 0,
+                bytes: 0,
+                expires_at: None,
+                reason: Some("indexing".to_owned()),
+            }))
+        });
     // Both Use and Manage stop following the place: the developer otherwise inherits Manage,
     // which also grants Use. Eve is named in Manage on the page and still holds Use through it.
     {
@@ -1610,6 +1697,11 @@ async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in
         .await
         .problem();
     assert_eq!(missing_permissions(&dan), ["environment.use"]);
+    assert!(
+        recordings.lock().unwrap().is_empty(),
+        "a refused sender starts no file work on the owner's access"
+    );
+    assert!(s.rig.turn_starts(id).is_empty());
     // Named in the environment's Use row, he is heard.
     s.rig
         .lets_use(
@@ -1626,8 +1718,8 @@ async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in
         .ok()
         .input;
     assert_eq!(dan.state, InputState::Pending);
-    // Admission includes before-state capture, even for a text-only input.
-    assert_eq!(dan.state_detail.as_deref(), Some("files"));
+    // Acceptance stays pending. The actual before-state and its indexing fallback are reported
+    // with the turn; a receipt does not guess a preparation phase that has not started yet.
     let first = s.rig.run_turn(id, 0, "Dan finished").await;
     let first_input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
         .bind(first.turn_id)
@@ -1643,7 +1735,6 @@ async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in
         .ok()
         .input;
     assert_eq!(eve.state, InputState::Pending);
-    assert_eq!(eve.state_detail.as_deref(), Some("files"));
     let second = s.rig.run_turn(id, 1, "Eve finished").await;
     let second_input: Id = sqlx::query_scalar("SELECT input_id FROM turns WHERE id=$1")
         .bind(second.turn_id)
@@ -1651,6 +1742,58 @@ async fn an_input_needs_the_senders_own_use_of_the_environment_its_agent_acts_in
         .await
         .unwrap();
     assert_eq!(second_input, eve.id);
+    let captures = recordings.lock().unwrap().clone();
+    assert_eq!(
+        captures.len(),
+        2,
+        "each sender keeps one source observation without waiting for the whole index"
+    );
+    assert!(
+        captures.iter().all(|(_, waits)| !waits),
+        "the default start never asks to wait for initial indexing"
+    );
+    for ((who, input, turn_id, notice), (snapshot, _)) in [
+        (&s.dan, dan.id, first.turn_id, Some("indexing")),
+        (&s.eve, eve.id, second.turn_id, None),
+    ]
+    .into_iter()
+    .zip(captures)
+    {
+        let visible = s
+            .rig
+            .world
+            .app
+            .call(ThreadSyncGet, &[&id])
+            .token(&who.token)
+            .query(&ThreadSyncGetQuery::default())
+            .send()
+            .await
+            .ok();
+        let turn = visible
+            .turns
+            .iter()
+            .find(|turn| turn.id == turn_id)
+            .unwrap();
+        assert_eq!(turn.input_id, input);
+        assert_eq!(turn.before_snapshot_id, Some(snapshot));
+        assert_eq!(
+            turn.recording_notice.as_deref(),
+            notice,
+            "coverage is explained once on the affected turn"
+        );
+        if notice.is_some() {
+            let progress = turn.recording_indexing.as_ref().unwrap();
+            assert_eq!((progress.done, progress.total), (80_000, 200_000));
+        }
+        let mut conn = s.rig.db.acquire().await.unwrap();
+        let source = orch_db::queries::storage::snapshot(&mut conn, snapshot)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.created_by, Some(who.id()));
+        assert_eq!(source.state, "unavailable");
+        assert_eq!(source.unavailable_reason.as_deref(), Some("indexing"));
+    }
 }
 
 #[tokio::test]
@@ -1997,7 +2140,9 @@ async fn every_driving_request_is_refused_to_a_viewer_and_to_a_stranger() {
                 .problem(),
             app.call(ThreadInterrupt, &[&id])
                 .token(token)
-                .body(&ThreadInterruptBody { turn_id: new_id() })
+                .body(&ThreadInterruptBody {
+                    turn_id: Some(new_id()),
+                })
                 .send()
                 .await
                 .problem(),
@@ -2039,7 +2184,7 @@ async fn input_receipt_scene() -> (Scene, Id) {
 
 async fn input_operation_key(scene: &Scene, thread: Id, allow: serde_json::Value) -> String {
     use orch_access_contract::key_scope::KeyScope;
-    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_api_core::middleware::authentication::{new_api_token, token_hash};
     use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
 
     let scope: KeyScope = serde_json::from_value(json!({
@@ -2054,14 +2199,15 @@ async fn input_operation_key(scene: &Scene, thread: Id, allow: serde_json::Value
         "a valid operation-bound key policy"
     );
     let stored = serde_json::to_value(scope).unwrap();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let issued_key_id = new_id();
+    let secret = new_api_token(issued_key_id);
     let hash = token_hash(&secret);
     let now = scene.rig.world.now();
     let mut conn = scene.rig.world.conn().await;
     create_api_token_scoped(
         &mut conn,
         &NewApiToken {
-            id: new_id(),
+            id: issued_key_id,
             user_id: scene.ada.id(),
             name: "Input receipt control",
             token_hash: &hash,
@@ -2322,4 +2468,66 @@ async fn an_input_read_facet_does_not_authorize_submission() {
     assert_eq!(count, 0);
     assert!(scene.rig.turn_starts(thread).is_empty());
     scene.rig.engine.stop();
+}
+
+/// Prints one step of a person's act: how many statements it ran and how long it took, with the statements it
+/// ran most often (their first words, never their values).
+fn report_step(step: &str, statements: &[(std::time::Instant, String)], took: std::time::Duration) {
+    let mut counted: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (_, text) in statements {
+        *counted.entry(text.as_str()).or_default() += 1;
+    }
+    let mut most: Vec<(&str, usize)> = counted.into_iter().collect();
+    most.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    eprintln!(
+        "STEP {step}: {} statements, {} distinct, {} ms",
+        statements.len(),
+        most.len(),
+        took.as_millis()
+    );
+    for (text, times) in most.iter().take(30) {
+        eprintln!("  {times:4} {text}");
+    }
+}
+
+#[tokio::test]
+async fn a_message_on_an_idle_thread_is_taken_and_its_turn_started_with_the_statements_it_needs() {
+    let s = Scene::new().await;
+    let id = s.thread().await.base.id;
+    // The first exchange opens the session and starts the harness; the second message is the one measured.
+    s.exchange(id, 0, "Warm up", "Warm").await;
+    support::Statements::record_all();
+    let posted = std::time::Instant::now();
+    let sent = s
+        .say(&s.ada, id, "Measured", Delivery::Queue, "measured")
+        .await;
+    let taken = std::time::Instant::now();
+    assert!(sent.status.is_success(), "{:?}", sent.body);
+    let start = s.rig.turn_start(id, 1).await;
+    let started = std::time::Instant::now();
+    let recorded = support::Statements::recorded();
+    let taking: Vec<_> = recorded
+        .iter()
+        .filter(|(at, _)| *at >= posted && *at <= taken)
+        .cloned()
+        .collect();
+    let starting: Vec<_> = recorded
+        .iter()
+        .filter(|(at, _)| *at > taken && *at <= started)
+        .cloned()
+        .collect();
+    report_step(
+        "taking the message (and making its turn)",
+        &taking,
+        taken - posted,
+    );
+    report_step(
+        "its turn's start until the harness is asked to begin",
+        &starting,
+        started - taken,
+    );
+    s.rig
+        .say(id, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    s.rig.wait_state(id, "idle").await;
 }
