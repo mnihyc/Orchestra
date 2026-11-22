@@ -24,6 +24,7 @@ async fn start(w: &Forks, parent: Id, secret: &str, client: &str) -> RawReply {
         .call(ThreadSideCreate, &[&parent])
         .token(secret)
         .body(&ThreadSideCreateBody {
+            acting: false,
             content: vec![ContentPart::Text {
                 text: "A scoped aside".into(),
             }],
@@ -162,6 +163,7 @@ async fn side_create_rechecks_after_its_actual_parent_lock_before_the_first_nati
                 app.call(ThreadSideCreate, &[&parent])
                     .token(&secret)
                     .body(&ThreadSideCreateBody {
+                        acting: false,
                         content: vec![ContentPart::Text {
                             text: "After parent wait".into(),
                         }],

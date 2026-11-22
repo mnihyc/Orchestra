@@ -794,24 +794,6 @@ async fn message_view(
         .ok_or_else(|| ApiError::internal("a message was not shown"))
 }
 
-fn cursor_text(after: &After) -> String {
-    format!("{}|{}", after.at.timestamp_micros(), after.id)
-}
-
-fn cursor_of(text: Option<&str>) -> ApiResult<Option<After>> {
-    let Some(text) = text else { return Ok(None) };
-    let bad = || ApiError::invalid("cursor", "is not a cursor of this list");
-    let (micros, id) = text.split_once('|').ok_or_else(bad)?;
-    Ok(Some(After {
-        at: micros
-            .parse::<i64>()
-            .ok()
-            .and_then(DateTime::<Utc>::from_timestamp_micros)
-            .ok_or_else(bad)?,
-        id: id.parse().map_err(|_| bad())?,
-    }))
-}
-
 /// Whether the policy `sharing.allow_external` lets the maker of a group bring
 /// somebody from outside its root org into it.
 async fn owners_name_outsiders(conn: &mut Conn, root: Id) -> ApiResult<bool> {
@@ -863,7 +845,11 @@ async fn org_chat_create(
 }
 
 /// Reads a chat.
-async fn chat_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
+async fn chat_get(
+    ctx: Ctx,
+    query: orch_api_contract::chats::ChatGetQuery,
+    (): (),
+) -> ApiResult<Chat> {
     let mut tx = ctx.app.db.begin_snapshot().await?;
     let principal = ctx.operation_principal(&mut tx).await?;
     let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
@@ -874,10 +860,24 @@ async fn chat_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Chat> {
         origin: origin(&ctx),
     };
     note_opened(&mut tx, &work, &prepared.loaded).await?;
-    let chat = read_operation::project(&mut tx, &work.principal, &prepared)
+    let mut chat = read_operation::project(&mut tx, &work.principal, &prepared)
         .await?
         .chat
         .ok_or_else(|| ApiError::internal("the chat read has no chat projection"))?;
+    if let Some(query) = query.members()
+        && let Some(members) = chat.members.take()
+    {
+        let page = crate::collection::snapshot(
+            &query,
+            &format!("chat-members:{}:{}", ctx.user()?.id(), chat.base.id),
+            members,
+            |user| (user.display_name.to_lowercase(), user.id),
+            |user| format!("{} {}", user.display_name, user.username),
+            false,
+        )?;
+        chat.members = Some(page.items);
+        chat.members_next_cursor = page.next_cursor;
+    }
     tx.commit().await.map_err(DbError::from)?;
     Ok(chat)
 }
