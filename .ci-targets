@@ -1,0 +1,4 @@
+web typecheck
+web lint
+web test
+web-e2e tests/e2e/call-recovery.spec.ts tests/e2e/live-wait.spec.ts tests/e2e/machine-programs.spec.ts tests/e2e/gateway-pairing.spec.ts tests/e2e/resources.spec.ts --project=chromium
