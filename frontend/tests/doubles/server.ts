@@ -10,14 +10,15 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { Job } from '../../src/generated/api-types.ts';
+import type { Job, MeLandingReply } from '../../src/generated/api-types.ts';
 
 import { type SceneName, sceneOf } from './thread-scenes.ts';
 import { type Answer, type Person, Refusal, type Subscriber, World } from './world.ts';
 import { bootstrap } from './bootstrap.ts';
-import { threadOpening } from './thread-opening.ts';
+import { sessionThreadOpening, threadOpening, threadOpeningPart } from './thread-opening.ts';
 import { chatOpening, nodeChatOpening, documentPages, nodeOverview, orgOverview, orgLandingPlaces } from './screen-openings.ts';
 import { installScreenFixture } from './screen-gate.ts';
 
@@ -118,6 +119,9 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       return world.emailCode(await bodyOf(request));
     case 'POST /auth/session':
       return world.restoreSession(cookiesOf(request), csrfHeader);
+    case 'POST /auth/session/open':
+      receivedRequests.push({ id: requestId, method, path, body: {} });
+      return pageOpening(request, query, csrfHeader, requestId);
     case 'POST /auth/refresh':
       return world.refresh(cookiesOf(request), csrfHeader);
     case 'POST /auth/logout':
@@ -145,11 +149,20 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       return world.setAdminMode(bearer, await bodyOf(request));
     case 'POST /me/admin-openings':
       return world.openings.cached(bearer, await bodyOf(request), requestId);
-    case 'GET /me/bootstrap': {
+    case 'GET /me/bootstrap':
+    case 'GET /me/landing': {
       const person = world.caller(bearer);
       const zone = request.headers['x-orch-timezone'];
       if (typeof zone === 'string' && person.me.timezone_mode === 'device' && person.me.timezone !== zone) world.updateMe(person, { timezone: zone, timezone_mode: 'device', timezone_report: true });
-      return { status: 200, body: await bootstrap(world, person, bearer) };
+      const shell = await bootstrap(world, person, bearer);
+      if (route === 'GET /me/bootstrap') return { status: 200, body: shell };
+      const sidebar = shell.state.sidebar;
+      const place: unknown = typeof sidebar === 'object' && sidebar !== null && 'last_place' in sidebar ? sidebar.last_place : null;
+      const saved = typeof place === 'object' && place !== null && 'node_id' in place && typeof place.node_id === 'string'
+        && 'route' in place && typeof place.route === 'string' && place.route.replace(/\/$/, '') === '/thread/' + place.node_id ? place.node_id : null;
+      const id = query.get('thread') ?? saved;
+      const thread = id === null ? { status: 'omitted' as const } : await threadOpeningPart(world, world.browserPerson(bearer), id, requestId);
+      return { status: 200, body: { shell, thread_id: id, thread } satisfies MeLandingReply };
     }
     case 'PATCH /me':
       return world.updateMe(world.caller(bearer), await bodyOf(request));
@@ -168,10 +181,16 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
       ? { mode: 'places', nodes: await orgLandingPlaces(world, person, overview[1], query) }
       : { mode: 'overview', data: await orgOverview(world, person, overview[1], query) } };
   }
+  const addressed = /^POST \/auth\/session\/thread\/([^/]+)$/.exec(route);
+  if (addressed?.[1] !== undefined) {
+    receivedRequests.push({ id: requestId, method, path, body: {} });
+    return sessionThreadOpening(world, addressed[1], cookiesOf(request), csrfHeader, requestId);
+  }
   const opening = /^GET \/threads\/([^/]+)\/opening$/.exec(route);
   if (opening?.[1] !== undefined) {
     receivedRequests.push({ id: requestId, method, path, body: {} });
-    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], Number(query.get('limit') ?? 200)) };
+    const requested = query.get('limit');
+    return { status: 200, body: await threadOpening(world, world.browserPerson(bearer), opening[1], requested === null ? undefined : Number(requested)) };
   }
   const chat = /^GET \/chats\/([^/]+)\/opening$/.exec(route);
   if (chat?.[1] !== undefined) return { status: 200, body: await chatOpening(world, world.browserPerson(bearer), chat[1], query) };
@@ -227,6 +246,56 @@ async function api(request: IncomingMessage, path: string, query: URLSearchParam
   }
   // A request of the real API that the double does not play is still a request that needs somebody signed in.
   throw new Refusal(404, 'not_found', `the double does not answer ${route}`);
+}
+
+/** One request of the API as the real server answers it, with the bookkeeping its successful reads do. */
+async function nativeAnswer(request: IncomingMessage, path: string, query: URLSearchParams, requestId: string): Promise<Answer> {
+  const result = await api(request, path, query, requestId);
+  if (result.status >= 200 && result.status < 300) {
+    world.openings.finishJson(request.headers.authorization, request.method ?? 'GET', path,
+      query, result.body, request.headers['x-orch-opening'], requestId);
+  }
+  const view = request.headers['x-orch-view'];
+  if (request.method === 'GET' && result.status < 300 && typeof view === 'string' && request.headers.authorization !== undefined) {
+    try {
+      const { noteView } = await import('./view-read.ts');
+      noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
+    } catch { /* Personal bookkeeping never changes a successful native page answer. */ }
+  }
+  return result;
+}
+
+/**
+ * A page's first screen in one request, as the real server answers POST /auth/session/open: the session restored from the
+ * cookie, then each read of the query answered as that read answers the restored session, one line of JSON each.
+ */
+async function pageOpening(request: IncomingMessage, query: URLSearchParams, csrf: string | undefined, requestId: string): Promise<Answer> {
+  const restored = world.restoreSession(cookiesOf(request), csrf);
+  if (restored.status !== 200) return restored;
+  const session = (restored.body ?? null) as { access_token: string } | null;
+  const lines = [JSON.stringify({ session })];
+  if (session !== null) {
+    const carried: Record<string, string> = { authorization: `Bearer ${session.access_token}` };
+    for (const name of ['x-orch-view', 'x-orch-timezone', 'x-orch-opening']) {
+      const value = request.headers[name];
+      if (typeof value === 'string') carried[name] = value;
+    }
+    const refused = { type: 'orch:error:request.invalid', code: 'request.invalid', title: 'The request is not valid', status: 400,
+      detail: 'a read is a path of the API below its base, with its query' };
+    lines.push(...await Promise.all(query.getAll('read').map(async (read, index) => {
+      if (!/^\/[^/]/.test(read)) return JSON.stringify({ read: index, status: 'failed', retry_after: null, problem: { ...refused, request_id: requestId } });
+      const url = new URL(read, 'http://double.invalid');
+      const native = Object.assign(Readable.from([]), { method: 'GET', url: `${BASE}${read}`, headers: carried }) as unknown as IncomingMessage;
+      const answer = await nativeAnswer(native, url.pathname, url.searchParams, requestId)
+        .catch((error: unknown) => { if (error instanceof Refusal) return error.answer; throw error; });
+      if (answer.text !== undefined || answer.bytes !== undefined) return JSON.stringify({ read: index, status: 'failed', retry_after: null, problem: { ...refused, request_id: requestId } });
+      if (answer.status < 300) return JSON.stringify({ read: index, status: 'ready', data: answer.body ?? null });
+      const retry = answer.headers?.['Retry-After'] ?? answer.headers?.['retry-after'];
+      return JSON.stringify({ read: index, status: 'failed', retry_after: retry !== undefined && /^\d+$/.test(retry) ? Number(retry) : null,
+        problem: { ...(answer.body as object), request_id: requestId } });
+    })));
+  }
+  return { ...restored, body: undefined, headers: { 'Content-Type': 'application/x-ndjson' }, bytes: Buffer.from(`${lines.join('\n')}\n`) };
 }
 
 /** The requests only the double has, by which a test steers it. */
@@ -377,20 +446,7 @@ const server = createServer((request, response) => {
     if (url.pathname.startsWith('/__double/')) return control(request, url.pathname.slice('/__double'.length));
     if (!url.pathname.startsWith(`${BASE}/`)) return { status: 404, body: { detail: 'not the API' } };
     if (world.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, world.delayMs));
-    const path = url.pathname.slice(BASE.length);
-    const result = await api(request, path, url.searchParams, requestId);
-    if (result.status >= 200 && result.status < 300) {
-      world.openings.finishJson(request.headers.authorization, request.method ?? 'GET', path,
-        url.searchParams, result.body, request.headers['x-orch-opening'], requestId);
-    }
-    const view = request.headers['x-orch-view'];
-    if (request.method === 'GET' && result.status < 300 && typeof view === 'string' && request.headers.authorization !== undefined) {
-      try {
-        const { noteView } = await import('./view-read.ts');
-        await noteView(world, world.browserPerson(request.headers.authorization), view, result.body);
-      } catch { /* Personal bookkeeping never changes a successful native page answer. */ }
-    }
-    return result;
+    return nativeAnswer(request, url.pathname.slice(BASE.length), url.searchParams, requestId);
   };
   answer()
     .catch((error: unknown): Answer => {
@@ -520,7 +576,7 @@ live.on('connection', (socket: WebSocket) => {
         joined.clear();
         for (const { part } of world.parts) part.gone?.(subscriber);
         for (const feed of subs.values()) world.subscribers.get(feed)?.delete(subscriber);
-        subs.clear();
+        subs.clear();world.closeHierarchy(subscriber);
         for (const [id, feed] of former) subscriber.send({ op: 'resync', id, feed });
       } });
       if (frame.op === 'auth') {
@@ -531,6 +587,7 @@ live.on('connection', (socket: WebSocket) => {
           server_time: new Date().toISOString(),
           access_expires_at: new Date(Date.now() + world.accessLifeMs).toISOString(),
           heartbeat_secs: 25,
+          max_client_frame_bytes:16*1024,
           build: world.meta.build,
         });
       }
@@ -564,6 +621,12 @@ live.on('connection', (socket: WebSocket) => {
           socket.close(4403); return;
         }
         finally { pendingOpening = null; }
+        if(world.isHierarchy(feed)){
+          if(frame.window!==undefined){world.hierarchyWindow(subscriber,person,id,feed,frame.window);return;}
+          subs.set(id,feed);world.openHierarchy(subscriber,id,feed);
+          subscriber.send({op:'subscribed',id,feed,seq:null,mode:'ephemeral'});
+          return;
+        }
         const orgId = /^org:(.+)$/.exec(feed)?.[1];
         const tree = orgId === undefined ? undefined : world.trees.get(orgId);
         if (orgId === undefined || tree === undefined) {
@@ -598,6 +661,7 @@ live.on('connection', (socket: WebSocket) => {
         const feed = subs.get(id);
         if (feed !== undefined) {
           subs.delete(id);
+          world.closeHierarchy(subscriber,id);
           world.subscribers.get(feed)?.delete(subscriber);
           subscriber.send({ op: 'closed', id, feed, reason: 'unsubscribed' });
         }
@@ -613,6 +677,7 @@ live.on('connection', (socket: WebSocket) => {
   });
 
   socket.on('close', () => {
+    world.closeHierarchy(subscriber);
     clearTimeout(late);
     sockets.delete(socket);
     sessionReaders.delete(socket);
