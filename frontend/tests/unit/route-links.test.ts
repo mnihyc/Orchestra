@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import ts from 'typescript';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
 const routesRoot = resolve(sourceRoot, 'routes');
@@ -146,4 +147,77 @@ describe('every address leads to a built screen', () => {
     });
     expect(toStandIns.map((address) => `${address.where} ${address.text} (${standIns.map((route) => route.file).join(', ')})`)).toEqual([]);
   });
+});
+
+
+/** Native document transitions have one explicit owner; ordinary app links use the shared routing component. */
+const NATIVE_ANCHORS: Readonly<Record<string, string>> = {
+  'shell/TrailLink.tsx': 'The shared anchor routes ordinary application paths and retains native browser acts',
+  'features/auth/IdentityProviders.tsx': 'The server owns the identity-provider redirect',
+  'shell/PublicAddressNotice.tsx': 'Open explicitly changes the browser origin',
+};
+const NATIVE_DOCUMENT_ACTS: Readonly<Record<string, string>> = {
+  'shell/Banners.tsx': 'The explicit new-version Reload act',
+  'features/admin/PublicAddress.tsx': 'The successful Save and open changes origin only for its actor',
+  'features/auth/IdentityProviders.tsx': 'The server owns the identity-provider redirect',
+  'features/auth/freshProof.ts': 'A server-owned fresh-proof continuation',
+  'features/settings/personal/Security.tsx': 'Linking an identity leaves for its provider',
+  'features/ports/Ports.tsx': 'A port entrance has its own origin and ticket',
+  'features/chat/open.ts': 'A standalone part with no router retains normal browser navigation',
+};
+function navigationDefaults(source: string, file: string): string[] {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const failures: string[] = [];
+  const where = (node: ts.Node) => `${file}:${String(parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1)}`;
+  const text = (attribute: ts.JsxAttribute | undefined): string | null => {
+    const value = attribute?.initializer;
+    if (value === undefined) return null;
+    if (ts.isStringLiteral(value)) return value.text;
+    if (!ts.isJsxExpression(value) || value.expression === undefined) return null;
+    return ts.isStringLiteralLike(value.expression) ? value.expression.text : ts.isTemplateExpression(value.expression) ? value.expression.head.text : null;
+  };
+  const visit = (node: ts.Node) => {
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(parsed) === 'a' && NATIVE_ANCHORS[file] === undefined) {
+      const attributes = node.attributes.properties.filter(ts.isJsxAttribute);
+      const named = (name: string) => attributes.find((attribute) => attribute.name.getText(parsed) === name);
+      const href = named('href'), target = text(named('target')), value = text(href);
+      const download = named('download');
+      const downloading = download !== undefined && !(download.initializer !== undefined && ts.isJsxExpression(download.initializer) && download.initializer.expression?.kind === ts.SyntaxKind.FalseKeyword);
+      const native = downloading || (target !== null && target !== '' && target !== '_self') || value?.startsWith('#') === true || (value !== null && /^[a-z][a-z0-9+.-]*:/iu.test(value));
+      if (href !== undefined && !native) failures.push(`${where(node)} ordinary anchor`);
+    }
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(parsed), attributes = node.attributes.properties.filter(ts.isJsxAttribute);
+      const named = (name: string) => attributes.find((attribute) => attribute.name.getText(parsed) === name);
+      if (tag === 'button' && named('type') === undefined) failures.push(`${where(node)} implicit submit button`);
+      if (tag === 'form' && named('onSubmit') === undefined && text(named('method')) !== 'dialog' && NATIVE_DOCUMENT_ACTS[file] === undefined) failures.push(`${where(node)} native form submission`);
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['assign', 'replace', 'reload'].includes(node.expression.name.text)) {
+      const receiver = node.expression.expression.getText(parsed);
+      if ((receiver === 'location' || receiver.endsWith('.location')) && NATIVE_DOCUMENT_ACTS[file] === undefined) failures.push(`${where(node)} document navigation`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return failures;
+}
+
+it('distinguishes application navigation from downloads external tabs hashes and explicit protocol transitions', () => {
+  expect(navigationDefaults(`const links = <><a href="/inbox" /><a href={path} /><a href="#part" /><a href="/file" download />
+<a href="/inbox" target="_blank" /><a href="https://other.example.test" /></>;
+window.location.assign('/settings/security');`, 'fixture.tsx')).toEqual([
+    'fixture.tsx:1 ordinary anchor', 'fixture.tsx:1 ordinary anchor', 'fixture.tsx:3 document navigation',
+  ]);
+  expect(navigationDefaults('<a href="/inbox" download={false} />', 'fixture.tsx')).toEqual(['fixture.tsx:1 ordinary anchor']);
+  expect(navigationDefaults('<a href={meta.public_url} />', 'shell/PublicAddressNotice.tsx')).toEqual([]);
+});
+
+it('keeps every application action and link from reloading its document unless its native flow requires it', () => {
+  const failures = files(sourceRoot).flatMap((file) => navigationDefaults(readFileSync(file, 'utf8'), relative(sourceRoot, file)));
+  expect(failures, `Document navigation: ${JSON.stringify(failures)}`).toEqual([]);
+}, 30_000);
+
+it('requires a native button type and a form submission owner so an ordinary press cannot reload the page', () => {
+  expect(navigationDefaults('<form><button>Go</button></form>', 'fixture.tsx')).toEqual(['fixture.tsx:1 native form submission', 'fixture.tsx:1 implicit submit button']);
+  expect(navigationDefaults('<form onSubmit={submit}><button type="button">Go</button></form>', 'fixture.tsx')).toEqual([]);
 });

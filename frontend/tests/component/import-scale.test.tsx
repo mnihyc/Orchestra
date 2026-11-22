@@ -51,3 +51,31 @@ it('draws 50 reasons from 100,000 losses or warnings and keeps their counts and 
   fireEvent.click(screen.getByRole('button', { name: 'Back to first page' }));
   expect(screen.getByText('Reason 0 · 2')).toBeVisible();
 });
+
+it('finds a selected local filename beyond the first page without changing the source', () => {
+  const file = new File(['x'], 'source.md');
+  const files = Array.from({ length: 1_001 }, (_, index) => ({ file, path: `Notes/${index}.md` }));
+  const change = vi.fn();
+  show(<ImportSourceStep value={{ fault: null, files, bytes: files.length }} onChange={change} />);
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Find in Selected files' }), { target: { value: 'Notes/1000.md' } });
+  expect(screen.getByText('Notes/1000.md')).toBeVisible();
+  expect(screen.queryByText('Notes/0.md')).toBeNull();
+  expect(screen.getByRole('region', { name: 'Selected files' })).toHaveClass('overflow-y-auto');
+  expect(change).not.toHaveBeenCalled();
+});
+it('finds a later source person without changing the import attribution', () => {
+  const people = Array.from({ length: 1_001 }, (_, index) => ({ principal: `person-${index}`, username: `user-${index}`, display_name: `Person ${index}`, matched: 'none' as const, user: null, objects: 1 }));
+  const change = vi.fn();
+  show(<ImportPeople people={people} authors="labels" mayAttribute onAuthors={vi.fn()} onPerson={change} />);
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Find in People' }), { target: { value: 'Person 1000' } });
+  expect(screen.getByText('Person 1000')).toBeVisible();
+  expect(screen.queryByText('Person 0')).toBeNull();
+  expect(change).not.toHaveBeenCalled();
+});
+it('finds a later complete warning and keeps its counted words', () => {
+  const reasons = Array.from({ length: 1_001 }, (_, index) => ({ code: 'future_warning', message: `Reason ${index}`, params: { count: 2 } }));
+  show(<ImportReasons reasons={reasons} label="Warnings" />);
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Find in Warnings' }), { target: { value: 'Reason 1000' } });
+  expect(screen.getByText('Reason 1000 · 2')).toBeVisible();
+  expect(screen.queryByText('Reason 0 · 2')).toBeNull();
+});

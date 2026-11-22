@@ -1,3 +1,4 @@
+import { useCollectionSearch } from '@/lib/collectionSearch';
 /** Places, documents and folders shared from outside the trees a person can browse. */
 import { useState } from 'react';
 import { useListChoice } from '@/lib/listState';
@@ -32,16 +33,14 @@ const KINDS: readonly NodeKind[] = ['org', 'project', 'topic', 'thread'];
 export function SharedScreen() {
   const { t } = useTranslation();
   useScreenHeading({ title: t('screens.shared.title'), icon: Share2 });
-  const [cursor, setCursor] = useState<string | null>(null);
-  const query = useQuery(sharedPageQuery(cursor));
-  const [text, setText] = useState('');
+  const search = useCollectionSearch('shared-with-me');
   const [kind, setKind] = useListChoice<NodeKind | 'document_container' | 'document' | 'all'>('shared', 'kind', 'all');
-  const needle = text.trim().toLocaleLowerCase();
-  const rows = (query.data?.items ?? []).filter((row) => {
-    const name = row.kind === 'document_container' ? row.folder.name ?? '' : row.kind === 'document' ? row.document.title : row.name;
-    const description = row.kind === 'document_container' || row.kind === 'document' ? '' : row.description;
-    return (kind === 'all' || row.kind === kind) && (needle === '' || [name, description, ...row.path.flatMap((part) => part.redacted || part.name === null ? [] : [part.name])].some((part) => part.toLocaleLowerCase().includes(needle)));
-  });
+  const filters = JSON.stringify([search.scope, search.q, kind]);
+  const [position, setPosition] = useState<{ filters: string; cursor: string | null }>({ filters, cursor: null });
+  const cursor = position.filters === filters ? position.cursor : null;
+  const setCursor = (next: string | null) => setPosition({ filters, cursor: next });
+  const query = useQuery(sharedPageQuery(cursor, search.q, kind === 'all' ? undefined : kind));
+  const rows = query.data?.items ?? [];
   const columns: Column<SharedListItem>[] = [
     { id: 'name', header: t('sharedWithMe.name'), cell: (row) => row.kind === 'document'
       ? <div className="flex min-w-0 flex-col gap-1"><div className="flex min-w-0 items-center gap-2"><FileText className="size-4 shrink-0 text-text-muted" aria-hidden />
@@ -57,12 +56,12 @@ export function SharedScreen() {
     { id: 'changed', header: t('sharedWithMe.changed'), from: 'md', cell: (row) => row.kind === 'document_container' ? '—' : <RelativeTime at={row.kind === 'document' ? row.document.updated_at : row.updated_at} /> },
   ];
   return <Page><PageHeader title={t('screens.shared.title')} lead={t('sharedWithMe.lead')} mark={<PlaceMark><Share2 aria-hidden /></PlaceMark>} />
-    <FilterBar search={<Input type="search" label={t('documentFolders.filterPage')} value={text} onChange={(event) => setText(event.target.value)} />}
+    <FilterBar search={<Input type="search" hideLabel label={t('ui.collection.find', { name: t('screens.shared.title') })} placeholder={t('ui.combobox.search')} value={search.text} onChange={(event) => search.onText(event.target.value)} />}
       action={<Button icon={<RefreshCw aria-hidden />} pending={query.isFetching} onClick={() => void query.refetch()}>{t('sharedWithMe.refresh')}</Button>}>
       <Select<NodeKind | 'document_container' | 'document' | 'all'> label={t('sharedWithMe.kind')} value={kind} onValueChange={setKind} options={[{ value: 'all', ...choiceOption(t, 'statusFilter.any') }, { value: 'document', label: t('finder.kinds.document') }, { value: 'document_container', label: t('finder.kinds.document_container') }, ...KINDS.map((value) => ({ value, ...choiceOption(t, `placeKind.${value}`) }))]} />
     </FilterBar>
-    {query.error !== null ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows read={query} rows={5} /> : rows.length === 0 ? <EmptyState icon={<Share2 aria-hidden />} title={t(query.data.items.length === 0 && cursor === null && query.data.next_cursor === null ? 'sharedWithMe.empty' : 'sharedWithMe.noMatches')}
-      action={query.data.items.length === 0 && cursor === null && query.data.next_cursor === null ? <Button action="search" onClick={() => openFinder()}>{t('sharedWithMe.findPlaces')}</Button> : <Button onClick={() => { setText(''); setKind('all'); }}>{t('sharedWithMe.clearFilters')}</Button>} /> : <Table label={t('screens.shared.title')} columns={columns} rows={rows} rowKey={(row) => row.kind === 'document_container' ? `document_container:${row.folder.id}` : row.kind === 'document' ? `document:${row.document.id}` : `${row.kind}:${row.id}`} />}
+    {query.error !== null ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : query.data === undefined ? <SkeletonRows read={query} rows={5} /> : rows.length === 0 ? <EmptyState icon={<Share2 aria-hidden />} title={t(search.q === '' && kind === 'all' && query.data.items.length === 0 && cursor === null && query.data.next_cursor === null ? 'sharedWithMe.empty' : 'sharedWithMe.noMatches')}
+      action={search.q === '' && kind === 'all' && query.data.items.length === 0 && cursor === null && query.data.next_cursor === null ? <Button action="search" onClick={() => openFinder()}>{t('sharedWithMe.findPlaces')}</Button> : <Button onClick={() => { search.onText(''); setKind('all'); setCursor(null); }}>{t('sharedWithMe.clearFilters')}</Button>} /> : <Table label={t('screens.shared.title')} columns={columns} rows={rows} virtual rowKey={(row) => row.kind === 'document_container' ? `document_container:${row.folder.id}` : row.kind === 'document' ? `document:${row.document.id}` : `${row.kind}:${row.id}`} />}
     {query.data !== undefined && (cursor !== null || query.data.next_cursor !== null) && <div className="flex flex-wrap justify-between gap-2">
       <Button disabled={cursor === null} onClick={() => setCursor(null)}>{t('documentFolders.beginning')}</Button>
       <Button disabled={query.data.next_cursor === null} onClick={() => setCursor(query.data.next_cursor)}>{t('documentFolders.next')}</Button>
