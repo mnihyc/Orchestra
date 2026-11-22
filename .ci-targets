@@ -1,0 +1,6 @@
+fmt
+clippy
+test -p orch-api-core --features test-support --test provider_managed
+test -p orch-api-core --features test-support --test templates
+test -p orch-api-core --features test-support --test kfix_schemas
+test -p orch-api-core --features test-support --test semantic_admin

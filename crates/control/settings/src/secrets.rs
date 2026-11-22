@@ -164,6 +164,7 @@ impl From<WriteError> for SecretError {
             WriteError::Locked { by } => Self::Locked { by },
             WriteError::Invalid(Invalid::WrongScope { .. }) => Self::NotHere,
             WriteError::OperationRefused
+            | WriteError::Ceiling { .. }
             | WriteError::Invalid(_)
             | WriteError::Lock(_)
             | WriteError::Stale { .. } => Self::Unreadable {
