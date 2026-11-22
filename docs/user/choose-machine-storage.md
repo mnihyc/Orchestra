@@ -3,77 +3,55 @@ group: resources
 title: Choose where a machine keeps data
 screens: /resources/templates, /resources/templates/$id, /resources/machines/$id, /resources/environments/$id, /resources/providers/$id
 keywords: storage, disk, machine, host, template, env.storage, runtime.storage, workspace, home, state
-summary: Use a machine’s named storages for workspace, home and runtime data.
+summary: Use the named storages of a machine for the workspace, the home and the state of its environments and providers.
 ---
 
 # Choose where a machine keeps data
 
-Every machine reports its named storages with their capacity and free space.
-Read **Storage** on its page, then use those names in **Unit configuration**.
-`env.storage` chooses where new workspace, home and connector state data is
-made. Separate connector-state storage applies where the driver makes a unit;
-a directory connector retains its private machine data directory and declares
-workspace, home and mount storage roles. `runtime.storage` chooses a provider's
-home and state data where its declared data roles support them. An omitted
-member uses the machine's default. A name that machine does not offer is
-refused; it never silently falls back to another disk.
+Every machine reports its named storages with their capacity and the space that is free. Read **Storage** on its page, then use those names in **Container configuration**.
 
-For example, `{"workspace":"fast","home":"bulk","state":"fast"}` chooses
-two named storages for an environment. A provider has no workspace, so use
-`{"state":"fast"}` for its private connector state. A provider's separate
-home selection is used where its data-source facts offer one.
+- The storage setting of an environment (`env.storage`) chooses where new data for the workspace, the home and the state of the connector is made. The state of a connector has its own storage where the driver makes a container. A connector that runs on a directory keeps its own private data directory on the machine and declares roles of storage for the workspace, the home and mounts.
+- The storage setting of a managed provider (`runtime.storage`) chooses its home and its state, where its declared roles of data support them.
+- A member that is left out uses the default of the machine. A name that the machine does not offer is refused. It never falls back quietly to another disk.
 
-Storage selects a place for new owned data. Existing directories retain their
-identity, permissions and location. Data already made by Orch keeps its recorded
-storage across restarts and template edits. Changing a storage does not move
-that data: use a reviewed move or copy operation for an existing environment.
+For example, `{"workspace":"fast","home":"bulk","state":"fast"}` chooses two named storages for an environment. A provider has no workspace, so use `{"state":"fast"}` for the private state of its connector. A separate home for a provider is used where its sources of data offer one.
+
+Storage selects a place for new data that Orch owns. Directories that exist keep their identity, their permissions and their location. Data that Orch made already keeps the storage recorded for it, across restarts and edits of the template. Changing a storage does not move that data. To move the data of an environment that exists, use a move or a copy that you review first.
 
 ## Configure named storages
 
-A node operator declares names and paths in `[[node.storage]]` in `orch.toml`.
-A directory-running connector uses `[[storage]]` in its `config.toml`, with the
-same `name`, `path` and `default` members. Paths must be existing directories
+Nodes and directory-running connectors declare named paths in `[[storages]]` in
+their data-directory `config.toml`. A node operator can use `orch-node policy set storages`
+to write that same canonical policy. Each entry has `name`, `path` and `default` members. Paths must be existing directories
 under the machine's allowed `environment.roots`; the machine checks that policy
 before exposing or creating data. Exactly one declared storage is the default.
 
 ```toml
-[[storage]]
+[[storages]]
 name = "fast"
 path = "/srv/work"
 default = true
 ```
 
-Without an explicit connector storage list, its allowed roots supply storage
-names: `default` for the first root, then `root-2`, `root-3` and so on. The
-connector makes its owned directories beneath those roots. With no allowed
-root there is no storage to offer. Give disks explicit names if their ordering
-may change. No connector state or credential path is exposed in the report.
+Without a list of storages for the connector, its allowed roots give the names: `default` for the first root, then `root-2`, `root-3` and so on. The connector makes the directories it owns beneath those roots. With no allowed root there is no storage to offer. Give disks names of their own if their order may change. The report exposes no path of the state of the connector and no credential.
 
 ## Replace host template paths
 
-Host-process templates contain an existing **Run as user** account and commands,
-and can be shared across machines. They no longer contain `workspace_base`,
-`home_base` or `mounts_base` paths. Declare the old directories as named machine
-storages, choose the workspace and home names in `env.storage`, and choose a
-storage when adding each mount volume location. Remove the old members from the
-template. Existing volume records retain their exact paths; Orch does not
-relocate, adopt or purge directories while applying this configuration change.
+Templates for processes on a host hold an account that exists (**Run as user**) and commands, and can be shared across machines. They no longer hold the paths `workspace_base`, `home_base` or `mounts_base`.
 
-The form explains the driver's fields. An example contains the account and
-commands; it needs no knowledge of a particular host's filesystem layout.
+1. Declare the old directories as named storages of the machine.
+2. Choose the names for the workspace and the home in the storage setting of the environment.
+3. Choose a storage when you add the location of each mount volume.
+4. Remove the old members from the template.
+
+Records of volumes that exist keep their exact paths. Orch does not relocate, adopt or purge directories while it applies this change of configuration. The form explains the fields of the driver. An example holds the account and the commands, and needs no knowledge of the layout of the files of a particular host.
 
 ## Set common defaults
 
-Environment and provider runtime settings use the same schema for each common
-member: limits, storage, placement needs, variables, secret names, update policy
-and commands after start. They inherit from the system through the resource's
-home and then its own values. Runtime limits include disk in GB, subject to the
-machine's declared quota support. Provider runtimes have no workspace, work
-mounts, environment shells or browsers, or environment idle warning.
-
+Environments and managed providers use the same schema for each member they share: limits, storage, what placement needs, variables, secret names, the policy for updates and commands after start. They inherit from the system through the home of the resource, then from its own values. Limits on the runtime include disk in GB, subject to the quota the machine declares it supports. Managed providers have no workspace, no mounts for work, no shells or browsers of an environment, and no warning that an environment is idle.
 
 ## Data directory inventory
 
-Machine Storage also shows the connector’s typed data-directory observation. The observation time says how old that report is; each listed component has its apparent size, or a dash when inspection could not measure it. Incomplete scans, unreadable or linked components and unlisted entries remain visible as facts. An unavailable inventory is distinct from a fully inspected empty directory. These rows do not provide filesystem operands or cleanup authority.
+**Storage** of a machine also shows the observation of the data directory of the connector. The time of the observation says how old that report is. Each component listed has its apparent size, or a dash when it could not be measured. Scans that are incomplete, components that cannot be read or are links, and entries that are not listed stay visible as facts. An inventory that is unavailable differs from a directory that was fully inspected and is empty. These rows give no operands of the file system and no permission to clean up.
 
-The sealed store shows only its immediate safe name and size. It has no preview, Open, download, nested filename or credential value. Storage capacity remains a separate report from these apparent file sizes.
+The sealed store shows only its immediate safe name and its size. It has no preview, no **Open**, no download, no name of a nested file and no credential value. The capacity of storage stays a separate report from these apparent sizes of files.

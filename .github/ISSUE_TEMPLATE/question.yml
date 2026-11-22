@@ -1,0 +1,21 @@
+name: Question
+description: You are stuck or unsure how to do something with Orch.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please look in the [user guide](https://github.com/mnihyc/Orchestra/blob/main/docs/user/README.md) and the [operator guide](https://github.com/mnihyc/Orchestra/blob/main/docs/operator/README.md) first. Do not paste passwords, keys, tokens or reset links.
+  - type: textarea
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What have you tried, and what happened?
+      description: Include the pages you read and what the screen or the logs said.
+  - type: input
+    attributes:
+      label: Orch version
+      description: The output of `./update.sh status`, if it matters.

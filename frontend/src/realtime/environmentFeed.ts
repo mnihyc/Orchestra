@@ -7,14 +7,17 @@
  * number returned by the same authorized HTTP sync. A reconnect resumes that number; only a
  * server-declared unrepairable gap reads that one environment's sync again.
  */
+import { READ_NOW } from '@/api/freshness';
 import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect } from 'react';
 
-import { environmentQuery } from '@/api/environments';
+import { environmentKey, environmentQuery } from '@/api/environments';
 import { applyRow, feedSequences, record } from '@/api/cache';
 import { seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import { socket } from '@/realtime/live';
 import type { FeedFrame } from '@/realtime/socket';
+import type { Environment } from '@/generated/api-types';
+import { repairEnvironmentMcp } from '@/api/mcpChanges';
 
 /** The name of an environment's feed on the socket. */
 export const environmentFeed = (environmentId: string): string => `env:${environmentId}`;
@@ -25,7 +28,11 @@ export function applyEnvironmentFrame(client: QueryClient, environmentId: string
     seedEnvironmentLibrary(client, environmentId, frame.data.library);
     const environment = frame.data.environment;
     if (record(environment)) {
+      const before = client.getQueryData<Environment>(environmentKey(environmentId));
       applyRow(client, { kind: 'environment', id: environmentId, value: environment });
+      if (JSON.stringify(before?.mcp_found) !== JSON.stringify(environment.mcp_found)) {
+        void repairEnvironmentMcp(client, environmentId);
+      }
     }
     feedSequences.set(environmentFeed(environmentId), frame.seq);
     for (const job of Array.isArray(frame.data.jobs) ? frame.data.jobs as unknown[] : []) {
@@ -49,7 +56,7 @@ export function useEnvironmentFeed(environmentId: string | null): void {
           // Only a server-declared gap needs an exact snapshot. Ordinary reconnects replay the cursor.
           if (repairing) return;
           repairing = true;
-          void client.query({ ...environmentQuery(environmentId), staleTime: 0 }).then(() => {
+          void client.query({ ...environmentQuery(environmentId), ...READ_NOW }).then(() => {
             if (!active) return;
             subscription?.unsubscribe(); subscription = follow();
           }, () => undefined).finally(() => { repairing = false; });

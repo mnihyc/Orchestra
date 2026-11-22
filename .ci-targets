@@ -1,0 +1,1 @@
+web-e2e tests/e2e/configuration-read-availability.spec.ts tests/e2e/machine-native-tools.spec.ts tests/e2e/implicit-actions.spec.ts tests/e2e/program-versions.spec.ts tests/e2e/implicit-personal-settings.spec.ts
