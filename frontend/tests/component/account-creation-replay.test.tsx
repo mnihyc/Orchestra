@@ -26,6 +26,8 @@ afterEach(async()=>{cleanup();await setLocale('en');});
 const refused=()=>new ApiError({type:'orch:error:conflict.exists',code:'conflict.exists',status:409,
   title:'Already used',detail:'The account change could not be completed',request_id:'refused-registration'},null);
 async function submit(kind:'setup'|'register') {
+  const name = await screen.findByLabelText(i18n.t('auth.fields.displayName'));
+  expect(screen.getAllByRole('textbox')[0]).toBe(name);
   await userEvent.type(await screen.findByLabelText(i18n.t('auth.fields.username')),'new-account');
   await userEvent.type(screen.getByLabelText(i18n.t('auth.fields.displayName')),'New account');
   await userEvent.type(screen.getByLabelText(i18n.t('auth.fields.password'),{exact:true}),'a-valid-secret-1234');

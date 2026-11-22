@@ -25,7 +25,7 @@ export const detailMachine: Machine = { ...unplacedGrouping(), revision: 1, ...d
   providers: [], agents: [], environments: [], environment_sandboxes: [], access: detailAccess,
   facts: { diagnostic_canary: 'diagnostic-canary', hostname: 'build-system' } };
 
-export const detailHost: Host = { ...unjudgedProvenance(), id: 'host', name: 'Build host', address: 'workshop.builder', home: detailHome, org_id: 'team', owner: ADA,
+export const detailHost: Host = { bundled_with_server: false, ...unjudgedProvenance(), id: 'host', name: 'Build host', address: 'workshop.builder', home: detailHome, org_id: 'team', owner: ADA,
   machine: detailMachineRef, capacity: { cpu_millis: 8000, memory_mb: 16384, disk_gb: 200 }, declared: { cpu_millis: 1000, memory_mb: 2048, disk_gb: 20 },
   labels: ['linux'], running: { environment: 1, provider: 1 }, mine: 1, schedulable: true, revision: 1, access: detailAccess,
   drivers: [{ name: 'sample', title: 'Example driver', creates: ['environment', 'provider'], runtime_classes: [] }], storages: [],
@@ -37,7 +37,7 @@ export const detailEnvironment: Environment = { ...unjudgedProvenance(), id: 'en
   workspace_root: '/workspace', workspace_storage: null, remote_write: true, terminal: true, browser: false, vnc: false,
   reach: 0, threads: [], threads_hidden: 0, mounts: [], mcp_found: [], exec: { machine_offers: [], offers: [], orch_tools: false },
   facts: { diagnostic_canary: 'diagnostic-canary' }, granted_capabilities: [], index: 'full', index_reason: null, manifest_at: null,
-  idle_stop_at: null, last_activity_at: null, unused_since: null, remove_at: null, remove_reason: null, removal: null,
+  idle_stop_at: null, idle_stop_deferred: false, removal_keep_days: 7, last_activity_at: null, unused_since: null, remove_at: null, remove_reason: null, removal: null,
   update_required: false, updates: [], ports_exposed: false,
   support: { looked_at: null, browser: { programs: [], window: false, playwright_cli: null, sandbox: null }, vnc: { servers: [], window_manager: null } },
   network: { mode: 'open', required_mode: 'open', network_mode: 'bridge', proxy_url: null, allowed_hosts: [], sources: [], networks: [], revision: '1', always: [], always_revision: '1', always_source: 'orch_configuration', state: 'ready', reason: null, last_denied: null } };
@@ -58,4 +58,4 @@ export const detailUnitProvider: Provider = planProvider({ id: 'unit-provider', 
   runtime_support: { lifecycle: 'unit', commands_after_start: null, after_up: false },
   runtime: { state: 'running', host: { id: detailHost.id, name: detailHost.name, address: detailHost.address }, driver: 'sample',
     template: { id: detailTemplate.id, name: detailTemplate.name, owner: detailTemplate.owner }, generation: 2,
-    network: detailEnvironment.network, updates: [], update_required: false, last_active_at: null, idle_stop_at: null, renew_at: null, job: null } });
+    network: detailEnvironment.network, updates: [], update_required: false, last_active_at: null, idle_stop_at: null, renew_at: null, job: null, detail: null } });

@@ -17,4 +17,5 @@ Neutral schemas, catalogues, descriptors and interfaces for every seam.
 - [orch-summarizer-contract](summarizer/README.md): Summarizer contract for title, description and tag generation.
 - [orch-notifier-contract](notifier/README.md): Notification channel contract hosted by the worker.
 - [orch-blob-contract](blob/README.md): BlobStore trait seam; local storage is the v0.1 implementation.
+- [orch-human-check-contract](human-check/README.md): HumanCheckProvider trait seam; hCaptcha and reCAPTCHA of Google Cloud Fraud Defense are the first backends.
 - [orch-identity-contract](identity/README.md): IdentityProviderKind trait seam; OIDC is the v0.1 implementation.

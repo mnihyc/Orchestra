@@ -1,0 +1,1 @@
+test -p orch-api-core --test realtime_socket -- --nocapture --test-threads=1
