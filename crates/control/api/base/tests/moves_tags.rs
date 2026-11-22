@@ -635,7 +635,8 @@ async fn tags_are_defined_at_any_place_and_listed_with_those_above() {
         .token(&dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(
         listed
             .iter()
@@ -650,7 +651,8 @@ async fn tags_are_defined_at_any_place_and_listed_with_those_above() {
         .token(&dan.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .items;
     assert_eq!(of_org.len(), 1);
     // A name is unique in its node without regard to case.
     let again = define(&a.boss, a.acme, "URGENT", 1).await.problem();
@@ -831,4 +833,83 @@ async fn a_tag_is_renamed_and_deleting_it_takes_it_off_every_topic() {
         .await
         .problem();
     assert_eq!(missing.code, ErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn a_tag_picker_starts_with_its_own_recent_definition_and_searches_before_a_one_row_page() {
+    use orch_api_contract::personal::{MePickerRecentChoice, MePickerRecentCreate};
+    let world = World::new().await;
+    let a = acme(&world).await;
+    let mut tags = Vec::new();
+    for index in 0..13 {
+        tags.push(
+            world
+                .app
+                .call(NodeTagCreate, &[&a.acme])
+                .token(&a.boss.token)
+                .body(&NodeTagCreateBody {
+                    name: format!("Label {index:02}"),
+                    color: Some(0),
+                })
+                .send()
+                .await
+                .full_tag()
+                .ok(),
+        );
+    }
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&a.boss.token)
+        .body(&MePickerRecentChoice {
+            kind: "tag".into(),
+            key: tags[12].id.to_string(),
+        })
+        .send()
+        .await
+        .ok();
+    world
+        .app
+        .call(MePickerRecentCreate, &[])
+        .token(&a.boss.token)
+        .body(&MePickerRecentChoice {
+            kind: "tag".into(),
+            key: "never-offered-private-tag".into(),
+        })
+        .send()
+        .await
+        .ok();
+    let first = world
+        .app
+        .call(NodeTagList, &[&a.web])
+        .token(&a.boss.token)
+        .raw_query("picker=true&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        first.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [tags[12].id]
+    );
+    assert!(first.next_cursor.is_some());
+    assert!(
+        !first
+            .next_cursor
+            .as_ref()
+            .unwrap()
+            .contains("never-offered-private-tag")
+    );
+    let exact = world
+        .app
+        .call(NodeTagList, &[&a.web])
+        .token(&a.boss.token)
+        .raw_query("picker=true&q=Label%2000&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        exact.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [tags[0].id]
+    );
+    assert!(exact.next_cursor.is_none());
 }

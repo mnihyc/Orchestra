@@ -21,6 +21,8 @@ import { Drawer } from '@/ui/Drawer';
 import { Button } from '@/ui/Button';
 import type { NarrowChoice } from '@/features/workbench/NarrowChoices';
 import { useChromeBottom } from '@/features/workbench/chrome';
+import { useDeviceChoiceGroups } from '@/ui/DeviceChoiceFacts';
+import { FactDisclosure } from '@/ui/FactDisclosure';
 
 export function useNarrowWorkbench(pending = false, focusMode = false) {
   const ready = useFrameReady();
@@ -36,14 +38,14 @@ export function useNarrowWorkbench(pending = false, focusMode = false) {
   useEffect(() => onViewRevealed(() => setNavigationAt(null)), []);
   const navigation = navigationAt === route;
   const setNavigation = (open: boolean) => setNavigationAt(open ? route : null);
-  const [selectedView, setSelectedView] = useViewChoice<string>('global', 'mobileView', '');
-  const [selectedTab, setSelectedTab] = useViewChoice<string>('global', 'mobileTab', '');
-  const [selectedContainer, setSelectedContainer] = useViewChoice<string>('global', 'mobileContainer', '');
-  const [selectedBar, setSelectedBar] = useViewChoice<SideBarId>('global', 'mobileBar', 'right');
+  const [selectedView, setSelectedView, viewReceipt] = useViewChoice<string>('global', 'mobileView', '');
+  const [selectedTab, setSelectedTab, tabReceipt] = useViewChoice<string>('global', 'mobileTab', '');
+  const [selectedContainer, setSelectedContainer, containerReceipt] = useViewChoice<string>('global', 'mobileContainer', '');
+  const [selectedBar, setSelectedBar, barReceipt] = useViewChoice<SideBarId>('global', 'mobileBar', 'right');
   const tabs = allTabs(layout);
   const selected = tabs.find((tab) => tab.id === selectedTab && tab.view === selectedView) ?? tabs.findLast((tab) => tab.view === selectedView);
   const place = selected === undefined ? null : findTab(layout, selected.id);
-  const bar = place?.container !== undefined && (place.area === 'left' || place.area === 'right') ? place.area : selectedBar;
+  const bar = place?.container !== undefined && (place.area === 'left' || place.area === 'right') ? place.area : selectedBar === 'left' ? 'left' : 'right';
   const wanted = selectedView !== '' ? place?.container?.name ?? '' : selectedContainer;
   const container = layout[bar].containers.find((candidate) => candidate.name === wanted);
   const viewer = selectedView !== '' && container === undefined && selected !== undefined && !['screen', 'page', 'navigation', 'resource-navigation'].includes(selected.view) ? selected : null;
@@ -83,7 +85,33 @@ export function useNarrowWorkbench(pending = false, focusMode = false) {
   }
   const body = (tab: Tab) => <ViewSlot tab={tab} primary />;
   const title = viewer === null ? '' : viewer.of?.path ?? t(viewOf(viewer.view)?.title ?? 'views.screen.title');
+  const viewName = (value: unknown) => {
+    if (value === '') return t('clientFacts.device.closed');
+    const definition = typeof value === 'string' ? viewOf(value) : undefined;
+    return definition === undefined ? undefined : t(definition.title);
+  };
+  const tabName = (value: unknown) => value === '' ? t('clientFacts.device.closed') : viewName(tabs.find((tab) => tab.id === value)?.view);
+  const containerName = (value: unknown) => {
+    if (value === '') return t('clientFacts.device.closed');
+    if (typeof value !== 'string' || ![...layout.left.containers, ...layout.right.containers].some((item) => item.name === value)) return undefined;
+    const definition = containerOf(value), view = viewOf(value);
+    return definition !== undefined ? t(definition.title) : view === undefined ? undefined : viewChoice(view, t).name;
+  };
+  const barName = (value: unknown) => value === 'left' || value === 'right' ? t(`workbench.areas.${value}`) : undefined;
+  const viewFacts = useDeviceChoiceGroups(viewReceipt === undefined ? undefined : { ...viewReceipt, effective: viewer?.view ?? '', origin: selectedView !== '' && selected === undefined ? 'default' : viewReceipt.origin,
+    saved_choice_availability: viewReceipt.saved !== undefined && viewName(viewReceipt.saved) === undefined ? 'unavailable' : viewReceipt.saved_choice_availability }, viewName(viewer?.view ?? ''), viewName(viewReceipt?.saved));
+  const tabFacts = useDeviceChoiceGroups(tabReceipt, tabName(viewer?.id ?? ''), tabName(tabReceipt?.saved));
+  const containerFacts = useDeviceChoiceGroups(containerReceipt, containerName(container?.name ?? ''), containerName(containerReceipt?.saved));
+  const barFacts = useDeviceChoiceGroups(barReceipt === undefined ? undefined : { ...barReceipt, effective: bar, origin: bar !== selectedBar ? 'default' : barReceipt.origin,
+    saved_choice_availability: barReceipt.saved !== undefined && barName(barReceipt.saved) === undefined ? 'unavailable' : barReceipt.saved_choice_availability }, barName(bar), barName(barReceipt?.saved));
+  const deviceGroups = [
+    ...viewFacts.groups.map((group) => ({ ...group, key: 'phone-view', title: t('craftChoiceNames.keys.mobileView') })),
+    ...tabFacts.groups.map((group) => ({ ...group, key: 'phone-tab', title: t('craftChoiceNames.keys.mobileTab') })),
+    ...containerFacts.groups.map((group) => ({ ...group, key: 'phone-container', title: t('workbench.containers.label') })),
+    ...barFacts.groups.map((group) => ({ ...group, key: 'phone-bar', title: t('workbench.bars.peek.title') })),
+  ];
   return {
+    deviceFacts: <FactDisclosure groups={deviceGroups} fragment={viewFacts.fragment ?? tabFacts.fragment ?? containerFacts.fragment ?? barFacts.fragment} />,
     choices,
     primary,
     mainTabs: groups.flatMap((group) => group.tabs),

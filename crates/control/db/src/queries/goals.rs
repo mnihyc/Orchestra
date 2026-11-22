@@ -149,18 +149,16 @@ pub async fn live(conn: &mut Conn, thread: Id) -> Result<Option<GoalRow>, DbErro
 
 /// The goal a thread shows: the one under way, else the latest ended goal unless it was cleared.
 pub async fn current(conn: &mut Conn, thread: Id) -> Result<Option<GoalRow>, DbError> {
-    if let Some(goal) = live(conn, thread).await? {
-        return Ok(Some(goal));
+    if super::read_facts::with_opening(conn, |facts| {
+        facts
+            .details
+            .as_ref()
+            .is_some_and(|row| row.node_id == thread && !row.has_goals)
+    }) == Some(true)
+    {
+        return Ok(None);
     }
-    let sql = format!(
-        "{GOAL_SELECT} WHERE thread_id = $1 AND status IN ('met','stopped','cleared')
-          ORDER BY set_at DESC, id DESC LIMIT 1"
-    );
-    let goal: Option<GoalRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-        .bind(thread)
-        .fetch_optional(conn)
-        .await?;
-    Ok(goal.filter(|goal| goal.status != status::CLEARED))
+    Ok(current_of(conn, &[thread]).await?.pop())
 }
 
 /// The goals of the threads `threads`, as each thread shows them, in one read. Each requested thread probes its live
@@ -320,7 +318,9 @@ pub async fn end(
     at: DateTime<Utc>,
 ) -> Result<bool, DbError> {
     Ok(sqlx::query(
-        "UPDATE thread_goals SET status = $2, reason = COALESCE($3, reason), detail = COALESCE($4, detail),
+        "UPDATE thread_goals SET status = $2,
+            reason = CASE WHEN $2='met' THEN $3 ELSE COALESCE($3, reason) END,
+            detail = CASE WHEN $2='met' THEN $4 ELSE COALESCE($4, detail) END,
             elapsed_ms = elapsed_ms + CASE WHEN active_since IS NULL THEN 0
                                            ELSE GREATEST(0, (EXTRACT(EPOCH FROM ($5 - active_since)) * 1000)::bigint) END,
             active_since = NULL, checking_until = NULL, ended_at = $5, updated_at = $5
@@ -630,10 +630,12 @@ pub struct ReportRow {
     pub next: Option<String>,
     /// What Orch made of it; none while it waits.
     pub outcome: Option<String>,
-    /// Who found it met: `helper` or `agent`.
+    /// Who decided the report: `helper` or `person`.
     pub checked_by: Option<String>,
     /// The helper's reason, or why it could not check.
     pub reason: Option<String>,
+    /// Captured native helper admission/result; never supplied by an agent report.
+    pub helper: Option<Json>,
     /// When it was made.
     pub created_at: DateTime<Utc>,
     /// When Orch decided what it came to.
@@ -641,7 +643,7 @@ pub struct ReportRow {
 }
 
 const REPORT_SELECT: &str = "SELECT r.id, r.goal_id, r.thread_id, r.turn_id, t.ordinal AS turn_ordinal, r.status, r.evidence,
-    r.next, r.outcome, r.checked_by, r.reason, r.created_at, r.decided_at
+    r.next, r.outcome, r.checked_by, r.reason, r.helper, r.created_at, r.decided_at
     FROM thread_goal_reports r LEFT JOIN turns t ON t.id = r.turn_id";
 
 /// A report to keep.
@@ -722,7 +724,7 @@ pub async fn decide_report(
 ) -> Result<bool, DbError> {
     Ok(sqlx::query(
         "UPDATE thread_goal_reports SET outcome = $2, checked_by = $3, reason = $4, decided_at = $5
-          WHERE id = $1 AND outcome IS NULL",
+          WHERE id = $1 AND (outcome IS NULL OR outcome='unchecked')",
     )
     .bind(id)
     .bind(outcome)
@@ -733,32 +735,6 @@ pub async fn decide_report(
     .await?
     .rows_affected()
         == 1)
-}
-
-/// Notes that the helper could not be asked about a report, and says how many times that has happened.
-pub async fn note_check_attempt(conn: &mut Conn, id: Id) -> Result<i32, DbError> {
-    Ok(sqlx::query_scalar(
-        "UPDATE thread_goal_reports SET attempts = attempts + 1 WHERE id = $1 RETURNING attempts",
-    )
-    .bind(id)
-    .fetch_one(conn)
-    .await?)
-}
-
-/// Holds the helper's claim on a goal until `until`, so that the check is tried again then.
-pub async fn delay_check(
-    conn: &mut Conn,
-    id: Id,
-    until: DateTime<Utc>,
-    at: DateTime<Utc>,
-) -> Result<(), DbError> {
-    sqlx::query("UPDATE thread_goals SET checking_until = $2, updated_at = $3 WHERE id = $1 AND status = 'active'")
-        .bind(id)
-        .bind(until)
-        .bind(at)
-        .execute(conn)
-        .await?;
-    Ok(())
 }
 
 /// Marks the reports of a goal that wait and are older than `id` as superseded: the agent said more since.

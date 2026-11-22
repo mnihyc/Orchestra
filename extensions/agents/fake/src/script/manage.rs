@@ -177,6 +177,7 @@ impl Runner {
         let begun = |result: Option<Json>| ToolPayload::Orch {
             tool,
             arguments: arguments.clone(),
+            rate_limit: orch_agent_contract::events::tool_rate_limit(result.as_ref()),
             result,
         };
         let raw_name = format!("mcp__orch__{}", tool.name());
@@ -234,7 +235,7 @@ impl Runner {
                     &native_ref,
                     ItemStatus::Failed,
                     begun(Some(json!({
-                        "error": { "code": refusal.code, "message": refusal.message }
+                        "error": refusal
                     }))),
                     Some(&line),
                     true,
