@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use orch_types::{Hash, Id, Seq};
 
 pub mod reading;
+pub mod retained;
 
 pub const JOB_KIND: &str = "thread_continuation";
 
@@ -28,10 +29,15 @@ pub struct ContinuationRow {
     pub queue_held_at: Option<DateTime<Utc>>,
     pub queue_revision: i64,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_source: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_prefix: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub open_result: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_creation: Option<orch_types::Json>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub native_creation_result: Option<orch_types::Json>,
     pub failure: Option<orch_types::Json>,
 }
@@ -45,6 +51,8 @@ pub struct Projection {
     pub projection_revision: i64,
     pub follows_active: bool,
     pub viewed_segment_id: Option<Id>,
+    #[sqlx(rename = "viewed_queue_revision")]
+    pub queue_revision: i64,
 }
 
 impl Projection {
@@ -57,18 +65,206 @@ impl Projection {
     }
 }
 
+#[derive(Debug, Copy, Clone, sqlx::FromRow)]
+pub(super) struct HistorySources {
+    no_spans: bool,
+    pub(super) has_turns: bool,
+    pub(super) has_open_inputs: bool,
+    has_retained_inputs: bool,
+    has_edited_prompt: bool,
+}
+
+fn opening_history(conn: &Conn, thread: Id, view: Id) -> Option<HistorySources> {
+    super::read_facts::with_opening(conn, |facts| {
+        facts.history_sources.get(&(thread, view)).copied()
+    })
+    .flatten()
+}
+
+const VIEW_COLUMNS: &str = "t.node_id AS thread_id,c.id AS viewed_continuation_id,
+    CASE WHEN $2::uuid IS NULL THEN t.execution_revision ELSE c.projection_revision END AS projection_revision,
+    ($2::uuid IS NULL) AS follows_active,c.current_segment_id AS viewed_segment_id,c.queue_revision AS viewed_queue_revision";
+
+// The indexed history keys let an imported conversation skip empty detail reads.
+const HISTORY_SOURCES: &str = "NOT EXISTS (SELECT 1 FROM thread_continuation_spans s WHERE s.continuation_id=c.id) AS no_spans,
+         EXISTS (SELECT 1 FROM turns x WHERE x.thread_id=t.node_id) AS has_turns,
+         EXISTS (SELECT 1 FROM thread_inputs x WHERE x.thread_id=t.node_id AND x.continuation_id=c.id
+             AND x.state IN ('pending','delivering','failed')) AS has_open_inputs,
+         EXISTS (SELECT 1 FROM thread_inputs x WHERE x.thread_id=t.node_id AND x.source='user' AND x.state='cancelled') AS has_retained_inputs,
+         EXISTS (SELECT 1 FROM thread_prompt_versions x WHERE x.continuation_id=c.id AND x.input_id<>x.group_id) AS has_edited_prompt";
+
+#[derive(sqlx::FromRow)]
+struct Selected {
+    #[sqlx(flatten)]
+    projection: Projection,
+    #[sqlx(flatten)]
+    sources: HistorySources,
+}
+
+impl Selected {
+    fn remember(self, conn: &Conn, viewed: Option<Id>) -> Projection {
+        let projection = self.projection;
+        let _ = super::read_facts::with_opening(conn, |facts| {
+            facts.history_sources.insert(
+                (projection.thread_id, projection.viewed_continuation_id),
+                self.sources,
+            );
+            facts
+                .projections
+                .insert((projection.thread_id, viewed), projection.clone());
+        });
+        projection
+    }
+}
+
+#[derive(Clone, Copy, sqlx::FromRow)]
+pub(super) struct OpeningSchedules {
+    thread_id: Id,
+    topic_id: Id,
+    active_schedules: i64,
+    schedule_topic_seq: Option<Seq>,
+}
+
+pub(super) fn opening_schedule_count(conn: &Conn, thread: Id) -> Option<i64> {
+    super::read_facts::with_opening(conn, |facts| {
+        facts
+            .schedules
+            .filter(|row| row.thread_id == thread)
+            .map(|row| row.active_schedules)
+    })
+    .flatten()
+}
+
+/// The topic's pending-work sequence when this snapshot counted no active schedules on the thread.
+pub fn empty_schedule_seq(conn: &Conn, topic: Id, thread: Id) -> Option<Seq> {
+    super::read_facts::with_opening(conn, |facts| {
+        facts
+            .schedules
+            .filter(|row| {
+                row.thread_id == thread && row.topic_id == topic && row.active_schedules == 0
+            })
+            .and_then(|row| row.schedule_topic_seq)
+    })
+    .flatten()
+}
+
+pub(super) fn active_schedule_count(thread_column: &str) -> String {
+    format!(
+        "(SELECT count(*) FROM input_schedules s WHERE s.state='active' AND s.deleted_at IS NULL
+        AND s.target->>'kind'='thread' AND s.target->>'thread_id'={thread_column}::text)"
+    )
+}
+
+pub(crate) fn opening_cap_coverage(conn: &Conn, thread: Id) -> Option<bool> {
+    super::read_facts::with_opening(conn, |facts| {
+        facts
+            .covering_caps
+            .filter(|(node, _)| *node == thread)
+            .map(|(_, covered)| covered)
+    })
+    .flatten()
+}
+
+/// Facts about the selected thread and its active segment, independent of the viewed continuation.
+#[derive(sqlx::FromRow)]
+pub(super) struct OpeningDetails {
+    pub node_id: Id,
+    pub environment_id: Option<Id>,
+    pub workspace_dir: String,
+    pub directory_threads: i64,
+    pub open_sides: i64,
+    pub holding_job: Option<Id>,
+    pub has_goals: bool,
+    pub accepted_tools: Option<orch_types::Json>,
+}
+
+/// Read the addressed thread and the continuation selected for its first screen.
+pub async fn opening_thread(
+    conn: &mut Conn,
+    thread: Id,
+    viewed: Option<Id>,
+) -> Result<Option<(super::threads::ThreadRow, Projection)>, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct OpeningThread {
+        #[sqlx(flatten)]
+        thread: super::threads::ThreadRow,
+        #[sqlx(flatten)]
+        selected: Selected,
+        no_call_recovery: bool,
+        may_have_caps: bool,
+        #[sqlx(flatten)]
+        schedules: OpeningSchedules,
+        #[sqlx(flatten)]
+        details: OpeningDetails,
+    }
+    let thread_columns = super::threads::THREAD_COLUMNS;
+    let thread_from = super::threads::THREAD_FROM;
+    let coverage = crate::usage::caps::THREAD_CAP_COVERAGE;
+    let schedule_count = active_schedule_count("t.node_id");
+    let holding_job = super::jobs::changes::holding_job_sql();
+    let sql = format!("SELECT {thread_columns},{VIEW_COLUMNS},{HISTORY_SOURCES},
+        (SELECT count(*) FROM threads neighbor JOIN nodes n ON n.id=neighbor.node_id
+          WHERE neighbor.environment_id=t.environment_id AND neighbor.workspace_dir=t.workspace_dir
+            AND neighbor.node_id<>t.node_id AND n.deleted_at IS NULL AND neighbor.side_of IS NULL) AS directory_threads,
+        (SELECT count(*) FROM threads child JOIN nodes n ON n.id=child.node_id
+          WHERE child.side_of=t.node_id AND n.deleted_at IS NULL AND n.archived_at IS NULL) AS open_sides,
+        (SELECT s.orch_tools_offer FROM segments s WHERE s.id=t.current_segment_id AND s.thread_id=t.node_id
+            AND s.continuation_id=t.active_continuation_id) AS accepted_tools,
+        {holding_job} AS holding_job,
+        EXISTS (SELECT 1 FROM thread_goals g WHERE g.thread_id=t.node_id) AS has_goals,
+        ({coverage}) AS may_have_caps, {schedule_count} AS active_schedules,
+        (SELECT topic_seq FROM topics WHERE node_id=t.topic_id) AS schedule_topic_seq,
+        NOT EXISTS (SELECT 1 FROM model_call_recovery r WHERE r.node_id=t.node_id) AS no_call_recovery
+        {thread_from}
+        JOIN thread_continuations c ON c.thread_id=t.node_id AND c.id=COALESCE($2,t.active_continuation_id)
+        WHERE t.node_id=$1");
+    let row: Option<OpeningThread> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(viewed)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(row.map(|row| {
+        let _ = super::read_facts::with_opening(conn, |facts| {
+            facts.thread = Some(row.thread.clone());
+            facts.schedules = Some(row.schedules);
+            facts.details = Some(row.details);
+            facts.covering_caps = Some((thread, row.may_have_caps));
+            facts.no_call_recovery = row.no_call_recovery.then_some(thread);
+        });
+        (row.thread, row.selected.remember(conn, viewed))
+    }))
+}
+
 pub async fn projection(
     conn: &mut Conn,
     thread: Id,
     viewed: Option<Id>,
 ) -> Result<Option<Projection>, DbError> {
-    Ok(sqlx::query_as("SELECT t.node_id AS thread_id,c.id AS viewed_continuation_id,
-        t.active_continuation_id,t.execution_revision,
-        CASE WHEN $2::uuid IS NULL THEN t.execution_revision ELSE c.projection_revision END AS projection_revision,
-        ($2::uuid IS NULL) AS follows_active,c.current_segment_id AS viewed_segment_id
+    use super::read_facts::with_opening;
+    let cached = with_opening(conn, |facts| {
+        facts.projections.get(&(thread, viewed)).cloned()
+    });
+    let for_opening = cached.is_some();
+    if let Some(row) = cached.flatten() {
+        return Ok(Some(row));
+    }
+
+    let sources = if for_opening {
+        HISTORY_SOURCES
+    } else {
+        "false AS no_spans,true AS has_turns,true AS has_open_inputs,true AS has_retained_inputs,true AS has_edited_prompt"
+    };
+    let sql = format!(
+        "SELECT t.active_continuation_id,t.execution_revision,{VIEW_COLUMNS},{sources}
         FROM threads t JOIN thread_continuations c ON c.thread_id=t.node_id
-            AND c.id=COALESCE($2,t.active_continuation_id) WHERE t.node_id=$1")
-        .bind(thread).bind(viewed).fetch_optional(conn).await?)
+            AND c.id=COALESCE($2,t.active_continuation_id) WHERE t.node_id=$1"
+    );
+    let row: Option<Selected> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(viewed)
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(row.map(|row| row.remember(conn, viewed)))
 }
 
 pub async fn continuation(
@@ -173,6 +369,7 @@ pub struct VersionRow {
     pub created_at: DateTime<Utc>,
     pub status: String,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::OptionalJson")]
     pub job_snapshot: Option<orch_types::Json>,
 }
 
@@ -182,6 +379,9 @@ pub async fn viewed_version(
     thread: Id,
     view: Id,
 ) -> Result<Option<VersionRow>, DbError> {
+    if opening_history(conn, thread, view).is_some_and(|history| !history.has_edited_prompt) {
+        return Ok(None);
+    }
     Ok(sqlx::query_as(
         "SELECT v.input_id,v.group_id,v.continuation_id,v.ordinal,i.author_id,i.created_at,
         c.status,v.job_id,o.job_snapshot FROM thread_prompt_versions v
@@ -325,9 +525,11 @@ pub async fn freeze_prefix(
 pub struct OperationRow {
     pub id: Id,
     pub job_id: Option<Id>,
+    #[sqlx(try_from = "crate::storage::ExactJson")]
     pub job_snapshot: orch_types::Json,
     pub thread_id: Id,
     pub actor_id: Id,
+    #[sqlx(try_from = "crate::storage::Text")]
     pub client_id: String,
     pub body_hash: Vec<u8>,
     pub kind: String,
@@ -356,7 +558,7 @@ pub async fn replay(
     client: &str,
 ) -> Result<Option<OperationRow>, DbError> {
     Ok(sqlx::query_as("SELECT * FROM thread_continuation_operations WHERE thread_id=$1 AND actor_id=$2 AND client_id=$3")
-        .bind(thread).bind(actor).bind(client).fetch_optional(conn).await?)
+        .bind(thread).bind(actor).bind(orch_types::storable::encode_key(client)).fetch_optional(conn).await?)
 }
 
 pub async fn operation(conn: &mut Conn, id: Id) -> Result<Option<OperationRow>, DbError> {
@@ -373,10 +575,10 @@ pub async fn create_operation(conn: &mut Conn, row: &OperationRow) -> Result<(),
         source_continuation_id,target_continuation_id,input_id,segment_id,expected_active_continuation_id,
         expected_execution_revision,expected_queue_revision,status,created_at,job_id,job_snapshot)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'preparing',$14,$15,$16)")
-        .bind(row.id).bind(row.thread_id).bind(row.actor_id).bind(&row.client_id).bind(&row.body_hash).bind(&row.kind)
+        .bind(row.id).bind(row.thread_id).bind(row.actor_id).bind(orch_types::storable::encode_key(&row.client_id)).bind(&row.body_hash).bind(&row.kind)
         .bind(row.source_continuation_id).bind(row.target_continuation_id).bind(row.input_id).bind(row.segment_id)
         .bind(row.expected_active_continuation_id).bind(row.expected_execution_revision).bind(row.expected_queue_revision)
-        .bind(row.created_at).bind(row.job_id).bind(&row.job_snapshot).execute(&mut *conn).await?;
+        .bind(row.created_at).bind(row.job_id).bind(orch_types::storable::encode_exact(&row.job_snapshot)).execute(&mut *conn).await?;
     sqlx::query("UPDATE thread_continuations SET job_id=$2 WHERE id=$1 AND thread_id=$3")
         .bind(row.target_continuation_id)
         .bind(row.id)
@@ -487,6 +689,7 @@ mod tests {
             projection_revision: 1,
             follows_active: true,
             viewed_segment_id: None,
+            queue_revision: 1,
         };
         assert!(root.accepts_cursor(true, None));
         let changed = Projection {

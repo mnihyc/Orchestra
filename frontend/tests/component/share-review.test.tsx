@@ -11,7 +11,7 @@ import { show } from './support';
 
 const mocks = vi.hoisted(() => ({ read: vi.fn<(_target: { id: string }) => Promise<PermissionPage>>(), preview: vi.fn<(_target: { id: string }) => Promise<SharePreview>>(), change: vi.fn<(_target: { id: string }, _body: unknown) => Promise<PermissionPage>>() }));
 vi.mock('@/api/access', async (original) => ({ ...await original<object>(), readPage: mocks.read, previewShare: mocks.preview, changePage: mocks.change, pageQuery: (target: { id: string }) => ({ queryKey: ['page', target.id], queryFn: () => mocks.read(target) }) }));
-vi.mock('@/features/navigation/placeLabels', () => ({ useNodeLabel: (_id: string, name: string) => name }));
+vi.mock('@/features/navigation/placeLabels', async (loadOriginal) => ({ ...await loadOriginal<object>(), useNodeLabel: (_id: string, name: string) => name }));
 vi.mock('@/features/access/names', () => ({ usePermissionName: () => (name: string) => name }));
 vi.mock('@/features/access/holders', () => ({ HolderView: () => <span>Vera Rubin</span> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: () => <span>Vera Rubin</span> }));
@@ -28,7 +28,7 @@ function preview(): SharePreview {
 }
 const targets = ['First', 'Refused', 'Lost'].map((id) => ({ kind: 'topic' as const, id, name: id }));
 async function review() {
-  await screen.findAllByText('They will be named here.');
+  await screen.findAllByText('They will be added here.');
   await userEvent.type(screen.getByRole('combobox', { name: 'Add people, groups or roles' }), 'Vera');
   await userEvent.click(await screen.findByRole('option', { name: 'Vera Rubin' }));
   await userEvent.click(screen.getByRole('button', { name: 'Review shares' }));
@@ -63,8 +63,9 @@ it('reviews policy, existing access and gains first; sends frozen revisions and 
   const lost = within(screen.getByText('Lost', { selector: 'span' }).closest('li')!);
   mocks.read.mockResolvedValueOnce(page('Lost', [entry('unknown-writer')], 9));
   await userEvent.click(lost.getByRole('button', { name: 'Read current state' }));
-  expect(await lost.findByText(/revision 9/)).toBeVisible();
-  await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
+  expect(await lost.findByText(/Current permission page/)).toBeVisible();
+  expect(lost.queryByText(/revision/i)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Undo what succeeded' }));
   await waitFor(() => expect(mocks.change).toHaveBeenCalledTimes(4));
   expect(mocks.change.mock.calls[3]).toEqual([targets[0], { expected_revision: 8, rows: [{ permission: 'topic.view', remove: ['new-entry'], update: [] }] }]);
 });

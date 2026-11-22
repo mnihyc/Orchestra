@@ -113,6 +113,7 @@ pub const HISTORY_FACETS: &[FacetSpec] = &[
             KeyTargetKind::Object(K::McpServer),
             KeyTargetKind::Object(K::Mount),
             KeyTargetKind::Object(K::Skill),
+            KeyTargetKind::Object(K::Pool),
         ],
         TargetResolver::Resolved("page"),
     ),
