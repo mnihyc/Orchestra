@@ -15,7 +15,7 @@ import { oneOf } from '@/features/resources/search';
 import { useTemplateActs } from '@/features/resources/templates/acts';
 import { NewTemplateDialog } from '@/features/resources/templates/NewTemplate';
 import { confinementOf, imageSource } from '@/features/resources/templates/spec';
-import type { RuntimeClass, Template, UnitKind } from '@/generated/api-types';
+import type { RuntimeClass, TemplateListRow as Template, UnitKind } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
 import { SegmentedControl } from '@/ui/SegmentedControl';

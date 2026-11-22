@@ -73,7 +73,7 @@ test('public-name availability finds a root slug and a registration conflict sta
   page.on('request',(request) => {const url=new URL(request.url()); if (url.pathname.endsWith('/auth/name-availability')) checked.push(url.searchParams.get('name') ?? '');});
   await page.goto('/register');
   await identity(page,'acme');
-  await expect(page.getByRole('status').filter({hasText:'A username or root org already uses this public name.'})).toBeVisible();
+  await expect(page.getByRole('status').filter({hasText:'A username or root organization already uses this public name.'})).toBeVisible();
   await page.getByRole('button',{name:'Create account'}).click();
   await expect(page.getByLabel('Username',{exact:true})).toHaveAttribute('aria-invalid','true');
   await expect(page.getByLabel('Username',{exact:true})).toBeFocused();

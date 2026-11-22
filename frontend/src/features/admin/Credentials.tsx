@@ -17,6 +17,8 @@ import { Dialog } from '@/ui/Dialog';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
 import { Pagination } from '@/ui/Pagination';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { useCollectionSearch } from '@/lib/collectionSearch';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { StatusTag } from '@/features/admin/StatusTag';
@@ -35,7 +37,8 @@ export function AdminSessions({ person }: { person: string }) {
 }
 function SessionsReader({ person }: { person: string }) {
   const { t } = useTranslation();
-  const list = useInfiniteQuery(adminSessionsQuery(person));
+  const search = useCollectionSearch('admin-sessions:' + person);
+  const list = useInfiniteQuery(adminSessionsQuery(person, search.q));
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [ending, setEnding] = useState<AdminSession | 'all' | null>(null);
   const revoke = useMutation({
@@ -63,9 +66,10 @@ function SessionsReader({ person }: { person: string }) {
   ];
   return <div className="flex min-w-0 flex-col gap-4">
     <div className="flex flex-wrap justify-end gap-2"><Button size="sm" disabled={list.isFetching} onClick={() => void list.refetch()}>{t('operationKeys.activity.refresh')}</Button>
-      <Button size="sm" disabled={list.isPending || list.isError || rows.length === 0 || revoke.isPending} onClick={() => { revoke.reset(); setEnding('all'); }}>{t('adminCredentials.endAll')}</Button></div>
+      <Button size="sm" disabled={list.isPending || list.isError || rows.length === 0 && search.q === '' || revoke.isPending} onClick={() => { revoke.reset(); setEnding('all'); }}>{t('adminCredentials.endAll')}</Button></div>
+    <CollectionSearch name={t('adminCredentials.sessions')} {...search} />
     {list.isPending ? <SkeletonRows read={list} rows={3} /> : list.isError && !list.isFetchNextPageError ? <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      : rows.length === 0 ? <EmptyState compact title={t('adminCredentials.noSessions')} /> : <Table label={t('adminCredentials.sessions')} rows={rows} rowKey={(row) => row.id} columns={columns} />}
+      : rows.length === 0 ? <EmptyState compact title={t('adminCredentials.noSessions')} /> : <Table key={search.q} virtual label={t('adminCredentials.sessions')} rows={rows} rowKey={(row) => row.id} columns={columns} />}
     <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
     <ConfirmDialog open={ending !== null} onOpenChange={(open) => { if (!open && !revoke.isPending) setEnding(null); }} title={ending === 'all' ? t('adminCredentials.endAll') : t('security.sessions.endTitle', { browser: ending === null ? '' : browserName(ending.user_agent) })}
       confirmLabel={ending === 'all' ? t('adminCredentials.endAll') : t('security.sessions.end')} danger pending={revoke.isPending} error={revoke.error ?? undefined}

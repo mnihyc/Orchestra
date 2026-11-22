@@ -38,6 +38,7 @@ async fn what_a_session_was_opened_with_is_kept_source_by_source() {
                 return Err(CommandError::new(ErrorCode::Internal, "not a session.open"));
             };
             Ok(CommandResult::SessionOpen(SessionOpenResult {
+                mcp: None,
                 native_session_ref: format!("native-{}", open.segment_id),
                 resumed: open.mode == SessionMode::Resume,
                 import_report: None,
