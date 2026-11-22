@@ -840,6 +840,28 @@ mod tests {
     }
 
     #[test]
+    fn a_machine_directory_read_declares_its_physical_machine_subject() {
+        let op = for_route(&crate::resources::MachineDirectoryList::ROUTE).unwrap();
+        assert_eq!(op.variants.len(), 1);
+        let variant = &op.variants[0];
+        assert_eq!(
+            variant.operation,
+            crate::machine_sources::DIRECTORIES.operation
+        );
+        assert_eq!(variant.facets.len(), 1);
+        let facet = &variant.facets[0];
+        assert_eq!(facet.action, KeyAction::Read);
+        assert_eq!(facet.usage, FacetUsage::Required);
+        assert_eq!(
+            facet.resources,
+            [KeyTargetKind::Object(
+                orch_access_contract::permissions::ObjectKind::Machine
+            )]
+        );
+        assert_eq!(facet.target, crate::machine_sources::SUBJECT);
+    }
+
+    #[test]
     fn unknown_metadata_and_permissions_fail_closed() {
         let mut route = OperationCatalogueGet::ROUTE;
         route.operation = None;

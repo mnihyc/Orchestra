@@ -118,6 +118,7 @@ async fn set(s: &Scene, key: &str, value: Json) {
         .call(NodeSettingSet, &[&s.tree.org.base.id, &key])
         .token(&s.ada.token)
         .body(&NodeSettingSetBody {
+            model_choice: None,
             value,
             locked: None,
             expected_revision: None,
@@ -158,19 +159,514 @@ async fn document(s: &Scene, title: &str, markdown: &str) -> Id {
         .id
 }
 
-/// Turns of the indexer until the org's index stands as `state`, or the patience runs out.
+/// Turns of the indexer until the org's index stands as `state`, or the patience runs out. For a state that
+/// the index was not in already: after an act that leaves the index standing as it stood (idle, say), use
+/// [`index_where`] and wait for what the act changed.
 async fn index_until(s: &Scene, state: &str) -> orch_engine::semantic::state::OrgState {
+    index_where(s, state, |_| true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_index_retry_keeps_its_actual_batch_and_does_not_borrow_a_later_models_or_poll_interval()
+{
+    let s = Scene::new().await;
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seen = script_with_pause(&s, &[], Some(Arc::clone(&paused)));
+    let provider = embeddings_provider(&s, &["embed-a", "embed-b"]).await;
+    document(
+        &s,
+        "Retry source",
+        "A stored document needs its real embedding batch.",
+    )
+    .await;
+    set(&s, "search.semantic.max_disk_share", json!(null)).await;
+    set(&s, "search.semantic.enabled", json!(true)).await;
+    name(&s, provider, "embed-a", 8).await;
+    assert!(
+        vectors_or_reason(&s, &seen).await,
+        "captured query and retry facts require the deployment vector-enabled fixture"
+    );
+    let failed = index_until(&s, "paused").await;
+    let retry = failed
+        .retry
+        .expect("the failed actual content batch needs its captured retry facts");
+    assert_eq!(retry.model_name, "embed-a");
+    assert!(retry.batch_pieces > 0);
+    assert_eq!(
+        retry.next,
+        orch_api_contract::admin::SemanticRetryNext::IndexerPass
+    );
+    assert!(
+        retry.next_eligible_at.is_none(),
+        "a global polling interval is not a per-provider deadline"
+    );
+    set(&s, "search.semantic.enabled", json!(false)).await;
+    name(&s, provider, "embed-b", 8).await;
+    set(
+        &s,
+        "search.semantic.tuning",
+        json!({
+            "chunk_tokens":400,"batch_tokens":4096,"candidates":50,"oversample":4,"fusion_k":60,
+            "same_model_cosine_milli":990,"interval_secs":500,"query_wait_secs":3
+        }),
+    )
+    .await;
+    let now = s
+        .rig
+        .engine
+        .semantic_state(s.tree.org.base.id)
+        .await
+        .unwrap();
+    assert_eq!(now.model_name.as_deref(), Some("embed-b"));
+    let kept = now.retry.unwrap();
+    assert_eq!(kept.model_name, "embed-a");
+    assert!(kept.next_eligible_at.is_none());
+    assert_eq!(kept.batch_pieces, retry.batch_pieces);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_indexing_pass_finishes_the_recorded_retry_instead_of_promising_it_again() {
+    let s = Scene::new().await;
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seen = script_with_pause(&s, &[], Some(Arc::clone(&paused)));
+    let provider = embeddings_provider(&s, &["embed-a"]).await;
+    document(
+        &s,
+        "Retry later",
+        "The actual next pass must close its previous retry.",
+    )
+    .await;
+    set(&s, "search.semantic.max_disk_share", json!(null)).await;
+    set(&s, "search.semantic.enabled", json!(true)).await;
+    name(&s, provider, "embed-a", 8).await;
+    assert!(
+        vectors_or_reason(&s, &seen).await,
+        "captured query and retry facts require the deployment vector-enabled fixture"
+    );
+    let before = index_until(&s, "paused").await.retry.unwrap();
+    assert_eq!(
+        before.next,
+        orch_api_contract::admin::SemanticRetryNext::IndexerPass
+    );
+    paused.store(false, std::sync::atomic::Ordering::Relaxed);
+    let after = index_where(&s, "idle", |state| {
+        state.retry.as_ref().is_some_and(|retry| {
+            retry.next == orch_api_contract::admin::SemanticRetryNext::Finished
+        })
+    })
+    .await
+    .retry
+    .unwrap();
+    assert_eq!(after.model_name, before.model_name);
+    assert_eq!(after.generation_id, before.generation_id);
+    assert!(after.next_eligible_at.is_none());
+    assert_eq!(
+        before.next,
+        orch_api_contract::admin::SemanticRetryNext::IndexerPass,
+        "a later observation does not rewrite the old recorded decision"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serving_sources_belong_to_the_query_and_opening_their_details_never_embeds_again() {
+    use orch_engine::semantic::query::Meaning;
+    let s = Scene::new().await;
+    let seen = script(&s, &[]);
+    let provider = embeddings_provider(&s, &["embed-a", "embed-b"]).await;
+    document(
+        &s,
+        "Rollback",
+        "A release can be rolled back after a failed deployment.",
+    )
+    .await;
+    set(&s, "search.semantic.max_disk_share", json!(null)).await;
+    set(&s, "search.semantic.enabled", json!(true)).await;
+    name(&s, provider, "embed-a", 8).await;
+    assert!(
+        vectors_or_reason(&s, &seen).await,
+        "captured query and retry facts require the deployment vector-enabled fixture"
+    );
+    index_until(&s, "idle").await;
+    let first = s
+        .rig
+        .engine
+        .meaning(s.tree.org.base.id, "rollback")
+        .await
+        .unwrap();
+    let Meaning::Found { receipt, .. } = first else {
+        panic!("the active index answers this query");
+    };
+    assert_eq!(receipt.model_name, "embed-a");
+    assert_eq!(receipt.usage_owner, Some(s.ada.id()));
+    assert!(!receipt.cached);
+    let cached = s
+        .rig
+        .engine
+        .meaning(s.tree.org.base.id, "rollback")
+        .await
+        .unwrap();
+    let Meaning::Found {
+        receipt: cached, ..
+    } = cached
+    else {
+        panic!("the same query can use its cached vector");
+    };
+    assert!(cached.cached);
+    assert!(
+        cached.usage_owner.is_none(),
+        "a cached vector does not invent a new payer or request"
+    );
+    let query: SearchStreamListQuery =
+        serde_json::from_value(json!({"q":"rollback","sort":"relevance","immediate":true}))
+            .unwrap();
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&query)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<Json> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let source = events
+        .iter()
+        .find(|event| event["type"] == "meaning_sources")
+        .expect("even an exhausted search retains its source facts");
+    assert_eq!(source["total"], 1);
+    assert_eq!(source["single"]["model_name"], "embed-a");
+    let cursor = source["cursor"].as_str().unwrap();
+    set(&s, "search.semantic.enabled", json!(false)).await;
+    name(&s, provider, "embed-b", 8).await;
+    let before = seen.lock().unwrap().len();
+    let details: SearchStreamListQuery = serde_json::from_value(
+        json!({"q":"rollback","sort":"relevance","cursor":cursor,"source_details":true,"limit":1}),
+    )
+    .unwrap();
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&details)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let page: Json = serde_json::from_slice(
+        response
+            .raw
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["page"]["sources"][0]["model"]["model_name"], "embed-a");
+    assert_eq!(
+        page["page"]["sources"][0]["root"]["id"],
+        json!(s.tree.org.base.id)
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        before,
+        "Details is an authorized cached-fact read, never another embedding"
+    );
+    assert_eq!(
+        receipt.model_name, "embed-a",
+        "a later setting cannot rewrite the earlier native receipt"
+    );
+    let stranger = places::person(&s.rig.world, "other-reader").await;
+    let refused = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&stranger.token)
+        .query(&details)
+        .send_bytes()
+        .await;
+    assert_ne!(refused.status, 200);
+    let session = cursor.split_once(':').unwrap().0.parse::<Id>().unwrap();
+    sqlx::query(
+        "UPDATE search_sessions SET state=jsonb_set(state,ARRAY['meaning_positions',$2::text],
+        (state->'meaning_positions'->$2::text)-'receipt') WHERE id=$1",
+    )
+    .bind(session)
+    .bind(s.tree.org.base.id.to_string())
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let old = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&details)
+        .send_bytes()
+        .await;
+    assert_eq!(old.status, 200);
+    let page: Json = serde_json::from_slice(
+        old.raw
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        page["page"]["unreported"], true,
+        "uncaptured old facts are distinct from a complete zero-source reply"
+    );
+    assert!(page["page"]["sources"].as_array().unwrap().is_empty());
+    assert_eq!(seen.lock().unwrap().len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_captured_index_pages_without_retrieval_and_access_changes_do_not_skip_the_next_source()
+ {
+    let s = Scene::new().await;
+    let seen = script(&s, &[]);
+    let provider = embeddings_provider(&s, &["embed-a"]).await;
+    document(
+        &s,
+        "First rollback",
+        "Rollback a release in the first home.",
+    )
+    .await;
+    set(&s, "search.semantic.max_disk_share", json!(null)).await;
+    set(&s, "search.semantic.enabled", json!(true)).await;
+    name(&s, provider, "embed-a", 8).await;
+    assert!(
+        vectors_or_reason(&s, &seen).await,
+        "captured query and retry facts require the deployment vector-enabled fixture"
+    );
+    let other = places::make_org(
+        &s.rig.world,
+        &s.ada,
+        "Second index home",
+        "second-index-home",
+    )
+    .await
+    .base
+    .id;
+    s.rig
+        .world
+        .app
+        .call(NodeDocumentCreate, &[&other])
+        .token(&s.ada.token)
+        .body(&NodeDocumentCreateBody {
+            title: "Second rollback".into(),
+            blocks: None,
+            markdown: Some("Rollback a release in the second home.".into()),
+            access: None,
+        })
+        .send()
+        .await
+        .ok();
+    for (key, value) in [
+        ("search.semantic.max_disk_share", json!(null)),
+        ("search.semantic.enabled", json!(true)),
+        (
+            "search.semantic.embeddings",
+            json!({"provider_id":provider,"model_name":"embed-a","dimensions":8,
+            "query_prefix":"task: search result | query: ","document_prefix":"title: {title} | text: "}),
+        ),
+    ] {
+        s.rig
+            .world
+            .app
+            .call(NodeSettingSet, &[&other, &key])
+            .token(&s.ada.token)
+            .body(&NodeSettingSetBody {
+                model_choice: None,
+                value,
+                locked: None,
+                expected_revision: None,
+            })
+            .send()
+            .await
+            .ok();
+    }
+    index_until(&s, "idle").await;
+    for _ in 0..40 {
+        s.rig.engine.keep_indexing().await.unwrap();
+        let now = s.rig.engine.semantic_state(other).await.unwrap();
+        if now.state == "idle" && now.active.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        s.rig
+            .engine
+            .semantic_state(other)
+            .await
+            .unwrap()
+            .active
+            .is_some()
+    );
+    let query: SearchStreamListQuery =
+        serde_json::from_value(json!({"q":"rollback","sort":"relevance","immediate":true}))
+            .unwrap();
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&query)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let events: Vec<Json> = response
+        .raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let summary = events
+        .iter()
+        .find(|event| event["type"] == "meaning_sources")
+        .unwrap();
+    assert_eq!(summary["total"], 2);
+    assert!(
+        summary["single"].is_null(),
+        "one model cannot stand for multiple actual indexes"
+    );
+    let cursor = summary["cursor"].as_str().unwrap();
+    let before = seen.lock().unwrap().len();
+    let details: SearchStreamListQuery =
+        serde_json::from_value(json!({"q":"rollback","sort":"relevance","cursor":cursor,
+        "source_details":true,"limit":1}))
+        .unwrap();
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&details)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let first: Json = serde_json::from_slice(
+        response
+            .raw
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first["page"]["sources"].as_array().unwrap().len(), 1);
+    let first_root: Id =
+        serde_json::from_value(first["page"]["sources"][0]["root"]["id"].clone()).unwrap();
+    let mut next = details.clone();
+    next.source_offset =
+        Some(serde_json::from_value(first["page"]["next_offset"].clone()).unwrap());
+    // A current native suspension removes the first root; the captured ordinal still continues to the second.
+    sqlx::query("INSERT INTO org_suspensions (org_id,user_id,suspended_by) VALUES ($1,$2,$2)")
+        .bind(first_root)
+        .bind(s.ada.id())
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let session = cursor.split_once(':').unwrap().0.parse::<Id>().unwrap();
+    sqlx::query(
+        "UPDATE search_sessions SET state=jsonb_set(state,ARRAY['meaning_positions',$2::text],
+        (state->'meaning_positions'->$2::text)-'receipt') WHERE id=$1",
+    )
+    .bind(session)
+    .bind(first_root.to_string())
+    .execute(s.rig.db.pool())
+    .await
+    .unwrap();
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&next)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let second: Json = serde_json::from_slice(
+        response
+            .raw
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(second["page"]["total"], 1);
+    assert_eq!(
+        second["page"]["unreported"], false,
+        "a withdrawn root's missing receipt is no longer this reader's fact"
+    );
+    assert_eq!(second["page"]["sources"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        second["page"]["sources"][0]["root"]["id"],
+        json!(first_root)
+    );
+    assert!(second["page"]["next_offset"].is_null());
+    let mut filtered = details;
+    filtered.source_filter = Some("embed-a".into());
+    let response = s
+        .rig
+        .world
+        .app
+        .call(SearchStreamList, &[])
+        .token(&s.ada.token)
+        .query(&filtered)
+        .send_bytes()
+        .await;
+    assert_eq!(response.status, 200);
+    let page: Json = serde_json::from_slice(
+        response
+            .raw
+            .split(|byte| *byte == b'\n')
+            .find(|line| !line.is_empty())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["page"]["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        before,
+        "paging, filtering and current access checks never request new vectors"
+    );
+}
+
+/// Turns of the indexer until the org's index stands as `state` and `taken_up` says that the change just made
+/// has been taken up, or the patience runs out.
+///
+/// The standing alone does not say that. The engine's own supervisor takes a turn of the indexer beside the
+/// test's, and the turn that finds the org's claim held does nothing: the index then still stands as it did
+/// before the act ("idle", with the length it had), and a wait for "idle" returns at once with that. Nothing in
+/// the index counts its turns, so a wait for a change waits for the change: the length, the generation, the
+/// provider or the probes that the act is to cause.
+async fn index_where(
+    s: &Scene,
+    state: &str,
+    taken_up: impl Fn(&orch_engine::semantic::state::OrgState) -> bool,
+) -> orch_engine::semantic::state::OrgState {
     let org = s.tree.org.base.id;
     for _ in 0..40 {
         s.rig.engine.keep_indexing().await.unwrap();
         let now = s.rig.engine.semantic_state(org).await.unwrap();
-        if now.state == state {
+        if now.state == state && taken_up(&now) {
             return now;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let now = s.rig.engine.semantic_state(org).await.unwrap();
-    panic!("the index never stood as {state}: {now:?}");
+    panic!("the index never stood as {state} with the change taken up: {now:?}");
 }
 
 /// Whether the test database can keep vectors; where it cannot, checks that nothing is asked and the reason is said.
@@ -353,7 +849,8 @@ async fn the_indexer_makes_vectors_newest_first_and_pauses_before_the_disk_share
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_shorter_needs_none() {
-    let s = Scene::new().await;
+    // This case drives each indexing turn and counts its exact model requests.
+    let s = Scene::without_supervisor().await;
     // "served-a" is the model "embed-a" served under another name.
     let seen = script(&s, &[("served-a", "embed-a")]);
     let org = s.tree.org.base.id;
@@ -374,7 +871,7 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     }
     let first = index_until(&s, "idle").await.active.unwrap();
     // Updating names, model offers or access must not suspend a still-valid endpoint's old index.
-    sqlx::query("UPDATE providers SET revision = revision + 1 WHERE id = $1")
+    sqlx::query("UPDATE providers SET name=name||' revised',revision=revision+1 WHERE id=$1")
         .bind(provider)
         .execute(s.rig.db.pool())
         .await
@@ -392,7 +889,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // The same model elsewhere: the probe texts agree, the generation moves, nothing is made again.
     let before = seen.lock().unwrap().len();
     name(&s, elsewhere, "served-a", 4).await;
-    let moved = index_until(&s, "idle").await.active.unwrap();
+    let moved = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.provider_id == elsewhere)
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(moved.id, first.id);
     assert_eq!(moved.provider_id, elsewhere);
     assert_eq!(
@@ -414,7 +918,11 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
         "an unchecked endpoint is never compared with stored vectors"
     );
     let before = seen.lock().unwrap().len();
-    let checked = index_until(&s, "idle").await.active.unwrap();
+    let probed = Arc::clone(&seen);
+    let checked = index_where(&s, "idle", |_| probed.lock().unwrap().len() > before)
+        .await
+        .active
+        .unwrap();
     assert_eq!(
         checked.id, first.id,
         "the same model at the edited endpoint reuses its generation"
@@ -433,7 +941,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // Shorter vectors of the same model: cut in place, the index made anew, nothing made again.
     let before = seen.lock().unwrap().len();
     name(&s, elsewhere, "served-a", 2).await;
-    let shorter = index_until(&s, "idle").await.active.unwrap();
+    let shorter = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.dimensions == Some(2))
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(shorter.id, first.id);
     assert_eq!(shorter.dimensions, Some(2));
     assert_eq!(seen.lock().unwrap().len(), before + 1);
@@ -466,7 +981,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     // Another model, with room for both: a new generation is built and then answers; the old one goes.
     let before = seen.lock().unwrap().len();
     name(&s, provider, "embed-b", 2).await;
-    let rebuilt = index_until(&s, "idle").await.active.unwrap();
+    let rebuilt = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.model_name == "embed-b")
+    })
+    .await
+    .active
+    .unwrap();
     assert_ne!(rebuilt.id, first.id);
     assert_eq!(rebuilt.model_name, "embed-b");
     let made: usize = seen.lock().unwrap()[before..]
@@ -506,7 +1028,14 @@ async fn a_new_model_builds_a_new_generation_and_the_same_model_elsewhere_or_sho
     );
     // Rebuilding in place removes the present generation; a new one is built where it was.
     s.rig.engine.semantic_rebuild_in_place(org).await.unwrap();
-    let rebuilt_again = index_until(&s, "idle").await.active.unwrap();
+    let rebuilt_again = index_where(&s, "idle", |now| {
+        now.active
+            .as_ref()
+            .is_some_and(|active| active.model_name == "embed-a")
+    })
+    .await
+    .active
+    .unwrap();
     assert_eq!(rebuilt_again.model_name, "embed-a");
     assert_ne!(rebuilt_again.id, rebuilt.id);
 }
@@ -593,7 +1122,8 @@ async fn a_new_chunk_size_keeps_the_old_layout_answering_until_the_replacement_i
         "vectors with the former prompt title are stale immediately"
     );
     let before = seen.lock().unwrap().len();
-    index_until(&s, "idle").await;
+    let remade = Arc::clone(&seen);
+    index_where(&s, "idle", |_| remade.lock().unwrap().len() > before).await;
     assert!(
         seen.lock().unwrap()[before..]
             .iter()

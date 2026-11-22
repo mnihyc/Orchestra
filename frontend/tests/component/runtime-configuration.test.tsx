@@ -12,6 +12,7 @@ import { i18n } from '@/i18n';
 import { RuntimeConfiguration } from '@/features/resources/providers/RuntimeConfiguration';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { show } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 const server = vi.hoisted(() => ({ read: vi.fn<() => Promise<ResolvedSetting[]>>() }));
 vi.mock('@/api/resources', async (original) => {
@@ -36,13 +37,16 @@ it('writes a named secret separately, conceals its value and clears the field af
   const user = userEvent.setup();
   const provider = planProvider({ secrets_set: ['runtime:API_TOKEN'] });
   show(<RuntimeConfiguration provider={provider} />);
-  const value = await screen.findByLabelText('API_TOKEN');
+  // A secret that is set is dots with Replace; the field to type a new value is hidden as it is typed.
+  expect(await screen.findByLabelText('API_TOKEN')).toHaveValue(SECRET_DOTS);
+  await user.click(screen.getByRole('button', { name: i18n.t('settingsEditors.secret.replace') }));
+  const value = screen.getByLabelText('API_TOKEN');
   expect(value).toHaveAttribute('type', 'password');
   expect(value).toHaveValue('');
   await user.type(value, 'only-written-once');
   await user.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(setProviderSecret).toHaveBeenCalledWith(provider.id, 'runtime:API_TOKEN', 'only-written-once'));
-  await waitFor(() => expect(value).toHaveValue(''));
+  await waitFor(() => expect(screen.getByLabelText('API_TOKEN')).toHaveValue(SECRET_DOTS));
   expect(screen.queryByText('only-written-once')).not.toBeInTheDocument();
 });
 
@@ -50,7 +54,7 @@ it('a reader sees the secret name without a value field or save button', async (
   server.read.mockResolvedValue([{ key: 'runtime.secret_names', value: ['API_TOKEN'], own: null, source: { scope: 'default', node: null }, locked_by: null, writable: false, parts: [] }]);
   const provider = planProvider({ access: { permissions: ['provider.view'], administers: false, through: [],admin_only:[],participating:true } });
   show(<RuntimeConfiguration provider={provider} />);
-  const rows = await screen.findByRole('list', { name: 'Unit configuration' });
+  const rows = await screen.findByRole('list', { name: 'Container configuration' });
   expect(rows).toHaveTextContent('API_TOKEN');
   expect(screen.queryByLabelText('API_TOKEN')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
@@ -59,10 +63,10 @@ it('a reader sees the secret name without a value field or save button', async (
 
 it.each(['managed','connected'] as const)('a directory provider reads the same runtime settings with %s display placement', async (placement) => {
   show(<RuntimeConfiguration provider={planProvider({placement,runtime_support:{lifecycle:'attach',commands_after_start:{supported:true,reason:null},after_up:false}})} />);
-  expect(screen.getByText(/Runtime variables and sealed secrets override the agent profile/)).toBeVisible();
+  expect(screen.getByText(/Variables and secrets set here override the agent profile/)).toBeVisible();
   const definition = SETTINGS_REGISTRY.find((row) => row.key === 'runtime.secret_names');
   if (definition === undefined) throw new Error('The fixture registry has no runtime secret names');
-  const rows = await screen.findByRole('list',{name:'Unit configuration'});
+  const rows = await screen.findByRole('list',{name:'Container configuration'});
   expect(rows).toHaveTextContent(localizedSetting(definition, i18n).title);
   expect(rows).not.toHaveTextContent('runtime.secret_names');
   expect(await screen.findByLabelText('API_TOKEN')).toHaveAttribute('type','password');

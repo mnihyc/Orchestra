@@ -14,8 +14,8 @@
 //! `*`. This module is where the engine asks it, so that no second rule grows beside it.
 //!
 //! **What a turn's model has to be.** The model a turn states is the one resolved for its thread. It has to be
-//! enabled on the provider and within the allowlist of the place, and to list the effort the turn would use;
-//! the first two are [`check_allowed`], the third is the entry's own parameters. A turn is blocked with the
+//! enabled on the provider, capable of generation, and within the allowlist of the place. It must list the effort the turn would use;
+//! the first three are [`check_allowed`], the effort uses the entry's own parameters. A turn is blocked with the
 //! reason when one does not hold, and a lease lets a request through for the turn's model alone.
 //!
 //! **Groups.** A provider's managers may put a model in groups of their own naming (`frontier`, `small`), and a
@@ -49,6 +49,10 @@ pub enum NotAllowed {
     NotEnabled,
     /// The allowlist of the place leaves it out.
     LeftOutByThePlace,
+    /// The model or its provider declares work that excludes text generation.
+    GenerationUnsupported,
+    /// The stored declaration cannot be read.
+    Unreadable,
 }
 
 impl NotAllowed {
@@ -57,6 +61,10 @@ impl NotAllowed {
     pub fn describe(&self, model: &str) -> String {
         match self {
             Self::NotEnabled => format!("the model {model} is not enabled on the provider"),
+            Self::GenerationUnsupported => format!(
+                "The model {model} cannot generate replies. Choose a text generation model."
+            ),
+            Self::Unreadable => format!("The provider's settings for {model} could not be read."),
             Self::LeftOutByThePlace => {
                 format!("the model {model} is not among the models allowed here")
             }
@@ -64,20 +72,26 @@ impl NotAllowed {
     }
 }
 
-/// Whether the model with routing name `model` may be run: the provider lists it as enabled (`entry` is its
-/// row) and the allowlist of the place, where there is one, names it.
+/// A thread may use an enabled model that its place allows and whose purpose permits generation.
 pub fn check_allowed(
     entry: Option<&ModelRow>,
     allowlist: Option<&[String]>,
     model: &str,
 ) -> Result<(), NotAllowed> {
-    if !entry.is_some_and(|entry| entry.enabled) {
-        return Err(NotAllowed::NotEnabled);
-    }
-    if allowlist.is_some_and(|patterns| {
-        !entry.is_some_and(|entry| allowed_by(patterns, model, &entry.groups))
-    }) {
+    let entry = entry
+        .filter(|row| row.enabled)
+        .ok_or(NotAllowed::NotEnabled)?;
+    if allowlist.is_some_and(|patterns| !allowed_by(patterns, model, &entry.groups)) {
         return Err(NotAllowed::LeftOutByThePlace);
+    }
+    let purpose = orch_provider_contract::models::stored_model_purpose(
+        &entry.model_name,
+        &entry.parameters,
+        &entry.option_layers,
+    )
+    .map_err(|_| NotAllowed::Unreadable)?;
+    if !purpose.supports_purpose(orch_provider_contract::models::ModelPurpose::Generation) {
+        return Err(NotAllowed::GenerationUnsupported);
     }
     Ok(())
 }
@@ -126,7 +140,7 @@ mod tests {
         ModelRow {
             model_name: "openai/gpt-6-sol".to_owned(),
             display_name: display.to_owned(),
-            parameters: Json::Null,
+            parameters: serde_json::json!({}),
             option_layers: Json::Null,
             groups: Vec::new(),
             enabled,
@@ -189,6 +203,27 @@ mod tests {
             check_allowed(None, None, "openai/gpt-6-sol"),
             Err(NotAllowed::NotEnabled)
         );
+    }
+
+    #[test]
+    fn a_thread_can_use_an_unclassified_model_but_honours_its_declared_and_reachable_work() {
+        let mut model = entry("", true);
+        model.model_name = "local-choice".into();
+        let may_generate = |row: &ModelRow| check_allowed(Some(row), None, &row.model_name).is_ok();
+        model.parameters = serde_json::json!({});
+        assert!(may_generate(&model));
+        for declaration in [
+            serde_json::json!({"purposes":["embedding"]}),
+            serde_json::json!({"offered":{"purposes":["embedding"]}}),
+            serde_json::json!({"purposes":[]}),
+        ] {
+            model.parameters = declaration;
+            assert!(!may_generate(&model));
+        }
+        model.parameters = serde_json::json!({"purposes":["embedding","generation"]});
+        assert!(may_generate(&model));
+        model.option_layers = serde_json::json!({"endpoints":{"openai-embeddings":{}}});
+        assert!(!may_generate(&model));
     }
 
     #[test]

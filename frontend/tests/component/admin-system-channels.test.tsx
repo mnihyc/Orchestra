@@ -11,6 +11,7 @@ import { i18n, setLocale } from '@/i18n';
 import { meta } from '../doubles/fixtures';
 import { systemChannel, systemNotifier } from './admin-system-fixtures';
 import { show } from './support';
+import { SECRET_DOTS } from '@/ui/SecretField';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<NotificationChannel[]>>(), notifiers: vi.fn<() => Promise<Notifier[]>>(), scope: vi.fn<(scope: string) => void>(),
   create: vi.fn<typeof Settings.createSystemChannel>(), orgCreate: vi.fn<typeof Settings.createOrgChannel>(), update: vi.fn<typeof Settings.updateChannel>(),
@@ -79,8 +80,9 @@ for (const locale of ['en', 'zh-CN'] as const) {
     let dialog = screen.getByRole('dialog');
     const optional = i18n.t('ui.field.optional').replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
     const keptSecret = within(dialog).getByLabelText(new RegExp(`^Relay token\\s*${optional}$`, 'u'));
-    expect(keptSecret).toHaveValue('');
-    expect(keptSecret).toHaveAttribute('type', 'password');
+    // The saved token is dots that are set, never an empty box; nothing of it is read back.
+    expect(keptSecret).toHaveValue(SECRET_DOTS);
+    expect(within(dialog).getByText(i18n.t('settingsEditors.secret.set'))).toBeVisible();
     const name = within(dialog).getByRole('textbox', { name: i18n.t('settings.channels.name') });
     await user.clear(name); await user.type(name, 'Changed relay');
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.save') }));
@@ -100,7 +102,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     dialog = screen.getByRole('alertdialog', { name: i18n.t('settings.channels.removeTitle', { name: 'Changed relay' }) });
     await user.click(within(dialog).getByRole('button', { name: i18n.t('settings.channels.removeConfirm', { name: 'Changed relay' }) }));
     await waitFor(() => expect(calls.remove).toHaveBeenCalledExactlyOnceWith(original.id));
-    expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Changed relay' })).not.toBeInTheDocument());
     expect(calls.read).toHaveBeenCalledOnce(); expect(calls.orgCreate).not.toHaveBeenCalled();
   });
 }

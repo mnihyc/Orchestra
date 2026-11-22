@@ -123,3 +123,83 @@ async fn an_ordinary_home_change_accepts_the_same_root_and_refuses_another_root_
         assert_eq!(home_audits(&world, kind, id).await, audits, "{kind}");
     }
 }
+
+#[tokio::test]
+async fn a_server_hosts_new_home_requires_confirmation_when_the_same_role_entry_reaches_other_people()
+ {
+    let world = World::new().await;
+    let owner = person(&world, "server-home-owner").await;
+    let other = person(&world, "server-home-colleague").await;
+    let root = native_root(&world, &owner, "Server organization").await;
+    let project = native_project(&world, &owner, root, "Colleague project").await;
+    let id = resource(&world, &owner, root, "host", "Server host").await;
+    let mut conn = world.conn().await;
+    access::testing::insert_member(&mut conn, root, other.id(), root)
+        .await
+        .unwrap();
+    access::testing::name_owner(&mut conn, project, ("user", other.id()), world.now())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hosts SET bundled_with_server=true WHERE id=$1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    access::testing::set_row(
+        &mut conn,
+        &access::PageKey::new("host", id, "live"),
+        "any",
+        "host.use",
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    access::testing::add_entry(
+        &mut conn,
+        &access::PageKey::new("system", access::SYSTEM_ID, "defaults"),
+        "any",
+        "host.use",
+        ("role", None, Some("admin")),
+        None,
+        world.now(),
+    )
+    .await
+    .unwrap();
+    drop(conn);
+    let original = row(&world, "host", id).await;
+    let body = ResourceHomeSetBody {
+        home_id: project,
+        expected_revision: original["revision"].as_i64(),
+    };
+    let refused = world
+        .app
+        .call(ObjectHomeSet, &[&"hosts", &id])
+        .token(&owner.token)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(
+        refused.code,
+        orch_api_contract::common::ErrorCode::ConflictConfirmationRequired
+    );
+    assert_eq!(
+        row(&world, "host", id).await,
+        original,
+        "the unconfirmed role-context change rolls back"
+    );
+    let proof = refused.extra["server_host_use"]["confirmation"]
+        .as_str()
+        .unwrap();
+    world
+        .app
+        .call(ObjectHomeSet, &[&"hosts", &id])
+        .token(&owner.token)
+        .header("orch-server-host-use-confirmed", proof)
+        .body(&body)
+        .send()
+        .await
+        .ok();
+    assert_eq!(row(&world, "host", id).await["home_id"], json!(project));
+}

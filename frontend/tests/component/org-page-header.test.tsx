@@ -31,15 +31,15 @@ vi.mock('@/api/personal', async (original) => ({ ...await original<object>(),
   starNode: calls.star, unstarNode: calls.unstar,
 }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(), useGoToPlace: () => vi.fn() }));
-vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
+vi.mock('@/features/navigation/NodeDialogs', async (loadOriginal) => ({ ...await loadOriginal<object>(), openNodeDialog: calls.dialog }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncementContents: () => { calls.announcements(); return <div data-testid="announcement-composer" />; } }));
 vi.mock('@/features/thread/SubscriptionBell', () => ({ SubscriptionBell: () => { calls.notifications(); return <div data-testid="notification-options" />; } }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => { calls.tags(); return <div data-testid="tag-picker" />; } }));
 vi.mock('@/features/org/Activity', () => ({ OrgActivity: () => null, ActivityFeed: () => null }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: () => undefined }));
-vi.mock('@/shell/org', () => ({ selectOrg: () => undefined }));
-vi.mock('@/shell/screen', () => ({ useScreenHeading: () => undefined }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
+vi.mock('@/shell/org', async (loadOriginal) => ({ ...await loadOriginal<object>(), selectOrg: () => undefined }));
+vi.mock('@/shell/screen', async (loadOriginal) => ({ ...await loadOriginal<object>(), useScreenHeading: () => undefined }));
+vi.mock('@tanstack/react-router', async (loadOriginal) => ({ ...await loadOriginal<object>(), Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a> }));
 const appearance = useAppearance.getState();
 const previousTheme = document.documentElement.dataset.theme;
 const wasDark = document.documentElement.classList.contains('dark');
