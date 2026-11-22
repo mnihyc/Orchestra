@@ -17,6 +17,9 @@ import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
+import { InheritedChoiceLabel, type ChoiceInheritance } from '@/ui/InheritedChoice';
+import { deviceChoiceOf, offeredDeviceChoice } from '@/lib/viewChoiceFacts';
+import { DeviceChoiceException, DeviceChoiceFacts } from '@/ui/DeviceChoiceFacts';
 
 export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
   /** The actual resource, when this is a resource option without an inspection preview. */
@@ -33,6 +36,7 @@ export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
 };
 
 export interface SelectProps<Value extends string> extends FieldSlots {
+  inheritance?: ChoiceInheritance | undefined;
   value: Value;
   onValueChange: (value: Value) => void;
   options: readonly SelectOption<Value>[];
@@ -52,9 +56,19 @@ export interface SelectProps<Value extends string> extends FieldSlots {
   /** Classes of the frame round label, field and messages. */
   fieldClassName?: string;
   className?: string;
+  /** Authorized facts for the current choice, inside this opening instead of another popup. */
+  footer?: ReactNode;
 }
 
-export function Select<Value extends string>({
+export function Select<Value extends string>({ inheritance, ...props }: SelectProps<Value>) {
+  if (inheritance === undefined) return <SelectField {...props} />;
+  return <SelectField<string> {...props} value={inheritance.selected ? 'inherit' : `value:${props.value}`}
+    valueLabel={inheritance.selected ? <InheritedChoiceLabel choice={inheritance} /> : props.valueLabel}
+    options={[{ value: 'inherit', name: <InheritedChoiceLabel choice={inheritance} /> }, ...props.options.map((option) => ({ ...option, value: `value:${option.value}` }))]}
+    onValueChange={(next) => { if (next === 'inherit') inheritance.onSelect(); else { const option = props.options.find((option) => `value:${option.value}` === next); if (option !== undefined) props.onValueChange(option.value); } }} />;
+}
+
+function SelectField<Value extends string>({
   value,
   onValueChange,
   options,
@@ -75,8 +89,12 @@ export function Select<Value extends string>({
   id,
   fieldClassName,
   className,
+  footer,
 }: SelectProps<Value>) {
   const [shown, setShown, covered] = useTransientLayer(open, onOpenChange);
+  // Before the first opening, Radix only needs option names for typeahead, the field and its native form mirror.
+  const [opened, setOpened] = useState(shown);
+  if (shown && !opened) setOpened(true);
   // The list takes the room it has for the options it has now, not those it opened with.
   const field = useRef<HTMLElement | null>(null);
   const attachField = useCallback((node: HTMLElement | null) => { field.current = node; }, []);
@@ -84,8 +102,12 @@ export function Select<Value extends string>({
   const [highlighted, setHighlighted] = useState(value);
   const lastItem = useRef<HTMLElement | null>(null);
   const hasGuides = options.some((option) => option.help !== undefined);
-  const hasControls = hasGuides || options.some((option) => option.accessory !== undefined || option.preview !== undefined);
   const selected = options.find((option) => option.value === value);
+  const receipt = deviceChoiceOf(onValueChange);
+  const hasControls = footer !== undefined || receipt !== undefined || hasGuides || options.some((option) => option.accessory !== undefined || option.preview !== undefined);
+  const saved = options.find((option) => option.value === receipt?.saved);
+  const observation = receipt === undefined ? undefined : offeredDeviceChoice(receipt, value, options.map((option) => option.value));
+  const choiceName = (option: SelectOption<Value> | undefined) => option?.preview?.renderName === undefined ? option?.name ?? option?.label : option.preview.renderName(option.name ?? option.label);
   const active = options.find((option) => option.value === highlighted) ?? selected;
   const sections: { group: string | undefined; options: SelectOption<Value>[] }[] = [];
   for (const option of options) {
@@ -134,10 +156,13 @@ export function Select<Value extends string>({
       && selected !== undefined && mirror.value !== value
       && !Array.from(mirror.options).some((option) => option.value === value)) event.stopPropagation();
   };
+  const itemText = (option: SelectOption<Value>) => (
+    <Primitive.ItemText><span data-overflow-text={option.fullLabel}>{choiceName(option)}</span></Primitive.ItemText>
+  );
   const optionItem = (option: SelectOption<Value>) => (
     <div key={option.value} className="contents">{option.separatorBefore === true && <Primitive.Separator role="separator" className="my-1 h-px bg-border" />}<Choice
       presentation="picker"
-      name={<Primitive.ItemText><span data-overflow-text={option.fullLabel}>{option.preview?.renderName === undefined ? option.name ?? option.label : option.preview.renderName(option.name ?? option.label)}</span></Primitive.ItemText>}
+      name={itemText(option)}
       description={option.description}
       compact
     >{(content, choice) => <ChoiceCard preview={option.preview}><Primitive.Item
@@ -157,7 +182,7 @@ export function Select<Value extends string>({
     </Primitive.Item></ChoiceCard>}</Choice></div>
   );
   return (
-    <Field label={label} optional={optional} hint={hint} error={error} hideLabel={hideLabel} aside={aside} help={help} className={fieldClassName} id={id}>
+    <Field label={label} optional={optional} hint={hint} error={error} hideLabel={hideLabel} aside={observation === undefined ? aside : <>{aside}<DeviceChoiceException observation={observation} /></>} help={help} className={fieldClassName} id={id}>
       {(control) => (
         <div className="contents" onChangeCapture={keepNativeSelection}>
         <Primitive.Root value={value} onValueChange={(next) => onValueChange(next as Value)} disabled={disabled} open={shown} onOpenChange={changeOpen}>
@@ -191,6 +216,7 @@ export function Select<Value extends string>({
               role={hasControls ? 'dialog' : 'listbox'}
               aria-modal={hasControls ? true : undefined}
               aria-labelledby={hasControls ? control['aria-labelledby'] : undefined}
+              aria-label={hasControls && typeof label === 'string' ? label : undefined}
               position="popper"
               side={place.side}
               sideOffset={4}
@@ -205,7 +231,7 @@ export function Select<Value extends string>({
                 if (!hasControls) return;
                 if (event.key === 'F1' && activeHelp !== undefined) { event.preventDefault(); openGuide(); }
                 if (event.key === 'Tab') {
-                  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-choice-help], [data-choice-inspect], [data-choice-accessory] button'));
+                  const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[data-choice-help], [data-choice-inspect], [data-choice-accessory] button, [data-select-footer] a[href], [data-select-footer] button:not([disabled]), [data-select-footer] [tabindex="0"], [data-fact-disclosure-body] button:not([disabled]), [data-fact-disclosure-body] a[href], [data-fact-disclosure-body] [tabindex="0"]'));
                   if (buttons.length === 0) return;
                   const current = buttons.findIndex((button) => button === event.target);
                   const next = current < 0 ? event.shiftKey ? buttons.at(-1) : buttons[0] : buttons[current + (event.shiftKey ? -1 : 1)];
@@ -215,7 +241,10 @@ export function Select<Value extends string>({
                 }
               }}
             >
-              <ChoiceInspection><Primitive.Viewport role={hasControls ? 'listbox' : 'presentation'} aria-labelledby={hasControls ? control['aria-labelledby'] : undefined} className="p-1">
+              {!opened ? options.map((option) => (
+                <Primitive.Item key={option.value} value={option.value} disabled={option.disabled}>{itemText(option)}</Primitive.Item>
+              )) : <ChoiceInspection><Primitive.Viewport role={hasControls ? 'listbox' : 'presentation'} aria-labelledby={hasControls ? control['aria-labelledby'] : undefined}
+              aria-label={hasControls && typeof label === 'string' ? label : undefined} className="p-1">
                 {sections.map((section) => section.group === undefined ? section.options.map(optionItem) : (
                   <Primitive.Group key={section.options[0]?.value}>
                     <Primitive.Label className="px-2 py-1 text-xs font-medium text-text-muted">{section.group}</Primitive.Label>
@@ -228,7 +257,9 @@ export function Select<Value extends string>({
                   help={{ ...guide, onOpen: () => { changeOpen(false); guide.onOpen(); } }} compact />)}
               </div>}
               {active?.accessory !== undefined && <div data-choice-accessory className="flex min-w-0 items-center border-t border-border p-2">{active.accessory}</div>}
-              </ChoiceInspection>
+              {footer !== undefined && <div data-select-footer className="min-w-0 border-t border-border p-2">{footer}</div>}
+              {observation !== undefined && <div className="border-t border-border p-2"><DeviceChoiceFacts observation={observation} current={choiceName(selected)} saved={choiceName(saved)} inline /></div>}
+              </ChoiceInspection>}
             </Primitive.Content>
           </Primitive.Portal>
         </Primitive.Root>

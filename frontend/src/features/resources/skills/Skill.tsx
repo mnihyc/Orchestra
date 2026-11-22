@@ -13,6 +13,7 @@ import { ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/feat
 import { Facts } from '@/features/resources/Facts';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
+import type { SkillTab } from '@/features/resources/tabs';
 import { languageOf } from '@/features/files/languages';
 import type { Skill, SkillOrigin, SkillVersionInfo } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
@@ -35,9 +36,8 @@ import { Hint } from '@/features/help/Hint';
 import { LibraryCounts, libraryQuery } from '@/features/resources/Library';
 import { SkillRefusal } from './Refusal';
 import { AddVersion } from './SkillDialog';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
-export type SkillTab = 'overview' | 'versions' | 'draft' | 'access';
-export const SKILL_TABS: readonly SkillTab[] = ['overview', 'versions', 'draft', 'access'];
 
 /** Where a version came from, in a few words. */
 export function OriginWords({ origin }: { origin: SkillOrigin }) {
@@ -60,24 +60,28 @@ export function SkillScreen({ id, tab, onTab }: { id: string; tab?: SkillTab; on
   const query = useQuery(skillQuery(id));
   const back = useResourceHeading('skills', GraduationCap, query.data?.name ?? t('common.loading'), query.data?.id);
   const [localTab, setLocalTab] = useState<SkillTab>('overview');
+  const shown = tab ?? localTab;
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [switching,setSwitching]=useState<boolean|null>(null);
+  const application=useApplicationImpact({object:{kind:'skill',id},model_id:null},switching!==null||removing);
+  const showPublication=shown==='overview'&&query.data?.origin!==undefined&&query.data.origin!==null&&holds(query.data.access,'skill.manage');
+  const publication=useApplicationImpact({object:{kind:'skill',id},model_id:null},showPublication,{skill_publication:true});
   const kept = (skill: Skill) => cache.setQueryData(skillKey(id), skill);
   const reimport = useMutation({ mutationFn: () => reimportSkill(id), onSuccess: () => { void cache.invalidateQueries({ queryKey: skillKey(id) }); void cache.invalidateQueries({ queryKey: skillVersionsKey(id) }); } });
-  const toggle = useMutation({ mutationFn: (enabled: boolean) => updateSkill(id, { enabled, expected_revision: query.data?.revision ?? 0 }), onSuccess: kept });
+  const toggle = useMutation({ mutationFn: (enabled: boolean) => updateSkill(id, { enabled, expected_revision: query.data?.revision ?? 0 }), onSuccess: (value)=>{kept(value);setSwitching(null);} });
   const remove = useMutation({ mutationFn: () => deleteSkill(id), onSuccess: () => { void navigate({ to: '/resources/skills' }); } });
   if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const skill = query.data;
   const target = { kind: 'skill' as const, id, name: skill.name };
   const manage = holds(skill.access, 'skill.manage');
   const admin = adminSpec(skill, 'skill.manage');
-  const shown = tab ?? localTab;
   const latest = skill.latest;
   const menu = [...homeMoveEntries(t, 'skill', skill, { draft: shown === 'draft' }), ...resourceDuplicateEntries(t, 'skill', skill, { draft: shown === 'draft' }), ...entriesOf([copyLinkAct(t, { kind: 'skill', id }), shareAct(t, target, skill.access)], [managedAct({ id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) }, manage, t('resources.act.manageRequired'))], [cleanup.act({ kind: 'skill', id }, manage)])];
   const add = managedAct({ id: 'add-version', label: t('resourceDetails.skill.upload'), icon: <Upload aria-hidden />, run: () => setAdding(true) }, manage, t('resources.act.manageRequired'));
   const facts = [
     { name: t('resources.home.label'), value: skill.home.name ?? t('access.place.hidden') },
-    { name: t('resourceDetails.enabled'), value: <Switch label={t(skill.enabled ? 'resourceDetails.on' : 'resourceDetails.off')} checked={skill.enabled} disabled={!manage || toggle.isPending} tooltip={manage ? undefined : t('resources.act.manageRequired')} aria-description={manage ? undefined : t('resources.act.manageRequired')} onCheckedChange={(enabled) => { if (manage) toggle.mutate(enabled); }} /> },
+    { name: t('resourceDetails.enabled'), value: <Switch label={t(skill.enabled ? 'resourceDetails.on' : 'resourceDetails.off')} checked={skill.enabled} disabled={!manage || toggle.isPending} tooltip={manage ? undefined : t('resources.act.manageRequired')} aria-description={manage ? undefined : t('resources.act.manageRequired')} onCheckedChange={(enabled) => { if (manage) setSwitching(enabled); }} /> },
     { name: t('resourceDetails.skill.latest'), value: latest === null ? t('resourceDetails.skill.noVersion') : <span className="flex flex-wrap items-center gap-x-2">
       {t('resourceDetails.skill.version', { number: latest.number })}
       {latest.created_by !== null && <UserChip user={latest.created_by} />}
@@ -94,16 +98,17 @@ export function SkillScreen({ id, tab, onTab }: { id: string; tab?: SkillTab; on
       <Facts compact label={t('resourceDetails.overview')} rows={facts} />
     </Section>
     {(skill.origin !== null || reimport.data !== undefined || reimport.error !== null || toggle.error !== null) && <div className="flex flex-wrap items-center gap-2">
-      {skill.origin !== null && <Button admin={admin} icon={<RefreshCw aria-hidden />} blocked={!manage} reason={manage ? undefined : t('resources.act.manageRequired')} pending={reimport.isPending} onClick={() => { if (manage) reimport.mutate(); }}>{t('resourceDetails.skill.reimport')}</Button>}
+      {skill.origin !== null && <Button admin={admin} icon={<RefreshCw aria-hidden />} blocked={!manage||!publication.ready} reason={manage ? undefined : t('resources.act.manageRequired')} pending={reimport.isPending} onClick={() => { if (manage&&publication.ready) reimport.mutate(); }}>{t('resourceDetails.skill.reimport')}</Button>}
+      {showPublication&&<ApplicationPreview read={publication.read}/>}
       {reimport.data !== undefined && !reimport.data.made && <span role="status" className="text-sm text-text-muted">{t('resourceDetails.skill.upToDate')}</span>}
       {reimport.error !== null && <SkillRefusal error={reimport.error} />}
       {toggle.error !== null && <ErrorAlert error={toggle.error} />}
     </div>}
     {latest !== null && <VersionFiles skillId={id} versionId={latest.id} />}
   </>;
-  return <Page><PageHeader adminAccess={skill.access.admin_access} ownership={skill} opening={{ kind: 'skill', id: skill.id }} back={back} title={skill.name} lead={skill.description}
+  return <Page><PageHeader compactResource facts={[t(skill.enabled ? 'resourceDetails.on' : 'resourceDetails.off')]} adminAccess={skill.access.admin_access} ownership={skill} opening={{ kind: 'skill', id: skill.id }} back={back} title={skill.name} lead={skill.description}
     mark={<PlaceMark><GraduationCap aria-hidden /></PlaceMark>}
-    actions={<><Hint id="skills" popover /><HeadingActs admin={admin} name={skill.name} primary={add} edit={null} menu={menu} /></>} />
+    help={<Hint id="skills" popover />} actions={<HeadingActs admin={admin} name={skill.name} primary={add} edit={null} menu={menu} />} />
     <Tabs label={t('resourceDetails.layout.tabs')} value={shown} onValueChange={onTab ?? setLocalTab} panelClassName="pt-4" tabs={[
       { value: 'overview', label: t('resourceDetails.overview'), panel: overview },
       { value: 'versions', label: t('resourceDetails.skill.versions'), panel: <Versions skill={skill} /> },
@@ -112,8 +117,14 @@ export function SkillScreen({ id, tab, onTab }: { id: string; tab?: SkillTab; on
     ]} />
     {adding && <AddVersion skill={skill} onClose={() => setAdding(false)} />}
     {cleanup.dialogs}
+    <ConfirmDialog admin={admin} open={switching!==null} onOpenChange={(open)=>{if(!open)setSwitching(null);}}
+      title={t(switching===true?'resourceImpact.enableTitle':'resourceImpact.disableTitle',{name:skill.name})}
+      confirmLabel={t(switching===true?'resources.act.enable':'resources.act.disable')} danger={switching===false}
+      pending={toggle.isPending} disabled={!application.ready} error={toggle.error} onConfirm={()=>{if(switching!==null)toggle.mutate(switching);}}>
+      <ApplicationPreview read={application.read} kind={switching===true?'enable':'disable'}/>
+    </ConfirmDialog>
     <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t('resourceDetails.removeTitle', { name: skill.name })} confirmLabel={t('resourceDetails.remove')} danger
-      pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t('resourceDetails.skill.removeHelp')}</ConfirmDialog>
+      pending={remove.isPending} disabled={!application.ready} error={remove.error} onConfirm={() => remove.mutate()}><span className="flex min-w-0 flex-col gap-2"><span>{t('resourceDetails.skill.removeHelp')}</span><ApplicationPreview read={application.read} kind="delete"/></span></ConfirmDialog>
   </Page>;
 }
 

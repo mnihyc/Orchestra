@@ -629,6 +629,7 @@ impl orch_connector_core::programs::Handler for Programs {
             })
             .collect();
         MachinePrograms {
+            approvals: Vec::new(),
             machine_view: None,
             entries,
             capabilities: [Kind::Agent, Kind::ProviderSource]
