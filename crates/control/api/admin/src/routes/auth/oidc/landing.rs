@@ -295,7 +295,7 @@ async fn sign_in_inner(
     let registering = matches!(&decision, Decision::Register);
     let user = match decision {
         Decision::SignIn { user } => {
-            let person = orch_db::queries::transaction_guard::lock_person(&mut tx, user)
+            let person = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, user)
                 .await?
                 .ok_or_else(|| {
                     ApiError::new(
@@ -593,7 +593,7 @@ pub(super) async fn link(
         )))
     };
     let mut tx = ctx.app.db.begin().await?;
-    let Some(person) = orch_db::queries::transaction_guard::lock_person(&mut tx, user)
+    let Some(person) = orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, user)
         .await?
         .filter(|person| person.kind == "human")
     else {
@@ -689,7 +689,8 @@ pub(super) async fn proof(
     let Some(person) = tokens::live_session_user(&mut tx, session, ctx.now).await? else {
         return refused(NO_SESSION);
     };
-    let Some(current) = orch_db::queries::transaction_guard::lock_person(&mut tx, person).await?
+    let Some(current) =
+        orch_db::queries::transaction_guard::lock_credential_writer(&mut tx, person).await?
     else {
         return refused(NO_SESSION);
     };

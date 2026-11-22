@@ -1,8 +1,9 @@
+import { channelPage, pageOf } from './collection.ts';
 /** The away projections extend the one world's existing notifications, routes, channels and preferences. */
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
-import type { NodeRef, Notification, NotificationChannel, NotificationPrefs, NotificationRoute, NotificationSummaryGetReply, OutsideStatus } from '../../src/generated/api-types.ts';
+import type { NodeRef, Notification, NotificationChannel, NotificationChannelPage, NotificationPrefs, NotificationRoute, NotificationSummaryGetReply, OutsideStatus } from '../../src/generated/api-types.ts';
 import type { AwayNotification, AwayPrefs, AwayRoute, NotificationGroup, PushDevice, ReadResult } from '../../src/features/settings/personal/away/types.ts';
 import { type Answer, type Part, type Person, Refusal, type World } from './world.ts';
 
@@ -34,7 +35,7 @@ export class AwayWorld implements Part {
   private rows(user: string): Notification[] { return this.world.notifications.rows.get(user) ?? []; }
   private key(user: string, channelId: string): string { return `${user}:${channelId}`; }
   private channels(person: Person): NotificationChannel[] {
-    const channels = this.world.notifications.handle(person, 'GET', '/notification-channels', new URLSearchParams(), {})?.body as NotificationChannel[];
+    const channels = this.world.notifications.channelsFor(person);
     return channels.filter((channel) => !this.removedChannels.has(channel.id));
   }
   private prefs(person: Person): AwayPrefs {
@@ -234,12 +235,13 @@ export class AwayWorld implements Part {
         return { status: 200, body: next };
       }
     }
-    if (method === 'GET' && path === '/me/notification-routes') return { status: 200, body: this.routes(person) };
-    if (method === 'GET' && path === '/notification-channels' && !query.has('org_id')) return { status: 200, body: this.channels(person).map((channel) => ({ ...channel, route: this.route(person, channel), enabled_route_count: null })) };
+    if (method === 'GET' && path === '/me/notification-routes') return { status: 200, body: pageOf(this.routes(person).filter((row) => !query.has('retained') || (row.health === 'channel_removed') === (query.get('retained') === 'true')), query, (row) => (row.channel?.name ?? '') + ' ' + (row.channel?.kind ?? '') + ' ' + (row.label ?? '')) };
+    if (method === 'GET' && path === '/notification-channels' && !query.has('org_id')) return { status: 200, body: channelPage(this.channels(person).filter((channel) => query.get('system') !== 'true' || channel.owner === 'system').map((channel) => ({ ...channel, route: this.route(person, channel), enabled_route_count: null })), query) };
     if (method === 'GET' && path === '/notification-channels' && query.has('org_id')) {
       const answer = this.world.settings.handle(person, method, path, query, body);
-      const channels = (answer?.body ?? []) as NotificationChannel[];
-      return { status: 200, body: channels.filter((channel) => !this.removedChannels.has(channel.id)).map((channel) => ({ ...channel, enabled_route_count: [...this.world.notifications.routes].filter(([key, route]) => key.endsWith(`:${channel.id}`) && route.enabled).length })) };
+      const page = answer?.body as NotificationChannelPage;
+      const channels = page.items;
+      return { status: 200, body: { ...page, items: channels.filter((channel) => !this.removedChannels.has(channel.id)).map((channel) => ({ ...channel, enabled_route_count: [...this.world.notifications.routes].filter(([key, route]) => key.endsWith(`:${channel.id}`) && route.enabled).length })) } };
     }
     const removed = /^\/notification-channels\/([^/]+)$/.exec(path)?.[1];
     if (method === 'DELETE' && removed !== undefined) {
@@ -288,7 +290,7 @@ export class AwayWorld implements Part {
       const projected = this.route(person, channel);
       this.announce(person, 'route'); return { status: 200, body: projected };
     }
-    if (method === 'GET' && path === '/me/push-subscriptions') return { status: 200, body: this.devices.get(user) ?? [] };
+    if (method === 'GET' && path === '/me/push-subscriptions') return { status: 200, body: pageOf(this.devices.get(user) ?? [], query, (row) => row.label) };
     if (method === 'POST' && path === '/me/push-subscriptions') {
       const answer = this.world.notifications.handle(person, method, path, query, body);
       const hash = createHash('sha256').update(String(body.endpoint)).digest('hex');

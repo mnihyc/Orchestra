@@ -1,13 +1,18 @@
 /** Kept volumes, current restore/purge guards and the actual durable job, with no optimistic restoration. */
+import { PathLink } from '@/shell/TrailLink';
 import { Cleanup } from '@/features/storage/Cleanup';
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Boxes, Eye, RotateCcw, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ApiError } from '@/api/client';
 import { environmentQuery } from '@/api/environments';
 import { keptEnvironmentsQuery, restoreEnvironment, retainedEnvironmentQuery, retentionJobQuery } from '@/api/trace';
 import { newActKey } from '@/lib/requests';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { useRetainedRows } from '@/lib/retainedRows';
+import { CollectionSearch } from '@/ui/CollectionSearch';
+import { ScrollRegion } from '@/ui/ScrollRegion';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes } from '@/lib/format';
 import { Badge } from '@/ui/Badge';
@@ -39,7 +44,7 @@ export function JobProgress({ id, environmentId, onFinished }: { id: string; env
   const refreshed = useRef<string | null>(null);
   const finished = job.data !== undefined && !['queued', 'running'].includes(job.data.state);
   const restored = job.data?.kind === 'environment_restore' && job.data.state === 'succeeded';
-  const live = useQuery({ ...environmentQuery(environmentId), enabled: restored, staleTime: 0 });
+  const live = useQuery({ ...environmentQuery(environmentId), enabled: restored });
   useEffect(() => {
     if (!finished || refreshed.current === id) return;
     refreshed.current = id;
@@ -54,7 +59,7 @@ export function JobProgress({ id, environmentId, onFinished }: { id: string; env
     {job.data.error !== null ? <ErrorAlert error={job.data.error} /> : <StateLine compact message={state} />}
     {(job.data.state === 'queued' || job.data.state === 'running') && <Meter look="progress" value={job.data.progress.percent} label={state} />}
     {(job.data.state === 'queued' || job.data.state === 'running') && <JobActivityLine job={job.data} />}
-    {live.data?.status === 'stopped' && <StateLine compact message={t('trace.restoreStopped')} action={<Button size="sm" action="open" asChild><a href={`/resources/environments/${environmentId}`}>{t('trace.openEnvironment')}</a></Button>} />}
+    {live.data?.status === 'stopped' && <StateLine compact message={t('trace.restoreStopped')} action={<Button size="sm" action="open" asChild><PathLink href={`/resources/environments/${environmentId}`}>{t('trace.openEnvironment')}</PathLink></Button>} />}
     {live.isError && <ErrorAlert error={live.error} />}
   </div>;
 }
@@ -62,28 +67,50 @@ function PurgeDialog({ entry, onClose, onAccepted, onRefused }: { entry: Deleted
   return <Cleanup request={{scope:'me',resource:{kind:'environment',id:entry.environment.id},items:[`environment:${entry.environment.id}`]}} onClose={onClose} onAccepted={(job)=>onAccepted(job.id)} onFinished={onRefused} onRefused={onRefused} />;
 }
 
-export function KeptEnvironmentRow({ entry, hostOnly = false, onJob, onRefresh }: { entry: RemovalEntry; hostOnly?: boolean; onJob?: (id: string, environmentId: string) => void; onRefresh?: () => void }) {
+export function KeptEnvironmentRow({ entry, hostOnly = false, onJob, onRefresh, onActive }: { entry: RemovalEntry; hostOnly?: boolean; onJob?: (id: string, environmentId: string) => void; onRefresh?: () => void; onActive?: (active: boolean) => void }) {
   const { t } = useTranslation();
   const removal = entry.removal ?? null;
   if (removal === null) return <EmptyState compact title={t('trace.noContent')} icon={<Eye aria-hidden />} />;
-  return <ReadyKeptEnvironmentRow entry={{ ...entry, removal }} hostOnly={hostOnly} onJob={onJob} onRefresh={onRefresh} />;
+  return <ReadyKeptEnvironmentRow entry={{ ...entry, removal }} hostOnly={hostOnly} onJob={onJob} onRefresh={onRefresh} onActive={onActive} />;
 }
-function ReadyKeptEnvironmentRow({ entry, hostOnly = false, onJob, onRefresh }: { entry: DeletedEnvironment; hostOnly?: boolean; onJob?: (id: string, environmentId: string) => void; onRefresh?: () => void }) {
+function ReadyKeptEnvironmentRow({ entry, hostOnly = false, onJob, onRefresh, onActive }: { entry: DeletedEnvironment; hostOnly?: boolean; onJob?: (id: string, environmentId: string) => void; onRefresh?: () => void; onActive?: (active: boolean) => void }) {
   const { t } = useTranslation(); const [purging, setPurging] = useState<DeletedEnvironment | null>(null); const [jobId, setJobId] = useState<string | null>(entry.removal.job?.id ?? null);
   const refresh = () => onRefresh?.();
   const restore = useMutation({ mutationFn: () => restoreEnvironment(entry.environment.id, entry.removal.revision, newActKey()), onSuccess: (job) => { if (onJob === undefined) setJobId(job.id); else onJob(job.id, entry.environment.id); refresh(); }, onError: (error) => { if (error instanceof ApiError) refresh(); } });
+  useEffect(() => { onActive?.(purging !== null || restore.isPending); }, [onActive, purging, restore.isPending]);
   const facts = entry.removal;
   useEffect(() => { if (facts.job !== null && onJob !== undefined) onJob(facts.job.id, entry.environment.id); }, [facts.job?.id, onJob, entry.environment.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <div className="flex min-w-0 flex-col gap-3" data-kept-environment={entry.environment.id}><RemovalFacts entry={entry} />{!hostOnly && <p className="text-sm text-text-muted">{t('trace.restoreStopped')}</p>}<div className="flex flex-wrap gap-2">{!hostOnly && facts.can_inspect && <Button size="sm" action="show" asChild><a href={inspectionHref('environment', entry.environment.id)}>{t('trace.inspect')}</a></Button>}{!hostOnly && facts.can_restore && <Button size="sm" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => restore.mutate()}>{t('trace.restore')}</Button>}{!hostOnly && facts.can_purge && <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} onClick={() => setPurging(entry)}>{t('trace.purge')}</Button>}</div>{restore.error !== null && <ErrorAlert error={restore.error} />}{hostOnly && facts.job !== null && <p className="text-sm wrap-anywhere text-text-muted">{retainedJobWords(t,facts.job)}</p>}{!hostOnly && jobId !== null && onJob === undefined && <JobProgress id={jobId} environmentId={entry.environment.id} onFinished={refresh} />}{purging !== null && <PurgeDialog entry={purging} onClose={() => setPurging(null)} onAccepted={(id) => { if (onJob === undefined) setJobId(id); else onJob(id, entry.environment.id); refresh(); }} onRefused={refresh} />}</div>;
+  return <div className="flex min-w-0 flex-col gap-3" data-kept-environment={entry.environment.id}><RemovalFacts entry={entry} />{!hostOnly && <p className="text-sm text-text-muted">{t('trace.restoreStopped')}</p>}<div className="flex flex-wrap gap-2">{!hostOnly && facts.can_inspect && <Button size="sm" action="show" asChild><PathLink href={inspectionHref('environment', entry.environment.id)}>{t('trace.inspect')}</PathLink></Button>}{!hostOnly && facts.can_restore && <Button size="sm" icon={<RotateCcw aria-hidden />} pending={restore.isPending} onClick={() => restore.mutate()}>{t('trace.restore')}</Button>}{!hostOnly && facts.can_purge && <Button size="sm" variant="danger-ghost" icon={<Trash2 aria-hidden />} onClick={() => setPurging(entry)}>{t('trace.purge')}</Button>}</div>{restore.error !== null && <ErrorAlert error={restore.error} />}{hostOnly && facts.job !== null && <p className="text-sm wrap-anywhere text-text-muted">{retainedJobWords(t,facts.job)}</p>}{!hostOnly && jobId !== null && onJob === undefined && <JobProgress id={jobId} environmentId={entry.environment.id} onFinished={refresh} />}{purging !== null && <PurgeDialog entry={purging} onClose={() => setPurging(null)} onAccepted={(id) => { if (onJob === undefined) setJobId(id); else onJob(id, entry.environment.id); refresh(); }} onRefused={refresh} />}</div>;
+}
+interface KeptRow { id: string; entry: DeletedEnvironment }
+function KeptListRow({ row, visible, keep, onJob, refresh }: { row: KeptRow; visible: boolean; keep: (row: KeptRow, active: boolean) => void; onJob: (id: string, environmentId: string) => void; refresh: () => void }) {
+  const onActive = useCallback((active: boolean) => keep(row, active), [keep, row]);
+  return <li hidden={!visible} className="py-4"><KeptEnvironmentRow entry={row.entry} onJob={onJob} onRefresh={refresh} onActive={onActive} /></li>;
 }
 export function KeptEnvironments({ node, open, hideEmpty = false }: { node: string; open: boolean; hideEmpty?: boolean }) {
+  const search = useCollectionSearch('kept-environments:' + node);
+  return <KeptEnvironmentList key={search.scope} node={node} open={open} hideEmpty={hideEmpty} search={search} />;
+}
+function KeptEnvironmentList({ node, open, hideEmpty, search }: { node: string; open: boolean; hideEmpty: boolean; search: ReturnType<typeof useCollectionSearch> }) {
   const { t } = useTranslation();
   const [jobs, setJobs] = useState<{ id: string; environmentId: string }[]>([]);
   const onJob = useCallback((id: string, environmentId: string) => setJobs((held) => held.some((job) => job.id === id) ? held : [...held, { id, environmentId }]), []);
-  const list = useInfiniteQuery({ ...keptEnvironmentsQuery(node), enabled: open }); const rows = list.isError ? [] : list.data?.pages.flatMap((page) => page.items) ?? [];
+  const list = useInfiniteQuery({ ...keptEnvironmentsQuery(node, search.q), enabled: open });
+  const rows = useMemo(() => list.isError ? [] : list.data?.pages.flatMap((page) => page.items.map((entry) => ({ id: entry.environment.id, entry }))) ?? [], [list.isError, list.data]);
+  const kept = useRetainedRows(rows);
   const refresh = () => { void list.refetch(); };
-  if (hideEmpty && list.isSuccess && rows.length === 0 && jobs.length === 0) return null;
-  return <section aria-label={t('trace.keptTitle')} className="mt-6 flex flex-col gap-3"><h3 className="font-medium">{t('trace.keptTitle')}</h3>{jobs.map((job) => <JobProgress key={job.id} id={job.id} environmentId={job.environmentId} onFinished={refresh} />)}<p className="text-sm text-text-muted">{t('trace.keptLead')}</p>{list.isPending ? <SkeletonRows read={list} rows={3} /> : list.isError ? <ErrorState compact title={t('trace.environmentReadFailure')} error={list.error} onRetry={refresh} /> : rows.length === 0 ? <EmptyState compact title={t('trace.keptEmpty')} icon={<RotateCcw aria-hidden />} /> : <ul className="divide-y divide-border">{rows.map((row) => <li key={row.environment.id} className="py-4"><KeptEnvironmentRow entry={row} onJob={onJob} onRefresh={refresh} /></li>)}</ul>}<Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} /></section>;
+  if (hideEmpty && search.text === '' && list.isSuccess && rows.length === 0 && kept.rows.length === 0 && jobs.length === 0) return null;
+  return <section aria-label={t('trace.keptTitle')} className="mt-6 flex flex-col gap-3">
+    <h3 className="font-medium">{t('trace.keptTitle')}</h3>
+    <CollectionSearch name={t('trace.keptTitle')} {...search} />
+    {jobs.map((job) => <JobProgress key={job.id} id={job.id} environmentId={job.environmentId} onFinished={refresh} />)}
+    <p className="text-sm text-text-muted">{t('trace.keptLead')}</p>
+    {list.isPending ? <SkeletonRows read={list} rows={3} /> : list.isError ? <ErrorState compact title={t('trace.environmentReadFailure')} error={list.error} onRetry={refresh} /> : rows.length === 0 ? <EmptyState compact title={t('trace.keptEmpty')} icon={<RotateCcw aria-hidden />} /> : null}
+    <ScrollRegion kind="table" label={t('trace.keptTitle')} className="max-h-96 overflow-y-auto"><ul className="divide-y divide-border">
+      {kept.rows.map((row) => <KeptListRow key={row.id} row={row} visible={kept.visible.has(row.id)} keep={kept.keep} onJob={onJob} refresh={refresh} />)}
+    </ul></ScrollRegion>
+    <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
+  </section>;
 }
 /** Metadata only: no Files, shells, starting control or environment feed mounts here. */
 export function RetainedEnvironmentInspection({ id }: { id: string }) {
