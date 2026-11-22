@@ -12,11 +12,14 @@ import { Fragment, type SyntheticEvent, useCallback, useEffect, useMemo, useRef,
 import { useTranslation } from 'react-i18next';
 
 import { orgsQuery } from '@/api/nodes';
-import { ApiError } from '@/api/client';
+import { ApiError, client } from '@/api/client';
+import { useStore } from 'zustand';
+import { requestReader } from '@/lib/readAttempts';
 import { tooShort } from '@/api/search';
 import { Filters } from '@/features/search/Filters';
 import { Hit } from '@/features/search/Hit';
-import { SEARCH_TABS, inOrg, filtersOf, narrowing, readParams, restoredView, savedView, tabOf, withTab, type SearchParams } from '@/features/search/params';
+import { MeaningFacts } from '@/features/search/MeaningFacts';
+import { SEARCH_TABS, inOrg, filtersOf, narrowing, readParams, restoredView, savedView, tabOf, unavailableSavedView, withTab, type SearchParams } from '@/features/search/params';
 import { OrgScope } from '@/features/search/OrgScope';
 import { groupHitIds, useHitOrgs } from '@/features/search/orgHits';
 import { keyOfHit } from '@/features/search/hits';
@@ -32,11 +35,12 @@ import { labelsOfHits } from '@/features/search/labels';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { useDebounced } from '@/lib/debounce';
 import { useViewChoice } from '@/lib/viewChoices';
+import { bindDeviceChoice } from '@/lib/viewChoiceFacts';
 import { useScreenHeading } from '@/shell/screen';
 import { Page, PageHeader } from '@/shell/Page';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
-import { Tooltip } from '@/ui/Tooltip';
+import { Popover } from '@/ui/Popover';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
 import { FilterBar } from '@/ui/FilterBar';
@@ -56,10 +60,20 @@ export interface SearchPageProps {
   onParams: (next: SearchParams) => void;
 }
 
-export function SearchPage({ params, onParams }: SearchPageProps) {
-  const [kept, keep] = useViewChoice<string>('search', 'filters', '');
+export function SearchPage(props: SearchPageProps) {
+  const reader = useStore(client.session, (state) => requestReader(state.userId, state.readerVersion));
+  return <ReaderSearch key={reader} {...props} />;
+}
+
+function ReaderSearch({ params, onParams }: SearchPageProps) {
+  const [kept, keep, observation] = useViewChoice<string>('search', 'filters', '');
   const [restored, setRestored] = useState(() => restoredView(params, kept));
   const [resumed, setResumed] = useState(restored !== undefined);
+  const [resumeSource, setResumeSource] = useState(() => restored === undefined ? null : savedView(restored));
+  const invalidSaved = unavailableSavedView(kept);
+  const [fallbackView, setFallbackView] = useState<string | null>(null);
+  const unavailable = invalidSaved || fallbackView !== null && fallbackView === savedView(params);
+  const showingResumed = resumed && (restored !== undefined || savedView(params) === resumeSource);
   if (restored !== undefined && savedView(params) === savedView(restored) && params.q === restored.q) setRestored(undefined);
   const selected = useSelectedOrg((state) => state.orgId);
   const orgs = useQuery(orgsQuery);
@@ -70,32 +84,35 @@ export function SearchPage({ params, onParams }: SearchPageProps) {
     if (restored === undefined && params.org === undefined && org !== undefined) onParams({ ...params, org });
   }, [onParams, org, params, restored]);
   const view = savedView(shown);
-  useEffect(() => { keep(view); }, [keep, view]);
+  useEffect(() => { if (!unavailable && !showingResumed) keep(view); }, [keep, view, unavailable, showingResumed]);
   useEffect(() => {
     if (restored === undefined) return;
     onParams({ ...restored, ...(org === undefined ? {} : { org }) });
   }, [onParams, org, restored]);
-  return <SearchResults params={shown} onParams={(next) => {
+  const change = bindDeviceChoice((next: SearchParams) => {
     if (savedView(next) !== view || next.org !== shown.org) setResumed(false);
+    setFallbackView(null); keep(savedView(next));
     setRestored(undefined);
     onParams(next);
-  }} onUnavailable={(error, person) => {
-    if (!resumed || !(error instanceof SearchPlaceOutside || error instanceof ApiError && (error.status === 403 || error.status === 404))) return false;
+  }, observation === undefined ? undefined : { ...observation, effective: shown, origin: unavailable ? 'default' : showingResumed ? observation.origin : 'address',
+    saved_choice_availability: unavailable ? 'unavailable' : observation.saved_choice_availability });
+  return <SearchResults params={shown} onParams={change} onUnavailable={(error, person) => {
+    if (!showingResumed || !(error instanceof SearchPlaceOutside || error instanceof ApiError && (error.status === 403 || error.status === 404))) return false;
     if (person !== undefined) {
       if (shown[person] === undefined) return false;
       const next = readParams({ ...shown, [person]: undefined });
-      setRestored(undefined); keep(savedView(next)); onParams(next);
+      setFallbackView(savedView(next)); setResumeSource(savedView(next)); setRestored(undefined); onParams(next);
       return true;
     }
     if (shown.scope === undefined && shown.chat_id === undefined && shown.document_id === undefined) return false;
-    setResumed(false); setRestored(undefined); keep('{}');
+    setFallbackView('{}'); setResumed(false); setRestored(undefined);
     onParams(shown.q === undefined ? {} : {q: shown.q});
     return true;
   }} />;
 }
 
 function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {onUnavailable: (error: unknown, person?: PersonFilter) => boolean}) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [filtersOpen, setFiltersOpen] = useState(false);
   useScreenHeading({ title: t('screens.search.title'), icon: SearchIcon });
 
@@ -174,8 +191,14 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
     onParams({ ...params, ...(words === '' ? { q: undefined } : { q: words }) });
   };
 
-  const meaningReason = search.reasons.meaning === undefined || search.reasons.meaning === null ? '' : t(`search.meaningReasons.${search.reasons.meaning}`, {defaultValue: search.reasons.meaning});
+  const meaningReason = search.reasons.meaning === undefined || search.reasons.meaning === null ? ''
+    : t(`search.meaningReasons.${search.reasons.meaning}`, { defaultValue: search.reasons.meaning });
+  const inlineMeaningReason = search.reasons.meaning !== undefined && search.reasons.meaning !== null
+    && i18n.exists(`search.meaningReasons.${search.reasons.meaning}`) ? meaningReason : '';
   const indexPaused = search.reasons.meaning === 'provider_disabled' || search.reasons.meaning === 'provider_removed';
+  const continuationEnded = search.error instanceof ApiError && search.error.faults().some((fault) => fault.path === 'cursor');
+  const partial = search.cursor !== null || Object.values(search.unavailable).some(Boolean);
+  const total = formatNumber(search.total, locale) + (partial ? '+' : '');
   const error = scopeError ?? (params.org === undefined && orgsRead.isError ? orgsRead.error : null) ?? search.error ?? (search.unavailable.words === true ? new Error(t('search.wordsUnavailable')) : null);
   const activeFilters = narrowing(params);
   const filtersLabel = activeFilters === 0 ? t('search.filters.button') : t('search.filters.active', { count: activeFilters });
@@ -193,7 +216,7 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
           {length === null && error !== null && (
             <ErrorAlert
               error={error}
-              message={wrongPlace ? t('search.org.outsidePlace') : search.unavailable.words === true ? t('search.wordsUnavailable') : undefined}
+              message={wrongPlace ? t('search.org.outsidePlace') : search.unavailable.words === true ? t('search.wordsUnavailable') : continuationEnded ? t('search.continuationEnded') : undefined}
               action={scopeError !== null ? <Button size="sm" onClick={() => onParams({ ...params, scope: undefined })}>{t('search.org.clearPlace')}</Button> :
                 <Button size="sm" onClick={() => setSubmitted((value) => value + 1)}>
                   {t('common.tryAgain')}
@@ -204,16 +227,24 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
           {ready && length === null && !search.unfinished && error === null && hits.length === 0 && (
             <EmptyState
               icon={<SearchX aria-hidden />}
-              title={t('search.state.nothing', { query: params.q ?? '' })}
+              title={t(search.conversationChars === null ? 'search.state.nothing' : 'search.state.nothingIndexed', { query: params.q ?? '' })}
               description={narrowing(params) > 0 ? t('search.state.nothingNarrow') : t('search.state.nothingAbout')}
               action={params.org !== 'all' && (orgs?.length ?? 0) > 1 ? <AcrossOrgs params={params} onParams={onParams} /> : undefined}
             />
           )}
 
           {length === null && error === null && <p role="status" className="min-h-5 text-sm text-text-muted tabular-nums">
-            {!ready ? t('common.loading') : search.unfinished ? t('search.searching', {count: search.total, number: formatNumber(search.total, locale)}) : t('search.total', {count: search.total, number: formatNumber(search.total, locale)})}
-            {search.unavailable.meaning === true && <> · <MeaningStatus label={t('search.meaningUnavailable')} reason={meaningReason} /></>}
-            {search.unavailable.meaning !== true && indexPaused && <> · <MeaningStatus label={t('search.indexPaused')} reason={meaningReason} /></>}
+            {!ready ? t('common.loading') : search.unfinished ? t('search.searching', {count: search.total, number: formatNumber(search.total, locale)}) : t('search.total', {count: search.total, number: total})}
+            {search.conversationChars !== null && <> · <Popover label={t('search.coverage.label')} className="w-(--menu-max-width) [--floating-width:var(--menu-max-width)]"
+              trigger={<button type="button" className="focus-inset rounded-sm text-left">{t('search.coverage.label')}</button>}>
+              <div className="flex flex-col gap-2 text-sm text-text-muted">
+                <p>{t('search.coverage.about', { number: formatNumber(search.conversationChars, locale) })}</p>
+                <p>{t('search.coverage.omitted')}</p>
+              </div>
+            </Popover></>}
+            {search.unavailable.meaning === true && <> · <MeaningFacts filters={filters} summary={search.meaningSources} label={t('search.meaningUnavailable')} reason={meaningReason} inlineReason={inlineMeaningReason} /></>}
+            {search.unavailable.meaning !== true && indexPaused && <> · <MeaningFacts filters={filters} summary={search.meaningSources} label={t('search.indexPaused')} reason={meaningReason} inlineReason={inlineMeaningReason} /></>}
+            {search.unavailable.meaning !== true && !indexPaused && search.meaningSources !== null && (search.meaningSources.total > 0 || search.meaningSources.unreported) && <> · <MeaningFacts filters={filters} summary={search.meaningSources} /></>}
             {search.unavailable.meaning !== true && !indexPaused && search.reasons.meaning !== undefined && search.reasons.meaning !== null && <span> · {t(`search.wordsOnly.${search.reasons.meaning}`, {defaultValue: search.reasons.meaning})}</span>}
           </p>}
           {hits.length > 0 && <>
@@ -264,17 +295,9 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
         tabs={SEARCH_TABS.map((tab) => ({ value: tab, label: t(`search.tabs.${tab}` as const), panel: resultPanel }))} />
     </div>
     <Drawer open={filtersOpen} onOpenChange={setFiltersOpen} title={t('search.filters.title')} side="bottom">
-      <div className="p-4"><Filters params={params} onParams={onParams} values={values} /></div>
+      <div className="p-4"><Filters params={params} onParams={onParams} values={values} inlineFacts /></div>
     </Drawer>
   </Page>;
-}
-
-/** A source or index reason is available from the same quiet label by pointer, focus or tap. */
-function MeaningStatus({reason,label}:{reason:string;label:string}) {
-  const [open,setOpen]=useState(false);
-  return <Tooltip content={reason} open={open} onOpenChange={setOpen}>
-    <button type="button" title={reason} className="focus-inset rounded-sm text-left" onClick={()=>setOpen((before)=>!before)}>{label}</button>
-  </Tooltip>;
 }
 
 /** One ordinary bounded read supplies a truthful hint; it never pages all orgs for a count. */

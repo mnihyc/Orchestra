@@ -394,6 +394,7 @@ export function TokenForm({ onMake, pending, error, serviceAccountId, returned =
 /** A token just made, shown once; or, where the same creation was answered again, that it was made and has no secret to give. */
 export function TokenMade({ made, name }: { made: TokenCreateResponse; name?: string }) {
   const { t } = useTranslation();
+  const apiAddress = window.location.origin + '/openapi/v1';
   const label = 'info' in made ? made.info.name : name ?? made.token_id;
   if (made.token === null) {
     return <InlineAlert tone="warning" title={t('tokens.new.alreadyTitle', { name: label })}>{t('tokens.new.already')}</InlineAlert>;
@@ -412,6 +413,12 @@ export function TokenMade({ made, name }: { made: TokenCreateResponse; name?: st
         />
         <CopyButton value={made.token} label={t('tokens.new.copy')} className="mb-1" />
       </div>
+      <dl className="grid gap-1 text-sm">
+        <dt>{t('tokens.new.apiAddress')}</dt>
+        <dd><code className="wrap-anywhere">{apiAddress}</code></dd>
+        <dt>{t('tokens.new.example')}</dt>
+        <dd><code className="wrap-anywhere" dir="ltr">{`curl -H "Authorization: Bearer $ORCH_KEY" "${apiAddress}/me"`}</code></dd>
+      </dl>
     </div>
   );
 }

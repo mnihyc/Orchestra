@@ -11,6 +11,49 @@ use orch_types::new_id;
 use serde_json::json;
 
 #[tokio::test]
+async fn a_person_receives_an_inbox_item_while_their_account_write_is_open() {
+    let db = TestDb::fresh().await;
+    let person = new_id();
+    let mut conn = db.pool.acquire().await.unwrap();
+    identity::testing::insert_user(&mut conn, person, "reader")
+        .await
+        .unwrap();
+    let mut account = db.pool.begin().await.unwrap();
+    orch_db::queries::transaction_guard::lock_person(&mut account, person)
+        .await
+        .unwrap()
+        .unwrap();
+    // The account lock stays open until after the notice is committed. The limit detects a
+    // conflicting lock, rather than judging this shared runner's normal execution time.
+    sqlx::query("SET lock_timeout='1s'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let notice = identity::add_inbox_row(
+        &mut conn,
+        &identity::NewInboxRow {
+            user_id: person,
+            kind: "system.message",
+            title: "A new item",
+            body: "",
+            data: &json!({}),
+            dedupe_key: "account-open",
+            at: clock::start(),
+        },
+    )
+    .await
+    .expect("notification delivery does not wait on the person's account")
+    .unwrap();
+    let counts = orch_db::queries::notifications::inbox::counts(&mut conn, person)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(counts.seq, notice);
+    assert_eq!(counts.unread, 1);
+    account.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn one_decision_removes_every_kinds_waiting_and_unread_copies_without_another_notice() {
     let db = TestDb::fresh().await;
     let mut conn = db.pool.acquire().await.unwrap();
@@ -61,12 +104,13 @@ async fn one_decision_removes_every_kinds_waiting_and_unread_copies_without_anot
                 .execute(&mut *conn)
                 .await
                 .unwrap();
-            let before: Vec<(orch_types::Id, i64)> =
-                sqlx::query_as("SELECT id,inbox_seq FROM users WHERE id=ANY($1) ORDER BY id")
-                    .bind(vec![ada, bo])
-                    .fetch_all(&mut *conn)
-                    .await
-                    .unwrap();
+            let before: Vec<(orch_types::Id, i64)> = sqlx::query_as(
+                "SELECT user_id,inbox_seq FROM user_inboxes WHERE user_id=ANY($1) ORDER BY user_id",
+            )
+            .bind(vec![ada, bo])
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
             let decision = json!({"approve":state=="approved","expires_at":at+chrono::Duration::days(7),"note":"Reviewed together"});
             assert!(
                 approvals::decide(&mut conn, id, state, Some(bo), &decision, at)
@@ -93,12 +137,13 @@ async fn one_decision_removes_every_kinds_waiting_and_unread_copies_without_anot
             .await
             .unwrap();
             assert_eq!(pending, 0);
-            let after: Vec<(orch_types::Id, i64)> =
-                sqlx::query_as("SELECT id,inbox_seq FROM users WHERE id=ANY($1) ORDER BY id")
-                    .bind(vec![ada, bo])
-                    .fetch_all(&mut *conn)
-                    .await
-                    .unwrap();
+            let after: Vec<(orch_types::Id, i64)> = sqlx::query_as(
+                "SELECT user_id,inbox_seq FROM user_inboxes WHERE user_id=ANY($1) ORDER BY user_id",
+            )
+            .bind(vec![ada, bo])
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
             assert!(
                 after
                     .iter()
@@ -118,12 +163,13 @@ async fn one_decision_removes_every_kinds_waiting_and_unread_copies_without_anot
                 .await
                 .unwrap()
             );
-            let unchanged: Vec<(orch_types::Id, i64)> =
-                sqlx::query_as("SELECT id,inbox_seq FROM users WHERE id=ANY($1) ORDER BY id")
-                    .bind(vec![ada, bo])
-                    .fetch_all(&mut *conn)
-                    .await
-                    .unwrap();
+            let unchanged: Vec<(orch_types::Id, i64)> = sqlx::query_as(
+                "SELECT user_id,inbox_seq FROM user_inboxes WHERE user_id=ANY($1) ORDER BY user_id",
+            )
+            .bind(vec![ada, bo])
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
             assert_eq!(unchanged, after, "a losing decision has no effect");
         }
     }

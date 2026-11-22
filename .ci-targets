@@ -1,0 +1,8 @@
+fmt
+clippy
+contracts
+test -p orch-link
+test -p orch-link-contract --lib
+test -p orch-connector-core --test recording_keys
+test -p orch-connector-core --test mount_data
+test -p orch-envhost --lib -- state_store::review_tests

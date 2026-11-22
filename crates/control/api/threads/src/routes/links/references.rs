@@ -16,9 +16,9 @@ use super::Position;
 
 use super::live_document;
 
-use super::open;
+use super::open as open_native;
 
-use super::seal;
+use super::seal as seal_native;
 
 use crate::middleware::authorization;
 
@@ -108,6 +108,16 @@ pub(super) async fn list(
     query: DocumentReferencesListQuery,
     (): (),
 ) -> ApiResult<Page<LinkedThing>> {
+    if query.limit == Some(0) {
+        return Err(invalid("limit", "must be greater than zero"));
+    }
+    if !query_text(&query).is_empty()
+        && orch_db::queries::search::Query::parse(query_text(&query))
+            .terms()
+            .is_empty()
+    {
+        return Err(invalid("q", "give at least one word or quoted phrase"));
+    }
     let mut tx = ctx.app.db.begin_snapshot().await?;
     let mut cancellation = orch_db::queries::search::cancel_on_drop(&ctx.app.db, &mut tx).await?;
     let principal = authorization::principal(&ctx, &mut tx).await?;
@@ -126,6 +136,63 @@ pub(super) async fn list(
 
 fn wrong_cursor() -> ApiError {
     invalid("cursor", "is not a cursor of this list")
+}
+
+fn query_text(query: &DocumentReferencesListQuery) -> &str {
+    query.q.as_deref().unwrap_or("").trim()
+}
+
+fn seal_list(
+    principal: &Principal,
+    document: Id,
+    direction: LinkDirection,
+    of: Option<&str>,
+    position: &Position,
+    query: &str,
+) -> ApiResult<String> {
+    seal_native(
+        principal,
+        document,
+        direction,
+        of,
+        &Position::Filtered {
+            query: query.to_owned(),
+            position: Box::new(position.clone()),
+        },
+    )
+}
+
+fn open_list(
+    principal: &Principal,
+    document: Id,
+    direction: LinkDirection,
+    of: Option<&str>,
+    text: &str,
+    query: &str,
+) -> ApiResult<Position> {
+    match open_native(principal, document, direction, of, text)? {
+        Position::Filtered {
+            query: expected,
+            position,
+        } if expected == query => Ok(*position),
+        _ => Err(wrong_cursor()),
+    }
+}
+
+fn matches_name(words: &orch_db::queries::search::Query, row: &LinkedThing) -> bool {
+    words.matches(
+        &[
+            row.name.as_deref().unwrap_or(""),
+            row.label.as_deref().unwrap_or(""),
+            row.path.as_deref().unwrap_or(""),
+            &row.context
+                .iter()
+                .filter_map(|node| node.name.as_deref())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ]
+        .join(" "),
+    )
 }
 
 /// The conservative scopes a person's sources are narrowed by before each is checked exactly.
@@ -153,10 +220,21 @@ async fn incoming(
     if let Some(of) = query.of.as_deref() {
         return one_source(ctx, tx, principal, document, query, limits, of).await;
     }
-    let before = match query
+    let text = query_text(query);
+    let words = orch_db::queries::search::Query::parse(text);
+    let mut before = match query
         .cursor
         .as_deref()
-        .map(|text| open(principal, document.id, LinkDirection::In, None, text))
+        .map(|cursor| {
+            open_list(
+                principal,
+                document.id,
+                LinkDirection::In,
+                None,
+                cursor,
+                text,
+            )
+        })
         .transpose()?
     {
         None => None,
@@ -164,36 +242,74 @@ async fn incoming(
         Some(_) => return Err(wrong_cursor()),
     };
     let scopes = scopes_of(tx, principal, document.id).await?;
-    let page = orch_engine::links::sources_page(
-        tx,
-        &Person(principal),
-        SourcePageAsk {
-            target: document.id,
-            scopes: &scopes,
-            before,
-            limit: limits.page(query.limit),
-            checks: limits.access_checks,
-        },
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let listed = sources(ctx, tx, principal, document, &page.sources, limits, None).await?;
-    let next_cursor = page
-        .next
+    let wanted = limits.page(query.limit);
+    let batch = if text.is_empty() {
+        wanted
+    } else {
+        wanted.max(limits.page_size)
+    };
+    let mut remaining = limits.access_checks;
+    let mut items = Vec::new();
+    let next;
+    loop {
+        let page = orch_engine::links::sources_page(
+            tx,
+            &Person(principal),
+            SourcePageAsk {
+                target: document.id,
+                scopes: &scopes,
+                before,
+                limit: batch.min(remaining).max(1),
+                checks: remaining,
+            },
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        remaining = remaining.saturating_sub(page.examined);
+        let listed = sources(
+            ctx,
+            tx,
+            principal,
+            document,
+            &page.sources,
+            limits,
+            (None, ""),
+        )
+        .await?;
+        let mut extra = false;
+        for row in listed.into_iter().map(|row| row.thing) {
+            if !text.is_empty() && !matches_name(&words, &row) {
+                continue;
+            }
+            if items.len() == wanted {
+                extra = true;
+                break;
+            }
+            items.push(row);
+        }
+        if extra {
+            next = items.last().map(|row: &LinkedThing| row.id);
+            break;
+        }
+        if page.next.is_none() || remaining == 0 || text.is_empty() || items.len() == wanted {
+            next = page.next;
+            break;
+        }
+        before = page.next;
+    }
+    let next_cursor = next
         .map(|below| {
-            seal(
+            seal_list(
                 principal,
                 document.id,
                 LinkDirection::In,
                 None,
                 &Position::Sources { below },
+                text,
             )
         })
         .transpose()?;
-    Ok(Page {
-        items: listed.into_iter().map(|each| each.thing).collect(),
-        next_cursor,
-    })
+    Ok(Page { items, next_cursor })
 }
 
 /// The next mentions of one source, which the reader must be able to read like any other.
@@ -222,7 +338,16 @@ async fn one_source(
     let after = match query
         .cursor
         .as_deref()
-        .map(|text| open(principal, document.id, LinkDirection::In, Some(of), text))
+        .map(|text| {
+            open_list(
+                principal,
+                document.id,
+                LinkDirection::In,
+                Some(of),
+                text,
+                query_text(query),
+            )
+        })
         .transpose()?
     {
         None => None,
@@ -237,14 +362,119 @@ async fn one_source(
     if !readable.contains(&id) {
         return Ok(Page::last(Vec::new()));
     }
-    let listed = sources(ctx, tx, principal, document, &[source], limits, after).await?;
-    let next_cursor = listed
-        .first()
-        .and_then(|each| each.thing.next_mentions.clone());
+    let wanted = query
+        .limit
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(limits.occurrences);
+    let mention_limits = Limits {
+        occurrences: wanted.min(limits.access_checks).max(1),
+        ..limits
+    };
+    let mut listed = sources(
+        ctx,
+        tx,
+        principal,
+        document,
+        std::slice::from_ref(&source),
+        mention_limits,
+        (after, query_text(query)),
+    )
+    .await?;
+    let text = query_text(query);
+    if text.is_empty() {
+        let next_cursor = listed
+            .first()
+            .and_then(|row| row.thing.next_mentions.clone());
+        return Ok(Page {
+            items: listed.into_iter().map(|row| row.thing).collect(),
+            next_cursor,
+        });
+    }
+    let Some(first) = listed.pop() else {
+        return Ok(Page::last(Vec::new()));
+    };
+    let mut thing = first.thing;
+    let words = orch_db::queries::search::Query::parse(text);
+    let mut cursor = thing
+        .occurrences
+        .last()
+        .and_then(|row| part_of(&row.anchor));
+    let mut more = thing.next_mentions.is_some();
+    let mut examined = thing.occurrences.len();
+    let mut matches = thing
+        .occurrences
+        .drain(..)
+        .filter(|row| matches_line(&words, &row.line))
+        .collect::<Vec<_>>();
+    while more && matches.len() <= wanted && examined < limits.access_checks {
+        let batch = limits
+            .page_size
+            .max(wanted)
+            .min(limits.access_checks - examined)
+            .max(1);
+        let mut parts = rows::parts(
+            tx,
+            document.id,
+            std::slice::from_ref(&source),
+            i64::try_from(batch)
+                .map_err(ApiError::internal)?
+                .saturating_add(1),
+            cursor,
+        )
+        .await?;
+        more = parts.len() > batch;
+        parts.truncate(batch);
+        let cast = names_for(tx, principal, &parts).await?;
+        let names = CastNames(&cast);
+        examined += parts.len();
+        cursor = parts.last().map(|part| part.part_id);
+        for part in parts {
+            let line = line_of(&part, document, &names, limits.line_chars);
+            if matches_line(&words, &line) {
+                matches.push(LinkOccurrence {
+                    anchor: anchor_of(&part),
+                    line,
+                    by: cast.author(part.by_user, part.by_thread, part.by_agent.as_deref()),
+                    at: Time::new(part.at),
+                });
+            }
+        }
+    }
+    if matches.len() > wanted {
+        matches.truncate(wanted);
+        cursor = matches.last().and_then(|row| part_of(&row.anchor));
+        more = true;
+    }
+    let next_cursor = if more {
+        cursor
+            .map(|part| {
+                seal_list(
+                    principal,
+                    document.id,
+                    LinkDirection::In,
+                    Some(of),
+                    &Position::Mentions { part },
+                    text,
+                )
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    thing.next_mentions = next_cursor.clone();
+    thing.occurrences = matches;
     Ok(Page {
-        items: listed.into_iter().map(|each| each.thing).collect(),
+        items: if thing.occurrences.is_empty() {
+            Vec::new()
+        } else {
+            vec![thing]
+        },
         next_cursor,
     })
+}
+
+fn matches_line(words: &orch_db::queries::search::Query, line: &LinkLine) -> bool {
+    words.matches(&format!("{}{}{}", line.before, line.reference, line.after))
 }
 
 fn part_of(anchor: &LinkAnchor) -> Option<Id> {
@@ -340,8 +570,9 @@ async fn sources(
     document: &DocumentRow,
     found: &[rows::LiveSource],
     limits: Limits,
-    after: Option<Id>,
+    mention: (Option<Id>, &str),
 ) -> ApiResult<Vec<Listed>> {
+    let (after, mention_query) = mention;
     if found.is_empty() {
         return Ok(Vec::new());
     }
@@ -391,12 +622,13 @@ async fn sources(
             && let Some(part) = part_of(&last.anchor)
         {
             let of = format!("{}:{}", of_word(thing.kind), source.source_id);
-            thing.next_mentions = Some(seal(
+            thing.next_mentions = Some(seal_list(
                 principal,
                 document.id,
                 LinkDirection::In,
                 Some(&of),
                 &Position::Mentions { part },
+                mention_query,
             )?);
         }
         out.push(Listed { thing });
@@ -511,10 +743,97 @@ async fn outgoing(
     query: &DocumentReferencesListQuery,
     limits: Limits,
 ) -> ApiResult<Page<LinkedThing>> {
+    let text = query_text(query);
+    if text.is_empty() {
+        return outgoing_page(ctx, tx, principal, document, query, limits)
+            .await
+            .map(|(page, _)| page);
+    }
+    let words = orch_db::queries::search::Query::parse(text);
+    let wanted = limits.page(query.limit);
+    let batch = wanted.max(limits.page_size);
+    let mut remaining = limits.access_checks;
+    let mut scan = query.clone();
+    let mut items = Vec::new();
+    let next_cursor;
+    loop {
+        scan.limit = Some(u32::try_from(batch.min(remaining).max(1)).map_err(ApiError::internal)?);
+        let (page, examined) = outgoing_page(ctx, tx, principal, document, &scan, limits).await?;
+        remaining = remaining.saturating_sub(examined);
+        let mut extra = false;
+        for row in page.items {
+            if !matches_name(&words, &row) {
+                continue;
+            }
+            if items.len() == wanted {
+                extra = true;
+                break;
+            }
+            items.push(row);
+        }
+        if extra {
+            next_cursor = items
+                .last()
+                .map(|row| {
+                    let kind = match row.kind {
+                        LinkedKind::Document => "document",
+                        LinkedKind::Chat => "chat",
+                        LinkedKind::Thread | LinkedKind::Place => "node",
+                        LinkedKind::File => "file",
+                        LinkedKind::EnvironmentFile => "environment_file",
+                    }
+                    .to_owned();
+                    let key = row
+                        .path
+                        .as_deref()
+                        .map(|path| URL_SAFE_NO_PAD.encode(rows::path_key(path)))
+                        .unwrap_or_default();
+                    seal_list(
+                        principal,
+                        document.id,
+                        LinkDirection::Out,
+                        None,
+                        &Position::TargetKeys {
+                            id: row.id,
+                            kind,
+                            key,
+                        },
+                        text,
+                    )
+                })
+                .transpose()?;
+            break;
+        }
+        if page.next_cursor.is_none() || remaining == 0 || examined == 0 || items.len() == wanted {
+            next_cursor = page.next_cursor;
+            break;
+        }
+        scan.cursor = page.next_cursor;
+    }
+    Ok(Page { items, next_cursor })
+}
+
+async fn outgoing_page(
+    ctx: &Ctx,
+    tx: &mut Conn,
+    principal: &Principal,
+    document: &DocumentRow,
+    query: &DocumentReferencesListQuery,
+    limits: Limits,
+) -> ApiResult<(Page<LinkedThing>, usize)> {
     let after = match query
         .cursor
         .as_deref()
-        .map(|text| open(principal, document.id, LinkDirection::Out, None, text))
+        .map(|text| {
+            open_list(
+                principal,
+                document.id,
+                LinkDirection::Out,
+                None,
+                text,
+                query_text(query),
+            )
+        })
         .transpose()?
     {
         None => None,
@@ -536,6 +855,7 @@ async fn outgoing(
     .await?;
     let more = edges.len() > limit;
     edges.truncate(limit);
+    let examined = edges.len();
     // The page ends where its last target is, whether or not every target of it can be shown.
     let last = edges.last().map(|edge| {
         (
@@ -689,14 +1009,15 @@ async fn outgoing(
         });
     }
     let next_cursor = match (more, last) {
-        (true, Some((id, kind, key))) => Some(seal(
+        (true, Some((id, kind, key))) => Some(seal_list(
             principal,
             document.id,
             LinkDirection::Out,
             None,
             &Position::TargetKeys { id, kind, key },
+            query_text(query),
         )?),
         _ => None,
     };
-    Ok(Page { items, next_cursor })
+    Ok((Page { items, next_cursor }, examined))
 }

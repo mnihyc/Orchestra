@@ -28,12 +28,12 @@ fn failed_terminal_writes_keep_started_visible_and_retry_the_first_staged_outcom
     let staged = staged.ok_or("no staged terminal write")?;
     assert!(staged.write().is_err());
     assert!(matches!(
-        journal.get(id).map(|entry| &entry.step),
+        journal.get(id).map(|entry| entry.step),
         Some(Step::Started)
     ));
     let disk = Journal::open(directory.path(), Duration::from_secs(86_400), now)?;
     assert!(matches!(
-        disk.get(id).map(|entry| &entry.step),
+        disk.get(id).map(|entry| entry.step),
         Some(Step::Started)
     ));
     let (second, retry) = journal.stage_finish(
@@ -46,16 +46,20 @@ fn failed_terminal_writes_keep_started_visible_and_retry_the_first_staged_outcom
     assert_eq!(first, second);
     let retry = retry.ok_or("a failed write must still be staged")?;
     retry.write()?;
-    journal.keep_finished(retry.entry);
+    journal.keep_finished(&retry.entry);
     assert_eq!(
         journal
             .get(id)
+            .as_ref()
             .and_then(Entry::result)
             .map(|answer| &answer.outcome),
         Some(&Ok(original.clone()))
     );
     let recovered = Journal::open(directory.path(), Duration::from_secs(86_400), now)?;
-    assert_eq!(recovered.get(id).and_then(Entry::result), Some(&first));
+    assert_eq!(
+        recovered.get(id).as_ref().and_then(Entry::result),
+        Some(&first)
+    );
     assert_eq!(
         journal.finish(id, Ok(json!({"captured":"replacement"})))?,
         first
@@ -89,7 +93,7 @@ fn active_and_staged_entries_survive_age_collection_until_their_terminal_write_i
     assert_eq!(journal.purge_except(later, &HashSet::from([second]))?, 0);
     let staged = staged.ok_or("missing staged result")?;
     staged.write()?;
-    journal.keep_finished(staged.entry);
+    journal.keep_finished(&staged.entry);
     assert_eq!(journal.purge_except(later, &HashSet::from([second]))?, 1);
     assert!(journal.get(first).is_none());
     assert!(journal.get(second).is_some());

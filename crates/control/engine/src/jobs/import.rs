@@ -722,7 +722,8 @@ impl Importing {
                 let content = self.source_stream(content);
                 let put = store.put(&spooled.blob, Some(size), content).await;
                 let _ = std::fs::remove_file(&spooled.path);
-                put.map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
+                let _publication =
+                    put.map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
                 let mut conn = self.engine.inner.db.acquire().await?;
                 storage::register_blob(
                     &mut conn,

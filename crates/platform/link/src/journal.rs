@@ -11,6 +11,13 @@
 //! with what was written instead of running it a second time. Entries are
 //! kept for a day, longer than any command runs and longer than a system
 //! stays down for an update.
+//!
+//! A command in hand is held in memory whole, since it is resumed from what
+//! is held. One that ended is held as the little its answers need: its result
+//! stays in its file until it is asked for again. A result can be far larger
+//! than its command (a vendor's list of models, each with the tools its
+//! endpoint offers, runs to megabytes, and a connector lists one every hour),
+//! and a day of them held in memory is what a machine would grow by.
 
 use orch_link_contract::commands::{Cmd, CmdRes, CommandError};
 use orch_types::{Id, Json, Time};
@@ -18,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Milliseconds in a second.
@@ -100,8 +108,8 @@ impl Staged {
     /// Writes it down, durably: blocks while the disk is at work.
     pub fn write(&self) -> Result<(), JournalError> {
         #[cfg(test)]
-        if matches!(self.entry.step, Step::Done { .. })
-            && let Some(control) = &self.control
+        if let Some(control) = &self.control
+            && control.gates(&self.entry.step)
         {
             control.before(&self.entry)?;
         }
@@ -132,14 +140,110 @@ fn write_entry(dir: &Path, entry: &Entry) -> Result<(), JournalError> {
     Ok(())
 }
 
+/// A command that ended, as the journal holds it in memory: its result is in its file.
+#[derive(Debug, Clone)]
+pub struct Ended {
+    path: PathBuf,
+    /// The command as it arrived, without its body.
+    cmd: Cmd,
+    accepted_at: Time,
+    ok: bool,
+}
+
+/// What an ended command is told to have ended with when its file can no longer be read.
+const UNREADABLE: &str =
+    "the command ended, but what it ended with can no longer be read on its machine";
+
+impl Ended {
+    fn of(dir: &Path, entry: &Entry) -> Self {
+        let cmd = Cmd {
+            native_members: entry.cmd.native_members.clone(),
+            native_revision: entry.cmd.native_revision,
+            native_target: entry.cmd.native_target.clone(),
+            id: entry.cmd.id,
+            kind: entry.cmd.kind.clone(),
+            key: entry.cmd.key.clone(),
+            deadline: entry.cmd.deadline,
+            authority_until: entry.cmd.authority_until,
+            body: Json::Null,
+        };
+        Self {
+            path: path_in(dir, cmd.id),
+            cmd,
+            accepted_at: entry.accepted_at,
+            ok: entry.result().is_some_and(|result| result.outcome.is_ok()),
+        }
+    }
+
+    fn unreadable(&self) -> CmdRes {
+        CmdRes {
+            id: self.cmd.id,
+            outcome: Err(CommandError::new(
+                orch_link_contract::commands::ErrorCode::Internal,
+                UNREADABLE,
+            )),
+        }
+    }
+
+    /// The command's kind.
+    #[must_use]
+    pub fn kind(&self) -> &str {
+        &self.cmd.kind
+    }
+
+    /// Whether the command succeeded.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.ok
+    }
+
+    /// The whole entry, read back from its file: blocks while the disk is at work. A file that can no longer
+    /// be read is told as the command having ended with that failure, never as a command unknown, so that it
+    /// is not carried out a second time.
+    #[must_use]
+    pub fn entry(&self) -> Entry {
+        let read = std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Entry>(&bytes).ok())
+            .filter(|entry| entry.cmd.id == self.cmd.id && entry.result().is_some());
+        read.unwrap_or_else(|| Entry {
+            cmd: self.cmd.clone(),
+            accepted_at: self.accepted_at,
+            step: Step::Done {
+                result: self.unreadable(),
+            },
+        })
+    }
+
+    /// How the command ended, read back from its file as [`Ended::entry`] reads it.
+    #[must_use]
+    pub fn result(&self) -> CmdRes {
+        match self.entry().step {
+            Step::Done { result } => result,
+            // What is read back always has a result; anything else is told as unreadable.
+            Step::Accepted | Step::Started => self.unreadable(),
+        }
+    }
+}
+
+/// What the journal holds of a command, without reading a result from the disk.
+#[derive(Debug, Clone)]
+pub enum Known {
+    /// Written down or started: the command whole, as it is resumed.
+    Open(Entry),
+    /// Ended; its result is read back from its file.
+    Ended(Ended),
+}
+
 /// The journal of a machine.
 #[derive(Debug)]
 pub struct Journal {
     dir: PathBuf,
     keep: Duration,
-    entries: HashMap<Id, Entry>,
-    /// The first terminal outcome, staged but not observable until its write succeeds.
-    finishing: HashMap<Id, Staged>,
+    entries: HashMap<Id, Known>,
+    /// The first terminal outcome, staged but not observable until its write succeeds. Shared with the one
+    /// writing it: a result can run to megabytes.
+    finishing: HashMap<Id, Arc<Staged>>,
     #[cfg(test)]
     control: Option<std::sync::Arc<TestWrites>>,
 }
@@ -170,10 +274,16 @@ impl Journal {
             let Ok(entry) = serde_json::from_slice::<Entry>(&bytes) else {
                 continue;
             };
-            journal.entries.insert(entry.cmd.id, entry);
+            let id = entry.cmd.id;
+            let known = journal.held(entry);
+            journal.entries.insert(id, known);
         }
         journal.purge(now)?;
         Ok(journal)
+    }
+
+    pub(crate) fn native_fences_directory(&self) -> PathBuf {
+        self.dir.join("native-fences")
     }
 
     fn path_of(&self, id: Id) -> PathBuf {
@@ -184,10 +294,43 @@ impl Journal {
         write_entry(&self.dir, entry)
     }
 
-    /// What is written about a command.
+    /// What is held in memory of an entry: an ended command without its result.
+    fn held(&self, entry: Entry) -> Known {
+        match entry.step {
+            Step::Done { .. } => Known::Ended(Ended::of(&self.dir, &entry)),
+            Step::Accepted | Step::Started => Known::Open(entry),
+        }
+    }
+
+    /// What is written about a command: one in hand as it is held, one that ended read back from its file,
+    /// which blocks while the disk is at work. [`Journal::known`] tells which without reading.
     #[must_use]
-    pub fn get(&self, id: Id) -> Option<&Entry> {
-        self.entries.get(&id)
+    pub fn get(&self, id: Id) -> Option<Entry> {
+        match self.entries.get(&id)? {
+            Known::Open(entry) => Some(entry.clone()),
+            Known::Ended(ended) => Some(ended.entry()),
+        }
+    }
+
+    /// What the journal holds of a command, without reading a result from the disk.
+    #[must_use]
+    pub fn known(&self, id: Id) -> Option<Known> {
+        self.entries.get(&id).cloned()
+    }
+
+    /// The kind of a command the journal knows, without reading a result from the disk.
+    #[must_use]
+    pub fn kind(&self, id: Id) -> Option<&str> {
+        match self.entries.get(&id)? {
+            Known::Open(entry) => Some(&entry.cmd.kind),
+            Known::Ended(ended) => Some(ended.kind()),
+        }
+    }
+
+    /// Whether a command ended and succeeded, without reading its result from the disk.
+    #[must_use]
+    pub fn succeeded(&self, id: Id) -> bool {
+        matches!(self.entries.get(&id), Some(Known::Ended(ended)) if ended.succeeded())
     }
 
     /// Writes a command down, durably, before the machine says that it has
@@ -218,7 +361,7 @@ impl Journal {
         let (result, staged) = self.stage_finish(id, outcome)?;
         if let Some(staged) = staged {
             staged.write()?;
-            self.keep_finished(staged.entry);
+            self.keep_finished(&staged.entry);
         }
         Ok(result)
     }
@@ -246,12 +389,19 @@ impl Journal {
 
     /// Keeps a command that [`Journal::stage_accept`] staged, once it is written down.
     pub fn keep(&mut self, entry: Entry) {
-        self.entries.entry(entry.cmd.id).or_insert(entry);
+        let id = entry.cmd.id;
+        if !self.entries.contains_key(&id) {
+            let known = self.held(entry);
+            self.entries.insert(id, known);
+        }
     }
 
     /// Notes that a command started, and says what is to be written for it, if anything.
     pub fn stage_started(&mut self, id: Id) -> Result<Option<Staged>, JournalError> {
-        let entry = self.entries.get_mut(&id).ok_or(JournalError::Unknown(id))?;
+        let known = self.entries.get_mut(&id).ok_or(JournalError::Unknown(id))?;
+        let Known::Open(entry) = known else {
+            return Ok(None);
+        };
         if entry.step != Step::Accepted {
             return Ok(None);
         }
@@ -270,38 +420,40 @@ impl Journal {
         &mut self,
         id: Id,
         outcome: Result<Json, CommandError>,
-    ) -> Result<(CmdRes, Option<Staged>), JournalError> {
-        let entry = self.entries.get(&id).ok_or(JournalError::Unknown(id))?;
-        if let Some(result) = entry.result() {
+    ) -> Result<(CmdRes, Option<Arc<Staged>>), JournalError> {
+        let entry = match self.entries.get(&id).ok_or(JournalError::Unknown(id))? {
             // The first result stands: a command ends once.
-            return Ok((result.clone(), None));
-        }
+            Known::Ended(ended) => return Ok((ended.result(), None)),
+            Known::Open(entry) => entry,
+        };
         if let Some(staged) = self.finishing.get(&id) {
             let Step::Done { result } = &staged.entry.step else {
                 return Err(JournalError::Unknown(id));
             };
-            return Ok((result.clone(), Some(staged.clone())));
+            return Ok((result.clone(), Some(Arc::clone(staged))));
         }
         let result = CmdRes { id, outcome };
         let mut entry = entry.clone();
         entry.step = Step::Done {
             result: result.clone(),
         };
-        let staged = Staged {
+        let staged = Arc::new(Staged {
             dir: self.dir.clone(),
             entry,
             #[cfg(test)]
             control: self.control.clone(),
-        };
-        self.finishing.insert(id, staged.clone());
+        });
+        self.finishing.insert(id, Arc::clone(&staged));
         Ok((result, Some(staged)))
     }
 
-    /// Makes a terminal entry observable only after its staged bytes are durable.
-    pub fn keep_finished(&mut self, entry: Entry) {
+    /// Makes a terminal entry observable only after its staged bytes are durable. What is held of it in
+    /// memory is what [`Known::Ended`] holds: its result is in the file just written.
+    pub fn keep_finished(&mut self, entry: &Entry) {
         let id = entry.cmd.id;
         if matches!(entry.step, Step::Done { .. }) {
-            self.entries.insert(id, entry);
+            let known = Known::Ended(Ended::of(&self.dir, entry));
+            self.entries.insert(id, known);
             self.finishing.remove(&id);
         }
     }
@@ -313,7 +465,10 @@ impl Journal {
         let mut found: Vec<&Entry> = self
             .entries
             .values()
-            .filter(|entry| entry.result().is_none())
+            .filter_map(|known| match known {
+                Known::Open(entry) => Some(entry),
+                Known::Ended(_) => None,
+            })
             .collect();
         found.sort_by_key(|entry| entry.accepted_at);
         found
@@ -332,10 +487,14 @@ impl Journal {
         let old: Vec<Id> = self
             .entries
             .iter()
-            .filter(|(id, entry)| {
+            .filter(|(id, known)| {
+                let accepted_at = match known {
+                    Known::Open(entry) => entry.accepted_at,
+                    Known::Ended(ended) => ended.accepted_at,
+                };
                 !live.contains(*id)
                     && !self.finishing.contains_key(*id)
-                    && entry.accepted_at.unix_millis() + keep_millis <= now.unix_millis()
+                    && accepted_at.unix_millis() + keep_millis <= now.unix_millis()
             })
             .map(|(id, _)| *id)
             .collect();
@@ -378,6 +537,8 @@ pub(crate) struct TestWrites {
     changed: std::sync::Condvar,
     failures: std::sync::atomic::AtomicUsize,
     hold_retry: bool,
+    /// Gate the first write of the command (the one that writes it down) instead of the one that ends it.
+    on_accept: bool,
     entered: tokio::sync::Semaphore,
 }
 
@@ -390,7 +551,22 @@ impl TestWrites {
             changed: std::sync::Condvar::new(),
             failures: std::sync::atomic::AtomicUsize::new(failures),
             hold_retry: false,
+            on_accept: false,
             entered: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    /// Gates the write that writes the command down, which is the first, instead of the write that ends it.
+    pub(crate) fn accepting(mut self) -> Self {
+        self.on_accept = true;
+        self
+    }
+
+    fn gates(&self, step: &Step) -> bool {
+        if self.on_accept {
+            matches!(step, Step::Accepted)
+        } else {
+            matches!(step, Step::Done { .. })
         }
     }
 
