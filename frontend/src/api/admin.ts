@@ -7,9 +7,11 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { api, done, ok, repeatable } from '@/api/client';
+import { api, client, done, ok, repeatable } from '@/api/client';
+import { collectionQuery, readAllPages } from '@/api/collection';
+import { READ_AGAIN_DOWN_MS } from '@/api/readAgain';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
-import { resourceRows } from '@/api/listed';
+import { everythingQuery } from '@/api/everything';
 import type {
   AdminPlugin,
   AdminUser,
@@ -24,10 +26,13 @@ import type {
   AuditEntryPage,
   AuditExportFormat,
   BackupRestoreList,
+  BundledNodeEnrollment,
   CapabilityDef,
   HarnessBuild,
   HarnessChannelsStatus,
   HarnessKindInfo,
+  HumanCheckState,
+  HumanCheckTestReply,
   Host,
   IdentityProvider,
   IdentityProviderInput,
@@ -78,7 +83,6 @@ export const backupRestoreListQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: ['admin', 'backup-restore-list'] as const,
   queryFn: ({ signal }): Promise<BackupRestoreList | null> => ok(api.GET('/admin/backup-restore-list', { signal })),
-  staleTime: 0,
   refetchOnMount: 'always',
 });
 
@@ -125,7 +129,23 @@ export const semanticSearchKey = ['admin', 'semantic-search'] as const;
 export const semanticSearchQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: semanticSearchKey,
-  queryFn: ({ signal }): Promise<SemanticSearchOverview> => ok(api.GET('/admin/semantic-search', { signal })),
+  queryFn:async({signal}):Promise<SemanticSearchOverview>=>{
+    let facts:SemanticSearchOverview|undefined;
+    const orgs=await readAllPages(async(cursor)=>{
+      const page=await ok(api.GET('/admin/semantic-search',{params:{query:cursor===null?{}:{cursor}},signal}));facts=page;
+      return {items:page.orgs,next_cursor:page.orgs_next_cursor??null};
+    },signal);
+    if(facts===undefined)throw new Error('The semantic index overview has no first page.');
+    return {...facts,orgs,orgs_next_cursor:undefined};
+  },
+});
+
+export const semanticSearchPageQuery=(q:string)=>infiniteQueryOptions({
+  ...ADMIN_QUERY,
+  queryKey:[...semanticSearchKey,'pages',q] as const,
+  initialPageParam:null as string|null,
+  queryFn:({pageParam,signal}):Promise<SemanticSearchOverview>=>ok(api.GET('/admin/semantic-search',{params:{query:{q,limit:50,...(pageParam===null?{}:{cursor:pageParam})}},signal})),
+  getNextPageParam:(page)=>page.orgs_next_cursor??undefined,
 });
 
 /** Rebuilds a root org's index in place: its vectors are made anew with the model named. */
@@ -280,13 +300,24 @@ export function nameOwner(orgId: string, userId: string): Promise<Node> {
 
 // ---------------------------------------------------------------- hosts and runtimes
 
+export const bundledNodeQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: ['admin', 'bundled-node-enrollment'] as const,
+  queryFn: ({signal}): Promise<BundledNodeEnrollment | null> => ok(api.GET('/admin/bundled-node/enrollment', {signal})),
+  refetchInterval: (query) => query.state.data ? READ_AGAIN_DOWN_MS : false,
+});
+
+export function retryBundledNode(): Promise<void> {
+  return done(api.POST('/admin/bundled-node/enrollment/retry'));
+}
+
 export const hostsKey = ['admin', 'hosts'] as const;
 
 /** Every host on the system, the system's own and those members added for their orgs. */
 export const hostsQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: hostsKey,
-  queryFn: ({ signal }): Promise<Host[]> => ok(api.GET('/admin/hosts', { signal })),
+  queryFn: ({ signal }): Promise<Host[]> => readAllPages((cursor) => ok(api.GET('/admin/hosts', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 export interface RuntimeFilter {
@@ -302,7 +333,7 @@ export const runtimesQuery = (filter: RuntimeFilter) =>
     ...ADMIN_QUERY,
     queryKey: runtimesKey(filter),
     queryFn: ({ signal }): Promise<Runtime[]> =>
-      ok(api.GET('/admin/runtimes', { params: { query: compact({ host_id: filter.host, kind: filter.kind === '' ? undefined : filter.kind }) }, signal })),
+      readAllPages((cursor) => ok(api.GET('/admin/runtimes', { params: { query: { ...compact({ host_id: filter.host, kind: filter.kind === '' ? undefined : filter.kind }), ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
   });
 
 // ---------------------------------------------------------------- capabilities, harnesses, agents, plugins
@@ -312,7 +343,12 @@ export const capabilitiesKey = ['admin', 'capabilities'] as const;
 export const capabilitiesQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: capabilitiesKey,
-  queryFn: ({ signal }): Promise<CapabilityDef[]> => ok(api.GET('/admin/capabilities', { signal })),
+  queryFn:({signal}):Promise<CapabilityDef[]>=>readAllPages((cursor)=>ok(api.GET('/admin/capabilities',{params:{query:cursor===null?{}:{cursor}},signal})),signal),
+});
+
+export const capabilitiesPageQuery=(q:string,aliases='')=>({
+  ...ADMIN_QUERY,
+  ...collectionQuery([...capabilitiesKey,'aliases',aliases],q,(query,signal)=>ok(api.GET('/admin/capabilities',{params:{query:{...query,...(aliases===''?{}:{aliases})}},signal}))),
 });
 
 /** Makes or changes a definition. A definition that exists is changed against the revision the screen read. */
@@ -330,7 +366,6 @@ export const harnessChannelsKey = [...harnessBuildsKey, 'channels'] as const;
 /** Local channel read metadata and the reason for its current schedule; this contacts no vendor. */
 export const harnessChannelsQuery = queryOptions({
   ...ADMIN_QUERY,
-  staleTime: 0,
   queryKey: harnessChannelsKey,
   queryFn: ({ signal }): Promise<HarnessChannelsStatus> => ok(api.GET('/admin/harnesses/channels', { signal })),
 });
@@ -361,22 +396,19 @@ export function readHarnessChannels(): Promise<HarnessBuild[]> {
 }
 
 /** Checks a kept build again, in the background, and answers every build, that one marked as being checked. */
-export function checkHarnessBuild(build: HarnessBuild): Promise<HarnessBuild[]> {
-  return ok(api.POST('/admin/harnesses/{kind}/{version}/check', { params: { path: { kind: build.kind, version: build.version } } }));
+export function checkHarnessBuild(build: Pick<HarnessBuild, 'kind' | 'version'> & { machine_id?: string; sha256?: string }): Promise<HarnessBuild[]> {
+  return ok(api.POST('/admin/harnesses/{kind}/{version}/check', {
+    params: {
+      path: { kind: build.kind, version: build.version },
+      query: { machine_id: build.machine_id ?? null, sha256: build.sha256 ?? null },
+    },
+  }));
 }
 
-export const systemAgentsKey = ['admin', 'agents'] as const;
-
-/** The agent profiles that belong to the system itself: those no org is the home of. */
-export const systemAgentsQuery = queryOptions({
-  ...ADMIN_QUERY,
-  queryKey: systemAgentsKey,
-  queryFn: async ({ signal }): Promise<Agent[]> => {
-    // The list carries the minimal rows of private profiles apart; the system's own are readable ones.
-    const all = resourceRows<Agent>(await ok(api.GET('/agents', { signal })));
-    return all.filter((agent) => agent.home === null);
-  },
-});
+/** System profiles use the same native inventory predicate before search and keyset paging. */
+export const systemAgentsPageQuery = (q: string) => ({ ...everythingQuery(String(client.session.getState().userId), 'resources', {
+  scope: 'system', kinds: ['agent'], q, owner: null, createdFrom: '', createdTo: '', sort: 'name', direction: 'asc', resource: { details: true, kind: 'system' },
+}, 'admin-system-agents'), ...ADMIN_QUERY });
 
 export function createSystemAgent(body: { name: string; harness_kind: string; profile: unknown }): Promise<Agent> {
   return ok(api.POST('/admin/agents', { body }));
@@ -387,7 +419,7 @@ export const pluginsKey = ['admin', 'plugins'] as const;
 export const pluginsQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: pluginsKey,
-  queryFn: ({ signal }): Promise<AdminPlugin[]> => ok(api.GET('/admin/plugins', { signal })),
+  queryFn: ({ signal }): Promise<AdminPlugin[]> => readAllPages((cursor) => ok(api.GET('/admin/plugins', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 // ---------------------------------------------------------------- storage and authority
@@ -402,10 +434,10 @@ export const storageQuery = queryOptions({
 
 export const pkiKey = ['admin', 'pki'] as const;
 
-export const pkiQuery = queryOptions({
-  ...ADMIN_QUERY,
-  queryKey: pkiKey,
-  queryFn: ({ signal }): Promise<PkiInfo> => ok(api.GET('/admin/pki', { signal })),
+/** The certificate page keeps the authority/service facts and one native searched machine window. */
+export const pkiPageQuery=(q='',cursor?:string)=>queryOptions({
+  ...ADMIN_QUERY,queryKey:[...pkiKey,q,cursor??null] as const,
+  queryFn:({signal}):Promise<PkiInfo>=>ok(api.GET('/admin/pki',{params:{query:{limit:ADMIN_PAGE_SIZE,...(q===''?{}:{q}),...(cursor===undefined?{}:{cursor})}},signal})),
 });
 
 // ---------------------------------------------------------------- the audit trail
@@ -463,6 +495,32 @@ export function startAuditExport(format: AuditExportFormat, from: string, to: st
   ) as Promise<ReadableStream<Uint8Array>>;
 }
 
+// ---------------------------------------------------------------- the human check
+
+export const humanCheckKey = ['admin', 'human-check'] as const;
+
+/** Whether the human check has its secret, and when it was last set; never the secret. */
+export const humanCheckQuery = queryOptions({
+  ...ADMIN_QUERY,
+  queryKey: humanCheckKey,
+  queryFn: ({ signal }): Promise<HumanCheckState> => ok(api.GET('/admin/human-check', { signal })),
+});
+
+/** Keeps the secret, sealed; it is never read back. */
+export function setHumanCheckSecret(secret: string): Promise<HumanCheckState> {
+  return ok(api.PUT('/admin/human-check/secret', { body: { secret } }));
+}
+
+/** Takes the secret away. */
+export function deleteHumanCheckSecret(): Promise<HumanCheckState> {
+  return ok(api.DELETE('/admin/human-check/secret'));
+}
+
+/** Asks the service with a token that is not one, to see that it is reached and accepts the keys. */
+export function testHumanCheck(): Promise<HumanCheckTestReply> {
+  return ok(api.POST('/admin/human-check/test'));
+}
+
 // ---------------------------------------------------------------- identity providers
 
 export const identityProvidersKey = ['admin', 'identity-providers'] as const;
@@ -470,7 +528,7 @@ export const identityProvidersKey = ['admin', 'identity-providers'] as const;
 export const identityProvidersQuery = queryOptions({
   ...ADMIN_QUERY,
   queryKey: identityProvidersKey,
-  queryFn: ({ signal }): Promise<IdentityProvider[]> => ok(api.GET('/admin/identity-providers', { signal })),
+  queryFn: ({ signal }): Promise<IdentityProvider[]> => readAllPages((cursor) => ok(api.GET('/admin/identity-providers', { params: { query: { ...(cursor === null ? {} : { cursor }) } }, signal })), signal),
 });
 
 export function createIdentityProvider(input: IdentityProviderInput): Promise<IdentityProvider> {
@@ -489,3 +547,11 @@ export function deleteIdentityProvider(id: string): Promise<void> {
 export function testIdentityProvider(id: string): Promise<IdentityProviderTestReply> {
   return ok(api.POST('/admin/identity-providers/{id}/test', { params: { path: { id } } }));
 }
+
+export const hostsPageQuery = (q: string) => ({ ...collectionQuery(hostsKey, q, (query, signal) => ok(api.GET('/admin/hosts', { params: { query }, signal }))), ...ADMIN_QUERY });
+
+export const pluginsPageQuery = (q: string) => ({ ...collectionQuery(pluginsKey, q, (query, signal) => ok(api.GET('/admin/plugins', { params: { query }, signal }))), ...ADMIN_QUERY });
+
+export const identityProvidersPageQuery = (q: string) => ({ ...collectionQuery(identityProvidersKey, q, (query, signal) => ok(api.GET('/admin/identity-providers', { params: { query }, signal }))), ...ADMIN_QUERY });
+
+export const runtimesPageQuery = (filter: RuntimeFilter, q: string) => ({ ...collectionQuery(runtimesKey(filter), q, (query, signal) => ok(api.GET('/admin/runtimes', { params: { query: { ...query, ...compact({ host_id: filter.host, kind: filter.kind === '' ? undefined : filter.kind }) } }, signal }))), ...ADMIN_QUERY });

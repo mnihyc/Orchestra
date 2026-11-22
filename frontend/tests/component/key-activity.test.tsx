@@ -6,6 +6,7 @@ import type * as Client from '@/api/client';
 import type * as Router from '@tanstack/react-router';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { tokensPageQuery } from '@/api/users';
 import { KeyActivity } from '@/features/settings/KeyActivity';
 import { Tokens } from '@/features/settings/personal/Tokens';
 import type { ApiTokenActivity, ApiTokenActivityPage, ApiTokenInfo } from '@/generated/api-types';
@@ -24,7 +25,7 @@ afterEach(async () => { cleanup(); await setLocale('en'); });
 
 it('keeps personal activity cold through list and scope review, then reads exactly once on explicit selection', async () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  client.setQueryData(['tokens'], [token]);
+  client.setQueryData(tokensPageQuery('').queryKey, {pages:[{items:[token],next_cursor:null}],pageParams:[null]});
   show(<QueryClientProvider client={client}><Tokens /></QueryClientProvider>);
   const shown = await screen.findByRole('row', { name: /Scoped work/ });
   expect(get).not.toHaveBeenCalled();

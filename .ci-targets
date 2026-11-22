@@ -1,0 +1,10 @@
+fmt
+contracts
+clippy
+test -p orch-settings-contract --lib
+test -p orch-settings --test resolution --test writes
+test -p orch-api-core --test settings --test setting_reach --test threads_settings --test thread_read_tools --test ask_tools_native_origin --test personal
+web typecheck
+web lint
+web test
+web-e2e --project=chromium --workers=1 --retries=0 tests/e2e/settings-pages.spec.ts tests/e2e/everything.spec.ts

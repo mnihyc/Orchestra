@@ -109,7 +109,7 @@ describe('a job under way', () => {
 
   it('says that it is waiting for its turn before it has begun, and that it is looking again when the line is lost', () => {
     show(<JobProgress job={job({ state: 'queued' })} heading="Switching" reconnecting />);
-    expect(screen.getByText('Waiting for its turn')).toBeVisible();
+    expect(screen.getByText('Waiting in line')).toBeVisible();
     expect(screen.getByText('Reconnecting…')).toBeVisible();
     expect(screen.getByText('The job goes on without this window. The bar stands where it was last seen.')).toBeVisible();
   });

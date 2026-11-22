@@ -8,6 +8,8 @@ import type * as Approvals from '@/api/approvals';
 import type * as Auth from '@/api/auth';
 import type * as Live from '@/realtime/live';
 import type * as Screen from '@/shell/screen';
+import { CardFrame } from '@/features/approvals/Card';
+import { RequestedEnd } from '@/features/access/RequestEnd';
 import { ApprovalDetail } from '@/features/approvals/ApprovalList';
 import type { Approval } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
@@ -72,4 +74,20 @@ for (const locale of ['en', 'zh-CN'] as const) it.each(['authority', 'connection
   expect(control).toBeDisabled(); act(() => target.focus());
   expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t(cause === 'authority' ? 'approvals.cannotAnswer' : 'approvals.waitForLine'));
   expect(calls.decide).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('keeps the decision deadline distinct from a requested access end in %s',async(locale)=>{
+  await setLocale(locale);
+  const decisionEnd='2030-11-15T12:00:00.000Z',grantEnd='2030-11-01T12:05:00.000Z';
+  const access:Approval={...request,kind:'access',expires_at:decisionEnd,request:{permissions:['thread.view'],options:null,holder:{kind:'user',user:ada},reason:'Read the thread',for_thread:null,expires_at:grantEnd}};
+  const view=show(<CardFrame approval={access}><RequestedEnd at={grantEnd}/></CardFrame>);
+  const label=screen.getByText(locale==='en'?'Decision until':'审批有效至');
+  expect(label.parentElement?.querySelector('time')).toHaveAttribute('dateTime',decisionEnd);
+  expect(view.container.querySelector(`time[datetime="${grantEnd}"]`)).not.toBeNull();
+});
+
+it.each(['en','zh-CN'] as const)('says an undated program request lasts while that program waits in %s',async(locale)=>{
+  await setLocale(locale);show(<CardFrame approval={request}><span>Command</span></CardFrame>);
+  expect(screen.getByText(locale==='en'?'While the agent waits':'代理程序等待期间有效')).toBeVisible();
+  expect(screen.queryByText(locale==='en'?'Decision until':'审批有效至')).not.toBeInTheDocument();
 });
