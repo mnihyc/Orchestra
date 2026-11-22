@@ -49,6 +49,7 @@ async fn a_file_that_goes_up_while_the_content_line_fails_goes_on_from_where_it_
     rig.blobs.cut_put(5);
     let fetched = rig
         .succeed(&FsFetch {
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: "big.bin".to_owned(),
@@ -102,6 +103,7 @@ async fn a_file_that_comes_down_while_the_session_is_cut_is_written_whole_and_th
         &rig.key_of::<FsWrite>(),
         rig.deadline(),
         &FsWrite {
+            access: orch_link_contract::commands::FsAccess::roots(),
             work: None,
             environment_id: rig.environment,
             path: "came.bin".to_owned(),
@@ -123,6 +125,8 @@ async fn a_file_that_comes_down_while_the_session_is_cut_is_written_whole_and_th
     // The command ran once; asked again by its identifier it is answered from the journal.
     let listing = rig
         .succeed(&FsList {
+            prefix: None,
+            access: orch_link_contract::commands::FsAccess::roots(),
             environment_id: rig.environment,
             mount: None,
             path: String::new(),
@@ -220,6 +224,8 @@ async fn what_the_host_measures_and_watches_goes_beside_the_streams_as_reports()
     rig.attach(&workspace).await;
     let watch_id = new_id();
     rig.succeed(&FsList {
+        prefix: None,
+        access: orch_link_contract::commands::FsAccess::roots(),
         environment_id: rig.environment,
         mount: None,
         path: String::new(),
