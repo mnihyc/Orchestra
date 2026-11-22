@@ -194,6 +194,7 @@ pub fn builder(
         blobs: wiring.blobs.clone(),
     };
     Ok(ConnectorBuilder::new(params)
+        .build_cache(wiring.prepared.tools().clone())
         .installation(orch_connector_core::installation::node(
             data,
             wiring

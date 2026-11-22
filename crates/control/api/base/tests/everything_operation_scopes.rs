@@ -19,7 +19,7 @@ use orch_api_contract::everything::{
     EverythingSort, ResourcesSummaryGet,
 };
 use orch_api_core::{
-    middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash},
+    middleware::authentication::{new_api_token, token_hash},
     testing::RawReply,
 };
 use orch_authz::ownership::{NewAccess, start_resource};
@@ -48,7 +48,7 @@ async fn issue(world: &World, user: Id, rules: Option<Vec<Json>>) -> Key {
         vec![]
     };
     let id = new_id();
-    let secret = new_token(API_TOKEN_PREFIX);
+    let secret = new_api_token(id);
     identity::create_api_token_scoped(
         &mut *world.conn().await,
         &identity::NewApiToken {
@@ -267,7 +267,7 @@ async fn summary_counts_only_exact_current_resource_read_without_hydrating_or_co
     );
     assert_eq!(
         bounded,
-        json!({"providers":0,"agents":0,"machines":0,"environments":0,"templates":1,"hosts":0,"mcp":0,"mounts":0,"skills":0})
+        json!({"providers":0,"agents":0,"machines":0,"environments":0,"templates":1,"hosts":0,"mcp":0,"mounts":0,"skills":0,"pools":0})
     );
 }
 

@@ -25,7 +25,7 @@ describe('guidance available beside the work', () => {
     expect(belongsTo(article, '/thread/$threadId')).toBe(true);
     expect(article.body).toContain('whole environment');
     expect(article.body).toContain('browser profiles');
-    expect(article.body.replace(/\s+/g, ' ')).toContain('sharing one document or thread does not share its folder');
+    expect(article.body.replace(/\s+/g, ' ')).toMatch(/sharing one document or thread does not share its folder/i);
   });
 
   it('takes a locked setting directly to its explanation', () => {
