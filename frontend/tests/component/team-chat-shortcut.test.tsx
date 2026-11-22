@@ -10,14 +10,14 @@ import { ViewOpeningContext, ViewRouteContext } from '@/features/workbench/viewO
 import { show } from './support';
 
 const world = vi.hoisted(() => ({ reveal: vi.fn(), takeQuotes: vi.fn() }));
-vi.mock('@/features/workbench/openView', () => ({ revealView: world.reveal }));
-vi.mock('@/realtime/stores/chat', () => ({ useChatUnread: () => ({ unread: false, mentions: 0 }) }));
+vi.mock('@/features/workbench/openView', async (loadOriginal) => ({ ...await loadOriginal<object>(), revealView: world.reveal }));
+vi.mock('@/realtime/stores/chat', async (loadOriginal) => ({ ...await loadOriginal<object>(), useChatUnread: () => ({ unread: false, mentions: 0 }) }));
 
 function Composer({ ready }: { ready: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   const onReady = useComposerFocus('team-chat', world.takeQuotes);
   useEffect(() => {
-    if (ready) onReady({ quote: () => undefined, focus: () => input.current?.focus() });
+    if (ready) onReady({ quote: () => undefined, mention: () => false, focus: () => input.current?.focus() });
   }, [onReady, ready]);
   return ready ? <input ref={input} aria-label="Chat draft" /> : <p>Loading chat</p>;
 }

@@ -35,6 +35,7 @@ async fn the_page_of_a_new_resource_is_its_owners_alone_and_follows_the_defaults
             P::AccessExternal,
             P::ProviderView,
             P::ProviderUse,
+            P::ProviderRelay,
             P::ProviderManage,
             P::ProviderBypass
         ],
@@ -119,6 +120,41 @@ async fn the_owner_names_a_person_with_options_and_the_change_is_audited_against
         )
         .await;
     assert!(matches!(refused, Err(ChangeError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn a_page_manager_with_roots_cannot_give_somebody_machine_file_reach() {
+    let w = World::new().await;
+    let owner = w.member("file-owner").await;
+    let giver = w.member("file-giver").await;
+    let recipient = w.member("file-recipient").await;
+    let environment = w.thing("environment", owner, w.topic, "Files").await;
+    w.grant(
+        "environment",
+        environment,
+        P::AccessManage,
+        Holder::User { id: giver },
+    )
+    .await;
+    w.put(
+        "environment",
+        environment,
+        P::FilesManage,
+        Holder::User { id: giver },
+        json!({}),
+    )
+    .await;
+    let before = w.epoch().await;
+    let refused = w.change_thing(giver,"environment",environment,json!({"rows":[{
+        "permission":"files.view","add":[{"holder":{"kind":"user","id":recipient},"options":{"reach":"machine"}}]
+    }]})).await;
+    assert!(
+        matches!(refused,Err(ChangeError::Invalid(ref faults)) if faults.iter().any(|fault|fault.path.ends_with("options.reach")))
+    );
+    assert_eq!(w.epoch().await, before, "a wider refusal gives nothing");
+    w.change_thing(giver,"environment",environment,json!({"rows":[{
+        "permission":"files.view","add":[{"holder":{"kind":"user","id":recipient},"options":{"reach":"roots"}}]
+    }]})).await.unwrap();
 }
 
 #[tokio::test]
@@ -712,5 +748,73 @@ async fn a_directory_environment_has_independent_owners_while_its_machine_owner_
     assert!(
         w.can_on(bob, "environment", environment, P::EnvironmentManage)
             .await
+    );
+}
+
+#[tokio::test]
+async fn naming_roots_again_removes_the_existing_machine_file_reach() {
+    let w = World::new().await;
+    let owner = w.member("file-owner").await;
+    let recipient = w.member("file-recipient").await;
+    let environment = w.thing("environment", owner, w.topic, "Files").await;
+    w.change_thing(owner,"environment",environment,json!({"rows":[{
+        "permission":"files.view","add":[{"holder":{"kind":"user","id":recipient},"options":{"reach":"machine"}}]
+    }]})).await.unwrap();
+    w.change_thing(owner,"environment",environment,json!({"rows":[{
+        "permission":"files.view","add":[{"holder":{"kind":"user","id":recipient},"options":{"reach":"roots"}}]
+    }]})).await.unwrap();
+    let principal = w.principal(orch_authz::Caller::session(recipient)).await;
+    let mut conn = w.conn().await;
+    let held = orch_authz::file_reach::held(
+        &mut conn,
+        &principal,
+        environment,
+        orch_authz::Policy::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        held.view,
+        Some(orch_access_contract::permissions::FileReach::Roots)
+    );
+}
+
+#[tokio::test]
+async fn a_page_manager_can_reduce_another_file_grant_without_holding_machine_paths() {
+    let w = World::new().await;
+    let owner = w.member("file-owner").await;
+    let manager = w.member("file-manager").await;
+    let recipient = w.member("file-recipient").await;
+    let environment = w.thing("environment", owner, w.topic, "Files").await;
+    w.grant(
+        "environment",
+        environment,
+        P::AccessManage,
+        Holder::User { id: manager },
+    )
+    .await;
+    let entry = w
+        .put(
+            "environment",
+            environment,
+            P::FilesView,
+            Holder::User { id: recipient },
+            json!({"reach":"machine"}),
+        )
+        .await;
+    w.change_thing(manager, "environment", environment, json!({"rows":[{"permission":"files.view","update":[{"entry_id":entry,"options":{"reach":"roots"}}]}]})).await.unwrap();
+    let principal = w.principal(orch_authz::Caller::session(recipient)).await;
+    let mut conn = w.conn().await;
+    assert_eq!(
+        orch_authz::file_reach::held(
+            &mut conn,
+            &principal,
+            environment,
+            orch_authz::Policy::default()
+        )
+        .await
+        .unwrap()
+        .view,
+        Some(orch_access_contract::permissions::FileReach::Roots)
     );
 }
