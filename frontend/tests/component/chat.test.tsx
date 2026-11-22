@@ -8,13 +8,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { queryClient } from '@/api/query';
 import type * as Acts from '@/features/chat/acts';
 import type * as Uploads from '@/lib/uploads';
+import { attachToChat } from '@/lib/uploads';
+import { useUploads } from '@/lib/useUploads';
 import type * as PeopleApi from '@/api/people';
 import { discard, edit, resend, send } from '@/features/chat/acts';
 import { ChatContext, type ChatContextValue, type MessageActions } from '@/features/chat/context';
-import { chatPageTitle } from '@/features/chat/ChatView';
+import { ChatPeople } from '@/features/people/ChatPeople';
+import { ChatView, ChatWriteNotice, chatPageTitle } from '@/features/chat/ChatView';
 import { Composer } from '@/features/chat/Composer';
 import { MessageList } from '@/features/chat/MessageList';
-import { EMPTY_ENTRY } from '@/realtime/stores/chat';
+import { chatWriter, EMPTY_ENTRY } from '@/realtime/stores/chat';
 import { i18n, setLocale } from '@/i18n';
 import type { Draft } from '@/features/chat/draft';
 import { Message, OutgoingMessage } from '@/features/chat/Message';
@@ -34,7 +37,11 @@ vi.mock('@/api/people', async (original) => ({
 }));
 vi.mock('@/lib/uploads', async (original) => ({
   ...(await original<typeof Uploads>()),
-  UploadTask: class { run = upload.run; },
+  UploadTask: class {
+    constructor(readonly file: File) {}
+    run = upload.run;
+    cancel() { return Promise.resolve(); }
+  },
   attachToChat: (_id: string, blob: UploadedBlob): Promise<ChatPart> => Promise.resolve({ type: 'image', blob: blob.blob, name: blob.name, media_type: 'image/png' }),
 }));
 
@@ -146,9 +153,10 @@ function Box({ onEditLast = vi.fn(), start = '', replyTo = null, replyingTo = nu
     },
     saving,
   };
+  const uploads = useUploads(GROUP.id, (blob, signal) => attachToChat(GROUP.id, blob, signal), draft.addAttachment);
   return inChat(
     { chat: GROUP },
-    <Composer chat={GROUP} draft={draft} replyingTo={replyingTo} inputRef={input} onEditLast={onEditLast} placeholder="Message Release crew…" />,
+    <Composer chat={GROUP} draft={draft} uploads={uploads} replyingTo={replyingTo} inputRef={input} onEditLast={onEditLast} placeholder="Message Release crew…" />,
   );
 }
 
@@ -311,6 +319,37 @@ describe('the box a message is written in', () => {
     await user.type(box(), 'x');
     await user.keyboard('{ArrowUp}');
     expect(onEditLast).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('keeps a selected file through a chat refresh only while sending remains allowed (%s)', async (writable) => {
+    let finish: (blob: UploadedBlob) => void = () => undefined;
+    const pending = new Promise<UploadedBlob>((resolve) => { finish = resolve; });
+    let signal: AbortSignal | undefined;
+    upload.run.mockImplementationOnce((current: AbortSignal) => { signal = current; return pending; });
+    // Drive the two feed receipts explicitly, without opening a socket in this test.
+    const room = chat({ id: writable ? 'refresh-allowed' : 'refresh-refused' });
+    chatWriter.reset(room.id, room, [], false, 0);
+    const view = show(<ChatView chatId={room.id} shown={false} />);
+    try {
+      const picker = view.container.querySelector<HTMLInputElement>('[data-chat-composer] input[type=file]');
+      if (!picker) throw new Error('Missing chat file picker');
+      fireEvent.change(picker, { target: { files: [new File(['x'], 'refresh.png', { type: 'image/png' })] } });
+      expect(await screen.findByText('refresh.png')).toBeVisible();
+      act(() => chatWriter.evict(room.id));
+      expect(view.container.querySelector('[data-chat-composer]')).toBeNull();
+      expect(signal?.aborted).toBe(false);
+      act(() => chatWriter.reset(room.id, { ...room, can: { ...room.can, send: writable } }, [], false, 1));
+      expect(signal?.aborted).toBe(!writable);
+      await act(async () => {
+        finish({ blob: 'a'.repeat(64), name: 'refresh.png', size: 1, media_type: 'image/png' });
+        await pending;
+      });
+      if (writable) expect(within(screen.getByRole('list', { name: 'Attached files' })).getByText('refresh.png')).toBeVisible();
+      else expect(screen.queryByText('refresh.png')).toBeNull();
+    } finally {
+      view.unmount();
+      chatWriter.evict(room.id);
+    }
   });
 
   it('keeps the text and waits for a dropped image before sending its completed part', async () => {
@@ -508,4 +547,21 @@ it.each(['en', 'zh-CN'] as const)('reaches chat history by keyboard even when it
   expect(screen.getByRole('region', { name: i18n.t('chat.messageList') })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('button', { name: 'After history' })).toHaveFocus();
   expect(onRead).not.toHaveBeenCalled();
+});
+
+it.each(['en','zh-CN'] as const)('names the actual people-chat kind and root policy in a disabled composer in %s',async(locale)=>{
+  await setLocale(locale);
+  const group={...GROUP,can:{...GROUP.can,send:false,reason:'disabled' as const}};
+  const view=show(<ChatWriteNotice chat={group} personName="Crew"/>);
+  expect(screen.getByRole('note')).toHaveTextContent(locale==='en'?'Group chats off for this organization':'此组织的群聊已关闭');
+  view.rerender(<ChatWriteNotice chat={{...group,kind:'direct'}} personName="Dora"/>);
+  expect(screen.getByRole('note')).toHaveTextContent(locale==='en'?'Direct chats off for this organization':'此组织的私聊已关闭');
+  expect(screen.getByRole('note')).not.toHaveTextContent('chat.direct');
+});
+
+it.each(['en','zh-CN'] as const)('shows the current timed membership deadline on the existing reader line in %s',async(locale)=>{
+  await setLocale(locale);const until='2030-11-15T12:00:00.000Z';
+  const view=show(<ChatPeople chat={{...GROUP,inspection_holders:[],membership_expiries:{[ADA.id]:until}}} me={ADA.id}/>);
+  expect(screen.getByText(locale==='en'?'Member until':'成员身份有效至')).toBeVisible();
+  expect(view.container.querySelector('time')).toHaveAttribute('dateTime',until);
 });

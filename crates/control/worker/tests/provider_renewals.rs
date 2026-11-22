@@ -40,6 +40,7 @@ async fn provider_in(world: &World, org: Id, state: &str, days: i64, config: Val
             name: &format!("Team {provider}"),
             owner_id: world.admin,
             home_id: org,
+            home_overridden: false,
             harness_kind: "fake",
             agent_id: agent,
             config: &json!({}),

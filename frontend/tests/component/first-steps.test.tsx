@@ -22,14 +22,14 @@ describe('the observed checklist', () => {
   it('shows an unavailable projection as a load failure without protocol identifiers, and keeps actual refusals distinct', () => {
     const missing=new ApiError({type:'orch:error:not_found',title:'Not found',code:'not_found',status:404,detail:'No such route',request_id:'missing-checklist'},null);
     const view=show(<FirstStepsFailure error={missing} />);
-    expect(screen.getByRole('alert')).toHaveTextContent('Could not check this org');
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not check this organization. Try again.');
     expect(screen.getByRole('alert')).toHaveTextContent("First steps are unavailable. Try again or ask the system's administrator.");
     expect(screen.getByRole('alert')).not.toHaveTextContent('not open to you');
     expect(screen.getByRole('alert')).not.toHaveTextContent('First steps need access');
     expect(screen.getByRole('alert')).not.toHaveTextContent(/missing-checklist|not_found|No such route/);
     view.rerender(<FirstStepsFailure error={new ApiError({...missing.problem,type:'orch:error:authz.denied',code:'authz.denied',status:403},null)} />);
     expect(screen.getByRole('alert')).toHaveTextContent('First steps need access');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('Could not check this org');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Could not check this organization. Try again.');
     expect(screen.getByRole('alert')).not.toHaveTextContent(/missing-checklist|authz.denied/);
   });
 
@@ -84,7 +84,7 @@ describe('the invitation role line', () => {
   const summary: InvitationRoleSummary = { role: 'viewer', start_topics: false, start_threads: false, send_inputs: false, answer_requests: false, model_access_required: true };
   it('keeps provider/model use separate from default page acts', () => {
     const view = show(<RoleSummary summary={summary} />);
-    expect(screen.getByText('Under this org\'s current defaults: view work.')).toBeVisible();
+    expect(screen.getByText('Under this organization\'s current defaults: view work.')).toBeVisible();
     expect(screen.getByText('Sending also needs their own access to the provider and model.')).toBeVisible();
     view.rerender(<RoleSummary summary={{ ...summary, send_inputs: true, answer_requests: true }} />);
     expect(screen.getByText(/send to agents, answer requests/)).toBeVisible();

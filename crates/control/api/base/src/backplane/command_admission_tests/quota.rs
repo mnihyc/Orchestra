@@ -113,6 +113,8 @@ fn request(fixture: &Fixture, provider: Id, kind: CommandKind) -> Proof<StoredCo
         _ => return Err("only complete and embed belong to this provider control".into()),
     };
     Ok(StoredCommand {
+        content_transit: false,
+        native_target: None,
         id: Some(new_id()),
         machine: fixture.machine,
         kind: kind.as_str().into(),

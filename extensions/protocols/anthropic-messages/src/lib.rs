@@ -37,7 +37,9 @@ use orch_agent_contract::credentials::{CredentialForm, IssuedCredential};
 use orch_agent_contract::discovery::ModelSuggestion;
 use orch_model_contract::credentials::{Credential, WireError};
 use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, standard_options};
-use orch_model_contract::protocol::{ANTHROPIC_MESSAGES, SecretHeaders, WireProtocol};
+use orch_model_contract::protocol::{
+    ANTHROPIC_MESSAGES, CompletionStop, SecretHeaders, WireProtocol,
+};
 use orch_model_contract::usage::UsageObserver;
 use orch_types::Field;
 use url::Url;
@@ -187,6 +189,18 @@ impl WireProtocol for AnthropicMessages {
         } else {
             Ok(text)
         }
+    }
+
+    fn completion_stopped(&self, body: &[u8]) -> Option<CompletionStop> {
+        let reply: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let reason = reply.get("stop_reason")?.as_str()?;
+        if matches!(reason, "end_turn" | "stop_sequence") {
+            return None;
+        }
+        Some(CompletionStop {
+            reason: reason.to_owned(),
+            output_limit: reason == "max_tokens",
+        })
     }
 
     fn credential_forms(&self) -> Vec<CredentialForm> {

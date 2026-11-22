@@ -225,6 +225,45 @@ async fn a_defaults_entry_is_absent_from_summary_and_every_change_says_what_chan
             .as_deref(),
         Some("Acme")
     );
+    assert!(
+        !line.text.contains(&agent_thread.to_string()),
+        "the History fallback must not disclose the raw permission holder either"
+    );
+    let visible = world
+        .app
+        .call(
+            orch_api_contract::access::HistoryList,
+            &[&"nodes", &org.base.id],
+        )
+        .token(&ada.token)
+        .query(&orch_api_contract::access::HistoryListQuery {
+            q: Some("Acme defaults".into()),
+            depth: Some(ActivityDepth::Every),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(visible.items.iter().any(|item| item.id == line.id));
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
+        .append_pair("q", &agent_thread.to_string())
+        .append_pair("depth", "every");
+    let hidden = world
+        .app
+        .call(
+            orch_api_contract::access::HistoryList,
+            &[&"nodes", &org.base.id],
+        )
+        .token(&ada.token)
+        .raw_query(&query.finish())
+        .send()
+        .await
+        .ok();
+    assert!(
+        hidden.items.is_empty(),
+        "a hidden raw holder identifier cannot match the projected History text"
+    );
 }
 
 #[tokio::test]
@@ -292,4 +331,80 @@ async fn activity_names_the_actual_resource_and_its_place_without_a_server_langu
     assert!(
         matches!(&row.actor, Some(orch_api_contract::access::HistoryActor::User(user)) if user.id == s.ada.id())
     );
+}
+
+#[tokio::test]
+async fn history_kind_selection_finds_an_older_matching_act_before_its_one_row_page() {
+    use orch_api_contract::access::{HistoryList, HistoryListQuery};
+    let world = World::new().await;
+    let ada = person(&world, "history-owner").await;
+    let org = make_org(&world, &ada, "History kinds", "history-kinds")
+        .await
+        .base
+        .id;
+    let mut older = Entry::new(
+        Actor::User(ada.id()),
+        "node.updated",
+        "org",
+        Some(org),
+        "Older matching change",
+    );
+    older.history = true;
+    older.node_id = Some(org);
+    older.org_id = Some(org);
+    audit::append(
+        &mut *world.conn().await,
+        &older,
+        &Origin::default(),
+        world.now(),
+    )
+    .await
+    .unwrap();
+    world.advance(Duration::minutes(1));
+    for _ in 0..13 {
+        let mut newer = Entry::new(
+            Actor::User(ada.id()),
+            "thread.created",
+            "org",
+            Some(org),
+            "Newer creation",
+        );
+        newer.history = true;
+        newer.node_id = Some(org);
+        newer.org_id = Some(org);
+        audit::append(
+            &mut *world.conn().await,
+            &newer,
+            &Origin::default(),
+            world.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let page = world
+        .app
+        .call(HistoryList, &[&"nodes", &org])
+        .token(&ada.token)
+        .query(&HistoryListQuery {
+            kinds: Some("changed".into()),
+            depth: Some(ActivityDepth::Every),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].action, "node.updated");
+    assert!(page.next_cursor.is_none());
+    let searched = world
+        .app
+        .call(HistoryList, &[&"nodes", &org])
+        .token(&ada.token)
+        .raw_query("q=Older%20matching&depth=every&limit=1")
+        .send()
+        .await
+        .ok();
+    assert_eq!(searched.items.len(), 1);
+    assert_eq!(searched.items[0].action, "node.updated");
 }

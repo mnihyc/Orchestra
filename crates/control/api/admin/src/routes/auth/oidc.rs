@@ -332,26 +332,44 @@ async fn client_secret(
 
 /// Asks the installed kind to begin a sign-in at `provider`; none where no kind is installed or the
 /// provider cannot be asked, which is logged.
-async fn ask_kind(ctx: &Ctx, provider: &IdentityProviderRow, fresh: bool) -> Option<SignInStart> {
-    let kind = kind_of(KIND_OIDC)?;
+async fn ask_kind(
+    ctx: &Ctx,
+    provider: &IdentityProviderRow,
+    fresh: bool,
+) -> ApiResult<Option<(SignInStart, String)>> {
+    let Some(kind) = kind_of(KIND_OIDC) else {
+        return Ok(None);
+    };
+    let public_url = crate::public_addresses::current(&ctx.app)
+        .await?
+        .addresses
+        .public_url;
+    let admitted_callback = callback_url(&public_url, &provider.key);
     let request = StartRequest {
         settings: settings_of(provider),
-        callback_url: callback_url(&ctx.app.config.system.public_url, &provider.key),
+        callback_url: admitted_callback.clone(),
         fresh,
     };
     match kind.start(&request).await {
-        Ok(started) => Some(started),
+        Ok(started) => Ok(Some((started, admitted_callback))),
         Err(error) => {
             tracing::warn!(provider = %provider.key, %error, "an identity provider could not begin a sign-in");
-            None
+            Ok(None)
         }
     }
 }
 
 /// The row of a sign-in begun now at `provider` in the browser marked `mark`, for nothing in
 /// particular yet: the caller says what it is for.
-fn state_row(ctx: &Ctx, provider: Id, pending: PendingSignIn, mark: &str) -> SignInState {
+fn state_row(
+    ctx: &Ctx,
+    provider: Id,
+    pending: PendingSignIn,
+    mark: &str,
+    callback: String,
+) -> SignInState {
     SignInState {
+        callback_url: callback,
         accepted_terms_hash: None,
         state: pending.state,
         identity_provider_id: provider,
@@ -451,7 +469,7 @@ async fn start_sign_in(
     } else {
         None
     };
-    let Some(started) = ask_kind(ctx, &provider, false).await else {
+    let Some((started, callback)) = ask_kind(ctx, &provider, false).await? else {
         return refused(SignInError::IdpError);
     };
     let mark = browser_mark(ctx);
@@ -466,7 +484,7 @@ async fn start_sign_in(
                 .map(str::trim)
                 .filter(|token| !token.is_empty())
                 .map(str::to_owned),
-            ..state_row(ctx, provider.id, started.pending, &mark)
+            ..state_row(ctx, provider.id, started.pending, &mark, callback)
         },
     )
     .await?;
@@ -526,7 +544,7 @@ async fn start_proof(
         .await?;
         (session, provider)
     };
-    let Some(started) = ask_kind(ctx, &provider, true).await else {
+    let Some((started, callback)) = ask_kind(ctx, &provider, true).await? else {
         return refused(SignInError::IdpError.code());
     };
     let mark = browser_mark(ctx);
@@ -539,7 +557,7 @@ async fn start_proof(
             session_id: Some(session.id),
             sensitive_purpose: Some(purpose_word(purpose).to_owned()),
             service_account_id: service_account,
-            ..state_row(ctx, provider.id, started.pending, &mark)
+            ..state_row(ctx, provider.id, started.pending, &mark, callback)
         },
     )
     .await?;
@@ -675,7 +693,7 @@ async fn callback(ctx: Ctx, query: AuthOidcCallbackQuery, _body: Body) -> ApiRes
     let request = CompleteRequest {
         settings: settings_of(&provider),
         client_secret: secret,
-        callback_url: callback_url(&ctx.app.config.system.public_url, &key),
+        callback_url: row.callback_url.clone(),
         pending: PendingSignIn {
             state: row.state.clone(),
             nonce: row.nonce.clone(),
@@ -755,7 +773,7 @@ async fn link_start(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<MeIdentityLink
         .filter(|row| row.enabled)
         .ok_or_else(ApiError::not_found)?;
     // The provider is asked before the transaction, so that no lock waits on another server.
-    let started = ask_kind(&ctx, &provider, false).await.ok_or_else(|| {
+    let (started, callback) = ask_kind(&ctx, &provider, false).await?.ok_or_else(|| {
         ApiError::new(
             ErrorCode::ProviderUnavailable,
             "the identity provider could not be reached",
@@ -773,7 +791,7 @@ async fn link_start(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<MeIdentityLink
             redirect_path: SECURITY_PATH.to_owned(),
             link_user_id: Some(person.id()),
             link_authority: Some(captured),
-            ..state_row(&ctx, provider.id, started.pending, &mark)
+            ..state_row(&ctx, provider.id, started.pending, &mark, callback)
         },
     )
     .await?;
