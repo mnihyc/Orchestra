@@ -1,0 +1,17 @@
+fmt
+clippy
+test -p orch-api-core --test everything_scale -- restoring_the_team_members_session an_org_chat_opening --nocapture --test-threads=1
+test -p orch-api-core --test thread_opening_scopes
+test -p orch-api-core --test node_chat_opening_scopes
+test -p orch-api-core --test defaults_opening
+test -p orch-api-core --test screen_openings
+test -p orch-api-core --test org_reader_operation_scopes
+test -p orch-api-core --test nodes
+test -p orch-api-core --test org_overview
+test -p orch-api-core --test usage_figures
+test -p orch-api-core --test ports_core
+test -p orch-api-core --test resource_summaries
+test -p orch-api-core --test summaries
+test -p orch-api-core --test thread_continuation_summaries
+test -p orch-api-core --test ask
+test -p orch-engine --test resource_summaries

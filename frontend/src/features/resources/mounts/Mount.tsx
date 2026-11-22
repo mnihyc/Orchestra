@@ -3,16 +3,17 @@ import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** Mount overview, where it appears, whether its data may be written, used-by and sharing.
  * Locations and uses are read separately; a failed read never becomes an empty list.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { MOUNT_TABS, type MountTab } from '@/features/resources/tabs';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { Box, Pencil, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { Box, Copy, Pencil, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
-import { deleteMount, mountQuery, mountUsesQuery } from '@/api/resource-tools';
+import { mountQuery, mountUsesQuery } from '@/api/resource-tools';
 import { copyLinkAct, entriesOf, managedAct, shareAct } from '@/features/resources/acts';
 import { useResourceCleanup } from '@/features/storage/acts';
+import { Cleanup } from '@/features/storage/Cleanup';
 import { DetailPages, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { placePath } from '@/features/navigation/places';
 import { Facts } from '@/features/resources/Facts';
@@ -23,7 +24,6 @@ import { holds } from '@/lib/permissions';
 import { Page, PageHeader, PlaceMark, Section } from '@/shell/Page';
 import { Button } from '@/ui/Button';
 import { adminSpec } from '@/ui/AdminAct';
-import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { SettingRow } from '@/ui/SettingRow';
@@ -32,6 +32,8 @@ import { choiceCopy } from '@/i18n/choices';
 import { EditMount } from './Edit';
 import { Locations } from './Locations';
 import { MountWhere } from './Where';
+import { CopyMountData } from './Copy';
+import { ApplicationPreview, useApplicationImpact } from '@/features/storage/Impact';
 
 function Uses({ id }: { id: string }) {
   const { t } = useTranslation();
@@ -57,21 +59,29 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
   const navigate = useNavigate();
   const cleanup = useResourceCleanup();
   const query = useQuery(mountQuery(id));
-  const back = useResourceHeading('mounts', Box, query.data?.name ?? t('common.loading'), query.data?.id);
+  const application=useApplicationImpact({object:{kind:'mount',id},model_id:null},query.data!==undefined);
+  // The name of a mount this page has just deleted: its tab keeps it until the person closes the deletion.
+  const [deletedName, setDeletedName] = useState<string | null>(null);
+  const back = useResourceHeading('mounts', Box, query.data?.name ?? deletedName ?? t('common.loading'), query.data?.id);
   const [editing, setEditing] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const accepted = useRef(false);
   const [localTab, setLocalTab] = useState<MountTab>('overview');
-  const remove = useMutation({ mutationFn: () => deleteMount(id), onSuccess: () => { void navigate({ to: '/resources/mounts' }); } });
-  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  // The deletion stays one dialog, first in both layouts below, from its plan to its result: the mount disappears from
+  // this page as soon as the deletion is accepted, and the page behind then shows nothing rather than "does not exist".
+  const deletion = removing && <Cleanup intent="delete-mount" admin={query.data === undefined ? undefined : adminSpec(query.data, 'mount.manage')} request={{ scope: 'me', resource: { kind: 'mount', id }, items: [] }} onAccepted={() => { accepted.current = true; setDeletedName(query.data?.name ?? ''); }} onClose={() => { setRemoving(false); if (accepted.current) void navigate({ to: '/resources/mounts' }); }} />;
+  if (query.data === undefined) return <>{deletion}{deletedName !== null ? null : query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />}</>;
   const mount = query.data;
   const manage = holds(mount.access, 'mount.manage');
   const target = { kind: 'mount' as const, id, name: mount.name };
   const shown = tab ?? localTab;
   const edit = managedAct({ id: 'edit', label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(true) }, manage, t('resources.act.manageRequired'));
-  const menu = [...homeMoveEntries(t, 'mount', mount), ...resourceDuplicateEntries(t, 'mount', mount), ...entriesOf([copyLinkAct(t, { kind: 'mount', id }), shareAct(t, target, mount.access)], [managedAct({ id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) }, manage, t('resources.act.manageRequired'))], [cleanup.act({ kind: 'mount', id }, manage)])];
+  const copy = managedAct({ id: 'copy-data', label: t('mountCopy.copy'), icon: <Copy aria-hidden />, run: () => setCopying(true) }, mount.locations.some((location) => location.can_remove && location.source !== null), t('mountCopy.noSource'));
+  const menu = [...homeMoveEntries(t, 'mount', mount), ...resourceDuplicateEntries(t, 'mount', mount), ...entriesOf([copy], [copyLinkAct(t, { kind: 'mount', id }), shareAct(t, target, mount.access)], [managedAct({ id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) }, manage, t('resources.act.manageRequired'))], [cleanup.act({ kind: 'mount', id }, manage)])];
   const overview = <><Section id="mount-about" title={t('resourceDetails.overview')}><Facts compact label={t('resourceDetails.overview')} rows={[
       { name: t('resources.home.label'), value: mount.home?.name ?? t('resourceDetails.system') },
-      { name: t('resourceDetails.mount.target'), value: <code>{mount.target}</code> },
+      { name: t('resourceDetails.mount.target'), value: <div className="flex min-w-0 flex-col gap-1"><code>{mount.target}</code><ApplicationPreview read={application.read}/></div> },
       { name: t('resourceDetails.mount.mode'), value: t(mount.read_only ? 'resourceDetails.mount.readOnly' : 'resourceDetails.mount.shared') },
       { name: t('resourceDetails.enabled'), value: t(mount.enabled ? 'resourceDetails.on' : 'resourceDetails.off') },
       { name: t('resourceDetails.mount.defaultFate'), value: choiceCopy(t, `mountFate.${mount.default_fate}`).name },
@@ -79,7 +89,7 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
     ]} /></Section>
     <p className="max-w-prose text-text-muted">{t('resourceDetails.mount.locationExplanation')}</p>
     <ResourceDetails><Facts rows={[{ name: t('resourceDetails.address'), value: mount.address }]} /></ResourceDetails></>;
-  return <Page><PageHeader adminAccess={mount.access.admin_access} ownership={mount} opening={{ kind: 'mount', id: mount.id }} back={back} title={mount.name} lead={mount.description} mark={<PlaceMark><Box aria-hidden /></PlaceMark>}
+  return <>{deletion}<Page><PageHeader compactResource facts={[t(mount.enabled ? 'resourceDetails.on' : 'resourceDetails.off')]} adminAccess={mount.access.admin_access} ownership={mount} opening={{ kind: 'mount', id: mount.id }} back={back} title={mount.name} lead={mount.description} mark={<PlaceMark><Box aria-hidden /></PlaceMark>}
     actions={<HeadingActs admin={adminSpec(mount, 'mount.manage')} name={mount.name} primary={null} edit={shown === 'settings' ? null : edit} menu={menu} />} />
     <Tabs label={t('resourceDetails.layout.tabs')} value={shown} onValueChange={onTab ?? setLocalTab} panelClassName="pt-4" tabs={[
       { value: 'overview', label: t('resourceDetails.overview'), panel: overview },
@@ -92,7 +102,7 @@ export function MountScreen({ id, tab, onTab }: { id: string; tab?: MountTab; on
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={mount.access} target={target} /> },
     ]} />
     {editing && <EditMount mount={mount} onClose={() => setEditing(false)} />}
+    {copying && <CopyMountData mount={mount} onClose={() => setCopying(false)} />}
     {cleanup.dialogs}
-    <ConfirmDialog admin={adminSpec(mount, 'mount.manage')} open={removing} onOpenChange={setRemoving} title={t('resourceDetails.removeTitle', { name: mount.name })} confirmLabel={t('resourceDetails.remove')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t('resourceDetails.mount.removeHelp')}</ConfirmDialog>
-  </Page>;
+  </Page></>;
 }
