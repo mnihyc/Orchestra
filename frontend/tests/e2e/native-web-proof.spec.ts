@@ -4,7 +4,7 @@ import type { FilePreview } from '../../src/features/files/source';
 import type { Item } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { AT, agentMessage, errorItem, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
+import { AT, agentMessage, errorItem, rawOf, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/thread-scenes';
 import { ACME, configureThread, emit, scenario, signIn } from './support';
 
@@ -23,7 +23,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const proof = toolCall('proven-search', { kind: 'web_search', action: { type: 'search' }, query: 'A real empty answer', results: [] },
       { title: 'Search the web', turn: 'web-proof-turn', at: AT });
     if (proof.kind !== 'tool_call') throw new Error('The proven search is a tool');
-    const search: Item = { ...proof, payload: { ...proof.payload, raw: { ...proof.payload.raw,
+    const search: Item = { ...proof, payload: { ...proof.payload, raw: { ...rawOf(proof),
       output: { inline: '', total_len: Buffer.byteLength(ORIGINAL), truncated: true, blob: HASH } } } };
     const opened = toolCall('proven-page', { kind: 'web_search', action: { type: 'open_page', url: ADDRESS }, query: ADDRESS, results: [] },
       { title: 'Open page', turn: 'web-proof-turn', at: AT });
