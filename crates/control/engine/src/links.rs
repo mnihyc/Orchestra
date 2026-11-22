@@ -110,6 +110,8 @@ pub struct SourcePage {
     pub next: Option<Id>,
     /// Whether `next` is the last candidate examined rather than a source delivered, and so must not be shown as it is.
     pub hides_position: bool,
+    /// Raw indexed candidates whose access was checked in this page.
+    pub examined: usize,
 }
 
 /// What a page of sources asks.
@@ -139,7 +141,10 @@ pub async fn sources_page(
     let mut below = ask.before;
     let mut examined = 0usize;
     loop {
-        let round = (limit * ROUND_PAGES).max(ROUND_MIN).min(checks - examined);
+        let round = limit
+            .saturating_mul(ROUND_PAGES)
+            .max(ROUND_MIN)
+            .min(checks - examined);
         let ids = rows::raw_sources(
             conn,
             ask.target,
@@ -152,6 +157,7 @@ pub async fn sources_page(
                 sources: found,
                 next: None,
                 hides_position: false,
+                examined,
             });
         };
         let mut live = rows::live_sources(conn, ask.target, &ids, ask.scopes).await?;
@@ -167,6 +173,7 @@ pub async fn sources_page(
                     next: found.last().map(|delivered| delivered.source_id),
                     sources: found,
                     hides_position: false,
+                    examined: examined.saturating_add(ids.len()),
                 });
             }
             found.push(source);
@@ -178,6 +185,7 @@ pub async fn sources_page(
                 sources: found,
                 next: None,
                 hides_position: false,
+                examined,
             });
         }
         if examined >= checks {
@@ -186,6 +194,7 @@ pub async fn sources_page(
                 sources: found,
                 next: Some(last),
                 hides_position: true,
+                examined,
             });
         }
     }
