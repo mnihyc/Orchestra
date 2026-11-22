@@ -836,6 +836,14 @@ impl EnvironmentDriver for MemoryDriver {
         let _flight = self.enter(Operation::Create, &spec.name).await?;
         let mut inner = lock(&self.inner);
         if let Some(found) = inner.units.get(&spec.name) {
+            if spec
+                .labels
+                .contains_key(orch_driver_contract::runtime::LABEL_BIRTH)
+            {
+                return Err(DriverError::InvalidSpec(
+                    "the requested birth requires a new unit; the existing fixture unit was left unchanged".into(),
+                ));
+            }
             if found.unit.runtime_id != spec.runtime_id {
                 return Err(DriverError::Internal(format!(
                     "a unit named {} exists and is not the unit of this runtime",
@@ -1023,6 +1031,22 @@ mod tests {
         driver.remove(&unit).await.unwrap();
         assert_eq!(driver.state_of(&unit.name), UnitStateKind::Absent);
         assert_eq!(driver.volumes().len(), 3, "a unit's volumes outlive it");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_birth_never_relabels_an_existing_fixture_unit() {
+        let driver = MemoryDriver::new("memory");
+        let mut request = spec("birth-system", "kept-unit");
+        let unit = driver.create(&request).await.unwrap();
+        let original = driver.unit(&unit.name).unwrap().spec;
+        request
+            .labels
+            .insert("orch.birth".into(), orch_types::new_id().to_string());
+        assert!(matches!(
+            driver.create(&request).await,
+            Err(DriverError::InvalidSpec(_))
+        ));
+        assert_eq!(driver.unit(&unit.name).unwrap().spec, original);
     }
 
     #[tokio::test]

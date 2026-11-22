@@ -5,6 +5,7 @@
  * said beside that control, never here. A notice with an action stays until it is used or dismissed;
  * ordinary success leaves by itself, while failures stay until they are put away.
  */
+import { PathLink } from '@/shell/TrailLink';
 import { CircleAlert, CircleCheck, Info, X } from 'lucide-react';
 import { Toast as Primitive } from 'radix-ui';
 import { Activity, type ReactNode } from 'react';
@@ -27,7 +28,7 @@ export interface ToastOptions {
   /** A pending background act remains visible until its caller dismisses this notice on completion. */
   persistent?: boolean;
   /** One thing to do about it. */
-  action?: { label: string; icon?: ReactNode; run: () => void };
+  action?: { label: string; icon?: ReactNode; run: () => void; href?: string };
 }
 
 interface Shown extends ToastOptions {
@@ -89,12 +90,12 @@ export function Toaster({ children }: { children?: ReactNode }) {
               )}
               {entry.action !== undefined && (
                 <Primitive.Action
+                  asChild={entry.action.href !== undefined}
                   altText={entry.action.label}
                   className="mt-1 inline-flex self-start items-center gap-1 rounded-sm font-medium text-accent-text hover:underline [&_svg]:size-4"
                   onClick={entry.action.run}
                 >
-                  {entry.action.icon}
-                  {entry.action.label}
+                  {entry.action.href === undefined ? <>{entry.action.icon}{entry.action.label}</> : <PathLink href={entry.action.href}>{entry.action.icon}{entry.action.label}</PathLink>}
                 </Primitive.Action>
               )}
             </div>

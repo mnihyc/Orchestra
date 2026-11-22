@@ -24,6 +24,10 @@ use orch_types::{Id, ManualClock, new_id};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+#[path = "certificates/public_addresses.rs"]
+mod public_addresses;
+
 struct Fixture {
     _test: TestDb,
     db: Db,
@@ -93,7 +97,7 @@ fn request(token: &str, csr_pem: &str) -> EnrollRequest {
             arch: Arch::X86_64,
         },
         connector_version: "0.1.0".to_owned(),
-        protocol_versions: vec![1],
+        protocol_versions: vec![orch_link_contract::version::PROTOCOL_VERSION],
         roles: vec![Role::Agent],
     }
 }
@@ -120,6 +124,50 @@ impl Fixture {
 
     fn csr() -> String {
         PendingEnrollment::start().unwrap().csr_pem().to_owned()
+    }
+}
+
+#[tokio::test]
+async fn a_name_chosen_when_adding_a_machine_or_host_survives_the_reported_hostname() {
+    let f = fixture().await;
+    for (purpose, roles, name) in [
+        (TokenFor::Machine, vec![Role::Agent], "Lab workstation"),
+        (
+            TokenFor::Host { home: None },
+            vec![Role::Node],
+            "Rendering host",
+        ),
+    ] {
+        let issued = f
+            .service
+            .issue_token(&TokenRequest {
+                created_by: f.user,
+                purpose,
+                name_hint: Some(name.to_owned()),
+            })
+            .await
+            .unwrap();
+        let mut joining = request(&issued.token, &Fixture::csr());
+        joining.roles = roles;
+        let reply = f
+            .service
+            .enroll(&joining, &Origin::default())
+            .await
+            .unwrap();
+        let mut conn = f.db.acquire().await.unwrap();
+        let machine = resources::machine(&mut conn, reply.machine_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(machine.name, name);
+        if matches!(purpose, TokenFor::Host { .. }) {
+            let host: String = sqlx::query_scalar("SELECT name FROM hosts WHERE machine_id=$1")
+                .bind(reply.machine_id)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+            assert_eq!(host, name);
+        }
     }
 }
 
@@ -796,6 +844,18 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
         fixture.service.adopt_token_file(&file).await.unwrap(),
         Adopted::AlreadyKnown
     );
+    let recorded: (bool, Option<String>) = sqlx::query_as(
+        "SELECT bundled_with_server,access FROM enrollment_tokens WHERE created_by=$1",
+    )
+    .bind(fixture.user)
+    .fetch_one(fixture.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        recorded,
+        (true, Some("only_me".into())),
+        "the protected bootstrap source records its origin and never grants public Host Use"
+    );
 
     // It enrolls a host, once, even a day later.
     fixture.clock.advance(chrono::Duration::hours(20));
@@ -813,6 +873,25 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
         .await
         .unwrap();
     assert_eq!(hosts, 1);
+    let name: String = sqlx::query_scalar("SELECT name FROM hosts WHERE machine_id=$1")
+        .bind(reply.machine_id)
+        .fetch_one(fixture.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        name, node.name,
+        "first start has no name chosen by a person"
+    );
+    let bundled: bool =
+        sqlx::query_scalar("SELECT bundled_with_server FROM hosts WHERE machine_id=$1")
+            .bind(reply.machine_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert!(
+        bundled,
+        "the authoritative origin survives token redemption"
+    );
     assert_eq!(
         fixture.service.adopt_token_file(&file).await.unwrap(),
         Adopted::AlreadyKnown,
@@ -824,4 +903,76 @@ async fn the_token_of_the_bundled_node_is_registered_in_the_name_of_the_first_ad
     let foreign = orch_pki::enrollment::issue_token(&other, Duration::ZERO, &fixture.clock);
     std::fs::write(&file, foreign.token.to_string()).unwrap();
     assert!(fixture.service.adopt_token_file(&file).await.is_err());
+}
+
+#[tokio::test]
+async fn an_ordinary_host_cannot_claim_the_server_origin_with_its_name_or_token_hint() {
+    let fixture = fixture().await;
+    let mut conn = fixture.db.acquire().await.unwrap();
+    resources::testing::make_system_admin(&mut conn, fixture.user)
+        .await
+        .unwrap();
+    drop(conn);
+    let issued = fixture
+        .service
+        .issue_token(&TokenRequest {
+            created_by: fixture.user,
+            purpose: TokenFor::Host { home: None },
+            name_hint: Some("bundled node".into()),
+        })
+        .await
+        .unwrap();
+    let mut node = request(&issued.token, &Fixture::csr());
+    node.roles = vec![Role::Node];
+    node.name = "bundled node".into();
+    let reply = fixture
+        .service
+        .enroll(&node, &Origin::default())
+        .await
+        .unwrap();
+    let bundled: bool =
+        sqlx::query_scalar("SELECT bundled_with_server FROM hosts WHERE machine_id=$1")
+            .bind(reply.machine_id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert!(!bundled);
+}
+
+#[tokio::test]
+async fn a_certificate_service_already_running_tells_a_new_machine_the_committed_browser_address() {
+    use orch_api_contract::public_addresses::PublicAddresses;
+    use orch_db::queries::public_addresses::{self, Write};
+    let fixture = fixture().await;
+    let seed = ServerConfig::default().system.address_seed();
+    let before = public_addresses::read(
+        &mut fixture.db.acquire().await.unwrap(),
+        &seed,
+        clock::start(),
+    )
+    .await
+    .unwrap();
+    let candidate = PublicAddresses {
+        public_url: "https://changed.example.test".into(),
+        alternate_urls: Vec::new(),
+    };
+    assert!(matches!(
+        public_addresses::publish(
+            &mut fixture.db.acquire().await.unwrap(),
+            &candidate,
+            before.revision,
+            None,
+            clock::start()
+        )
+        .await
+        .unwrap(),
+        Write::Written(_)
+    ));
+    let token = fixture.token(TokenFor::Machine).await;
+    let reply = fixture
+        .service
+        .enroll(&request(&token, &Fixture::csr()), &Origin::default())
+        .await
+        .unwrap();
+    assert_eq!(reply.system.public_url, "https://changed.example.test");
 }

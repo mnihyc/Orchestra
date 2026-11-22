@@ -138,7 +138,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
         ...(scope.kind==='me'?[]:[{name:t('usage.chip.person'),value:row.user?.display_name??t('usage.key.nobody')}]),
         ...[row.project,row.topic].filter((place)=>scope.kind!=='node' || place.id!==scope.id).map((place)=>({name:t(`usage.chip.${place.kind}` as 'usage.chip.project'),value:placeName(place)})),
       ];
-      const threadName=thread===null ? row.purpose==='summary'?t('usage.records.summary'):row.purpose==='embeddings'?t('usage.records.embeddings'):purposeLabel(row.purpose,t) : scope.kind==='node' && thread.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{id:ordinal}) : placeName(thread);
+      const threadName=thread===null ? row.purpose==='summary'?t('usage.records.summary'):row.purpose==='embeddings'?t('usage.records.embeddings'):purposeLabel(row.purpose,t) : scope.kind==='node' && thread.id===scope.id && ordinal!==undefined ? t('usage.records.turn',{number:ordinal}) : placeName(thread);
       const compact = [
         ...(!shown.has(TOKENS_COLUMN) ? [{name:t('usagePerf.tokensInOut'),value:t('usagePerf.tokenPair', { input: tokens(row), output: tokens(row, true) })}] : []),
         ...(!shown.has(FIRST_COLUMN) ? [{name:t('usagePerf.requestFirstToken'),value:timeText(measured(row.timing?.first_token_ms), format.locale, t)}] : []),
@@ -204,7 +204,7 @@ export function Requests({ scope, search, span, onSearch, orgChoices = [] }: { s
     {(history.isError || liveError) && <ErrorState error={history.error} onRetry={() => { setRetry((before) => before + 1); void history.refetch(); }} />}
     <p role="status" className="text-sm text-text-muted">{t(log.paused ? 'usagePerf.paused' : 'usagePerf.live')}</p>
     {rows.length === 0 && (history.isPending ? <SkeletonRows read={history} rows={4} /> : <p className="text-sm text-text-muted">{t('usagePerf.noRequests')}</p>)}
-    <Table label={t('usagePerf.requestsView')} rows={rows} columns={columns} rowKey={(row) => row.id} />
+    <Table virtual label={t('usagePerf.requestsView')} rows={rows} columns={columns} rowKey={(row) => row.id} />
     {history.hasNextPage && <Button size="sm" variant="ghost" disabled={history.isFetchingNextPage} onClick={() => void history.fetchNextPage()}>{t('usagePerf.older')}</Button>}
   </Section>;
 }

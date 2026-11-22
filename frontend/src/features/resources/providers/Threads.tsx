@@ -12,6 +12,8 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { providerThreadsQuery } from '@/api/resources';
+import { useCollectionSearch } from '@/lib/collectionSearch';
+import { CollectionSearch } from '@/ui/CollectionSearch';
 import { openChange } from '@/features/change/target';
 import { TopicPlace } from '@/features/navigation/PlaceChain';
 import type { Provider, ProviderThread } from '@/generated/api-types';
@@ -27,7 +29,8 @@ import { UserChip } from '@/ui/UserChip';
 
 export function ProviderThreads({ provider }: { provider: Provider }) {
   const { t } = useTranslation();
-  const list = useInfiniteQuery(providerThreadsQuery(provider.id));
+  const search = useCollectionSearch('provider-threads:' + provider.id);
+  const list = useInfiniteQuery(providerThreadsQuery(provider.id, search.q));
   const items = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const hidden = list.data?.pages[0]?.hidden ?? 0;
 
@@ -91,6 +94,7 @@ export function ProviderThreads({ provider }: { provider: Provider }) {
         ) : undefined
       }
     >
+      <CollectionSearch name={t('providers.threads.title')} {...search} />
       {list.isPending ? (
         <SkeletonRows read={list} rows={3} />
       ) : list.isError && items.length === 0 ? (
@@ -99,7 +103,7 @@ export function ProviderThreads({ provider }: { provider: Provider }) {
         <EmptyState compact icon={<MessagesSquare aria-hidden />} title={t('providers.threads.none')} />
       ) : (
         <div className="flex flex-col gap-2">
-          {items.length > 0 && <Table label={t('providers.threads.title')} columns={columns} rows={items} rowKey={(row) => row.thread.id} />}
+          {items.length > 0 && <Table key={search.q} virtual label={t('providers.threads.title')} columns={columns} rows={items} rowKey={(row) => row.thread.id} />}
           <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
           {hidden > 0 && <p className="text-sm text-text-muted">{t('providers.threads.hidden', { count: hidden })}</p>}
         </div>
