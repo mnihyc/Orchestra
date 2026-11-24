@@ -21,5 +21,5 @@ Logs, exact candidate manifest, API-visible facts and command exits survive clea
 run's evidence directory. Tokens, TLS private keys, database contents and the private inventory
 manifest are not copied into that evidence. API integration tests additionally cover off/due
 checks, size/time/redirect/older-manifest refusal, restricted callers, manifest hashes, failed
-attempts and the held-clock backup warning boundary. The scenario and tests are written but not
-claimed as executed; the integrator supplies their real result.
+attempts and the held-clock backup warning boundary. Run the scenario with the other smoke scenarios
+to see its result.

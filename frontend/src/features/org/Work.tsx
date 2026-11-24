@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { namesQuery, NAME_LIMIT_MAX } from '@/api/search';
+import { namesQuery, NAME_OVERVIEW_COUNT } from '@/api/search';
 import { openFinder } from '@/features/finder/store';
 import { PlaceLink } from '@/features/navigation/places';
 import { useSeenAfter, useSeenHere } from '@/features/navigation/visits';
@@ -23,7 +23,7 @@ import { orgWork, workReason, type WorkThread } from './workModel';
 const THREADS_SHOWN = 6;
 
 /** Use the server's existing bounded recent-visits lookup; there are no per-thread detail requests. */
-export const recentThreadsQuery = (orgId: string) => namesQuery({ q: '', kinds: ['thread'], orgId, limit: NAME_LIMIT_MAX });
+export const recentThreadsQuery = (orgId: string) => namesQuery({ q: '', kinds: ['thread'], orgId, limit: NAME_OVERVIEW_COUNT });
 
 export function WorkThreads({ rows, id }: { rows: readonly WorkThread[]; id: string }) {
   const { t } = useTranslation();

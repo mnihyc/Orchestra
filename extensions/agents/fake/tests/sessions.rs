@@ -317,7 +317,9 @@ async fn a_fork_without_a_turn_to_stop_at_has_the_whole_history() {
 #[tokio::test(start_paused = true)]
 async fn a_native_export_imports_into_a_session_of_another_home_with_the_same_history() {
     let mut source = Fake::start().await;
-    let session = source.session().await;
+    let source_spec = source.spec(SessionMode::New);
+    let source_opening = source_spec.opening_id;
+    let session = source.open(source_spec).await;
     source
         .say(
             &session,
@@ -345,6 +347,8 @@ async fn a_native_export_imports_into_a_session_of_another_home_with_the_same_hi
 
     let mut target = Fake::start().await;
     let mut spec = target.spec(SessionMode::ImportNative);
+    let target_opening = spec.opening_id;
+    assert_ne!(source_opening, target_opening);
     spec.archive = Some(archive.clone());
     let (imported, opened) = target.open_full(spec).await;
     assert!(!opened.resumed);
@@ -367,7 +371,20 @@ async fn a_native_export_imports_into_a_session_of_another_home_with_the_same_hi
         .unwrap();
     let said_by_target = target.queued();
     assert!(!said_by_source.is_empty());
-    assert_eq!(gist(&said_by_source), gist(&said_by_target));
+    let history = |events: &[Seen], opening| {
+        let mut history = gist(events);
+        for (_, body) in &mut history {
+            assert_eq!(
+                body.as_object_mut().unwrap().remove("native_opening_id"),
+                Some(json!(opening))
+            );
+        }
+        history
+    };
+    assert_eq!(
+        history(&said_by_source, source_opening),
+        history(&said_by_target, target_opening)
+    );
 
     // And the conversation goes on in the new home.
     let events = target.say(&imported, "third").await;
