@@ -36,9 +36,9 @@ vi.mock('@/api/profile', async (original) => ({ ...await original<typeof Profile
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),
   nodeQuery: (id: string) => ({ queryKey: ['card-home', id], queryFn: calls.home }),
 }));
-vi.mock('@/features/navigation/places', () => ({ PlaceLink: ({ place, children, className }: { place: NodeRef; children: ReactNode; className?: string }) =>
+vi.mock('@/features/navigation/places', async (loadOriginal) => ({ ...await loadOriginal<object>(), PlaceLink: ({ place, children, className }: { place: NodeRef; children: ReactNode; className?: string }) =>
   <a href={`/org/${place.id}`} className={className}>{children}</a> }));
-vi.mock('@/features/access/AccessDialog', () => ({ openAccess: (...args: unknown[]) => { calls.open(...args); } }));
+vi.mock('@/features/access/AccessDialog', async (loadOriginal) => ({ ...await loadOriginal<object>(), openAccess: (...args: unknown[]) => { calls.open(...args); } }));
 
 const previousTheme = document.documentElement.dataset.theme;
 const wasDark = document.documentElement.classList.contains('dark');

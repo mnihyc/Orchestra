@@ -67,6 +67,7 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `purposes` | `array or null` | may be absent | A provider manager's replacement for the reported purposes; absent follows discovery. |
 | `cache_lifetimes` | `array or null` | may be absent | Additional cache lifetimes enabled by a manager. Ordinary five-minute caching stays available. |
 | `native_tools` | `map of map of Binding or null` | may be absent | Optional interface/capability bindings, projected from installed declarations without rewriting older entries. |
 | `web_search` | `array or null` | may be absent | Native search modes enabled by a provider manager; absence leaves search disabled. |
@@ -88,6 +89,18 @@ facts credential declaration, so it receives no provider key through it.
 | `input_images` | `boolean or null` | may be absent | Whether it takes images. |
 | `request_options` | `object or null` | may be absent | Provider constraints on additional request options, keyed by wire protocol; `native` uses declared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct meanings. An omitted schema preserves the protocol's existing extension surface. |
 | `rate` | `Rate or null` | may be absent | What it costs, when a manager entered a price or discovery found one. |
+
+**ModelPurpose**
+
+| Value | Meaning |
+|-------|---------|
+| `"generation"` | Generate conversational text, including an agent's turns and summaries. |
+| `"embedding"` | Turn text into vectors for retrieval. |
+| `"image_generation"` | Generate an image. |
+| `"transcription"` | Turn speech into text. |
+| `"speech_generation"` | Generate speech from text. |
+| `"rerank"` | Rank existing retrieval candidates. |
+| `"decision"` | Choose among a supplied set of structured decisions. |
 
 **Binding**
 
@@ -145,6 +158,7 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `purposes` | `array or null` | may be absent | Work explicitly reported by the model's discovery source. |
 | `cache_lifetimes` | `array or null` | may be absent | Additional prompt-cache lifetimes observed without enabling them. |
 | `reasoning_modes` | `array or null` | may be absent | Additional reasoning modes observed at this offering, without enabling them. |
 | `report` | `ModelReport or null` | may be absent | Optional discovery details. These facts neither enable a capability nor constrain an old model entry. |

@@ -6,7 +6,7 @@
  * without an address still opens its card or project chooser.
  */
 import type { TFunction } from 'i18next';
-import { Bot, Boxes, Cpu, GraduationCap, HardDrive, Laptop, type LucideIcon, MessagesSquare, PlugZap, Server, Tags, UserRound, UsersRound, Wrench } from 'lucide-react';
+import { Bot, Boxes, Cpu, GraduationCap, HardDrive, Laptop, Layers3, type LucideIcon, MessagesSquare, PlugZap, Server, Tags, UserRound, UsersRound, Wrench } from 'lucide-react';
 
 import type { NameHit, NameKind, NodeRef } from '@/generated/api-types';
 import { NODE_GLYPHS, type NodeIconKind } from '@/ui/NodeIcon';
@@ -81,6 +81,7 @@ export const KIND_ICONS: Record<Described, LucideIcon> = {
   mount: HardDrive,
   machine: Laptop,
   skill: GraduationCap,
+  pool: Layers3,
 };
 
 export function iconOf(kind: Described): LucideIcon {
