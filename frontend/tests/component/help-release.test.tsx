@@ -9,11 +9,11 @@ import type { SettingDef } from '@/generated/api-types';
 import { Spotlight, useSpotlightTarget } from '@/ui/Spotlight';
 import { show } from './support';
 
-vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
+vi.mock('@/features/help/open', async (loadOriginal) => ({ ...await loadOriginal<object>(), useHelpOpener: () => vi.fn() }));
 vi.mock('@/api/settings', async (original) => ({ ...await original<object>(), targetSettingsQuery: () => ({ queryKey: ['help-source'], queryFn: () => Promise.reject(new Error('Access was removed')) }) }));
 
 const expiry: SettingDef = {
-  key: 'requests.expiry_hours', title: 'Request expiry', description: 'How long an agent boundary request waits.', group: 'confinement', class: 'policy', scopes: ['system', 'org', 'project', 'topic'], merge: 'min',
+  key: 'requests.expiry_minutes', title: 'Request expiry', description: 'How long an agent boundary request waits.', group: 'confinement', class: 'policy', scopes: ['system', 'org', 'project', 'topic'], merge: 'min',
   default: 24, example: 12, schema: { type: 'integer', minimum: 1, maximum: 168 }, text_key: null, keywords: [],
 };
 
@@ -38,7 +38,7 @@ describe('a setting entry', () => {
   });
   it.each([
     { key: 'mcp.enabled', words: /Browser tools fails with exit 1/, outcome: 'other servers and running turns continue', shipped: {}, example: { '00000000-0000-4000-8000-000000000001': true } },
-    { key: 'capability.recreate_grace_secs', words: /a turn is running and capability\.recreate_grace_secs is 120/, outcome: 'keeping every file, including /opt/restart-proof.txt outside the volumes', shipped: 120, example: 30 },
+    { key: 'capability.recreate_grace_secs', words: /a turn is running and the restart grace period is 120 seconds/, outcome: 'keeping every file, including /opt/restart-proof.txt outside the volumes', shipped: 120, example: 30 },
   ])('explains what restarts, what is kept and how the job reports its result for $key', ({ key, words, outcome, shipped, example }) => {
     const def: SettingDef = { ...expiry, key, default: shipped, example };
     show(<SettingEntry def={def} onBack={() => undefined} />);

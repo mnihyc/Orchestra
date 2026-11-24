@@ -1,0 +1,7 @@
+test -p orch-api-core --lib -- realtime::ephemeral::tests::
+test -p orch-api-core --test realtime_ephemeral
+test -p orch-api-core --test realtime_machine_views
+test -p orch-api-core --lib -- realtime::epoch_handoff_tests::notice_first_preserves_the_native_enrollment_status_and_purges_old_inbox_rows
+web typecheck
+web lint
+web test

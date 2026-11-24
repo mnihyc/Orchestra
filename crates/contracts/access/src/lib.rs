@@ -20,6 +20,7 @@ pub mod decisions;
 pub mod key_scope;
 pub mod pages;
 pub mod permissions;
+pub mod pools;
 pub mod roles;
 pub mod whereabouts;
 
