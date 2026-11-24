@@ -30,7 +30,7 @@ for (const kind of ['org', 'project'] as const) {
     page.on('request', (request) => {
       if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method()) && /\/(?:page|defaults)(?:\/|$)/.test(new URL(request.url()).pathname)) writes.push(request.url());
     });
-    await page.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }).click();
+    await page.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may make topics here?' }).click();
     const row = page.locator(`[data-access-permission="${kind === 'org' ? 'org.interact' : 'project.create_topics'}"]`);
     await expect(row).toBeVisible();
     await expect(row).toBeFocused();
