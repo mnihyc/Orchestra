@@ -1,4 +1,6 @@
 /** The outline uses the conversation's words and follows held live rows without another list read. */
+import { isTurnAnswer } from '@/features/timeline/answers';
+import { classifyAgentMessages } from '@/features/timeline/rows';
 import { itemText } from '@/features/timeline/ItemActions';
 import type { Item, OutlineEntry, OutlineKind } from '@/generated/api-types';
 import type { ThreadView } from '@/realtime/stores/thread';
@@ -36,5 +38,13 @@ export function outlineRows(stored: readonly OutlineEntry[], view: Pick<ThreadVi
       if (typeof args === 'object' && args !== null && 'category' in args && args.category === 'milestone' && 'title' in args && typeof args.title === 'string') add(item, 'milestone', args.title);
     }
   }
-  return [...entries.values()].sort((a, b) => a.seq - b.seq || Number(b.kind === 'turn') - Number(a.kind === 'turn'));
+  const heldAnswers = new Set(classifyAgentMessages(view).answers.values());
+  return [...entries.values()].filter((entry) => {
+    if (entry.kind !== 'agent_message') return true;
+    if (view.order.includes(entry.item_id)) return heldAnswers.has(entry.item_id);
+    const facts = entry.message;
+    return facts !== undefined && facts !== null && isTurnAnswer(entry.seq, facts.phase, {
+      ended: facts.ended, lastAgent: facts.last_agent_seq, lastFinal: facts.last_final_seq, lastWork: facts.last_work_seq,
+    });
+  }).sort((a, b) => a.seq - b.seq || Number(b.kind === 'turn') - Number(a.kind === 'turn'));
 }

@@ -13,6 +13,7 @@ import { type Answer, type Person, Refusal, type World } from './world.ts';
 
 /** The real upload contract's chunk size, used by this double's generated upload-session reply. */
 const UPLOAD_CHUNK_BYTES = 1024 * 1024;
+const transferPolicy = { initial_piece_bytes: 64 * 1024, initial_requests: 4, min_piece_bytes: 64 * 1024, max_piece_bytes: UPLOAD_CHUNK_BYTES, target_window_ms: 1000, window_rtts: 4, max_window_bytes: 4 * UPLOAD_CHUNK_BYTES, requests: 5 };
 /** The shipped snapshot bound when a test did not set one at its destination. */
 const COPY_BYTES = 64 * 1024 * 1024;
 /** A test upload session has the same one-hour life as the ordinary upload service. */
@@ -40,6 +41,7 @@ function importedWriting(name: string, source: string, format: 'markdown' | 'htm
 }
 
 interface Upload { name: string; size: number; media_type: string; bytes: Buffer; owner: string }
+interface UploadSession extends Upload { ranges: { start: number; len: number }[] }
 function entriesOfZip(data: Buffer, max: number): { name: string; data: Buffer | null; error: string | null }[] {
   let end = data.length - ZIP_END_BYTES;
   const earliest = Math.max(0, end - ZIP_COMMENT_BYTES);
@@ -75,7 +77,7 @@ function entriesOfZip(data: Buffer, max: number): { name: string; data: Buffer |
 
 export class PeopleImports {
   readonly world: World;
-  sessions = new Map<string, Upload>();
+  sessions = new Map<string, UploadSession>();
   blobs = new Map<string, Upload>();
   attachments = new Map<string, { owner: string; file: ThreadAttachmentCreateReply }>();
   copied = new Map<string, Document>();
@@ -93,21 +95,38 @@ export class PeopleImports {
     if (method !== 'PUT' || match === null) return null;
     const upload = this.sessions.get(match[1] ?? '');
     if (upload?.owner !== person.me.id) throw new Refusal(404, 'not_found', 'No such upload');
-    if (Number(query.get('offset')) !== upload.bytes.length) throw new Refusal(409, 'conflict.stale_revision', 'Upload offset changed', { received: upload.bytes.length });
+    const offset = Number(query.get('offset'));
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Refusal(400, 'request.invalid', 'Invalid piece offset');
     const chunks: Buffer[] = []; let bytes = 0;
-    for await (const chunk of request) { const part = Buffer.from(chunk as Uint8Array); bytes += part.length; if (bytes > UPLOAD_CHUNK_BYTES || upload.bytes.length + bytes > upload.size) throw new Refusal(413, 'docs.too_large', 'Upload piece is too large'); chunks.push(part); }
-    upload.bytes = Buffer.concat([upload.bytes, ...chunks]);
-    return { status: 200, body: { received: upload.bytes.length } };
+    for await (const chunk of request) { const part = Buffer.from(chunk as Uint8Array); bytes += part.length; if (bytes > UPLOAD_CHUNK_BYTES || offset + bytes > upload.size) throw new Refusal(413, 'docs.too_large', 'Upload piece is too large'); chunks.push(part); }
+    const piece = Buffer.concat(chunks);
+    if (upload.bytes.length < offset + piece.length) { const next = Buffer.alloc(offset + piece.length); upload.bytes.copy(next); upload.bytes = next; }
+    piece.copy(upload.bytes, offset);
+    upload.ranges.push({ start: offset, len: piece.length });
+    upload.ranges.sort((a, b) => a.start - b.start);
+    const ranges: typeof upload.ranges = [];
+    for (const range of upload.ranges) {
+      const last = ranges.at(-1);
+      if (last !== undefined && last.start + last.len >= range.start) last.len = Math.max(last.len, range.start + range.len - last.start);
+      else ranges.push({ ...range });
+    }
+    upload.ranges = ranges;
+    return { status: 200, body: { received: ranges.reduce((sum, range) => sum + range.len, 0) } };
   }
   handle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
     if (method === 'POST' && path === '/uploads/sessions') {
-      const id = randomUUID(); this.sessions.set(id, { name: String(body.name), size: Number(body.size), media_type: String(body.media_type), bytes: Buffer.alloc(0), owner: person.me.id });
-      return { status: 201, body: { upload_id: id, chunk_bytes: UPLOAD_CHUNK_BYTES, expires_at: new Date(Date.now() + UPLOAD_LIFE_MS).toISOString() } };
+      const id = randomUUID(); this.sessions.set(id, { name: String(body.name), size: Number(body.size), media_type: String(body.media_type), bytes: Buffer.alloc(0), owner: person.me.id, ranges: [] });
+      return { status: 201, body: { upload_id: id, chunk_bytes: UPLOAD_CHUNK_BYTES, policy: transferPolicy, expires_at: new Date(Date.now() + UPLOAD_LIFE_MS).toISOString() } };
     }
     let match: RegExpExecArray | null;
+    if (method === 'GET' && (match = /^\/uploads\/sessions\/([^/]+)$/.exec(path))) {
+      const upload = this.sessions.get(match[1] ?? '');
+      if (upload?.owner !== person.me.id) throw new Refusal(404, 'not_found', 'No such upload');
+      return { status: 200, body: { received: upload.ranges.reduce((sum, range) => sum + range.len, 0), ranges: upload.ranges, policy: transferPolicy } };
+    }
     if (method === 'POST' && (match = /^\/uploads\/sessions\/([^/]+)\/complete$/.exec(path))) {
       const upload = this.sessions.get(match[1] ?? '');
-      if (upload?.owner !== person.me.id || upload.bytes.length !== upload.size) throw new Refusal(400, 'request.invalid', 'The upload is incomplete');
+      if (upload?.owner !== person.me.id || upload.ranges.reduce((sum, range) => sum + range.len, 0) !== upload.size) throw new Refusal(400, 'request.invalid', 'The upload is incomplete');
       // The double needs a stable content identity; only the real blob store promises its hash algorithm.
       const blob = createHash('sha256').update(upload.bytes).digest('hex'); this.blobs.set(blob, upload);
       return { status: 200, body: { blob, name: upload.name, size: upload.size, media_type: upload.media_type } };

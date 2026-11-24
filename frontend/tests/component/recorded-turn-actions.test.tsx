@@ -23,7 +23,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     if (person === undefined || node === undefined) throw new Error('The recorded conversation needs its native reader and thread.');
     const thread = { ...world.threads.thread(person, node), environment_permissions: ['files.view', 'files.manage'] };
     const rows = recordedConversation(); threadWriter.reset(thread.id, { thread, ...rows }, false);
-    const context: TimelineContext = { threadId: thread.id, threadName: thread.name, detail: 'steps', recent: new Set(rows.turns.map((turn) => turn.id)), layout: 'one', setLayout: () => undefined,
+    const context: TimelineContext = { threadId: thread.id, threadName: thread.name, detail: 'normal', layout: 'one', setLayout: () => undefined,
       meId: person.me.id, canInteract: true, canManage: true, live: true, lit: null, selection: NOT_PICKING };
     const view = show(<TimelineContextValue.Provider value={context}><ViewCompactContext.Provider value={width === 400}>
       {rows.items.filter((item) => item.kind === 'user_message').map((item) => <UserMessage key={item.id} item={item} />)}
