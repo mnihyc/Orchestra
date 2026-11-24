@@ -458,6 +458,7 @@ pub(crate) struct Backward<'a> {
     ended: bool,
     neutral_room: Option<usize>,
     neutral_overflow: bool,
+    item_floor: Option<Seq>,
 }
 
 impl<'a> Backward<'a> {
@@ -491,6 +492,7 @@ impl<'a> Backward<'a> {
             ended: false,
             neutral_room: None,
             neutral_overflow: false,
+            item_floor: None,
         })
     }
 
@@ -499,6 +501,36 @@ impl<'a> Backward<'a> {
     pub(crate) fn with_neutral_bound(mut self, bytes: usize) -> Self {
         self.neutral_room = Some(bytes);
         self
+    }
+
+    /// A handoff's already bounded metadata page. Sequence limits come from the same capture;
+    /// no item from an omitted adjacent turn is decoded while the page is assembled.
+    pub(crate) fn captured_page(
+        cut: &'a cuts::Cut,
+        turns: Vec<TurnRow>,
+        range: Option<(Seq, Seq)>,
+    ) -> Self {
+        let mut queue = Queue::new(false, (1, 0));
+        queue.read = turns.len() as u64;
+        queue.pages = 1;
+        queue.rows = turns.into();
+        queue.exhausted = true;
+        let (after, through) = range.unwrap_or((-1, -1));
+        Self {
+            source: Source::Cut(cut),
+            before: through.checked_add(1),
+            item_floor: Some(after),
+            trailing: false,
+            reads: Reads::default(),
+            queue,
+            current: None,
+            pending: Items::default(),
+            unread: VecDeque::new(),
+            ready: VecDeque::new(),
+            ended: false,
+            neutral_room: None,
+            neutral_overflow: false,
+        }
     }
 
     /// Whether a turn was left unfinished because its neutral items could not fit.
@@ -570,7 +602,20 @@ impl<'a> Backward<'a> {
     ) -> Result<Vec<Bundle>, EngineError> {
         while self.ready.len() < most && !self.ended {
             if self.unread.is_empty() {
-                let page = self.source.items_before(conn, self.before).await?;
+                let page = if let (Source::Cut(cut), Some(after)) = (self.source, self.item_floor) {
+                    cuts::items_page_bounded(
+                        conn,
+                        cut.id,
+                        after,
+                        self.before
+                            .map_or(i64::MAX, |before| before.saturating_sub(1)),
+                        Some("main"),
+                        true,
+                    )
+                    .await?
+                } else {
+                    self.source.items_before(conn, self.before).await?
+                };
                 self.reads.item_pages += 1;
                 self.reads.items += page.len() as u64;
                 self.reads.peak_held = self.reads.peak_held.max(page.len() + self.held());

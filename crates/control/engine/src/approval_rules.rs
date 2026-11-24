@@ -91,7 +91,17 @@ pub(crate) async fn keep(
     option: &ApprovalOption,
     by: Id,
 ) -> Result<Option<Id>, EngineError> {
-    let Some(matcher) = thread_option(option) else {
+    let Some(public) = orch_db::queries::approvals::approval(&mut *unit.conn, approval).await?
+    else {
+        return Ok(None);
+    };
+    let request: HarnessRequest = serde_json::from_value(public.request)?;
+    let Some(matcher) = request
+        .options
+        .iter()
+        .find(|shown| shown.id == option.id)
+        .and_then(thread_option)
+    else {
         return Ok(None);
     };
     let Some(binding) = binding_of(&mut *unit.conn, thread).await? else {
@@ -145,9 +155,21 @@ pub(crate) async fn answer_by_rule(
     let Some(binding) = binding_of(&mut *unit.conn, thread).await? else {
         return Ok(None);
     };
-    for matcher in &offered {
-        if let Some(rule) =
-            rows::active_matching(&mut *unit.conn, thread.node_id, &binding, matcher).await?
+    for (rule, approval) in rows::active_bound(&mut *unit.conn, thread.node_id, &binding).await? {
+        let Some(row) = orch_db::queries::approvals::approval(&mut *unit.conn, approval).await?
+        else {
+            continue;
+        };
+        let original =
+            crate::redaction::presentation::approval_original(unit.conn, approval, &row.request)
+                .await?;
+        let original: HarnessRequest = serde_json::from_value(original)
+            .map_err(|_| EngineError::unreadable("a private rule request could not be read"))?;
+        if original
+            .options
+            .iter()
+            .filter_map(thread_option)
+            .any(|matcher| offered.contains(&matcher))
         {
             return Ok(Some((rule, once.id.clone())));
         }

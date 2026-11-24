@@ -17,6 +17,7 @@ export function EnvironmentSettings({ environment, wantedKey }: { environment: E
   return (
     <div id="environment-settings">
       <UnitConfiguration compact wantedKey={wantedKey} pool="environment" id={environment.id} placement={environment.placement} runtime={environment.runtime_changes}
+        boundThreads={environment.threads.length + environment.threads_hidden}
         lifecycle={lifecycle} resourceSupport={descriptor.resource_limits} commands={{supported:commands.supported === true,reason:typeof commands.reason === 'string' ? commands.reason : null}}
         afterUp={typeof afterUp==='boolean'?afterUp:null}
         templateId={environment.template?.id} jobId={environment.job?.id} failureDetail={environment.status_detail} place={{ name: environment.name, owner: environment.owner, access: environment.access, kind: null }} />
